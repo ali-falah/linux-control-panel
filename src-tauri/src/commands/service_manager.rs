@@ -1,0 +1,312 @@
+use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+
+use crate::{binary_exists, log_to_file};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceUnit {
+    pub name: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub description: String,
+    pub unit_file_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
+    Enable,
+    Disable,
+    Mask,
+    Unmask,
+    Reload,
+}
+
+impl std::fmt::Display for ServiceAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceAction::Start => write!(f, "start"),
+            ServiceAction::Stop => write!(f, "stop"),
+            ServiceAction::Restart => write!(f, "restart"),
+            ServiceAction::Enable => write!(f, "enable"),
+            ServiceAction::Disable => write!(f, "disable"),
+            ServiceAction::Mask => write!(f, "mask"),
+            ServiceAction::Unmask => write!(f, "unmask"),
+            ServiceAction::Reload => write!(f, "reload"),
+        }
+    }
+}
+
+/// List all systemd units (system scope)
+#[tauri::command]
+pub async fn list_all_units(filter: Option<String>) -> Result<Vec<ServiceUnit>, String> {
+    if !crate::binary_exists("systemctl").await {
+        return Err("systemctl is not available on this system".to_string());
+    }
+
+    use std::collections::HashMap;
+
+    let mut all_services: HashMap<String, ServiceUnit> = HashMap::new();
+
+    // 1. Get all installed unit files
+    let output_files = Command::new("systemctl")
+        .args([
+            "list-unit-files",
+            "--type=service",
+            "--no-pager",
+            "--no-legend",
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout_files = String::from_utf8_lossy(&output_files.stdout);
+    for line in stdout_files.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let name = parts[0].to_string();
+        let state = parts[1].to_string();
+
+        all_services.insert(
+            name.clone(),
+            ServiceUnit {
+                name,
+                load_state: "loaded".to_string(), // Assume loaded as default if we have a file
+                active_state: "inactive".to_string(),
+                sub_state: "dead".to_string(),
+                description: String::new(),
+                unit_file_state: state,
+            },
+        );
+    }
+
+    // 2. Get active/loaded units state and descriptions
+    let output_units = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--all",
+            "--type=service",
+            "--no-pager",
+            "--no-legend",
+            "--plain",
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout_units = String::from_utf8_lossy(&output_units.stdout);
+    for line in stdout_units.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let name = parts[0].to_string();
+        let load_state = parts[1].to_string();
+        let active_state = parts[2].to_string();
+        let sub_state = parts[3].to_string();
+        let description = parts[4..].join(" ");
+
+        if let Some(unit) = all_services.get_mut(&name) {
+            unit.load_state = load_state;
+            unit.active_state = active_state;
+            unit.sub_state = sub_state;
+            unit.description = description;
+        } else {
+            all_services.insert(
+                name.clone(),
+                ServiceUnit {
+                    name,
+                    load_state,
+                    active_state,
+                    sub_state,
+                    description,
+                    unit_file_state: "generated".to_string(),
+                },
+            );
+        }
+    }
+
+    let mut units: Vec<ServiceUnit> = all_services.into_values().collect();
+
+    if let Some(f) = filter {
+        let f = f.to_lowercase();
+        units.retain(|u| {
+            u.name.to_lowercase().contains(&f) || u.description.to_lowercase().contains(&f)
+        });
+    }
+
+    units.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(units)
+}
+
+/// Perform an action on a systemd service (start/stop/restart/enable/disable/mask/unmask)
+#[tauri::command]
+pub async fn unit_action(name: String, action: ServiceAction) -> Result<String, String> {
+    if !binary_exists("systemctl").await {
+        return Err("systemctl is not available".to_string());
+    }
+
+    let action_str = action.to_string();
+
+    // Actions that modify state need elevation
+    let needs_elevation = matches!(
+        action,
+        ServiceAction::Enable
+            | ServiceAction::Disable
+            | ServiceAction::Mask
+            | ServiceAction::Unmask
+            | ServiceAction::Start
+            | ServiceAction::Stop
+            | ServiceAction::Restart
+            | ServiceAction::Reload
+    );
+
+    let output = if needs_elevation {
+        Command::new("pkexec")
+            .args(["systemctl", &action_str, &name])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?
+    } else {
+        Command::new("systemctl")
+            .args([&action_str, &name])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run systemctl: {e}"))?
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        log_to_file(
+            "ERROR",
+            &format!("unit_action {action_str} {name} failed: {stderr}"),
+        );
+        return Err(format!("systemctl {action_str} {name} failed: {stderr}"));
+    }
+
+    log_to_file("INFO", &format!("Service action: {action_str} {name}"));
+    Ok(if stdout.is_empty() {
+        format!("Successfully ran: systemctl {action_str} {name}")
+    } else {
+        stdout
+    })
+}
+
+/// Get service logs from journalctl
+#[tauri::command]
+pub async fn get_service_logs(name: String, lines: Option<u32>) -> Result<String, String> {
+    if !binary_exists("journalctl").await {
+        return Err("journalctl is not available on this system".to_string());
+    }
+
+    let lines_str = lines.unwrap_or(100).to_string();
+
+    let output = Command::new("journalctl")
+        .args([
+            "-u",
+            &name,
+            "-n",
+            &lines_str,
+            "--no-pager",
+            "--output=short-precise",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run journalctl: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("journalctl failed: {err}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Read the unit file content via `systemctl cat`
+#[tauri::command]
+pub async fn read_unit_file(name: String) -> Result<String, String> {
+    if !binary_exists("systemctl").await {
+        return Err("systemctl is not available".to_string());
+    }
+
+    let output = Command::new("systemctl")
+        .args(["cat", &name])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run systemctl cat: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("systemctl cat {name} failed: {err}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Write a drop-in override for a unit file
+#[tauri::command]
+pub async fn write_unit_file(name: String, content: String) -> Result<(), String> {
+    // Write to a drop-in directory: /etc/systemd/system/<name>.d/override.conf
+    let unit_stem = name.trim_end_matches(".service");
+    let drop_in_dir = format!("/etc/systemd/system/{}.d", unit_stem);
+    let drop_in_file = format!("{}/override.conf", drop_in_dir);
+
+    // Create drop-in directory via pkexec
+    let mkdir_out = Command::new("pkexec")
+        .args(["mkdir", "-p", &drop_in_dir])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to create drop-in dir: {e}"))?;
+
+    if !mkdir_out.status.success() {
+        let err = String::from_utf8_lossy(&mkdir_out.stderr).to_string();
+        return Err(format!("Failed to create drop-in directory: {err}"));
+    }
+
+    // Write content via pkexec tee
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("pkexec")
+        .args(["tee", &drop_in_file])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn pkexec tee: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(content.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        log_to_file("ERROR", &format!("write_unit_file {name} failed: {err}"));
+        return Err(format!("Failed to write unit file: {err}"));
+    }
+
+    // Reload systemd daemon
+    let _ = Command::new("pkexec")
+        .args(["systemctl", "daemon-reload"])
+        .output()
+        .await;
+
+    log_to_file("INFO", &format!("Wrote unit file override for {name}"));
+    Ok(())
+}

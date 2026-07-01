@@ -1,0 +1,146 @@
+<script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { Globe, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
+  import { uiStore } from '../stores/ui.svelte.ts';
+  import { statusStore } from '../stores/status.svelte.ts';
+
+  interface EnvVar {
+    key: string;
+    value: string;
+    raw: string;
+  }
+
+  let vars = $state<EnvVar[]>([]);
+  let loading = $state(true);
+  let saving = $state(false);
+
+  async function loadVars() {
+    loading = true;
+    statusStore.setBusy('Reading /etc/environment…');
+    try {
+      vars = await invoke<EnvVar[]>('read_env_vars');
+      statusStore.setLastCommand('read /etc/environment', 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to load environment variables: ${e}`, 'error');
+      statusStore.setLastCommand('read_env_vars', 1, false);
+    } finally {
+      loading = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  function addVar() {
+    vars = [...vars, { key: '', value: '', raw: '' }];
+  }
+
+  function removeVar(index: number) {
+    vars = vars.filter((_, i) => i !== index);
+  }
+
+  function confirmSave() {
+    uiStore.confirm(
+      'Save Global Environment',
+      'Are you sure you want to save these variables to /etc/environment?\n\nThey will affect all users on the next login or reboot.',
+      () => doSave(),
+      true
+    );
+  }
+
+  async function doSave() {
+    // Filter out empties
+    const validVars = vars.filter(v => v.key.trim() !== '');
+    saving = true;
+    statusStore.setBusy('Saving /etc/environment…');
+    try {
+      await invoke('write_env_vars', { vars: validVars });
+      uiStore.addToast('Saved /etc/environment successfully', 'success');
+      await loadVars();
+    } catch (e) {
+      uiStore.addToast(`Failed to save environment variables: ${e}`, 'error');
+    } finally {
+      saving = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  async function browseFile(index: number) {
+    try {
+      const selected = await open({
+        multiple: false
+      });
+      if (selected && typeof selected === 'string') {
+        vars[index].value = selected;
+      }
+    } catch (e) {
+      uiStore.addToast(`Failed to open file dialog: ${e}`, 'error');
+    }
+  }
+
+  $effect(() => { loadVars(); });
+</script>
+
+<div class="module-page">
+  <div class="module-header">
+    <div class="module-icon"><Globe size={20} /></div>
+    <div>
+      <h1 class="module-title">Environment Variables</h1>
+      <p class="module-subtitle">Manage system-wide environment variables (/etc/environment)</p>
+    </div>
+    <div style="margin-left:auto; display:flex; gap:8px">
+      <button class="btn btn-ghost" onclick={loadVars} disabled={loading || saving}>
+        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+      </button>
+      <button class="btn btn-primary" onclick={confirmSave} disabled={loading || saving}>
+        <Save size={14} /> Save Changes
+      </button>
+    </div>
+  </div>
+
+  {#if loading && vars.length === 0}
+    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
+      <RefreshCw size={16} class="animate-spin-slow" /> Loading Environment…
+    </div>
+  {:else}
+    <div class="card module-content-scroll" style="padding:0">
+      <div class="table-wrap" style="border:none; border-radius:0">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:30%">Variable Name</th>
+              <th>Value</th>
+              <th style="width:80px; text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each vars as v, i}
+              <tr>
+                <td>
+                  <input class="w-full" style="font-family:var(--font-mono); font-weight:600; font-size:13px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
+                </td>
+                <td>
+                  <div style="display:flex; gap:8px">
+                    <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
+                    <button class="btn btn-sm btn-outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
+                      <FolderOpen size={14} />
+                    </button>
+                  </div>
+                </td>
+                <td style="text-align:right">
+                  <button class="btn btn-sm btn-ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
+                    <Trash2 size={14} />
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-raised)">
+        <button class="btn btn-outline" onclick={addVar}>
+          <Plus size={14} /> Add Variable
+        </button>
+      </div>
+    </div>
+  {/if}
+</div>

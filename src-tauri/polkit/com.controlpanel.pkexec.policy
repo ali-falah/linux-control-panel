@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<policyconfig>
+
+  <vendor>Control Panel</vendor>
+  <vendor_url>https://github.com/your-org/linux-control-panel</vendor_url>
+
+  <!-- DNF package and repository management -->
+  <action id="com.controlpanel.dnf.execute">
+    <description>Manage DNF packages and repositories</description>
+    <description xml:lang="ar">إدارة حزم DNF والمستودعات</description>
+    <message>Authentication is required to manage packages and repositories</message>
+    <message xml:lang="ar">المصادقة مطلوبة لإدارة الحزم والمستودعات</message>
+    <icon_name>package-x-generic</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/dnf</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- systemctl service management -->
+  <action id="com.controlpanel.systemctl.execute">
+    <description>Manage system services with systemctl</description>
+    <message>Authentication is required to manage system services</message>
+    <icon_name>preferences-system</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/systemctl</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- Writing system configuration files (tee) -->
+  <action id="com.controlpanel.write.config">
+    <description>Write system configuration files</description>
+    <message>Authentication is required to write system configuration files</message>
+    <icon_name>text-editor</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/tee</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- Flatpak system-wide operations -->
+  <action id="com.controlpanel.flatpak.execute">
+    <description>Manage Flatpak applications</description>
+    <message>Authentication is required to manage Flatpak applications</message>
+    <icon_name>application-x-executable</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/flatpak</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- sed for in-place file editing (repo toggling) -->
+  <action id="com.controlpanel.sed.execute">
+    <description>Edit repository configuration files</description>
+    <message>Authentication is required to edit repository configuration files</message>
+    <icon_name>text-editor</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/sed</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- mkdir for creating drop-in unit directories -->
+  <action id="com.controlpanel.mkdir.execute">
+    <description>Create system directories for unit overrides</description>
+    <message>Authentication is required to create system directories</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/mkdir</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>
