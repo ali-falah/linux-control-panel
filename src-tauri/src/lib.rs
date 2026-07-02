@@ -29,6 +29,15 @@ use commands::{
         add_group, add_user, change_password, delete_group, delete_user, list_groups, list_users,
         modify_user_group, toggle_sudo,
     },
+    nginx_manager::{
+        nginx_check_installed, nginx_service_status, nginx_service_action, nginx_test_config,
+        nginx_get_stats, nginx_list_sites, nginx_toggle_site, nginx_create_site, nginx_delete_site,
+        nginx_list_configs, nginx_read_config, nginx_write_config, nginx_list_backups,
+        nginx_restore_backup, nginx_list_www, nginx_read_www_file, nginx_create_www_dir,
+        nginx_delete_www_entry, nginx_rename_www_entry, nginx_upload_www_file,
+        nginx_read_log, nginx_clear_log, nginx_list_log_files,
+        nginx_check_certbot, nginx_list_ssl_certs, nginx_renew_cert,
+    },
 };
 
 /// Returns the app config directory, creating it if needed.
@@ -143,6 +152,33 @@ pub fn run() {
             // Environment Manager
             read_env_vars,
             write_env_vars,
+            // Nginx Manager
+            nginx_check_installed,
+            nginx_service_status,
+            nginx_service_action,
+            nginx_test_config,
+            nginx_get_stats,
+            nginx_list_sites,
+            nginx_toggle_site,
+            nginx_create_site,
+            nginx_delete_site,
+            nginx_list_configs,
+            nginx_read_config,
+            nginx_write_config,
+            nginx_list_backups,
+            nginx_restore_backup,
+            nginx_list_www,
+            nginx_read_www_file,
+            nginx_create_www_dir,
+            nginx_delete_www_entry,
+            nginx_rename_www_entry,
+            nginx_upload_www_file,
+            nginx_read_log,
+            nginx_clear_log,
+            nginx_list_log_files,
+            nginx_check_certbot,
+            nginx_list_ssl_certs,
+            nginx_renew_cert,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

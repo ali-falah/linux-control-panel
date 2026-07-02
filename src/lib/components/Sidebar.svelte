@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
     Package, History, LayoutGrid, Layers, Rocket, Settings, Globe, Users, Shield, TerminalSquare, ShieldAlert,
-    Clock, FileText, ChevronLeft, ChevronRight
+    Clock, FileText, ChevronLeft, ChevronRight, Server
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
 
@@ -19,6 +19,7 @@
     { id: 'selinux-manager',  label: 'SELinux Manager',  icon: ShieldAlert,description: 'Security policies & denials' },
     { id: 'cron-manager',     label: 'Scheduled Tasks',  icon: Clock,      description: 'Manage cron jobs' },
     { id: 'env-manager',      label: 'Global Environment',icon: FileText,   description: 'Edit /etc/environment' },
+    { id: 'nginx-manager',    label: 'Nginx Manager',     icon: Server,     description: 'Manage nginx web server' },
   ];
 </script>
 

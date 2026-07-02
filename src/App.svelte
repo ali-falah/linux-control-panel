@@ -17,6 +17,7 @@
   import SelinuxManager from './lib/modules/SelinuxManager.svelte';
   import CronManager from './lib/modules/CronManager.svelte';
   import EnvManager from './lib/modules/EnvManager.svelte';
+  import NginxManager from './lib/modules/NginxManager.svelte';
 
   import { uiStore } from './lib/stores/ui.svelte.ts';
 </script>
@@ -58,6 +59,8 @@
           <CronManager />
         {:else if uiStore.activeTab === 'env-manager'}
           <EnvManager />
+        {:else if uiStore.activeTab === 'nginx-manager'}
+          <NginxManager />
         {/if}
       {/key}
     </div>

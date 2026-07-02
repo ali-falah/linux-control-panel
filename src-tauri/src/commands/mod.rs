@@ -6,6 +6,7 @@ pub mod firewall_manager;
 pub mod flatpak_rpm;
 pub mod grub_manager;
 pub mod hosts_manager;
+pub mod nginx_manager;
 pub mod repo_manager;
 pub mod selinux_manager;
 pub mod service_manager;
