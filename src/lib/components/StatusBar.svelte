@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Activity, CheckCircle, XCircle, Loader } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
 
   function formatTime(date: Date): string {
@@ -13,35 +13,43 @@
 </script>
 
 <footer class="status-bar" role="status" aria-live="polite">
+  <!-- Left: last command -->
   <div class="status-left">
-    <div class="status-indicator" class:busy={statusStore.busy}>
-      {#if statusStore.busy}
-        <Loader size={12} class="spin-icon" />
-        <span class="status-text busy">{statusStore.busyLabel}</span>
-      {:else if statusStore.lastEntry}
+    {#if statusStore.busy}
+      <div class="status-indicator busy">
+        <Loader size={11} class="spin-icon" />
+        <span class="cmd-text">{statusStore.busyLabel}</span>
+      </div>
+    {:else if statusStore.lastEntry}
+      <div class="status-indicator">
         {#if statusStore.lastEntry.success}
-          <CheckCircle size={12} style="color: var(--color-success)" />
+          <CheckCircle2 size={11} class="icon-ok" />
         {:else}
-          <XCircle size={12} style="color: var(--color-error)" />
+          <XCircle size={11} class="icon-fail" />
         {/if}
-        <span class="status-text" class:success={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success}>
+        <span class="cmd-text" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success}>
           {statusStore.lastEntry.command}
         </span>
-      {:else}
-        <Activity size={12} style="color: var(--color-text-muted)" />
-        <span class="status-text muted">Ready</span>
-      {/if}
-    </div>
+      </div>
+    {:else}
+      <div class="status-indicator">
+        <Minus size={11} class="icon-idle" />
+        <span class="cmd-text idle">Ready</span>
+      </div>
+    {/if}
   </div>
 
+  <!-- Right: exit code + timestamp pill -->
   <div class="status-right">
     {#if statusStore.lastEntry}
-      <span class="exit-code" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success}>
+      <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}">
         exit {statusStore.lastEntry.exitCode ?? '—'}
       </span>
-      <span class="timestamp">{formatTime(statusStore.lastEntry.timestamp)}</span>
+      <span class="ts-pill">
+        {formatTime(statusStore.lastEntry.timestamp)}
+      </span>
     {:else}
-      <span class="version">Fedora 40+ / RHEL 9+</span>
+      <span class="ts-pill muted">Fedora / RHEL</span>
     {/if}
   </div>
 </footer>
@@ -51,54 +59,70 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 28px;
-    padding: 0 16px;
-    background: var(--color-bg-surface);
-    border-top: 1px solid var(--color-border);
+    height: 26px;
+    padding: 0 14px;
+    background: rgba(8, 8, 14, 0.7);
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
     font-size: 11px;
     font-family: var(--font-mono);
     flex-shrink: 0;
+    backdrop-filter: blur(8px);
+    gap: 12px;
   }
 
   .status-left, .status-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    min-width: 0;
   }
 
   .status-indicator {
     display: flex;
     align-items: center;
     gap: 5px;
+    min-width: 0;
   }
 
-  .status-text {
+  .cmd-text {
     color: var(--color-text-muted);
-    max-width: 400px;
+    max-width: 480px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .cmd-text.ok   { color: var(--color-success); }
+  .cmd-text.fail { color: var(--color-error); }
+  .cmd-text.idle { color: var(--color-text-muted); }
 
-  .status-text.busy   { color: var(--color-info); }
-  .status-text.success { color: var(--color-success); }
-  .status-text.fail    { color: var(--color-error); }
-  .status-text.muted   { color: var(--color-text-muted); }
-
-  .exit-code {
-    padding: 1px 6px;
-    border-radius: 4px;
+  /* pill badges on the right */
+  .pill {
+    padding: 1px 7px;
+    border-radius: 20px;
     font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
   }
-  .exit-code.ok   { background: var(--color-success-muted); color: var(--color-success); }
-  .exit-code.fail { background: var(--color-error-muted); color: var(--color-error); }
+  .pill-ok   { background: var(--color-success-muted); color: var(--color-success); }
+  .pill-fail { background: var(--color-error-muted);   color: var(--color-error); }
 
-  .timestamp, .version {
+  .ts-pill {
+    padding: 1px 7px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.05);
     color: var(--color-text-muted);
+    font-size: 10px;
+    white-space: nowrap;
   }
+  .ts-pill.muted { color: var(--color-text-muted); }
 
   :global(.spin-icon) {
     animation: spin 1s linear infinite;
     color: var(--color-info);
+    flex-shrink: 0;
   }
+  :global(.icon-ok)   { color: var(--color-success); flex-shrink: 0; }
+  :global(.icon-fail) { color: var(--color-error); flex-shrink: 0; }
+  :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0; }
 </style>

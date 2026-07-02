@@ -166,18 +166,22 @@
 
   <!-- Stats -->
   {#if repos.length > 0}
-    <div style="display:flex; gap:12px; flex-wrap:wrap">
-      <div class="card-raised" style="display:flex; align-items:center; gap:10px; padding:12px 16px">
-        <span style="font-size:22px; font-weight:700; color:var(--color-text-primary)">{repos.length}</span>
-        <span style="font-size:12px; color:var(--color-text-muted)">Total Repos</span>
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-value">{repos.length}</span>
+        <span class="stat-label">Total</span>
       </div>
-      <div class="card-raised" style="display:flex; align-items:center; gap:10px; padding:12px 16px">
-        <span style="font-size:22px; font-weight:700; color:var(--color-success)">{repos.filter(r => r.enabled).length}</span>
-        <span style="font-size:12px; color:var(--color-text-muted)">Enabled</span>
+      <div class="stat-card">
+        <span class="stat-value enabled">{repos.filter(r => r.enabled).length}</span>
+        <span class="stat-label">Enabled</span>
       </div>
-      <div class="card-raised" style="display:flex; align-items:center; gap:10px; padding:12px 16px">
-        <span style="font-size:22px; font-weight:700; color:var(--color-text-muted)">{repos.filter(r => !r.enabled).length}</span>
-        <span style="font-size:12px; color:var(--color-text-muted)">Disabled</span>
+      <div class="stat-card">
+        <span class="stat-value disabled">{repos.filter(r => !r.enabled).length}</span>
+        <span class="stat-label">Disabled</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value errors">{repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}</span>
+        <span class="stat-label">Errors</span>
       </div>
     </div>
   {/if}
@@ -203,7 +207,7 @@
               <th>ID</th>
               <th>URL / Metalink</th>
               <th style="text-align:center">GPG</th>
-              <th style="text-align:center">Status</th>
+              <th style="text-align:center">Enabled</th>
             </tr>
           </thead>
           <tbody>
@@ -227,15 +231,17 @@
                   </span>
                 </td>
                 <td style="text-align:center">
-                  <label class="toggle" title="{repo.enabled ? 'Disable' : 'Enable'} repo">
-                    <input
-                      type="checkbox"
-                      checked={repo.enabled}
-                      disabled={togglingId === repo.id}
-                      onchange={() => toggleRepo(repo)}
-                    />
-                    <span class="toggle-slider"></span>
-                  </label>
+                  <button
+                    class="repo-toggle"
+                    class:on={repo.enabled}
+                    onclick={() => toggleRepo(repo)}
+                    disabled={togglingId === repo.id}
+                    title="{repo.enabled ? 'Disable' : 'Enable'} repo"
+                    aria-checked={repo.enabled}
+                    role="switch"
+                  >
+                    <span class="repo-toggle-thumb"></span>
+                  </button>
                 </td>
               </tr>
             {/each}
@@ -249,5 +255,83 @@
 <style>
   .disabled-row td:not(:last-child) {
     opacity: 0.45;
+  }
+
+  /* Stat cards */
+  .stat-cards {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 14px 20px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    min-width: 90px;
+    backdrop-filter: blur(8px);
+  }
+  .stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--color-text-primary);
+  }
+  .stat-value.enabled { color: var(--color-success); }
+  .stat-value.disabled { color: var(--color-text-muted); }
+  .stat-value.errors { color: #f87171; }
+  .stat-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+
+  /* ── Repo toggle switch ─────────────────────────────────────── */
+  .repo-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    border: none;
+    background: #2a2f3e;
+    cursor: pointer;
+    transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.2s ease;
+    flex-shrink: 0;
+    outline: none;
+    padding: 0;
+  }
+  .repo-toggle:focus-visible {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4);
+  }
+  .repo-toggle.on {
+    background: #4f46e5;
+    box-shadow: 0 0 8px rgba(79, 70, 229, 0.45);
+  }
+  .repo-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .repo-toggle-thumb {
+    position: absolute;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.9);
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+  .repo-toggle.on .repo-toggle-thumb {
+    transform: translateX(16px);
   }
 </style>

@@ -14,8 +14,8 @@
   --color-bg-hover:   rgba(45, 45, 75, 0.4);
 
   /* Sidebar */
-  --color-sidebar-bg: rgba(8, 8, 14, 0.5);
-  --color-sidebar-border: rgba(255, 255, 255, 0.04);
+  --color-sidebar-bg: rgba(12, 12, 20, 0.75);
+  --color-sidebar-border: rgba(255, 255, 255, 0.05);
 
   /* Vibrant Accents */
   --color-accent:      #6366f1;
@@ -349,7 +349,7 @@ input[type="checkbox"]:checked::after {
 .badge-muted   { background: rgba(255,255,255,0.06);     color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 .badge-outline { background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border-hover); }
 
-/* ─── Table Redesign ─────────────────────────────────────────────────── */
+/* ─── Table Redesign ─────────────────────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
   border-radius: 12px;
@@ -362,11 +362,11 @@ table {
   font-size: 13px;
 }
 thead th {
-  padding: 14px 18px;
+  padding: 11px 18px;
   text-align: left;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-text-muted);
   background: rgba(0, 0, 0, 0.3);
@@ -374,14 +374,14 @@ thead th {
 }
 tbody tr {
   border-bottom: 1px solid rgba(255,255,255,0.03);
-  transition: all 0.2s ease;
+  transition: background 0.15s ease;
 }
 tbody tr:last-child { border-bottom: none; }
-tbody tr:hover { 
-  background: var(--color-bg-hover); 
+tbody tr:hover {
+  background: rgba(99, 102, 241, 0.07);
 }
 tbody td {
-  padding: 14px 18px;
+  padding: 12px 18px;
   color: var(--color-text-primary);
   vertical-align: middle;
 }

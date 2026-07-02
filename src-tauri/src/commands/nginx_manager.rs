@@ -97,8 +97,9 @@ async fn nginx_installed() -> bool {
 
 async fn run_nginx_test() -> NginxTestResult {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let output = Command::new("nginx")
-        .args(["-t"])
+    // nginx -t needs root: it opens /var/log/nginx/error.log and /run/nginx.pid
+    let output = Command::new("pkexec")
+        .args(["nginx", "-t"])
         .output()
         .await;
 
@@ -199,12 +200,15 @@ pub async fn nginx_check_installed() -> NginxInstallInfo {
         };
     }
 
-    let ver = Command::new("nginx")
-        .arg("-v")
+    // nginx -v also triggers a log-file open; run via pkexec to avoid the
+    // "could not open error log" alert polluting the version string.
+    let ver = Command::new("pkexec")
+        .args(["nginx", "-v"])
         .output()
         .await
         .ok()
         .map(|o| {
+            // nginx prints version to stderr
             let s = String::from_utf8_lossy(&o.stderr).to_string();
             s.trim().to_string()
         })

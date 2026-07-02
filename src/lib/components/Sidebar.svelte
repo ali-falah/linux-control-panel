@@ -1,25 +1,49 @@
 <script lang="ts">
   import {
-    Package, History, LayoutGrid, Layers, Rocket, Settings, Globe, Users, Shield, TerminalSquare, ShieldAlert,
-    Clock, FileText, ChevronLeft, ChevronRight, Server
+    Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
+    Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
+    ChevronLeft, ChevronRight, Database
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
 
-  const tabs: { id: TabId; label: string; icon: any; description: string }[] = [
-    { id: 'repo-manager',     label: 'Repo Manager',     icon: Package,    description: 'Manage DNF repositories' },
-    { id: 'dnf-history',      label: 'DNF Manager',      icon: History,    description: 'View & rollback transactions' },
-    { id: 'copr-browser',     label: 'Copr Browser',     icon: LayoutGrid, description: 'Browse Fedora Copr projects' },
-    { id: 'flatpak-rpm',      label: 'Flatpak vs RPM',   icon: Layers,     description: 'Detect duplicate packages' },
-    { id: 'startup-manager',  label: 'Startup Manager',  icon: Rocket,     description: 'Manage autostart entries' },
-    { id: 'service-manager',  label: 'Service Manager',  icon: Settings,   description: 'Manage systemd services' },
-    { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe,      description: 'Edit /etc/hosts entries' },
-    { id: 'user-manager',     label: 'Users & Groups',   icon: Users,      description: 'Manage users & groups' },
-    { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield,     description: 'Manage firewalld rules' },
-    { id: 'grub-manager',     label: 'GRUB Bootloader',  icon: TerminalSquare, description: 'Configure boot menu' },
-    { id: 'selinux-manager',  label: 'SELinux Manager',  icon: ShieldAlert,description: 'Security policies & denials' },
-    { id: 'cron-manager',     label: 'Scheduled Tasks',  icon: Clock,      description: 'Manage cron jobs' },
-    { id: 'env-manager',      label: 'Global Environment',icon: FileText,   description: 'Edit /etc/environment' },
-    { id: 'nginx-manager',    label: 'Nginx Manager',     icon: Server,     description: 'Manage nginx web server' },
+  const groups: {
+    label: string;
+    items: { id: TabId; label: string; icon: any }[];
+  }[] = [
+    {
+      label: 'Packages',
+      items: [
+        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database },
+        { id: 'dnf-history',   label: 'DNF Manager',    icon: Package },
+        { id: 'copr-browser',  label: 'Copr Browser',   icon: LayoutGrid },
+        { id: 'flatpak-rpm',   label: 'Flatpak vs RPM', icon: Layers },
+      ],
+    },
+    {
+      label: 'System',
+      items: [
+        { id: 'startup-manager', label: 'Startup Manager', icon: Rocket },
+        { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
+        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu },
+        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck },
+      ],
+    },
+    {
+      label: 'Network & Security',
+      items: [
+        { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe },
+        { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield },
+        { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server },
+      ],
+    },
+    {
+      label: 'Users & Config',
+      items: [
+        { id: 'user-manager', label: 'Users & Groups',    icon: Users },
+        { id: 'env-manager',  label: 'Environment',       icon: FileText },
+        { id: 'cron-manager', label: 'Scheduled Tasks',   icon: Clock },
+      ],
+    },
   ];
 </script>
 
@@ -49,27 +73,35 @@
 
   <div class="sidebar-divider"></div>
 
-  <!-- Navigation -->
+  <!-- Grouped Navigation -->
   <nav class="sidebar-nav">
-    {#each tabs as tab}
-      {@const isActive = uiStore.activeTab === tab.id}
-      <button
-        class="nav-item"
-        class:active={isActive}
-        onclick={() => uiStore.setActiveTab(tab.id)}
-        title={uiStore.sidebarCollapsed ? tab.label : ''}
-        aria-current={isActive ? 'page' : undefined}
-      >
-        <span class="nav-icon" class:active={isActive}>
-          <tab.icon size={18} />
-        </span>
-        {#if !uiStore.sidebarCollapsed}
-          <span class="nav-label">{tab.label}</span>
-          {#if isActive}
-            <span class="nav-active-dot"></span>
+    {#each groups as group}
+      {#if !uiStore.sidebarCollapsed}
+        <div class="group-label">{group.label}</div>
+      {:else}
+        <div class="group-sep"></div>
+      {/if}
+
+      {#each group.items as item}
+        {@const isActive = uiStore.activeTab === item.id}
+        <button
+          class="nav-item"
+          class:active={isActive}
+          onclick={() => uiStore.setActiveTab(item.id)}
+          title={uiStore.sidebarCollapsed ? item.label : ''}
+          aria-current={isActive ? 'page' : undefined}
+        >
+          <span class="nav-icon" class:active={isActive}>
+            <item.icon size={16} />
+          </span>
+          {#if !uiStore.sidebarCollapsed}
+            <span class="nav-label">{item.label}</span>
+            {#if isActive}
+              <span class="nav-active-dot"></span>
+            {/if}
           {/if}
-        {/if}
-      </button>
+        </button>
+      {/each}
     {/each}
   </nav>
 
@@ -82,9 +114,9 @@
     title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
   >
     {#if uiStore.sidebarCollapsed}
-      <ChevronRight size={16} />
+      <ChevronRight size={15} />
     {:else}
-      <ChevronLeft size={16} />
+      <ChevronLeft size={15} />
       <span>Collapse</span>
     {/if}
   </button>
@@ -97,35 +129,39 @@
     width: 220px;
     min-width: 220px;
     height: 100%;
-    background: var(--color-sidebar-bg);
-    border-right: 1px solid var(--color-sidebar-border);
-    transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-                min-width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    background: rgba(12, 12, 20, 0.75);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(16px);
+    transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+                min-width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
     overflow: hidden;
     padding: 12px 8px;
-    gap: 2px;
+    gap: 0;
   }
 
   .sidebar.collapsed {
-    width: 56px;
-    min-width: 56px;
-    padding: 12px 8px;
+    width: 52px;
+    min-width: 52px;
+    padding: 12px 6px;
   }
 
+  /* ── Logo ─────────────────────────────────────────────────────────── */
   .sidebar-logo {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 6px 12px;
+    padding: 6px 6px 12px;
     overflow: hidden;
     white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .logo-icon {
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
     border-radius: 8px;
-    background: var(--color-accent-muted);
+    background: linear-gradient(135deg, rgba(99,102,241,0.25), rgba(79,70,229,0.1));
+    border: 1px solid rgba(99,102,241,0.25);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -133,10 +169,7 @@
     flex-shrink: 0;
   }
 
-  .logo-icon svg {
-    width: 18px;
-    height: 18px;
-  }
+  .logo-icon svg { width: 16px; height: 16px; }
 
   .logo-text {
     display: flex;
@@ -145,10 +178,11 @@
   }
 
   .logo-title {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 700;
     color: var(--color-text-primary);
     letter-spacing: -0.01em;
+    line-height: 1.2;
   }
 
   .logo-version {
@@ -159,26 +193,47 @@
 
   .sidebar-divider {
     height: 1px;
-    background: var(--color-border);
-    margin: 4px 0 8px;
+    background: rgba(255, 255, 255, 0.05);
+    margin: 0 2px 8px;
     flex-shrink: 0;
   }
 
+  /* ── Grouped nav ──────────────────────────────────────────────────── */
   .sidebar-nav {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    /* hide scrollbar */
+    scrollbar-width: none;
+  }
+  .sidebar-nav::-webkit-scrollbar { display: none; }
+
+  .group-label {
+    padding: 10px 8px 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #475569;
+    white-space: nowrap;
+    overflow: hidden;
+    flex-shrink: 0;
   }
 
+  .group-sep {
+    height: 6px;
+  }
+
+  /* ── Nav item ─────────────────────────────────────────────────────── */
   .nav-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 9px 10px;
-    border-radius: 8px;
+    gap: 9px;
+    padding: 7px 8px;
+    border-radius: 7px;
     border: none;
     background: transparent;
     color: var(--color-text-secondary);
@@ -191,26 +246,28 @@
     transition: background 0.15s ease, color 0.15s ease;
     text-align: left;
     position: relative;
-    min-height: 38px;
+    min-height: 34px;
+    width: 100%;
   }
 
   .nav-item:hover {
-    background: var(--color-bg-hover);
+    background: rgba(255, 255, 255, 0.05);
     color: var(--color-text-primary);
   }
 
   .nav-item.active {
-    background: var(--color-active-bg);
-    color: var(--color-text-accent);
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
   }
 
   .nav-icon {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    color: var(--color-text-muted);
     transition: color 0.15s ease;
   }
 
@@ -225,23 +282,25 @@
   }
 
   .nav-active-dot {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: var(--color-accent);
     flex-shrink: 0;
+    box-shadow: 0 0 6px var(--color-accent-glow);
   }
 
-  .sidebar-spacer { flex: 0; }
+  /* ── Bottom ───────────────────────────────────────────────────────── */
+  .sidebar-spacer { flex: 0; min-height: 8px; }
 
   .collapse-btn {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--color-border);
+    padding: 7px 8px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
     background: transparent;
     color: var(--color-text-muted);
     font-size: 12px;
@@ -250,13 +309,13 @@
     transition: all 0.15s ease;
     white-space: nowrap;
     overflow: hidden;
-    margin-top: 8px;
     flex-shrink: 0;
+    width: 100%;
   }
 
   .collapse-btn:hover {
-    background: var(--color-bg-hover);
+    background: rgba(255, 255, 255, 0.05);
     color: var(--color-text-primary);
-    border-color: var(--color-border-hover);
+    border-color: rgba(255, 255, 255, 0.1);
   }
 </style>
