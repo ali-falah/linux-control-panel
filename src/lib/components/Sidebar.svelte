@@ -2,7 +2,7 @@
   import {
     Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
     Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
-    ChevronLeft, ChevronRight, Database
+    ChevronLeft, ChevronRight, Database, Terminal
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
 
@@ -41,6 +41,7 @@
       items: [
         { id: 'user-manager', label: 'Users & Groups',    icon: Users },
         { id: 'env-manager',  label: 'Environment',       icon: FileText },
+        { id: 'shell-env',    label: 'Shell Environment', icon: Terminal },
         { id: 'cron-manager', label: 'Scheduled Tasks',   icon: Clock },
       ],
     },

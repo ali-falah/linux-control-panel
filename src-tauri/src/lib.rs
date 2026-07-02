@@ -38,6 +38,14 @@ use commands::{
         nginx_read_log, nginx_clear_log, nginx_list_log_files,
         nginx_check_certbot, nginx_list_ssl_certs, nginx_renew_cert,
     },
+    shell_env::{
+        shell_list_profile_files, shell_read_profile_file, shell_parse_all_exports,
+        shell_get_live_value, shell_write_var, shell_delete_var,
+        shell_write_profile_file, shell_create_profile_d_file,
+        shell_list_backups, shell_restore_backup,
+        shell_parse_path, shell_add_path_entry, shell_remove_path_entry,
+        shell_get_live_env, shell_source_file,
+    },
 };
 
 /// Returns the app config directory, creating it if needed.
@@ -179,6 +187,22 @@ pub fn run() {
             nginx_check_certbot,
             nginx_list_ssl_certs,
             nginx_renew_cert,
+            // Shell Environment
+            shell_list_profile_files,
+            shell_read_profile_file,
+            shell_parse_all_exports,
+            shell_get_live_value,
+            shell_write_var,
+            shell_delete_var,
+            shell_write_profile_file,
+            shell_create_profile_d_file,
+            shell_list_backups,
+            shell_restore_backup,
+            shell_parse_path,
+            shell_add_path_entry,
+            shell_remove_path_entry,
+            shell_get_live_env,
+            shell_source_file,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

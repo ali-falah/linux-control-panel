@@ -18,6 +18,7 @@
   import CronManager from './lib/modules/CronManager.svelte';
   import EnvManager from './lib/modules/EnvManager.svelte';
   import NginxManager from './lib/modules/NginxManager.svelte';
+  import ShellEnv from './lib/modules/ShellEnv.svelte';
 
   import { uiStore } from './lib/stores/ui.svelte.ts';
 </script>
@@ -61,6 +62,8 @@
           <EnvManager />
         {:else if uiStore.activeTab === 'nginx-manager'}
           <NginxManager />
+        {:else if uiStore.activeTab === 'shell-env'}
+          <ShellEnv />
         {/if}
       {/key}
     </div>
