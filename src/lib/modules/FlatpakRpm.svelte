@@ -1,8 +1,10 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { Layers, RefreshCw, Trash2, AlertTriangle, CheckCircle, Search } from '@lucide/svelte';
+  import { Layers, RefreshCw, Trash2, AlertTriangle, CheckCircle, Search, Package } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   interface FlatpakApp {
     name: string;
@@ -136,18 +138,11 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Layers size={20} /></div>
-    <div>
-      <h1 class="module-title">Flatpak vs RPM</h1>
-      <p class="module-subtitle">Detect duplicate packages and manage installations</p>
-    </div>
-    <div style="margin-left:auto">
-      <button class="btn btn-ghost" onclick={loadAll} disabled={loadingDuplicates}>
-        <RefreshCw size={14} class={loadingDuplicates ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Flatpak vs RPM" subtitle="Detect duplicate packages and manage installations" icon={Layers}>
+    <button class="btn btn-ghost" onclick={loadAll} disabled={loadingDuplicates}>
+      <RefreshCw size={14} class={loadingDuplicates ? 'animate-spin-slow' : ''} /> Refresh
+    </button>
+  </PageHeader>
 
   <!-- Stats -->
   <div style="display:flex; gap:12px; flex-wrap:wrap">
@@ -193,14 +188,23 @@
   {#if activeTab === 'duplicates'}
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingDuplicates}
-        <div style="padding:32px;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--color-text-muted)">
-          <RefreshCw size={16} class="animate-spin-slow" /> Scanning for duplicates…
+        <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+          <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+            <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+          </div>
+          <span style="font-weight:500">Scanning for duplicates…</span>
         </div>
       {:else if duplicates.length === 0}
-        <div class="empty-state">
-          <CheckCircle size={40} style="color:var(--color-success);opacity:0.5" />
-          <span>No duplicate packages found</span>
-          <span style="font-size:12px">Your Flatpak and RPM installs don't overlap</span>
+        <div class="empty-state" style="padding: 64px 32px;">
+          <div style="width:64px; height:64px; border-radius:50%; background:rgba(34,197,94,0.1); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+            <CheckCircle size={32} style="color:var(--color-success); margin:0" />
+          </div>
+          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+            No duplicate packages found
+          </span>
+          <span style="color:var(--color-text-muted); margin-top:8px;">
+            Your Flatpak and RPM installs don't overlap.
+          </span>
         </div>
       {:else}
         {#each duplicates as dup (dup.common_name)}
@@ -248,13 +252,20 @@
   {:else if activeTab === 'flatpaks'}
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingFlatpak}
-        <div style="padding:32px;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--color-text-muted)">
-          <RefreshCw size={16} class="animate-spin-slow" /> Loading Flatpaks…
+        <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+          <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+            <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+          </div>
+          <span style="font-weight:500">Loading Flatpaks…</span>
         </div>
       {:else if filteredFlatpaks.length === 0}
-        <div class="empty-state">
-          <Layers size={40} class="empty-state-icon" />
-          <span>No Flatpak apps installed</span>
+        <div class="empty-state" style="padding: 64px 32px;">
+          <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+            <Layers size={32} class="empty-state-icon" style="margin:0" />
+          </div>
+          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+            No Flatpaks Found
+          </span>
         </div>
       {:else}
         <div class="table-wrap" style="border:none;border-radius:0">
@@ -266,7 +277,7 @@
                 <th>Version</th>
                 <th>Origin</th>
                 <th>Install</th>
-                <th></th>
+                <th style="text-align:right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -277,14 +288,16 @@
                   <td><span class="badge badge-info">{app.version || '—'}</span></td>
                   <td style="color:var(--color-text-secondary)">{app.origin}</td>
                   <td><span class="badge badge-muted">{app.installation}</span></td>
-                  <td>
-                    <button
-                      class="btn btn-sm btn-danger"
-                      onclick={() => confirmRemoveFlatpak(app)}
-                      disabled={removingId === app.app_id}
-                    >
-                      <Trash2 size={11} /> Remove
-                    </button>
+                  <td style="text-align:right">
+                    <KebabMenu>
+                      <button
+                        class="menu-item danger"
+                        onclick={() => confirmRemoveFlatpak(app)}
+                        disabled={removingId === app.app_id}
+                      >
+                        <Trash2 size={14} /> Remove
+                      </button>
+                    </KebabMenu>
                   </td>
                 </tr>
               {/each}
@@ -304,13 +317,20 @@
   {:else}
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingRpm}
-        <div style="padding:32px;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--color-text-muted)">
-          <RefreshCw size={16} class="animate-spin-slow" /> Loading RPMs…
+        <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+          <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+            <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+          </div>
+          <span style="font-weight:500">Loading RPMs…</span>
         </div>
       {:else if filteredRpms.length === 0}
-        <div class="empty-state">
-          <Package size={40} class="empty-state-icon" />
-          <span>No RPM packages found</span>
+        <div class="empty-state" style="padding: 64px 32px;">
+          <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+            <Package size={32} class="empty-state-icon" style="margin:0" />
+          </div>
+          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+            No RPM Packages Found
+          </span>
         </div>
       {:else}
         <div class="table-wrap" style="border:none;border-radius:0">
@@ -321,7 +341,7 @@
                 <th>Version</th>
                 <th>Arch</th>
                 <th>Description</th>
-                <th></th>
+                <th style="text-align:right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -333,14 +353,16 @@
                   <td style="color:var(--color-text-secondary);font-size:12px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                     {pkg.summary}
                   </td>
-                  <td>
-                    <button
-                      class="btn btn-sm btn-danger"
-                      onclick={() => confirmRemoveRpm(pkg)}
-                      disabled={removingId === pkg.name}
-                    >
-                      <Trash2 size={11} /> Remove
-                    </button>
+                  <td style="text-align:right">
+                    <KebabMenu>
+                      <button
+                        class="menu-item danger"
+                        onclick={() => confirmRemoveRpm(pkg)}
+                        disabled={removingId === pkg.name}
+                      >
+                        <Trash2 size={14} /> Remove
+                      </button>
+                    </KebabMenu>
                   </td>
                 </tr>
               {/each}

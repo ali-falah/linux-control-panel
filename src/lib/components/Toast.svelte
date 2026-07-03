@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { CheckCircle, XCircle, AlertTriangle, Info, X } from '@lucide/svelte';
+  import {
+    CheckCircle,
+    XCircle,
+    AlertTriangle,
+    Info,
+    X
+  } from '@lucide/svelte';
   import type { Toast } from '../stores/ui.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 

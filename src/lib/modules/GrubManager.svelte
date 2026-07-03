@@ -4,6 +4,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import CodeEditor from '../components/CodeEditor.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface GrubConfig {
     timeout: number;
@@ -111,28 +112,24 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><TerminalSquare size={20} /></div>
-    <div>
-      <h1 class="module-title">GRUB Configurator</h1>
-      <p class="module-subtitle">Safely manage bootloader settings and kernel parameters</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadConfig} disabled={loading || saving || rebuilding}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-      <button class="btn btn-warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || hasChanges}>
-        <RefreshCw size={14} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
-      </button>
-      <button class="btn btn-primary" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding}>
-        <Save size={14} /> Save Changes
-      </button>
-    </div>
-  </div>
+  <PageHeader title="GRUB Configurator" subtitle="Safely manage bootloader settings and kernel parameters" icon={TerminalSquare}>
+    <button class="btn btn-ghost" onclick={loadConfig} disabled={loading || saving || rebuilding}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    <button class="btn btn-warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || hasChanges}>
+      <RefreshCw size={14} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
+    </button>
+    <button class="btn btn-primary" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding}>
+      <Save size={14} /> Save Changes
+    </button>
+  </PageHeader>
 
   {#if loading && !config}
-    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Loading GRUB Config…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Loading GRUB Config…</span>
     </div>
   {:else if config}
     {#if hasChanges}

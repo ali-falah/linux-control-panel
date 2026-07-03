@@ -237,10 +237,7 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    /* hide scrollbar */
-    scrollbar-width: none;
   }
-  .sidebar-nav::-webkit-scrollbar { display: none; }
 
   .group-label-btn {
     display: flex;

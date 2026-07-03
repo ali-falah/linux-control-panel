@@ -1,8 +1,12 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search } from '@lucide/svelte';
+  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   interface RepoEntry {
     id: string;
@@ -107,26 +111,19 @@
 </script>
 
 <div class="module-page">
-  <!-- Header -->
-  <div class="module-header">
-    <div class="module-icon"><Package size={20} /></div>
-    <div>
-      <h1 class="module-title">Repo Manager</h1>
-      <p class="module-subtitle">Manage DNF repositories from /etc/yum.repos.d/</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px;">
-      <button class="btn btn-ghost" onclick={makecache} disabled={loading}>
+  <PageHeader title="Repo Manager" subtitle="Manage DNF repositories from /etc/yum.repos.d/" icon={Package}>
+    <button class="btn btn-primary" onclick={() => showAddDialog = true}>
+      <Plus size={14} /> Add Repo
+    </button>
+    <KebabMenu>
+      <button class="menu-item" onclick={makecache} disabled={loading}>
         <RefreshCw size={14} /> makecache
       </button>
-      <button class="btn btn-ghost" onclick={loadRepos} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} />
-        Refresh
+      <button class="menu-item" onclick={loadRepos} disabled={loading}>
+        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
       </button>
-      <button class="btn btn-primary" onclick={() => showAddDialog = true}>
-        <Plus size={14} /> Add Repo
-      </button>
-    </div>
-  </div>
+    </KebabMenu>
+  </PageHeader>
 
   <!-- Search -->
   <div class="search-bar">
@@ -139,30 +136,30 @@
     {/if}
   </div>
 
-  <!-- Add Repo Dialog -->
-  {#if showAddDialog}
-    <div class="card animate-fade-slide" style="border-color: var(--color-border-focus)">
-      <h3 style="font-size:14px; font-weight:600; margin:0 0 12px; color:var(--color-text-primary)">
-        Add Repository
-      </h3>
-      <div style="display:flex; gap:8px; align-items:center">
-        <div class="search-bar" style="flex:1">
-          <Link size={14} style="color:var(--color-text-muted)" />
-          <input
-            bind:value={addUrl}
-            placeholder="https://example.com/repo.repo or URL"
-            onkeydown={(e) => e.key === 'Enter' && addRepo()}
-          />
-        </div>
-        <button class="btn btn-primary" onclick={addRepo} disabled={addLoading || !addUrl.trim()}>
-          {addLoading ? 'Adding…' : 'Add'}
-        </button>
+  <SideDrawer bind:isOpen={showAddDialog} title="Add Repository" width="400px">
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <p style="color:var(--color-text-secondary); margin:0;">
+        Enter the URL of a .repo file or a baseurl to add it to your system.
+      </p>
+      <div class="search-bar">
+        <Link size={14} style="color:var(--color-text-muted)" />
+        <input
+          bind:value={addUrl}
+          placeholder="https://example.com/repo.repo"
+          onkeydown={(e) => e.key === 'Enter' && addRepo()}
+          style="width: 100%"
+        />
+      </div>
+      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:10px;">
         <button class="btn btn-ghost" onclick={() => { showAddDialog = false; addUrl = ''; }}>
           Cancel
         </button>
+        <button class="btn btn-primary" onclick={addRepo} disabled={addLoading || !addUrl.trim()}>
+          {addLoading ? 'Adding…' : 'Add Repository'}
+        </button>
       </div>
     </div>
-  {/if}
+  </SideDrawer>
 
   <!-- Stats -->
   {#if repos.length > 0}
@@ -189,14 +186,29 @@
   <!-- Repo List -->
   <div class="card module-content-scroll" style="padding:0">
     {#if loading}
-      <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-        <RefreshCw size={16} class="animate-spin-slow" />
-        <span>Loading repositories…</span>
+      <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
+        <Skeleton height="54px" borderRadius="8px" />
+        <Skeleton height="54px" borderRadius="8px" />
+        <Skeleton height="54px" borderRadius="8px" />
+        <Skeleton height="54px" borderRadius="8px" />
+        <Skeleton height="54px" borderRadius="8px" />
       </div>
     {:else if filteredRepos.length === 0}
-      <div class="empty-state">
-        <Package size={40} class="empty-state-icon" />
-        <span>{filter ? 'No repos match your search' : 'No repositories found in /etc/yum.repos.d/'}</span>
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <Database size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          {filter ? 'No results found' : 'No Repositories'}
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          {filter ? 'Try adjusting your search criteria.' : 'No repositories found in /etc/yum.repos.d/.'}
+        </span>
+        {#if !filter}
+          <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAddDialog = true}>
+            <Plus size={14} /> Add Your First Repo
+          </button>
+        {/if}
       </div>
     {:else}
       <div class="table-wrap" style="border:none; border-radius:0">

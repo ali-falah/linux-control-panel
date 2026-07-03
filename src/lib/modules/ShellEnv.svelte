@@ -7,6 +7,7 @@
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -440,13 +441,7 @@
 <!-- ─── Page ────────────────────────────────────────────────────────────── -->
 <div class="module-page">
   <!-- Header -->
-  <div class="module-header">
-    <div class="module-icon"><Terminal size={20} /></div>
-    <div>
-      <h1 class="module-title">Shell Environment</h1>
-      <p class="module-subtitle">Manage bash profile files, exported variables, and PATH</p>
-    </div>
-  </div>
+  <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal} />
 
   <!-- Tab Bar -->
   <div class="tab-bar">

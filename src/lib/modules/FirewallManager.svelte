@@ -3,6 +3,7 @@
   import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface FirewallState {
     is_running: boolean;
@@ -134,36 +135,38 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Shield size={20} /></div>
-    <div>
-      <h1 class="module-title">Firewall Manager</h1>
-      <p class="module-subtitle">Manage firewalld zones, open ports, and allowed services</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadState} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+  <PageHeader title="Firewall Manager" subtitle="Manage firewalld zones, open ports, and allowed services" icon={Shield}>
+    <button class="btn btn-ghost" onclick={loadState} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    {#if state?.is_running}
+      <button 
+        class="btn {state.is_panic ? 'btn-success' : 'btn-danger'}" 
+        onclick={confirmTogglePanic}
+      >
+        <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
       </button>
-      {#if state?.is_running}
-        <button 
-          class="btn {state.is_panic ? 'btn-success' : 'btn-danger'}" 
-          onclick={confirmTogglePanic}
-        >
-          <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode (Block All)'}
-        </button>
-      {/if}
-    </div>
-  </div>
+    {/if}
+  </PageHeader>
 
   {#if loading && !state}
-    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Loading Firewall State…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Loading Firewall State…</span>
     </div>
   {:else if state && !state.is_running}
-    <div class="empty-state">
-      <ShieldAlert size={48} class="empty-state-icon" style="color:var(--color-danger)" />
-      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">Firewall is Offline</span>
-      <span style="font-size:14px; margin-top:8px">firewalld is not currently running. You can start it from the Service Manager.</span>
+    <div class="empty-state" style="padding: 64px 32px;">
+      <div style="width:64px; height:64px; border-radius:50%; background:rgba(255,71,87,0.1); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+        <ShieldAlert size={32} class="empty-state-icon" style="color:var(--color-danger); margin:0;" />
+      </div>
+      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+        Firewall is Offline
+      </span>
+      <span style="color:var(--color-text-muted); margin-top:8px;">
+        firewalld is not currently running. You can start it from the Service Manager.
+      </span>
     </div>
   {:else if state}
     {#if state.is_panic}

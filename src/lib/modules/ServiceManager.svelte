@@ -2,11 +2,15 @@
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw, Eye,
-    FileText, ShieldBan, ShieldCheck, ToggleLeft, ChevronDown, X
+    FileText, ShieldBan, ShieldCheck, ToggleLeft, ChevronDown, X, PlayCircle
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import CodeEditor from '../components/CodeEditor.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
 
   interface ServiceUnit {
     name: string;
@@ -24,6 +28,7 @@
   let filter = $state('');
   let selectedUnit = $state<ServiceUnit | null>(null);
   let activePanel = $state<'logs' | 'editor' | null>(null);
+  let panelOpen = $state(false);
   let logs = $state('');
   let logsLoading = $state(false);
   let unitFileContent = $state('');
@@ -96,6 +101,7 @@
   async function openLogs(unit: ServiceUnit) {
     selectedUnit = unit;
     activePanel = 'logs';
+    panelOpen = true;
     logsLoading = true;
     logs = '';
     try {
@@ -110,6 +116,7 @@
   async function openEditor(unit: ServiceUnit) {
     selectedUnit = unit;
     activePanel = 'editor';
+    panelOpen = true;
     unitFileLoading = true;
     unitFileContent = '';
     try {
@@ -150,29 +157,30 @@
   }
 
   function closePanel() {
+    panelOpen = false;
     activePanel = null;
     selectedUnit = null;
   }
+
+  $effect(() => {
+    if (!panelOpen) {
+      activePanel = null;
+      selectedUnit = null;
+    }
+  });
 
   $effect(() => { load(); });
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Settings size={20} /></div>
-    <div>
-      <h1 class="module-title">Service Manager</h1>
-      <p class="module-subtitle">Browse, control, and inspect systemd service units</p>
-    </div>
-    <div style="margin-left:auto">
-      <button class="btn btn-ghost" onclick={load} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+    </button>
+  </PageHeader>
 
   <!-- Stats -->
-  <div style="display:flex; gap:12px; flex-wrap:wrap">
+  <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom: 8px;">
     <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
       <span style="font-size:22px;font-weight:700;color:var(--color-success)">{units.filter(u => u.active_state === 'active').length}</span>
       <span style="font-size:12px;color:var(--color-text-muted)">Active</span>
@@ -197,66 +205,69 @@
   </div>
 
   <!-- Side panel: Logs or Editor -->
-  {#if activePanel && selectedUnit}
-    <div class="panel animate-fade-slide">
-      <div class="panel-header">
-        <h3 class="panel-title">
-          {#if activePanel === 'logs'}
-            <Eye size={14} /> Logs — {selectedUnit.name}
-          {:else}
-            <FileText size={14} /> Unit File — {selectedUnit.name}
-          {/if}
-        </h3>
-        <div style="display:flex;gap:6px">
-          {#if activePanel === 'editor'}
-            <button
-              class="btn btn-primary"
-              onclick={confirmSaveUnitFile}
-              disabled={saving || editedContent === unitFileContent}
-            >
-              {saving ? 'Saving…' : 'Save Override'}
-            </button>
-          {/if}
-          <button class="btn btn-icon btn-ghost btn-sm" onclick={closePanel}>
-            <X size={14} />
-          </button>
-        </div>
-      </div>
+  <SideDrawer 
+    bind:isOpen={panelOpen} 
+    title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : `Unit File — ${selectedUnit?.name}`}
+    width="600px"
+  >
+    {#snippet headerActions()}
+      {#if activePanel === 'editor'}
+        <button
+          class="btn btn-primary btn-sm"
+          onclick={confirmSaveUnitFile}
+          disabled={saving || editedContent === unitFileContent}
+        >
+          {saving ? 'Saving…' : 'Save Override'}
+        </button>
+      {/if}
+    {/snippet}
 
-      {#if activePanel === 'logs'}
-        {#if logsLoading}
-          <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-            <RefreshCw size={14} class="animate-spin-slow" /> Loading logs…
-          </div>
-        {:else}
-          <pre class="log-output">{logs || 'No log output found.'}</pre>
-        {/if}
+    {#if activePanel === 'logs'}
+      {#if logsLoading}
+        <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
+          <RefreshCw size={14} class="animate-spin-slow" /> Loading logs…
+        </div>
       {:else}
-        {#if unitFileLoading}
-          <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-            <RefreshCw size={14} class="animate-spin-slow" /> Loading unit file…
-          </div>
-        {:else}
+        <pre class="log-output">{logs || 'No log output found.'}</pre>
+      {/if}
+    {:else if activePanel === 'editor'}
+      {#if unitFileLoading}
+        <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
+          <RefreshCw size={14} class="animate-spin-slow" /> Loading unit file…
+        </div>
+      {:else}
+        <div style="display:flex; flex-direction:column; height: 100%;">
           <CodeEditor
             value={unitFileContent}
-            height="280px"
+            height="100%"
             onchange={(v) => editedContent = v}
           />
-        {/if}
+        </div>
       {/if}
-    </div>
-  {/if}
+    {/if}
+  </SideDrawer>
 
   <!-- Service List -->
   <div class="card module-content-scroll" style="padding:0">
     {#if loading}
-      <div style="padding:32px;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--color-text-muted)">
-        <RefreshCw size={16} class="animate-spin-slow" /> Loading service units…
+      <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
+        <Skeleton height="42px" borderRadius="8px" />
+        <Skeleton height="42px" borderRadius="8px" />
+        <Skeleton height="42px" borderRadius="8px" />
+        <Skeleton height="42px" borderRadius="8px" />
+        <Skeleton height="42px" borderRadius="8px" />
       </div>
     {:else if filteredUnits.length === 0}
-      <div class="empty-state">
-        <Settings size={40} class="empty-state-icon" />
-        <span>No units match your filter</span>
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <Settings size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          No results found
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          Try adjusting your search criteria.
+        </span>
       </div>
     {:else}
       <div class="table-wrap" style="border:none;border-radius:0">
@@ -292,49 +303,51 @@
                     <span class="badge badge-muted">—</span>
                   {/if}
                 </td>
-                <td>
-                  <div style="display:flex;gap:4px;flex-wrap:wrap">
+                <td style="width: 140px;">
+                  <div style="display:flex;gap:8px; align-items:center">
                     {#if unit.active_state !== 'active'}
                       <button
                         class="btn btn-sm btn-success"
                         onclick={() => doAction(unit, 'start')}
                         disabled={!!actionInProgress}
                         title="Start"
+                        style="min-width: 70px; display:flex; justify-content:center;"
                       >
-                        <Play size={11} />
+                        <Play size={12} style="margin-right:4px"/> Start
                       </button>
                     {:else}
                       <button
-                        class="btn btn-sm btn-danger"
+                        class="btn btn-sm btn-outline btn-danger"
                         onclick={() => confirmDoAction(unit, 'stop')}
                         disabled={!!actionInProgress}
                         title="Stop"
+                        style="min-width: 70px; display:flex; justify-content:center;"
                       >
-                        <Square size={11} />
+                        <Square size={12} style="margin-right:4px"/> Stop
                       </button>
                     {/if}
-                    <button
-                      class="btn btn-sm btn-ghost"
-                      onclick={() => confirmDoAction(unit, 'restart')}
-                      disabled={!!actionInProgress}
-                      title="Restart"
-                    >
-                      <RotateCcw size={11} />
-                    </button>
-                    <button
-                      class="btn btn-sm btn-ghost"
-                      onclick={() => openLogs(unit)}
-                      title="View Logs"
-                    >
-                      <Eye size={11} />
-                    </button>
-                    <button
-                      class="btn btn-sm btn-ghost"
-                      onclick={() => openEditor(unit)}
-                      title="Edit Unit File"
-                    >
-                      <FileText size={11} />
-                    </button>
+
+                    <KebabMenu>
+                      <button
+                        class="menu-item"
+                        onclick={() => confirmDoAction(unit, 'restart')}
+                        disabled={!!actionInProgress}
+                      >
+                        <RotateCcw size={14} /> Restart
+                      </button>
+                      <button
+                        class="menu-item"
+                        onclick={() => openLogs(unit)}
+                      >
+                        <Eye size={14} /> View Logs
+                      </button>
+                      <button
+                        class="menu-item"
+                        onclick={() => openEditor(unit)}
+                      >
+                        <FileText size={14} /> Edit Unit File
+                      </button>
+                    </KebabMenu>
                   </div>
                 </td>
               </tr>
@@ -347,41 +360,15 @@
 </div>
 
 <style>
-  .panel {
-    border: 1px solid var(--color-border-focus);
-    border-radius: 10px;
-    overflow: hidden;
-    background: var(--color-bg-surface);
-  }
-
-  .panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-bg-card);
-  }
-
-  .panel-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 0;
-  }
-
   .log-output {
     font-size: 11px;
-    max-height: 300px;
+    flex: 1;
     overflow-y: auto;
-    padding: 12px 16px;
+    padding: 16px;
     margin: 0;
-    border: none;
-    border-radius: 0;
-    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: rgba(0,0,0,0.2);
     color: var(--color-text-secondary);
     white-space: pre-wrap;
     word-break: break-all;

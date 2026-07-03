@@ -10,6 +10,7 @@
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -644,28 +645,18 @@
 <!-- ─── Page ──────────────────────────────────────────────────────────── -->
 <div class="module-page">
   <!-- Header -->
-  <div class="module-header">
-    <div class="module-icon">
-      <Server size={24} />
-    </div>
-    <div>
-      <h1 class="module-title">Nginx Manager</h1>
-      <p class="module-subtitle">
-        {#if loading}
-          Checking nginx…
-        {:else if installInfo?.installed}
-          {installInfo.version} — Manage web server configs, sites, and files
-        {:else}
-          nginx is not installed on this system
-        {/if}
-      </p>
-    </div>
-  </div>
+  <PageHeader 
+    title="Nginx Manager" 
+    subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
+    icon={Server} 
+  />
 
   {#if loading}
-    <div class="center-state">
-      <div class="spinner"></div>
-      <span>Checking nginx installation…</span>
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Checking nginx installation…</span>
     </div>
   {:else if !installInfo?.installed}
     <!-- ─── Not Installed State ─── -->

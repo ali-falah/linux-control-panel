@@ -3,6 +3,7 @@
   import { ShieldAlert, Shield, RefreshCw, Power } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface SelinuxStatus {
     status: string;
@@ -66,22 +67,18 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><ShieldAlert size={20} /></div>
-    <div>
-      <h1 class="module-title">SELinux Manager</h1>
-      <p class="module-subtitle">Manage Security-Enhanced Linux state and view access denials</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-    </div>
-  </div>
+  <PageHeader title="SELinux Manager" subtitle="Manage Security-Enhanced Linux state and view access denials" icon={ShieldAlert}>
+    <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+  </PageHeader>
 
   {#if loading && !status}
-    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Loading SELinux State…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Loading SELinux State…</span>
     </div>
   {:else if status}
     <div class="card" style="margin-bottom:16px">
@@ -135,10 +132,16 @@
         
         <div style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px">
           {#if denials.length === 0}
-            <div class="empty-state" style="padding:40px">
-              <Shield size={48} class="empty-state-icon" style="color:var(--color-success)" />
-              <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No recent denials found</span>
-              <span style="font-size:14px; margin-top:8px">SELinux has not blocked any actions recently.</span>
+            <div class="empty-state" style="padding: 64px 32px;">
+              <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+                <Shield size={32} class="empty-state-icon" style="margin:0; color:var(--color-success);" />
+              </div>
+              <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+                No Recent Denials
+              </span>
+              <span style="color:var(--color-text-muted); margin-top:8px;">
+                SELinux has not blocked any actions recently.
+              </span>
             </div>
           {:else}
             {#each denials as denial}

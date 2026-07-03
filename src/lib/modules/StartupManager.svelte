@@ -3,6 +3,7 @@
   import { Rocket, RefreshCw, Search, Filter } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface SystemdUnit {
     name: string;
@@ -123,18 +124,11 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Rocket size={20} /></div>
-    <div>
-      <h1 class="module-title">Startup Manager</h1>
-      <p class="module-subtitle">Manage systemd services and XDG autostart entries</p>
-    </div>
-    <div style="margin-left:auto">
-      <button class="btn btn-ghost" onclick={load} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Startup Manager" subtitle="Manage systemd services and XDG autostart entries" icon={Rocket}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+    </button>
+  </PageHeader>
 
   <!-- Stats -->
   <div style="display:flex; gap:12px; flex-wrap:wrap">

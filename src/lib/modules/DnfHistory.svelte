@@ -4,6 +4,8 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import CodeEditor from '../components/CodeEditor.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   interface DnfHistoryEntry {
     id: number;
@@ -148,22 +150,13 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon">
-      <Package size={20} style="color:var(--color-accent)" />
-    </div>
-    <div>
-      <h2 style="font-size:20px; font-weight:700; color:var(--color-text-primary); margin:0 0 4px">DNF Manager</h2>
-      <p style="font-size:13px; color:var(--color-text-muted); margin:0">Manage packages, view history, and perform maintenance</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:10px">
-      {#if activeTab === 'history'}
-        <button class="btn btn-outline" onclick={loadHistory} disabled={loadingHistory}>
-          <RefreshCw size={14} class={loadingHistory ? 'animate-spin' : ''} /> Refresh History
-        </button>
-      {/if}
-    </div>
-  </div>
+  <PageHeader title="DNF Manager" subtitle="Manage packages, view history, and perform maintenance" icon={Package}>
+    {#if activeTab === 'history'}
+      <button class="btn btn-outline" onclick={loadHistory} disabled={loadingHistory}>
+        <RefreshCw size={14} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
+      </button>
+    {/if}
+  </PageHeader>
 
   <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content">
     {#each [['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance']] as [id, label]}
@@ -185,13 +178,23 @@
 
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingHistory && history.length === 0}
-        <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-          <RefreshCw size={16} class="animate-spin-slow" /> Loading DNF history…
+        <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+          <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+            <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+          </div>
+          <span style="font-weight:500">Loading DNF history…</span>
         </div>
       {:else if filteredHistory.length === 0}
-        <div class="empty-state">
-          <History size={40} class="empty-state-icon" />
-          <span>{historySearch ? 'No history matches your search.' : 'No DNF history found. DNF may not be available.'}</span>
+        <div class="empty-state" style="padding: 64px 32px;">
+          <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+            <History size={32} class="empty-state-icon" style="margin:0" />
+          </div>
+          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+            No History Found
+          </span>
+          <span style="color:var(--color-text-muted); margin-top:8px;">
+            {historySearch ? 'No history matches your search.' : 'No DNF history found. DNF may not be available.'}
+          </span>
         </div>
       {:else}
         <div class="table-wrap" style="border:none; border-radius:0">
@@ -203,7 +206,7 @@
                 <th>Date & Time</th>
                 <th>Action</th>
                 <th style="text-align:right">Altered</th>
-                <th style="text-align:right; width:120px"></th>
+                <th style="text-align:right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -229,17 +232,19 @@
                     {entry.altered}
                   </td>
                   <td style="text-align:right">
-                    <button
-                      class="btn btn-sm btn-danger"
-                      onclick={(e) => { e.stopPropagation(); confirmUndo(entry); }}
-                      disabled={undoingId === entry.id}
-                    >
-                      {#if undoingId === entry.id}
-                        <RefreshCw size={11} class="animate-spin" /> Rolling back…
-                      {:else}
-                        <Undo2 size={11} /> Undo
-                      {/if}
-                    </button>
+                    <KebabMenu>
+                      <button
+                        class="menu-item danger"
+                        onclick={(e) => { e.stopPropagation(); confirmUndo(entry); }}
+                        disabled={undoingId === entry.id}
+                      >
+                        {#if undoingId === entry.id}
+                          <RefreshCw size={14} class="animate-spin" /> Rolling back…
+                        {:else}
+                          <Undo2 size={14} /> Undo Transaction
+                        {/if}
+                      </button>
+                    </KebabMenu>
                   </td>
                 </tr>
               {/each}

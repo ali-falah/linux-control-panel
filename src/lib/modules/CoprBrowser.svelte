@@ -4,6 +4,7 @@
   import { open } from '@tauri-apps/plugin-shell';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface CoprProject {
     full_name: string;
@@ -84,17 +85,11 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><LayoutGrid size={20} /></div>
-    <div>
-      <h1 class="module-title">Copr Browser</h1>
-      <p class="module-subtitle">Search and manage Fedora Copr repositories</p>
-    </div>
-  </div>
+  <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
 
   <!-- Search Box -->
   <div style="display:flex; gap:8px">
-    <div class="search-bar" style="flex:1">
+    <div class="search-bar" style="flex:1; border: 1px solid var(--color-border-focus)">
       <Search size={14} style="color:var(--color-text-muted)" />
       <input
         bind:value={query}
@@ -113,14 +108,23 @@
 
   <!-- Results -->
   {#if loading}
-    <div class="card" style="display:flex; align-items:center; justify-content:center; gap:12px; padding:40px; color:var(--color-text-muted)">
-      <RefreshCw size={20} class="animate-spin-slow" />
-      <span>Searching Copr API…</span>
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Searching Copr API…</span>
     </div>
   {:else if hasSearched && results.length === 0}
-    <div class="empty-state card">
-      <LayoutGrid size={40} class="empty-state-icon" />
-      <span>No Copr projects found for "{query}"</span>
+    <div class="empty-state" style="padding: 64px 32px;">
+      <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+        <LayoutGrid size={32} class="empty-state-icon" style="margin:0" />
+      </div>
+      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+        No Projects Found
+      </span>
+      <span style="color:var(--color-text-muted); margin-top:8px;">
+        No Copr projects matched "{query}".
+      </span>
     </div>
   {:else if results.length > 0}
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px">
@@ -181,10 +185,16 @@
       {/each}
     </div>
   {:else}
-    <div class="empty-state card" style="border-style:dashed">
-      <Search size={40} class="empty-state-icon" />
-      <span>Search for Copr projects above</span>
-      <span style="font-size:12px">Try "vscode", "gaming", "llvm", "wine"…</span>
+    <div class="empty-state" style="padding: 64px 32px;">
+      <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+        <Search size={32} class="empty-state-icon" style="margin:0" />
+      </div>
+      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+        Search Copr Repositories
+      </span>
+      <span style="color:var(--color-text-muted); margin-top:8px;">
+        Try searching for "vscode", "gaming", "llvm", "wine"…
+      </span>
     </div>
   {/if}
 </div>

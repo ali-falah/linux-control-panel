@@ -4,6 +4,9 @@
   import { Clock, Plus, Trash2, RefreshCw, ShieldAlert, Shield, FolderOpen } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   interface CronJob {
     raw: string;
@@ -95,64 +98,54 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Clock size={20} /></div>
-    <div>
-      <h1 class="module-title">Scheduled Tasks</h1>
-      <p class="module-subtitle">Manage system and user cron jobs</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadJobs} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-      <button class="btn btn-primary" onclick={() => showAdd = !showAdd}>
-        <Plus size={14} /> Add Job
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs" icon={Clock}>
+    <button class="btn btn-ghost" onclick={loadJobs} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    <button class="btn btn-primary" onclick={() => showAdd = true}>
+      <Plus size={14} /> Add Job
+    </button>
+  </PageHeader>
 
-  {#if showAdd}
-    <div class="card" style="margin-bottom: 16px; border: 1px solid var(--color-border-focus)">
-      <h3 style="margin-top:0; color:var(--color-text-primary)">Create Scheduled Task</h3>
+  <SideDrawer bind:isOpen={showAdd} title="Create Scheduled Task" width="500px">
+    <div style="display:flex; flex-direction:column; gap:20px;">
       
-      <div style="display:flex; gap:16px; margin-bottom:12px">
-        <div style="flex:1">
-          <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Schedule</label>
-          <input class="w-full" style="font-family:var(--font-mono)" bind:value={newSchedule} />
-          
-          <div style="display:flex; gap:4px; margin-top:8px">
-            <button class="btn btn-sm btn-outline" onclick={() => setPreset('* * * * *')}>Every Min</button>
-            <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 * * * *')}>Hourly</button>
-            <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * *')}>Daily</button>
-            <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * 0')}>Weekly</button>
-            <button class="btn btn-sm btn-outline" onclick={() => setPreset('@reboot')}>On Boot</button>
-          </div>
-        </div>
+      <div>
+        <label style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Schedule</label>
+        <input class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newSchedule} />
         
-        <div style="flex:2">
-          <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Command to Execute</label>
-          <div style="display:flex; gap:8px">
-            <input class="w-full" style="font-family:var(--font-mono)" bind:value={newCommand} placeholder="/path/to/script.sh" />
-            <button class="btn btn-outline" onclick={browseFile} title="Browse for script file">
-              <FolderOpen size={16} />
-            </button>
-          </div>
+        <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+          <button class="btn btn-sm btn-outline" onclick={() => setPreset('* * * * *')}>Every Min</button>
+          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 * * * *')}>Hourly</button>
+          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * *')}>Daily</button>
+          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * 0')}>Weekly</button>
+          <button class="btn btn-sm btn-outline" onclick={() => setPreset('@reboot')}>On Boot</button>
+        </div>
+      </div>
+      
+      <div>
+        <label style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Command to Execute</label>
+        <div style="display:flex; gap:8px">
+          <input class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newCommand} placeholder="/path/to/script.sh" />
+          <button class="btn btn-outline" onclick={browseFile} title="Browse for script file">
+            <FolderOpen size={16} />
+          </button>
         </div>
       </div>
 
-      <div style="display:flex; align-items:center; justify-content:space-between">
-        <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
+      <div style="margin-top: 8px;">
+        <label style="display:flex; align-items:center; gap:10px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
           <input type="checkbox" bind:checked={isRootJob} />
           Run as Root User (System-wide)
         </label>
-        
-        <div style="display:flex; gap:8px">
-          <button class="btn btn-outline" onclick={() => showAdd = false}>Cancel</button>
-          <button class="btn btn-primary" onclick={addJob} disabled={!newCommand.trim()}>Save Job</button>
-        </div>
+      </div>
+      
+      <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:16px;">
+        <button class="btn btn-ghost" onclick={() => showAdd = false}>Cancel</button>
+        <button class="btn btn-primary" onclick={addJob} disabled={!newCommand.trim()}>Save Job</button>
       </div>
     </div>
-  {/if}
+  </SideDrawer>
 
   <div class="card module-content-scroll" style="padding:0">
     <div class="table-wrap" style="border:none; border-radius:0">
@@ -166,10 +159,34 @@
           </tr>
         </thead>
         <tbody>
-          {#if jobs.length === 0}
+          {#if loading}
             <tr>
-              <td colspan="4" style="text-align:center; padding:32px; color:var(--color-text-muted)">
-                No scheduled tasks found.
+              <td colspan="4">
+                <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+                  <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+                    <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+                  </div>
+                  <span style="font-weight:500">Loading cron jobs…</span>
+                </div>
+              </td>
+            </tr>
+          {:else if jobs.length === 0}
+            <tr>
+              <td colspan="4">
+                <div class="empty-state" style="padding: 64px 32px;">
+                  <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+                    <Clock size={32} class="empty-state-icon" style="margin:0" />
+                  </div>
+                  <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+                    No Scheduled Tasks
+                  </span>
+                  <span style="color:var(--color-text-muted); margin-top:8px;">
+                    You haven't added any cron jobs yet.
+                  </span>
+                  <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAdd = true}>
+                    <Plus size={14} /> Add First Job
+                  </button>
+                </div>
               </td>
             </tr>
           {:else}
@@ -185,9 +202,11 @@
                   {/if}
                 </td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm btn-danger" onclick={() => confirmDelete(job)} title="Delete Task">
-                    <Trash2 size={14} />
-                  </button>
+                  <KebabMenu>
+                    <button class="menu-item danger" onclick={() => confirmDelete(job)}>
+                      <Trash2 size={14} /> Delete Job
+                    </button>
+                  </KebabMenu>
                 </td>
               </tr>
             {/each}

@@ -3,6 +3,9 @@
   import { Globe, RefreshCw, Plus, Trash2, Save, Eye, EyeOff, Search } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   interface HostEntry {
     id: string;
@@ -139,33 +142,26 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Globe size={20} /></div>
-    <div>
-      <h1 class="module-title">Hosts Manager</h1>
-      <p class="module-subtitle">Edit /etc/hosts — requires polkit authentication to save</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={load} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-      <button class="btn btn-ghost" onclick={() => showAddForm = !showAddForm}>
-        <Plus size={14} /> Add Entry
-      </button>
-      <button
-        class="btn btn-primary"
-        onclick={confirmSave}
-        disabled={saving || !hasChanges}
-        style={hasChanges ? 'animation: pulse-glow 2s infinite' : ''}
-      >
-        {#if saving}
-          <RefreshCw size={14} class="animate-spin-slow" /> Saving…
-        {:else}
-          <Save size={14} /> {hasChanges ? 'Save Changes' : 'Saved'}
-        {/if}
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Hosts Manager" subtitle="Edit /etc/hosts — requires polkit authentication to save" icon={Globe}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    <button class="btn btn-outline" onclick={() => showAddForm = true}>
+      <Plus size={14} /> Add Entry
+    </button>
+    <button
+      class="btn btn-primary"
+      onclick={confirmSave}
+      disabled={saving || !hasChanges}
+      style={hasChanges ? 'animation: pulse-glow 2s infinite; box-shadow: 0 0 12px var(--color-accent-glow);' : ''}
+    >
+      {#if saving}
+        <RefreshCw size={14} class="animate-spin-slow" /> Saving…
+      {:else}
+        <Save size={14} /> {hasChanges ? 'Save Changes' : 'Saved'}
+      {/if}
+    </button>
+  </PageHeader>
 
   {#if hasChanges}
     <div style="padding:10px 14px;background:var(--color-warning-muted);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:12px;color:var(--color-warning);display:flex;align-items:center;gap:8px">
@@ -174,36 +170,37 @@
     </div>
   {/if}
 
-  <!-- Add Entry Form -->
-  {#if showAddForm}
-    <div class="card animate-fade-slide" style="border-color:var(--color-border-focus)">
-      <h3 style="font-size:14px;font-weight:600;margin:0 0 14px;color:var(--color-text-primary)">Add Host Entry</h3>
-      <div style="display:grid;grid-template-columns:140px 1fr 1fr;gap:10px;align-items:end">
-        <div>
-          <label class="field-label" for="new-ip">IP Address</label>
-          <input id="new-ip" class="input" bind:value={newIp} placeholder="127.0.0.1" />
-        </div>
-        <div>
-          <label class="field-label" for="new-hostnames">Hostnames (space-separated)</label>
-          <input id="new-hostnames" class="input" bind:value={newHostnames} placeholder="myhost.local myhost" />
-        </div>
-        <div>
-          <label class="field-label" for="new-comment">Comment (optional)</label>
-          <input id="new-comment" class="input" bind:value={newComment} placeholder="My custom host" />
-        </div>
+  <SideDrawer bind:isOpen={showAddForm} title="Add Host Entry" width="400px">
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <p style="color:var(--color-text-secondary); margin:0 0 8px;">
+        Add a new static mapping to your hosts file.
+      </p>
+      
+      <div>
+        <label class="field-label" for="new-ip">IP Address</label>
+        <input id="new-ip" class="input" bind:value={newIp} placeholder="127.0.0.1" style="width: 100%" />
       </div>
-      <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+      <div>
+        <label class="field-label" for="new-hostnames">Hostnames (space-separated)</label>
+        <input id="new-hostnames" class="input" bind:value={newHostnames} placeholder="myhost.local myhost" style="width: 100%" />
+      </div>
+      <div>
+        <label class="field-label" for="new-comment">Comment (optional)</label>
+        <input id="new-comment" class="input" bind:value={newComment} placeholder="My custom host" style="width: 100%" />
+      </div>
+
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
         <button class="btn btn-ghost" onclick={() => { showAddForm = false; newIp = ''; newHostnames = ''; }}>Cancel</button>
         <button
           class="btn btn-primary"
           onclick={addEntry}
           disabled={!newIp.trim() || !newHostnames.trim()}
         >
-          <Plus size={14} /> Add
+          <Plus size={14} /> Add Entry
         </button>
       </div>
     </div>
-  {/if}
+  </SideDrawer>
 
   <!-- Stats -->
   <div style="display:flex; gap:12px; flex-wrap:wrap">
@@ -229,13 +226,28 @@
 
   <!-- Grouped by category -->
   {#if loading}
-    <div class="card" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:40px;color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Reading /etc/hosts…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Reading /etc/hosts…</span>
     </div>
   {:else if filteredEntries.length === 0}
-    <div class="empty-state card">
-      <Globe size={40} class="empty-state-icon" />
-      <span>{filter ? 'No entries match your search' : 'No valid host entries found'}</span>
+    <div class="empty-state" style="padding: 64px 32px;">
+      <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+        <Globe size={32} class="empty-state-icon" style="margin:0" />
+      </div>
+      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+        {filter ? 'No results found' : 'No Hosts Found'}
+      </span>
+      <span style="color:var(--color-text-muted); margin-top:8px;">
+        {filter ? 'Try adjusting your search criteria.' : 'No valid host entries found in /etc/hosts.'}
+      </span>
+      {#if !filter}
+        <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAddForm = true}>
+          <Plus size={14} /> Add First Entry
+        </button>
+      {/if}
     </div>
   {:else}
     {#each categories as category}
@@ -293,12 +305,14 @@
                         </label>
                       </td>
                       <td style="text-align:right">
-                        <button
-                          class="btn btn-sm btn-danger"
-                          onclick={() => removeEntry(entry)}
-                        >
-                          <Trash2 size={11} />
-                        </button>
+                        <KebabMenu>
+                          <button
+                            class="menu-item danger"
+                            onclick={() => removeEntry(entry)}
+                          >
+                            <Trash2 size={14} /> Delete Entry
+                          </button>
+                        </KebabMenu>
                       </td>
                     </tr>
                   {/each}

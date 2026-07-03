@@ -4,6 +4,7 @@
   import { Globe, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
 
   interface EnvVar {
     key: string;
@@ -81,25 +82,21 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Globe size={20} /></div>
-    <div>
-      <h1 class="module-title">Environment Variables</h1>
-      <p class="module-subtitle">Manage system-wide environment variables (/etc/environment)</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadVars} disabled={loading || saving}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-      <button class="btn btn-primary" onclick={confirmSave} disabled={loading || saving}>
-        <Save size={14} /> Save Changes
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={Globe}>
+    <button class="btn btn-ghost" onclick={loadVars} disabled={loading || saving}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    <button class="btn btn-primary" onclick={confirmSave} disabled={loading || saving}>
+      <Save size={14} /> Save Changes
+    </button>
+  </PageHeader>
 
   {#if loading && vars.length === 0}
-    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Loading Environment…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Loading Environment…</span>
     </div>
   {:else}
     <div class="card module-content-scroll" style="padding:0">

@@ -3,6 +3,8 @@
   import { Users, UserPlus, Key, Shield, ShieldOff, Trash2, RefreshCw, Layers } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   interface UserInfo {
     username: string;
@@ -203,31 +205,24 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Users size={20} /></div>
-    <div>
-      <h1 class="module-title">Users & Groups</h1>
-      <p class="module-subtitle">Manage local accounts, passwords, privileges, and groups</p>
+  <PageHeader title="Users & Groups" subtitle="Manage local accounts, passwords, privileges, and groups" icon={Users}>
+    <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
+      <button class="btn btn-sm {view === 'users' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'users'}>Users</button>
+      <button class="btn btn-sm {view === 'groups' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'groups'}>Groups</button>
     </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px">
-        <button class="btn btn-sm {view === 'users' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'users'}>Users</button>
-        <button class="btn btn-sm {view === 'groups' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'groups'}>Groups</button>
-      </div>
-      <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </button>
+    {#if view === 'users'}
+      <button class="btn btn-primary" onclick={() => showAddUser = !showAddUser}>
+        <UserPlus size={14} /> Add User
       </button>
-      {#if view === 'users'}
-        <button class="btn btn-primary" onclick={() => showAddUser = !showAddUser}>
-          <UserPlus size={14} /> Add User
-        </button>
-      {:else}
-        <button class="btn btn-primary" onclick={() => showAddGroup = !showAddGroup}>
-          <Layers size={14} /> Add Group
-        </button>
-      {/if}
-    </div>
-  </div>
+    {:else}
+      <button class="btn btn-primary" onclick={() => showAddGroup = !showAddGroup}>
+        <Layers size={14} /> Add Group
+      </button>
+    {/if}
+  </PageHeader>
 
   {#if view === 'users' && showAddUser}
     <div class="card" style="margin-bottom: 16px; border: 1px solid var(--color-border-focus)">
@@ -298,24 +293,24 @@
                   {/if}
                 </td>
                 <td style="text-align:right">
-                  <div style="display:flex; gap:4px; justify-content:flex-end">
-                    <button class="btn btn-sm btn-ghost" onclick={() => {selectedUser = user; showGroupModal = true;}} title="Manage Groups">
-                      <Layers size={14} />
+                  <KebabMenu>
+                    <button class="menu-item" onclick={() => {selectedUser = user; showGroupModal = true;}}>
+                      <Layers size={14} /> Manage Groups
                     </button>
-                    <button class="btn btn-sm btn-ghost" onclick={() => confirmToggleSudo(user)} title={user.is_sudo ? "Revoke Sudo" : "Grant Sudo"}>
+                    <button class="menu-item" onclick={() => confirmToggleSudo(user)}>
                       {#if user.is_sudo}
-                        <ShieldOff size={14} style="color:var(--color-warning)" />
+                        <ShieldOff size={14} /> Revoke Sudo
                       {:else}
-                        <Shield size={14} style="color:var(--color-success)" />
+                        <Shield size={14} /> Grant Sudo
                       {/if}
                     </button>
-                    <button class="btn btn-sm btn-ghost" onclick={() => promptChangePassword(user)} title="Change Password">
-                      <Key size={14} />
+                    <button class="menu-item" onclick={() => promptChangePassword(user)}>
+                      <Key size={14} /> Change Password
                     </button>
-                    <button class="btn btn-sm btn-danger" onclick={() => confirmDelete(user)} title="Delete User">
-                      <Trash2 size={14} />
+                    <button class="menu-item danger" onclick={() => confirmDelete(user)}>
+                      <Trash2 size={14} /> Delete User
                     </button>
-                  </div>
+                  </KebabMenu>
                 </td>
               </tr>
             {/each}
@@ -350,9 +345,11 @@
                   </div>
                 </td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm btn-danger" onclick={() => confirmDeleteGroup(group)} title="Delete Group">
-                    <Trash2 size={14} />
-                  </button>
+                  <KebabMenu>
+                    <button class="menu-item danger" onclick={() => confirmDeleteGroup(group)}>
+                      <Trash2 size={14} /> Delete Group
+                    </button>
+                  </KebabMenu>
                 </td>
               </tr>
             {/each}
