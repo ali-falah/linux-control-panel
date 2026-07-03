@@ -2,9 +2,30 @@
   import {
     Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
     Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
-    ChevronLeft, ChevronRight, Database, Terminal
+    ChevronLeft, ChevronRight, Database, Terminal, ChevronDown
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
+
+  let expandedGroups = $state<Record<string, boolean>>({
+    'Packages': true,
+    'System': false,
+    'Network & Security': false,
+    'Users & Config': false
+  });
+
+  $effect(() => {
+    if (uiStore.activeTab) {
+      for (const group of groups) {
+        if (group.items.some(i => i.id === uiStore.activeTab)) {
+          expandedGroups[group.label] = true;
+        }
+      }
+    }
+  });
+
+  function toggleGroup(label: string) {
+    expandedGroups[label] = !expandedGroups[label];
+  }
 
   const groups: {
     label: string;
@@ -78,31 +99,40 @@
   <nav class="sidebar-nav">
     {#each groups as group}
       {#if !uiStore.sidebarCollapsed}
-        <div class="group-label">{group.label}</div>
+        <button class="group-label-btn" onclick={() => toggleGroup(group.label)}>
+          <span class="group-label">{group.label}</span>
+          <span class="group-chevron" class:expanded={expandedGroups[group.label]}>
+            <ChevronDown size={14} />
+          </span>
+        </button>
       {:else}
         <div class="group-sep"></div>
       {/if}
 
-      {#each group.items as item}
-        {@const isActive = uiStore.activeTab === item.id}
-        <button
-          class="nav-item"
-          class:active={isActive}
-          onclick={() => uiStore.setActiveTab(item.id)}
-          title={uiStore.sidebarCollapsed ? item.label : ''}
-          aria-current={isActive ? 'page' : undefined}
-        >
-          <span class="nav-icon" class:active={isActive}>
-            <item.icon size={16} />
-          </span>
-          {#if !uiStore.sidebarCollapsed}
-            <span class="nav-label">{item.label}</span>
-            {#if isActive}
-              <span class="nav-active-dot"></span>
-            {/if}
-          {/if}
-        </button>
-      {/each}
+      {#if uiStore.sidebarCollapsed || expandedGroups[group.label]}
+        <div class="group-items">
+          {#each group.items as item}
+            {@const isActive = uiStore.activeTab === item.id}
+            <button
+              class="nav-item"
+              class:active={isActive}
+              onclick={() => uiStore.setActiveTab(item.id)}
+              title={uiStore.sidebarCollapsed ? item.label : ''}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              <span class="nav-icon" class:active={isActive}>
+                <item.icon size={16} />
+              </span>
+              {#if !uiStore.sidebarCollapsed}
+                <span class="nav-label">{item.label}</span>
+                {#if isActive}
+                  <span class="nav-active-dot"></span>
+                {/if}
+              {/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
     {/each}
   </nav>
 
@@ -212,16 +242,55 @@
   }
   .sidebar-nav::-webkit-scrollbar { display: none; }
 
+  .group-label-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 12px 8px 6px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    color: #475569;
+    transition: color 0.15s ease;
+  }
+
+  .group-label-btn:hover {
+    color: var(--color-text-primary);
+  }
+
   .group-label {
-    padding: 10px 8px 4px;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #475569;
     white-space: nowrap;
     overflow: hidden;
     flex-shrink: 0;
+  }
+
+  .group-chevron {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #475569;
+  }
+
+  .group-label-btn:hover .group-chevron {
+    color: var(--color-text-primary);
+  }
+
+  .group-chevron.expanded {
+    transform: rotate(180deg);
+  }
+
+  .group-items {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow: hidden;
   }
 
   .group-sep {
