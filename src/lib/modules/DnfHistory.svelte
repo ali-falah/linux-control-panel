@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search, Trash2, Info, ListTree, CheckCircle, Database } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -15,8 +17,168 @@
     altered: number;
   }
 
-  type Tab = 'history' | 'packages' | 'maintenance';
-  let activeTab = $state<Tab>('history');
+  interface DnfUpdateEntry {
+    package: string;
+    arch: string;
+    version: string;
+    repo: string;
+    size: string;
+  }
+
+  type Tab = 'updates' | 'history' | 'packages' | 'maintenance' | 'logs';
+  let activeTab = $state<Tab>('updates');
+
+  // --- LOGS STATE ---
+  let dnfLogContent = $state('');
+  let loadingLog = $state(false);
+
+  async function loadDnfLog() {
+    loadingLog = true;
+    dnfLogContent = '';
+    statusStore.setBusy('Loading DNF log…');
+    try {
+      dnfLogContent = await invoke('dnf_read_log');
+      statusStore.setLastCommand('read /var/log/dnf.log', 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to load DNF log: ${e}`, 'error');
+      dnfLogContent = `Error: ${e}`;
+      statusStore.setLastCommand('read /var/log/dnf.log', 1, false);
+    } finally {
+      loadingLog = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  $effect(() => {
+    if (activeTab === 'logs' && !dnfLogContent) {
+      loadDnfLog();
+    }
+  });
+
+  // --- UPDATES STATE ---
+  let updates = $state<DnfUpdateEntry[]>([]);
+  let selectedUpdates = $state<Set<string>>(new Set());
+  let loadingUpdates = $state(false);
+  let upgradeOutput = $state('');
+  let isUpgrading = $state(false);
+  let upgradeTerminalRef: HTMLElement | null = null;
+  let unlistenOutput: UnlistenFn | null = null;
+  let unlistenFinished: UnlistenFn | null = null;
+  let pendingCr = $state(false);
+
+  let selectAllUpdates = $derived(
+    updates.length > 0 && selectedUpdates.size === updates.length
+  );
+
+  function toggleSelectAll(e: Event) {
+    const checked = (e.target as HTMLInputElement).checked;
+    if (checked) {
+      selectedUpdates = new Set(updates.map(u => u.package));
+    } else {
+      selectedUpdates = new Set();
+    }
+  }
+
+  async function checkUpdates() {
+    loadingUpdates = true;
+    statusStore.setBusy('Checking for updates…');
+    try {
+      updates = await invoke<DnfUpdateEntry[]>('dnf_check_updates');
+      statusStore.setLastCommand('dnf check-update', 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to check updates: ${e}`, 'error');
+      statusStore.setLastCommand('dnf check-update', 1, false);
+      updates = [];
+    } finally {
+      loadingUpdates = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  async function startUpgrade() {
+    if (selectedUpdates.size === 0) return;
+    const pkgs = Array.from(selectedUpdates);
+    
+    isUpgrading = true;
+    upgradeOutput = 'Starting upgrade process...\n';
+    pendingCr = false;
+    statusStore.setBusy('Upgrading packages…');
+
+    try {
+      unlistenOutput = await listen<string>('dnf-upgrade-output', async (event) => {
+        let chunk = event.payload;
+        // Strip ANSI escape codes
+        chunk = chunk.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+        
+        for (let i = 0; i < chunk.length; i++) {
+          let c = chunk[i];
+          
+          if (pendingCr) {
+             pendingCr = false;
+             if (c === '\n') {
+                 upgradeOutput += '\n';
+                 continue;
+             } else {
+                const lastNewline = upgradeOutput.lastIndexOf('\n');
+                if (lastNewline !== -1) {
+                  upgradeOutput = upgradeOutput.substring(0, lastNewline + 1);
+                } else {
+                  upgradeOutput = '';
+                }
+             }
+          }
+
+          if (c === '\r') {
+             pendingCr = true;
+          } else if (c === '\b') {
+             if (upgradeOutput.length > 0 && upgradeOutput[upgradeOutput.length - 1] !== '\n') {
+                upgradeOutput = upgradeOutput.slice(0, -1);
+             }
+          } else {
+             upgradeOutput += c;
+          }
+        }
+        await tick();
+        if (upgradeTerminalRef) {
+          upgradeTerminalRef.scrollTop = upgradeTerminalRef.scrollHeight;
+        }
+      });
+
+      unlistenFinished = await listen<boolean>('dnf-upgrade-finished', (event) => {
+        isUpgrading = false;
+        statusStore.clearBusy();
+        if (event.payload) {
+          uiStore.addToast('Upgrade completed successfully', 'success');
+          statusStore.setLastCommand('dnf upgrade -y', 0, true);
+          checkUpdates();
+        } else {
+          uiStore.addToast('Upgrade failed', 'error');
+          statusStore.setLastCommand('dnf upgrade -y', 1, false);
+        }
+        if (unlistenOutput) unlistenOutput();
+        if (unlistenFinished) unlistenFinished();
+      });
+
+      await invoke('dnf_run_upgrade', { packages: pkgs });
+    } catch (e) {
+      uiStore.addToast(`Upgrade error: ${e}`, 'error');
+      isUpgrading = false;
+      statusStore.clearBusy();
+      statusStore.setLastCommand('dnf upgrade -y', 1, false);
+      if (unlistenOutput) unlistenOutput();
+      if (unlistenFinished) unlistenFinished();
+    }
+  }
+
+  function toggleUpdateSelection(pkg: string) {
+    if (selectedUpdates.has(pkg)) {
+      selectedUpdates.delete(pkg);
+    } else {
+      selectedUpdates.add(pkg);
+    }
+    // trigger reactivity
+    selectedUpdates = new Set(selectedUpdates);
+  }
 
   // --- HISTORY STATE ---
   let history = $state<DnfHistoryEntry[]>([]);
@@ -146,6 +308,7 @@
   // Initialize
   $effect(() => {
     loadHistory();
+    checkUpdates();
   });
 </script>
 
@@ -161,7 +324,7 @@
   <!-- Controls: Tabs & Search -->
   <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
     <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
-      {#each [['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance']] as [id, label]}
+      {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'System Logs']] as [id, label]}
         <button
           class="tab-btn"
           class:active={activeTab === id}
@@ -182,7 +345,82 @@
     {/if}
   </div>
 
-  {#if activeTab === 'history'}
+  {#if activeTab === 'updates'}
+    <div class="card" style="display:flex; flex-direction:column; padding: 0; flex: 1; min-height: 0;">
+      {#if isUpgrading}
+        <div style="padding: 16px; display:flex; flex-direction:column; gap:16px; flex:1; min-height: 0;">
+          <h3 style="margin:0; font-size:16px; font-weight:600;">Upgrading Packages...</h3>
+          <div 
+            bind:this={upgradeTerminalRef}
+            style="flex:1; background:#000; color:#0f0; font-family:var(--font-mono); font-size:13px; padding:12px; border-radius:8px; overflow-y:auto; white-space:pre-wrap; min-height: 0;"
+          >{upgradeOutput}</div>
+        </div>
+      {:else}
+        <div style="padding: 16px; display:flex; justify-content:space-between; align-items:center; border-bottom: 1px solid var(--color-border);">
+          <div>
+            <h3 style="margin:0; font-size:16px; font-weight:600;">System Updates</h3>
+            <span style="font-size:13px; color:var(--color-text-secondary)">{updates.length} updates available</span>
+          </div>
+          <div style="display:flex; gap:12px;">
+            <button class="btn btn-outline" onclick={checkUpdates} disabled={loadingUpdates}>
+              <RefreshCw size={14} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
+            </button>
+            {#if updates.length > 0}
+              <button class="btn btn-primary" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
+                <RefreshCw size={14} /> Update Selected ({selectedUpdates.size})
+              </button>
+            {/if}
+          </div>
+        </div>
+        
+        <div style="flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;">
+          {#if loadingUpdates && updates.length === 0}
+          <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;gap:16px;color:var(--color-text-muted)">
+            <RefreshCw size={24} class="animate-spin-slow" />
+            <span>Checking for updates...</span>
+          </div>
+        {:else if updates.length === 0}
+          <div class="empty-state" style="padding: 64px 32px;">
+            <CheckCircle size={32} class="empty-state-icon" style="color:var(--color-success)" />
+            <span style="font-size:16px; font-weight:600;">System is up to date</span>
+          </div>
+          {:else}
+            <div class="table-wrap" style="border:none; border-radius:0; flex:1; overflow: visible;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 40px; text-align:center;">
+                    <input type="checkbox" checked={selectAllUpdates} onchange={toggleSelectAll} />
+                  </th>
+                  <th>Package</th>
+                  <th>Version</th>
+                  <th>Size</th>
+                  <th>Arch</th>
+                  <th>Repository</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each updates as pkg}
+                  <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;">
+                    <td style="text-align:center;">
+                      <input type="checkbox" checked={selectedUpdates.has(pkg.package)} onclick={(e) => { e.stopPropagation(); toggleUpdateSelection(pkg.package); }} />
+                    </td>
+                    <td style="font-weight:500;">{pkg.package}</td>
+                    <td style="font-family:var(--font-mono); font-size:12px;">{pkg.version}</td>
+                    <td style="font-size:12px; font-weight:500;">{pkg.size}</td>
+                    <td style="color:var(--color-text-secondary);">{pkg.arch}</td>
+                    <td><span class="badge badge-muted">{pkg.repo}</span></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+  {:else if activeTab === 'history'}
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingHistory && history.length === 0}
         <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
@@ -352,6 +590,23 @@
           <CodeEditor value={maintOutput} readonly={true} />
         </div>
       {/if}
+    </div>
+
+  {:else if activeTab === 'logs'}
+    <div class="card module-content-scroll" style="display:flex; flex-direction:column; gap:16px">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <h3 style="font-size:16px; font-weight:600; margin:0; color:var(--color-text-primary)">DNF System Logs</h3>
+          <span style="font-size:13px; color:var(--color-text-secondary);">/var/log/dnf.log</span>
+        </div>
+        <button class="btn btn-outline" onclick={loadDnfLog} disabled={loadingLog}>
+          <RefreshCw size={14} class={loadingLog ? 'animate-spin-slow' : ''} /> Refresh
+        </button>
+      </div>
+      
+      <div style="flex:1; min-height: 400px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
+        <CodeEditor value={dnfLogContent || 'Loading...'} readonly={true} />
+      </div>
     </div>
   {/if}
 </div>

@@ -3,7 +3,7 @@ use std::process::{Child, Output, Stdio};
 use std::sync::Mutex;
 use std::io::Write;
 
-static SUDO_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
+pub static SUDO_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
 
 #[tauri::command]
 pub async fn set_sudo_password(password: String) -> Result<(), String> {

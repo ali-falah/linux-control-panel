@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tauri::{AppHandle, Emitter};
 
 use crate::{binary_exists, log_to_file};
 
@@ -10,6 +11,15 @@ pub struct DnfHistoryEntry {
     pub date: String,
     pub action: String,
     pub altered: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnfUpdateEntry {
+    pub package: String,
+    pub arch: String,
+    pub version: String,
+    pub repo: String,
+    pub size: String,
 }
 
 /// Parse `dnf history list` output into structured entries
@@ -198,4 +208,150 @@ pub async fn dnf_makecache_cmd() -> Result<String, String> {
         .map_err(|e| format!("pkexec failed: {e}"))?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr))
+}
+
+#[tauri::command]
+pub fn dnf_read_log() -> Result<String, String> {
+    std::fs::read_to_string("/var/log/dnf.log").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
+    if !crate::binary_exists("dnf").await {
+        return Err("dnf is not available".to_string());
+    }
+    let output = Command::new("dnf")
+        .arg("info")
+        .arg("--upgrades")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut entries = Vec::new();
+    let mut current_entry = DnfUpdateEntry::default();
+
+    let extract_value = |line: &str| -> String {
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            parts[1].trim().to_string()
+        } else {
+            String::new()
+        }
+    };
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Name ") || line.starts_with("Name\t") || line.starts_with("Name:") || line.starts_with("Name ") {
+            let val = extract_value(line);
+            if !val.is_empty() {
+                if !current_entry.package.is_empty() {
+                    entries.push(current_entry.clone());
+                    current_entry = DnfUpdateEntry::default();
+                }
+                current_entry.package = val;
+            }
+        } else if line.starts_with("Architecture") {
+            current_entry.arch = extract_value(line);
+        } else if line.starts_with("Version") {
+            current_entry.version = extract_value(line);
+        } else if line.starts_with("Release") {
+            let rel = extract_value(line);
+            if !current_entry.version.is_empty() {
+                current_entry.version.push('-');
+                current_entry.version.push_str(&rel);
+            }
+        } else if line.starts_with("Repository") {
+            current_entry.repo = extract_value(line);
+        } else if line.starts_with("Download size") || line.starts_with("Installed size") || line.starts_with("Size") {
+            if current_entry.size.is_empty() {
+                current_entry.size = extract_value(line);
+            }
+        }
+    }
+    if !current_entry.package.is_empty() {
+        entries.push(current_entry);
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<(), String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (is_none, pw_opt) = {
+        let guard = crate::utils::privilege::SUDO_PASSWORD.lock().unwrap();
+        (guard.is_none(), if guard.is_some() { Some(guard.clone().unwrap()) } else { None })
+    };
+    if is_none {
+        return Err("Root privileges are required to perform upgrades. Please enable Root in the Control Panel.".to_string());
+    }
+    let pw = pw_opt.unwrap();
+
+    let mut cmd = tokio::process::Command::new("sudo");
+    cmd.arg("-S")
+       .arg("--prompt=")
+       .arg("python3")
+       .arg("-c")
+       .arg("import pty; import sys; pty.spawn(sys.argv[1:])")
+       .arg("dnf")
+       .arg("upgrade")
+       .arg("-y")
+       .args(&packages);
+    
+    cmd.stdin(Stdio::piped())
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut p = pw;
+        p.push('\n');
+        tokio::spawn(async move {
+            let _ = stdin.write_all(p.as_bytes()).await;
+        });
+    }
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = app_clone.emit("dnf-upgrade-output", text);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stderr.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = app_clone.emit("dnf-upgrade-output", text);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = app.emit("dnf-upgrade-finished", status.success());
+
+    if !status.success() {
+        return Err("Upgrade process failed".to_string());
+    }
+    Ok(())
 }

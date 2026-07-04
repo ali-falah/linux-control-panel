@@ -9,6 +9,7 @@ use commands::{
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
+        dnf_check_updates, dnf_run_upgrade, dnf_read_log,
     },
     env_manager::{read_env_vars, write_env_vars},
     firewall_manager::{
@@ -115,6 +116,9 @@ pub fn run() {
             dnf_autoremove,
             dnf_check,
             dnf_makecache_cmd,
+            dnf_check_updates,
+            dnf_run_upgrade,
+            dnf_read_log,
             // Copr Browser
             search_copr,
             enable_copr,
