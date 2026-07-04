@@ -467,11 +467,11 @@
     </button>
   </div>
 
-  <div class="tab-content module-content-scroll">
+  <div class="tab-content">
 
     <!-- ══ VARIABLES ══════════════════════════════════════════════════════ -->
     {#if activeTab === 'variables'}
-      <div class="tab-section" style="padding: 0;">
+      <div class="tab-section" style="padding: 0; display: flex; flex-direction: column; flex: 1; min-height: 0;">
         <div class="custom-toolbar">
           <div class="search-bar" style="flex:1; margin:0">
             <Search size={16} />
@@ -529,7 +529,7 @@
         {:else if filteredGroups.length === 0}
           <div class="empty-state">No exported variables found in profile files</div>
         {:else}
-          <div class="shell-groups-list">
+          <div class="shell-groups-list module-content-scroll" style="flex: 1; min-height: 0; border: none; border-radius: 0; padding-bottom: 24px;">
             {#each filteredGroups as group}
               <div class="shell-group-card">
                 <div class="sg-header" tabindex="0" role="button" onclick={() => toggleGroupCollapse(group.source_path)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroupCollapse(group.source_path); } }} id={`shell-group-${group.source_path}`}>
@@ -860,7 +860,7 @@
 
     <!-- ══ LIVE PREVIEW ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'preview'}
-      <div class="tab-section">
+      <div class="tab-section" style="display:flex; flex-direction:column; flex:1; min-height:0;">
         <div class="section-header">
           <h3>Resolved Environment</h3>
           <div class="row-actions">
@@ -908,7 +908,7 @@
           </div>
 
           <!-- Diff table -->
-          <div class="table-wrap">
+          <div class="table-wrap module-content-scroll" style="flex: 1; min-height: 0; margin-top: 16px;">
             <table use:tableFeatures>
               <thead>
                 <tr>
@@ -989,8 +989,8 @@
   :global(.tab-btn:hover) { color: var(--color-text-primary); }
   :global(.tab-btn.active) { color: var(--color-accent-soft); border-bottom-color: var(--color-accent); }
 
-  .tab-content { flex: 1; overflow-y: auto; }
-  .tab-section { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .tab-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .tab-section { padding: 24px; display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0; }
 
   /* ─── Spinners ────────────────────────────────────────────────────── */
   .spinner {
@@ -1299,6 +1299,7 @@
     border: 1px solid rgba(255,255,255,0.04);
     border-radius: 12px;
     overflow: hidden;
+    flex-shrink: 0;
   }
   .sg-header {
     display: flex;
@@ -1488,6 +1489,7 @@
     border: 1px solid rgba(255,255,255,0.04);
     border-radius: 12px;
     overflow: hidden;
+    flex-shrink: 0;
   }
   .sg-header {
     display: flex;
