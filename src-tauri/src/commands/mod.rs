@@ -13,3 +13,5 @@ pub mod service_manager;
 pub mod shell_env;
 pub mod startup_manager;
 pub mod user_manager;
+pub mod network_manager;
+pub mod device_manager;

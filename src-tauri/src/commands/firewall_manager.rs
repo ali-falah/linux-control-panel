@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallState {

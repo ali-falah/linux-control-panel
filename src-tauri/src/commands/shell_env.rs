@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 // ─── Structs ──────────────────────────────────────────────────────────────────
 

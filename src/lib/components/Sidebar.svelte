@@ -2,7 +2,8 @@
   import {
     Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
     Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
-    ChevronLeft, ChevronRight, Database, Terminal, ChevronDown
+    ChevronLeft, ChevronRight, Database, Terminal, ChevronDown,
+    HardDrive, Wifi
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
 
@@ -45,6 +46,7 @@
       items: [
         { id: 'startup-manager', label: 'Startup Manager', icon: Rocket },
         { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
+        { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive },
         { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu },
         { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck },
       ],
@@ -52,6 +54,7 @@
     {
       label: 'Network & Security',
       items: [
+        { id: 'network-manager',  label: 'Advanced Network', icon: Wifi },
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield },
         { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server },

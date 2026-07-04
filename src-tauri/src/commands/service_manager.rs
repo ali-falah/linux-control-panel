@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
 
@@ -275,7 +275,7 @@ pub async fn write_unit_file(name: String, content: String) -> Result<(), String
 
     // Write content via pkexec tee
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("pkexec")
+    let mut child = Command::new("pkexec")
         .args(["tee", &drop_in_file])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())

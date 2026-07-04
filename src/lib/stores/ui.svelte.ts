@@ -22,7 +22,9 @@ export type TabId =
   | 'cron-manager'
   | 'env-manager'
   | 'nginx-manager'
-  | 'shell-env';
+  | 'shell-env'
+  | 'device-manager'
+  | 'network-manager';
 
 class UIStore {
   activeTab = $state<TabId>('repo-manager');

@@ -1,6 +1,49 @@
 <script lang="ts">
-  import { CheckCircle2, XCircle, Loader, Minus } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { invoke } from '@tauri-apps/api/core';
+
+  let hasRoot = $state(false);
+  let showRootModal = $state(false);
+  let sudoPassword = $state('');
+  let sudoError = $state('');
+  let isTestingSudo = $state(false);
+
+  async function checkSudoStatus() {
+    try {
+      hasRoot = await invoke('check_sudo_status');
+    } catch(e) {}
+  }
+
+  async function toggleRoot() {
+    if (hasRoot) {
+      await invoke('clear_sudo_password');
+      hasRoot = false;
+    } else {
+      sudoPassword = '';
+      sudoError = '';
+      showRootModal = true;
+    }
+  }
+
+  async function submitSudo() {
+    if (!sudoPassword) return;
+    isTestingSudo = true;
+    sudoError = '';
+    try {
+      await invoke('set_sudo_password', { password: sudoPassword });
+      hasRoot = true;
+      showRootModal = false;
+    } catch(e: any) {
+      sudoError = e.toString();
+    } finally {
+      isTestingSudo = false;
+    }
+  }
+
+  $effect(() => {
+    checkSudoStatus();
+  });
 
   function formatTime(date: Date): string {
     return date.toLocaleTimeString('en-US', {
@@ -41,6 +84,13 @@
 
   <!-- Right: exit code + timestamp pill -->
   <div class="status-right">
+    <button class="pill {hasRoot ? 'pill-root-on' : 'pill-root-off'}" style="cursor: pointer; display: flex; align-items: center; gap: 4px; border: none; font-family: inherit; font-size: inherit;" onclick={toggleRoot}>
+      {#if hasRoot}
+        <ShieldCheck size={11} /> Root: ON
+      {:else}
+        <Shield size={11} /> Root: OFF
+      {/if}
+    </button>
     {#if statusStore.lastEntry}
       <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}">
         exit {statusStore.lastEntry.exitCode ?? '—'}
@@ -106,12 +156,16 @@
     letter-spacing: 0.02em;
   }
   .pill-ok   { background: var(--color-success-muted); color: var(--color-success); }
-  .pill-fail { background: var(--color-error-muted);   color: var(--color-error); }
+  .pill-fail { background: rgba(239, 68, 68, 0.1); color: var(--color-error); }
+  .pill-root-on { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+  .pill-root-off { background: rgba(255, 255, 255, 0.05); color: var(--color-text-muted); }
+  .pill-root-on:hover { background: rgba(34, 197, 94, 0.25); }
+  .pill-root-off:hover { background: rgba(255, 255, 255, 0.1); color: var(--color-text-primary); }
 
   .ts-pill {
-    padding: 1px 7px;
-    border-radius: 20px;
-    background: rgba(255, 255, 255, 0.05);
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.2);
     color: var(--color-text-muted);
     font-size: 10px;
     white-space: nowrap;
@@ -125,5 +179,46 @@
   }
   :global(.icon-ok)   { color: var(--color-success); flex-shrink: 0; }
   :global(.icon-fail) { color: var(--color-error); flex-shrink: 0; }
-  :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0; }
+  :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0;  }
 </style>
+
+{#if showRootModal}
+  <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showRootModal = false; }}>
+    <div class="modal-content" style="max-width: 320px;">
+      <h3 style="margin-top:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
+        <Shield size={18} style="color:var(--color-accent)"/>
+        Root Privileges
+      </h3>
+      <p style="font-size:13px; color:var(--color-text-secondary); margin-bottom:16px;">
+        Enter your sudo password. This will be securely held in memory to bypass OS prompts for this session.
+      </p>
+      
+      {#if sudoError}
+        <div style="background:rgba(239,68,68,0.1); color:var(--color-error); padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;">
+          {sudoError}
+        </div>
+      {/if}
+
+      <form onsubmit={(e) => { e.preventDefault(); submitSudo(); }}>
+        <input 
+          type="password" 
+          bind:value={sudoPassword}
+          class="input"
+          placeholder="Password..."
+          style="width: 100%; margin-bottom:16px;"
+          autofocus
+        />
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button type="button" class="btn btn-outline" onclick={() => showRootModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={isTestingSudo || !sudoPassword}>
+            {#if isTestingSudo}
+              <Loader size={14} class="animate-spin-slow" />
+            {:else}
+              Authenticate
+            {/if}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}

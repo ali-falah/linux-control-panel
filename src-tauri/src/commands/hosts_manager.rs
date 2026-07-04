@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+use crate::utils::privilege::tokio::Command;
 
 use crate::log_to_file;
 
@@ -118,7 +119,7 @@ pub async fn write_hosts(entries: Vec<HostEntry>) -> Result<(), String> {
     let content = serialize_hosts(&entries);
 
     // Write via pkexec tee to /etc/hosts
-    let mut child = tokio::process::Command::new("pkexec")
+    let mut child = Command::new("pkexec")
         .args(["tee", "/etc/hosts"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())

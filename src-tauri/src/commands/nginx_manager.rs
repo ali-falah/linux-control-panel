@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 use crate::log_to_file;
 

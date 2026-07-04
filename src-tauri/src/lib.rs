@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-
+pub mod utils;
 pub mod commands;
 
 use commands::{
@@ -46,7 +46,16 @@ use commands::{
         shell_parse_path, shell_add_path_entry, shell_remove_path_entry,
         shell_get_live_env, shell_source_file,
     },
+    network_manager::{
+        network_get_interfaces, network_get_dns,
+        network_list_connections, network_get_connection,
+        network_save_connection, network_delete_connection,
+        network_up_connection, network_down_connection,
+        network_set_interface_state
+    },
+    device_manager::{device_get_all},
 };
+use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
 /// Returns the app config directory, creating it if needed.
 pub fn config_dir() -> PathBuf {
@@ -203,6 +212,22 @@ pub fn run() {
             shell_remove_path_entry,
             shell_get_live_env,
             shell_source_file,
+            // Advanced Network
+            network_get_interfaces,
+            network_get_dns,
+            network_list_connections,
+            network_get_connection,
+            network_save_connection,
+            network_delete_connection,
+            network_up_connection,
+            network_down_connection,
+            network_set_interface_state,
+            // Device Manager
+            device_get_all,
+            // Privilege Manager
+            set_sudo_password,
+            clear_sudo_password,
+            check_sudo_status,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

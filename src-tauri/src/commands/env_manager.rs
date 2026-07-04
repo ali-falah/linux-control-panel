@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvVar {

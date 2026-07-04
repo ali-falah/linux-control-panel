@@ -19,6 +19,8 @@
   import EnvManager from './lib/modules/EnvManager.svelte';
   import NginxManager from './lib/modules/NginxManager.svelte';
   import ShellEnv from './lib/modules/ShellEnv.svelte';
+  import NetworkManager from './lib/modules/NetworkManager.svelte';
+  import DeviceManager from './lib/modules/DeviceManager.svelte';
 
   import { uiStore } from './lib/stores/ui.svelte.ts';
 </script>
@@ -64,6 +66,10 @@
           <NginxManager />
         {:else if uiStore.activeTab === 'shell-env'}
           <ShellEnv />
+        {:else if uiStore.activeTab === 'network-manager'}
+          <NetworkManager />
+        {:else if uiStore.activeTab === 'device-manager'}
+          <DeviceManager />
         {/if}
       {/key}
     </div>
