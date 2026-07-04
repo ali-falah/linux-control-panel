@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Layers, RefreshCw, Trash2, AlertTriangle, CheckCircle, Search, Package } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -139,9 +146,9 @@
 
 <div class="module-page">
   <PageHeader title="Flatpak vs RPM" subtitle="Detect duplicate packages and manage installations" icon={Layers}>
-    <button class="btn btn-ghost" onclick={loadAll} disabled={loadingDuplicates}>
+    <Button variant="ghost" class="" onclick={loadAll} disabled={loadingDuplicates}>
       <RefreshCw size={14} class={loadingDuplicates ? 'animate-spin-slow' : ''} /> Refresh
-    </button>
+    </Button>
   </PageHeader>
 
   <!-- Controls: Stats, Search & Tabs -->
@@ -175,16 +182,14 @@
     <!-- Tabs -->
     <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
       {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
-        <button
-          class="tab-btn"
-          class:active={activeTab === id}
+        <Button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
         >
           {label}
           {#if id === 'duplicates' && duplicates.length > 0}
             <span class="badge badge-warning" style="margin-left:4px;padding:1px 5px">{duplicates.length}</span>
           {/if}
-        </button>
+        </Button>
       {/each}
     </div>
   </div>
@@ -225,13 +230,13 @@
                   <div class="dup-version-label">Flatpak</div>
                   <div class="dup-version-id">{dup.flatpak.app_id}</div>
                   <div class="dup-version-ver">v{dup.flatpak.version} · {dup.flatpak.origin}</div>
-                  <button
-                    class="btn btn-sm btn-danger"
+                  <Button
+                    class="btn btn-sm -danger"
                     onclick={() => dup.flatpak && confirmRemoveFlatpak(dup.flatpak)}
                     disabled={removingId === dup.flatpak.app_id}
                   >
                     <Trash2 size={11} /> Remove Flatpak
-                  </button>
+                  </Button>
                 </div>
               {/if}
               {#if dup.rpm}
@@ -239,13 +244,13 @@
                   <div class="dup-version-label">RPM</div>
                   <div class="dup-version-id">{dup.rpm.name}</div>
                   <div class="dup-version-ver">v{dup.rpm.version} · {dup.rpm.arch}</div>
-                  <button
-                    class="btn btn-sm btn-danger"
+                  <Button
+                    class="btn btn-sm -danger"
                     onclick={() => dup.rpm && confirmRemoveRpm(dup.rpm)}
                     disabled={removingId === dup.rpm.name}
                   >
                     <Trash2 size={11} /> Remove RPM
-                  </button>
+                  </Button>
                 </div>
               {/if}
             </div>
@@ -311,9 +316,9 @@
         </div>
         {#if filteredFlatpaks.length > pageSize}
           <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-base)">
-            <button class="btn btn-outline btn-sm" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</button>
+            <Button variant="outline" class=" btn-sm" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</Button>
             <span style="font-size:12px; color:var(--color-text-secondary)">Page {currentPage} of {Math.ceil(filteredFlatpaks.length / pageSize)}</span>
-            <button class="btn btn-outline btn-sm" disabled={currentPage === Math.ceil(filteredFlatpaks.length / pageSize)} onclick={() => currentPage++}>Next</button>
+            <Button variant="outline" class=" btn-sm" disabled={currentPage === Math.ceil(filteredFlatpaks.length / pageSize)} onclick={() => currentPage++}>Next</Button>
           </div>
         {/if}
       {/if}
@@ -376,9 +381,9 @@
         </div>
         {#if filteredRpms.length > pageSize}
           <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-base)">
-            <button class="btn btn-outline btn-sm" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</button>
+            <Button variant="outline" class=" btn-sm" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</Button>
             <span style="font-size:12px; color:var(--color-text-secondary)">Page {currentPage} of {Math.ceil(filteredRpms.length / pageSize)}</span>
-            <button class="btn btn-outline btn-sm" disabled={currentPage === Math.ceil(filteredRpms.length / pageSize)} onclick={() => currentPage++}>Next</button>
+            <Button variant="outline" class=" btn-sm" disabled={currentPage === Math.ceil(filteredRpms.length / pageSize)} onclick={() => currentPage++}>Next</Button>
           </div>
         {/if}
       {/if}
@@ -387,7 +392,7 @@
 </div>
 
 <style>
-  .tab-btn {
+  :global(.tab-btn) {
     padding: 6px 14px;
     border: none;
     border-radius: 7px;
@@ -401,7 +406,7 @@
     align-items: center;
     transition: all 0.15s;
   }
-  .tab-btn.active {
+  :global(.tab-btn.active) {
     background: var(--color-bg-card);
     color: var(--color-text-primary);
   }

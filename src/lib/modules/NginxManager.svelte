@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import {
@@ -678,23 +685,21 @@
           <code>sudo pacman -S nginx</code>
         </div>
       </div>
-      <button class="btn btn-primary" onclick={init}>
+      <Button variant="primary" class="" onclick={init}>
         <RefreshCw size={14} /> Recheck
-      </button>
+      </Button>
     </div>
   {:else}
     <!-- ─── Tab Bar ─── -->
     <div class="tab-bar">
       {#each tabDefs as tab}
-        <button
-          class="tab-btn"
-          class:active={activeTab === tab.id}
+        <Button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
           onclick={() => (activeTab = tab.id)}
           id={`nginx-tab-${tab.id}`}
         >
           <tab.icon size={14} />
           {tab.label}
-        </button>
+        </Button>
       {/each}
     </div>
 
@@ -725,8 +730,8 @@
             {/if}
             <div class="service-btns">
               {#each [['start','Start',false], ['stop','Stop',true], ['restart','Restart',false], ['reload','Reload',false]] as [action, label, isDanger]}
-                <button
-                  class="btn btn-sm {isDanger ? 'btn-danger' : 'btn-outline'}"
+                <Button
+                  class="btn btn-sm {isDanger ? 'btn-danger' : '-outline'}"
                   onclick={() => doServiceAction(action as string)}
                   disabled={serviceLoading}
                   id={`nginx-svc-${action}`}
@@ -737,7 +742,7 @@
                   {:else}<RefreshCw size={12} />
                   {/if}
                   {label}
-                </button>
+                </Button>
               {/each}
             </div>
           </div>
@@ -749,14 +754,14 @@
                 <TerminalSquare size={16} />
                 Config Test (nginx -t)
               </div>
-              <button class="btn btn-sm btn-outline" onclick={runTest} disabled={testLoading} id="nginx-run-test">
+              <Button class="btn btn-sm -outline" onclick={runTest} disabled={testLoading} id="nginx-run-test">
                 {#if testLoading}
                   <div class="spinner-sm"></div>
                 {:else}
                   <RefreshCw size={12} />
                 {/if}
                 Run Test
-              </button>
+              </Button>
             </div>
             {#if testResult}
               <div class="test-result {testResult.passed ? 'test-pass' : 'test-fail'}">
@@ -780,9 +785,9 @@
                 <Globe size={16} />
                 Sites Overview
               </div>
-              <button class="btn btn-sm btn-ghost" onclick={() => Promise.all([loadStats(), loadServiceStatus()])} id="nginx-refresh-stats">
+              <Button class="btn btn-sm -ghost" onclick={() => Promise.all([loadStats(), loadServiceStatus()])} id="nginx-refresh-stats">
                 <RefreshCw size={12} />
-              </button>
+              </Button>
             </div>
             <div class="stats-grid">
               <div class="stat-item">
@@ -816,12 +821,12 @@
           <div class="section-header">
             <h3>Site Configurations</h3>
             <div class="header-actions">
-              <button class="btn btn-ghost btn-sm" onclick={loadSites} id="nginx-refresh-sites">
+              <Button variant="ghost" class=" btn-sm" onclick={loadSites} id="nginx-refresh-sites">
                 <RefreshCw size={13} /> Refresh
-              </button>
-              <button class="btn btn-primary btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
+              </Button>
+              <Button variant="primary" class=" btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
                 <Plus size={13} /> New Site
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -843,9 +848,10 @@
                     class="ui-toggle"
                     class:on={newSite.is_proxy}
                     onclick={() => newSite.is_proxy = !newSite.is_proxy}
+                    type="button"
                     role="switch"
                     aria-checked={newSite.is_proxy}
-                    type="button"
+                    aria-label="Toggle Reverse Proxy"
                     id="nginx-site-proxy"
                   >
                     <span class="ui-toggle-thumb"></span>
@@ -871,9 +877,10 @@
                     class="ui-toggle"
                     class:on={newSite.enable_404}
                     onclick={() => newSite.enable_404 = !newSite.enable_404}
+                    type="button"
                     role="switch"
                     aria-checked={newSite.enable_404}
-                    type="button"
+                    aria-label="Toggle custom 404 page"
                     id="nginx-site-404"
                     style="transform: scale(0.8);"
                   >
@@ -886,9 +893,10 @@
                     class="ui-toggle"
                     class:on={newSite.enable_50x}
                     onclick={() => newSite.enable_50x = !newSite.enable_50x}
+                    type="button"
                     role="switch"
                     aria-checked={newSite.enable_50x}
-                    type="button"
+                    aria-label="Toggle custom 50x page"
                     id="nginx-site-50x"
                     style="transform: scale(0.8);"
                   >
@@ -898,11 +906,11 @@
                 </label>
               </div>
               <div class="form-actions">
-                <button class="btn btn-ghost" onclick={() => (showNewSiteForm = false)}>Cancel</button>
-                <button class="btn btn-primary" onclick={createSite} disabled={newSiteLoading} id="nginx-create-site-submit">
+                <Button variant="ghost" class="" onclick={() => (showNewSiteForm = false)}>Cancel</Button>
+                <Button variant="primary" class="" onclick={createSite} disabled={newSiteLoading} id="nginx-create-site-submit">
                   {#if newSiteLoading}<div class="spinner-sm"></div>{/if}
                   Create Site
-                </button>
+                </Button>
               </div>
             </div>
           {/if}
@@ -937,8 +945,8 @@
                       <td>
                         <div class="row-actions">
                           {#if site.source === 'sites-available'}
-                            <button
-                              class="btn btn-sm {site.enabled ? 'btn-outline' : 'btn-primary'}"
+                            <Button
+                              class="btn btn-sm {site.enabled ? 'btn-outline' : '-primary'}"
                               onclick={() => toggleSite(site)}
                               disabled={toggleLoadingFor === site.name}
                               id={`nginx-toggle-${site.name}`}
@@ -951,15 +959,15 @@
                                 <Eye size={12} />
                               {/if}
                               {site.enabled ? 'Disable' : 'Enable'}
-                            </button>
+                            </Button>
                           {/if}
-                          <button
-                            class="btn btn-sm btn-danger"
+                          <Button
+                            class="btn btn-sm -danger"
                             onclick={() => confirmDeleteSite(site)}
                             id={`nginx-delete-site-${site.name}`}
                           >
                             <Trash2 size={12} /> Delete
-                          </button>
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -977,9 +985,9 @@
           <div class="editor-sidebar">
             <div class="editor-sidebar-header">
               <span>Files</span>
-              <button class="btn btn-ghost btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
+              <Button variant="ghost" class=" btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
                 <RefreshCw size={12} />
-              </button>
+              </Button>
             </div>
 
             {#if editorLoading && configs.length === 0}
@@ -1005,9 +1013,9 @@
             {/if}
 
             <div class="editor-sidebar-sep"></div>
-            <button class="btn btn-outline btn-sm sidebar-backup-btn" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
+            <Button variant="outline" class=" btn-sm sidebar-backup-btn" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
               <ArchiveRestore size={12} /> Backups ({backups.length})
-            </button>
+            </Button>
           </div>
 
           <!-- Editor Panel -->
@@ -1016,23 +1024,23 @@
               <div class="editor-toolbar">
                 <span class="editor-filename"><FileCode size={14} />{selectedConfig.name}</span>
                 <div class="editor-tools">
-                  <button class="btn btn-ghost btn-sm" onclick={() => (wordWrap = !wordWrap)} id="nginx-word-wrap">
+                  <Button variant="ghost" class=" btn-sm" onclick={() => (wordWrap = !wordWrap)} id="nginx-word-wrap">
                     {wordWrap ? 'Wrap: On' : 'Wrap: Off'}
-                  </button>
+                  </Button>
                   {#if hasChanges()}
-                    <button class="btn btn-ghost btn-sm" onclick={() => (showDiff = !showDiff)} id="nginx-show-diff">
+                    <Button variant="ghost" class=" btn-sm" onclick={() => (showDiff = !showDiff)} id="nginx-show-diff">
                       {showDiff ? 'Hide Diff' : 'Show Diff'}
-                    </button>
+                    </Button>
                   {/if}
-                  <button
-                    class="btn btn-primary btn-sm"
+                  <Button
+                    variant="primary" class=" btn-sm"
                     onclick={saveConfig}
                     disabled={configSaving || !hasChanges()}
                     id="nginx-save-config"
                   >
                     {#if configSaving}<div class="spinner-sm"></div>{:else}<Save size={12} />{/if}
                     Save
-                  </button>
+                  </Button>
                 </div>
               </div>
 
@@ -1073,7 +1081,7 @@
             <div class="backups-panel">
               <div class="editor-sidebar-header">
                 <span>Backups</span>
-                <button class="btn btn-ghost btn-sm" onclick={() => (showBackups = false)}>✕</button>
+                <Button variant="ghost" class=" btn-sm" onclick={() => (showBackups = false)}>✕</Button>
               </div>
               {#if backupsLoading}
                 <div class="center-state"><div class="spinner-sm"></div></div>
@@ -1084,9 +1092,9 @@
                   <div class="backup-item">
                     <div class="backup-name">{bk.filename}</div>
                     <div class="backup-ts">{bk.timestamp}</div>
-                    <button class="btn btn-sm btn-outline" onclick={() => restoreBackup(bk)} id={`nginx-restore-${bk.filename}`}>
+                    <Button class="btn btn-sm -outline" onclick={() => restoreBackup(bk)} id={`nginx-restore-${bk.filename}`}>
                       <ArchiveRestore size={11} /> Restore
-                    </button>
+                    </Button>
                   </div>
                 {/each}
               {/if}
@@ -1102,17 +1110,17 @@
             <div class="www-tree-header">
               <span>/var/www</span>
               <div class="header-actions">
-                <button class="btn btn-ghost btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={12} /></button>
-                <button class="btn btn-outline btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
+                <Button variant="ghost" class=" btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={12} /></Button>
+                <Button variant="outline" class=" btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
                   <FolderPlus size={12} />
-                </button>
+                </Button>
               </div>
             </div>
             {#if showNewDirForm}
               <div class="new-dir-form">
                 <input type="text" bind:value={newDirName} placeholder="folder-name" id="nginx-new-dir-name" />
-                <button class="btn btn-primary btn-sm" onclick={createDir} id="nginx-create-dir">Create</button>
-                <button class="btn btn-ghost btn-sm" onclick={() => (showNewDirForm = false)}>✕</button>
+                <Button variant="primary" class=" btn-sm" onclick={createDir} id="nginx-create-dir">Create</Button>
+                <Button variant="ghost" class=" btn-sm" onclick={() => (showNewDirForm = false)}>✕</Button>
               </div>
             {/if}
             {#if wwwLoading}
@@ -1135,9 +1143,9 @@
                 <span class="editor-filename"><FileText size={14} />{selectedWwwEntry.name}</span>
                 <div class="header-actions">
                   <span class="badge badge-muted">{formatSize(selectedWwwEntry.size)}</span>
-                  <button class="btn btn-danger btn-sm" onclick={() => confirmDeleteWww(selectedWwwEntry!)} id="nginx-delete-www-selected">
+                  <Button variant="danger" class=" btn-sm" onclick={() => confirmDeleteWww(selectedWwwEntry!)} id="nginx-delete-www-selected">
                     <Trash2 size={12} /> Delete
-                  </button>
+                  </Button>
                 </div>
               </div>
               {#if wwwFileLoading}
@@ -1168,22 +1176,22 @@
               <Search size={14} style="color:var(--color-text-muted)" />
               <input type="text" bind:value={logFilter} onchange={loadLog} placeholder="Filter…" id="nginx-log-filter" />
             </div>
-            <button class="btn btn-outline" onclick={loadLog} id="nginx-log-refresh">
+            <Button variant="outline" class="" onclick={loadLog} id="nginx-log-refresh">
               <RefreshCw size={14} /> Refresh
-            </button>
-            <button
-              class="btn {logAutoRefresh ? 'btn-primary' : 'btn-outline'}"
+            </Button>
+            <Button
+              class="btn {logAutoRefresh ? 'btn-primary' : '-outline'}"
               onclick={toggleAutoRefresh}
               id="nginx-log-auto"
             >
               <Clock size={14} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
-            </button>
-            <button class="btn btn-outline" onclick={exportLog} id="nginx-log-export">
+            </Button>
+            <Button variant="outline" class="" onclick={exportLog} id="nginx-log-export">
               <Download size={14} /> Export
-            </button>
-            <button class="btn btn-danger" onclick={confirmClearLog} id="nginx-log-clear">
+            </Button>
+            <Button variant="danger" class="" onclick={confirmClearLog} id="nginx-log-clear">
               <Trash2 size={14} /> Clear
-            </button>
+            </Button>
           </div>
           {#if logLoading}
             <div class="center-state"><div class="spinner"></div></div>
@@ -1197,9 +1205,9 @@
         <div class="tab-section">
           <div class="section-header">
             <h3>SSL Certificates — Let's Encrypt</h3>
-            <button class="btn btn-ghost btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
+            <Button variant="ghost" class=" btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
               <RefreshCw size={13} /> Refresh
-            </button>
+            </Button>
           </div>
           <div class="ssl-notice">
             <AlertTriangle size={14} />
@@ -1230,15 +1238,15 @@
                     </div>
                   </div>
                   <div class="ssl-actions">
-                    <button
-                      class="btn btn-outline btn-sm"
+                    <Button
+                      variant="outline" class=" btn-sm"
                       onclick={() => renewCert(cert.domain)}
                       disabled={renewingCert === cert.domain}
                       id={`nginx-renew-${cert.domain}`}
                     >
                       {#if renewingCert === cert.domain}<div class="spinner-sm"></div>{:else}<RefreshCw size={12} />{/if}
                       Renew
-                    </button>
+                    </Button>
                   </div>
                 </div>
               {/each}
@@ -1280,20 +1288,20 @@
       {/if}
     </button>
     <div class="tree-actions">
-      <button class="tree-action-btn" onclick={(e) => { e.stopPropagation(); renamingEntry = entry; renameValue = entry.name; }} title="Rename" id={`nginx-rename-btn-${entry.name}`}>
+      <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); renamingEntry = entry; renameValue = entry.name; }} title="Rename" id={`nginx-rename-btn-${entry.name}`}>
         <Edit3 size={11} />
-      </button>
+      </Button>
       {#if entry.is_dir}
-        <button class="tree-action-btn" onclick={(e) => { e.stopPropagation(); uploadFile(entry.path); }} title="Upload file here" id={`nginx-upload-${entry.name}`}>
+        <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); uploadFile(entry.path); }} title="Upload file here" id={`nginx-upload-${entry.name}`}>
           <Upload size={11} />
-        </button>
-        <button class="tree-action-btn" onclick={(e) => { e.stopPropagation(); showNewDirForm = true; newDirParent = entry.path; }} title="New subfolder" id={`nginx-newdir-${entry.name}`}>
+        </Button>
+        <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); showNewDirForm = true; newDirParent = entry.path; }} title="New subfolder" id={`nginx-newdir-${entry.name}`}>
           <FolderPlus size={11} />
-        </button>
+        </Button>
       {/if}
-      <button class="tree-action-btn danger" onclick={(e) => { e.stopPropagation(); confirmDeleteWww(entry); }} title="Delete" id={`nginx-del-www-${entry.name}`}>
+      <Button class="tree-action- danger" onclick={(e) => { e.stopPropagation(); confirmDeleteWww(entry); }} title="Delete" id={`nginx-del-www-${entry.name}`}>
         <Trash2 size={11} />
-      </button>
+      </Button>
     </div>
   </div>
   {#if entry.is_dir && expandedPaths.has(entry.path)}
@@ -1312,6 +1320,8 @@
     onkeydown={(e) => e.key === 'Escape' && (showTestModal = false)}
     role="dialog" aria-modal="true" tabindex="-1"
   >
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="modal"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.stopPropagation()}
@@ -1329,9 +1339,9 @@
       </div>
       <pre class="modal-output">{modalTestResult.output}</pre>
       <div class="modal-footer">
-        <button class="btn btn-primary" onclick={() => (showTestModal = false)} id="nginx-close-test-modal">
+        <Button variant="primary" class="" onclick={() => (showTestModal = false)} id="nginx-close-test-modal">
           Close
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1344,6 +1354,8 @@
     onkeydown={(e) => e.key === 'Escape' && (showOutputModal = false)}
     role="dialog" aria-modal="true" tabindex="-1"
   >
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="modal modal-wide"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.stopPropagation()}
@@ -1354,9 +1366,9 @@
       </div>
       <pre class="modal-output">{outputModalContent}</pre>
       <div class="modal-footer">
-        <button class="btn btn-primary" onclick={() => (showOutputModal = false)} id="nginx-close-output-modal">
+        <Button variant="primary" class="" onclick={() => (showOutputModal = false)} id="nginx-close-output-modal">
           Close
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1870,15 +1882,8 @@
     padding: 6px 12px;
     color: var(--color-text-muted);
   }
-  .log-filter input {
-    width: 160px;
-    border: none;
-    background: transparent;
-    color: var(--color-text-primary);
-    font-size: 13px;
-    outline: none;
-    padding: 0;
-  }
+
+
   .log-view {
     flex: 1;
     font-size: 11px;

@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { Globe, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
@@ -83,12 +90,12 @@
 
 <div class="module-page">
   <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={Globe}>
-    <button class="btn btn-ghost" onclick={loadVars} disabled={loading || saving}>
+    <Button variant="ghost" class="" onclick={loadVars} disabled={loading || saving}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
-    <button class="btn btn-primary" onclick={confirmSave} disabled={loading || saving}>
+    </Button>
+    <Button variant="primary" class="" onclick={confirmSave} disabled={loading || saving}>
       <Save size={14} /> Save Changes
-    </button>
+    </Button>
   </PageHeader>
 
   {#if loading && vars.length === 0}
@@ -118,15 +125,15 @@
                 <td>
                   <div style="display:flex; gap:8px">
                     <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
-                    <button class="btn btn-sm btn-outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
+                    <Button class="btn btn-sm -outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
                       <FolderOpen size={14} />
-                    </button>
+                    </Button>
                   </div>
                 </td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm btn-ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
+                  <Button class="btn btn-sm -ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
                     <Trash2 size={14} />
-                  </button>
+                  </Button>
                 </td>
               </tr>
             {/each}
@@ -134,9 +141,9 @@
         </table>
       </div>
       <div style="padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-raised)">
-        <button class="btn btn-outline" onclick={addVar}>
+        <Button variant="outline" class="" onclick={addVar}>
           <Plus size={14} /> Add Variable
-        </button>
+        </Button>
       </div>
     </div>
   {/if}

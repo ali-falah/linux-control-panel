@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Rocket, RefreshCw, Search, Filter } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -125,9 +132,9 @@
 
 <div class="module-page">
   <PageHeader title="Startup Manager" subtitle="Manage systemd services and XDG autostart entries" icon={Rocket}>
-    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+    <Button variant="ghost" class="" onclick={load} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-    </button>
+    </Button>
   </PageHeader>
 
   <!-- Controls: Stats, Search & Tabs -->
@@ -157,13 +164,12 @@
     <!-- Tabs -->
     <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:8px; margin: 0;">
       {#each [['all','All'],['service','Services'],['autostart','Autostart']] as [id, label]}
-        <button
-          class="filter-btn"
-          class:active={viewFilter === id}
+        <Button
+          class="filter-btn { viewFilter === id ? 'active' : '' }"
           onclick={() => viewFilter = id as ViewFilter}
         >
           {label}
-        </button>
+        </Button>
       {/each}
     </div>
   </div>

@@ -350,15 +350,7 @@
     text-overflow: ellipsis;
   }
 
-  .nav-active-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--color-accent);
-    flex-shrink: 0;
-    box-shadow: 0 0 6px var(--color-accent-glow);
-  }
-
+  /* svelte-ignore a11y-no-static-element-interactions */
   /* ── Bottom ───────────────────────────────────────────────────────── */
   .sidebar-spacer { flex: 0; min-height: 8px; }
 

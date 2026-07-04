@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -112,9 +119,9 @@
 
 <div class="module-page"> 
   <PageHeader title="Repo Manager" subtitle="Manage DNF repositories from /etc/yum.repos.d/" icon={Package}>
-    <button class="btn btn-primary" onclick={() => showAddDialog = true}>
+    <Button variant="primary" class="" onclick={() => showAddDialog = true}>
       <Plus size={14} /> Add Repo
-    </button>
+    </Button>
     <KebabMenu>
       <button class="menu-item" onclick={makecache} disabled={loading}>
         <RefreshCw size={14} /> makecache
@@ -154,7 +161,7 @@
       <Search size={14} style="color: var(--color-text-muted)" />
       <input bind:value={filter} placeholder="Filter repositories…" />
       {#if filter}
-        <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</button>
+        <Button class="btn btn-sm -ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</Button>
       {/if}
     </div>
   </div>
@@ -181,9 +188,9 @@
           {filter ? 'Try adjusting your search criteria.' : 'No repositories found in /etc/yum.repos.d/.'}
         </span>
         {#if !filter}
-          <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAddDialog = true}>
+          <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAddDialog = true}>
             <Plus size={14} /> Add Your First Repo
-          </button>
+          </Button>
         {/if}
       </div>
     {:else}
@@ -239,6 +246,47 @@
     {/if}
   </div>
 </div>
+
+<svelte:window onkeydown={(e) => { if (showAddDialog && e.key === 'Escape') showAddDialog = false; }} />
+
+{#if showAddDialog}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="modal-backdrop"
+    onclick={(e) => { if(e.target === e.currentTarget) showAddDialog = false; }}
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    onkeydown={(e) => e.key === 'Escape' && (showAddDialog = false)}
+  >
+    <div class="modal-content" style="max-width: 400px;">
+      <h3 style="margin-top:0; color:var(--color-text-primary);">Add Repository</h3>
+      <p style="font-size:13px; color:var(--color-text-muted); margin-bottom:16px;">
+        Enter the URL for the repository configuration file (e.g. .repo file) or baseurl.
+      </p>
+      
+      <div style="margin-bottom:20px;">
+        <label for="add-repo-url" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary);">Repository URL</label>
+        <input 
+          id="add-repo-url"
+          class="w-full input"
+          bind:value={addUrl}
+          placeholder="https://example.com/repo.repo"
+          onkeydown={(e) => e.key === 'Enter' && addRepo()}
+        />
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <Button variant="outline" onclick={() => showAddDialog = false} disabled={addLoading}>Cancel</Button>
+        <Button variant="primary" onclick={addRepo} disabled={addLoading || !addUrl.trim()}>
+          {#if addLoading}<RefreshCw size={14} class="animate-spin-slow" />{/if}
+          Add
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .disabled-row td:not(:last-child) {

@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import {
     Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2,
@@ -444,76 +451,56 @@
   <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal} />
 
   <!-- Tab Bar -->
-  <div class="tab-bar">
-    {#each ([
-      { id: 'variables', label: 'Variables',     icon: Variable },
-      { id: 'path',      label: 'PATH Manager',  icon: FolderOpen },
-      { id: 'files',     label: 'Profile Files', icon: FileCode },
-      { id: 'preview',   label: 'Live Preview',  icon: Eye },
-    ] as { id: typeof activeTab; label: string; icon: any }[]) as tab}
-      <button
-        class="tab-btn"
-        class:active={activeTab === tab.id}
-        onclick={() => (activeTab = tab.id)}
-        id={`shell-tab-${tab.id}`}
-      >
-        <tab.icon size={14} />
-        {tab.label}
-      </button>
-    {/each}
+  <div class="custom-tabs-container">
+    <button class="custom-tab" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
+      <Variable size={14} /> Variables
+    </button>
+    <button class="custom-tab" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
+      <FolderOpen size={14} /> PATH Manager
+    </button>
+    <button class="custom-tab" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
+      <FileCode size={14} /> Profile Files
+    </button>
+    <button class="custom-tab" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
+      <Eye size={14} /> Live Preview
+    </button>
   </div>
 
   <div class="tab-content module-content-scroll">
 
     <!-- ══ VARIABLES ══════════════════════════════════════════════════════ -->
     {#if activeTab === 'variables'}
-      <div class="tab-section">
-        <!-- Toolbar -->
-        <div class="section-header">
-          <div class="search-bar" style="flex:1">
-            <Search size={13} style="color:var(--color-text-muted)" />
-            <input bind:value={filterVars} placeholder="Filter variables…" id="shell-var-filter" />
+      <div class="tab-section" style="padding: 0;">
+        <div class="custom-toolbar">
+          <div class="search-box">
+            <Search size={16} />
+            <input bind:value={filterVars} placeholder="Filter variables..." />
+            {#if filterVars}<Button class="btn btn-sm -ghost" style="padding:2px; height:24px" onclick={() => filterVars = ''}>✕</Button>{/if}
           </div>
-          <button class="btn btn-ghost btn-sm" onclick={loadVarGroups} id="shell-reload-vars">
-            <RefreshCw size={13} /> Refresh
-          </button>
-          <button
-            class="btn btn-sm {showLiveValues ? 'btn-primary' : 'btn-outline'}"
-            onclick={() => { showLiveValues = !showLiveValues; if (showLiveValues) loadLiveValues(); }}
-            id="shell-show-live"
-          >
-            {#if loadingLive}<div class="spinner-sm"></div>{:else}<Eye size={13} />{/if}
-            Live values
-          </button>
-          <button class="btn btn-primary btn-sm" onclick={() => startAddVar(profileFiles[0]?.path ?? '')} id="shell-add-var">
-            <Plus size={13} /> Add Variable
-          </button>
+          <div class="toolbar-actions">
+            <button class="toolbar-btn" onclick={loadVarGroups} disabled={varsLoading}>
+              <RefreshCw size={14} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
+            </button>
+            <button class="toolbar-btn" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
+              <Eye size={14} /> Live values
+            </button>
+            <button class="toolbar-btn primary-btn" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
+              <Plus size={14} /> Add Variable
+            </button>
+          </div>
         </div>
 
-        <!-- Add variable form -->
         {#if addVarForm}
-          <div class="card add-var-form">
+          <div class="card add-var-form" style="margin-bottom:24px">
             <div class="form-title">Add exported variable</div>
             <div class="add-var-grid">
               <label class="form-field">
                 <span>Variable name</span>
-                <input
-                  type="text"
-                  bind:value={addVarForm.name}
-                  placeholder="JAVA_HOME"
-                  class="mono-input"
-                  id="shell-new-var-name"
-                />
+                <input type="text" bind:value={addVarForm.name} placeholder="JAVA_HOME" class="mono-input" id="shell-new-var-name" />
               </label>
               <label class="form-field">
                 <span>Value</span>
-                <input
-                  type="text"
-                  bind:value={addVarForm.value}
-                  placeholder="/usr/lib/jvm/java-21"
-                  class="mono-input"
-                  id="shell-new-var-value"
-                />
+                <input type="text" bind:value={addVarForm.value} placeholder="/usr/lib/jvm/java-21" class="mono-input" id="shell-new-var-value" />
               </label>
               <label class="form-field form-full">
                 <span>Target profile file</span>
@@ -525,140 +512,124 @@
               </label>
             </div>
             {#if addVarForm.name}
-              <div class="preview-line">
-                Preview: <code>export {addVarForm.name}="{addVarForm.value}"</code>
-              </div>
+              <div class="preview-line">Preview: <code>export {addVarForm.name}="{addVarForm.value}"</code></div>
             {/if}
             <div class="form-actions">
-              <button class="btn btn-ghost" onclick={() => (addVarForm = null)}>Cancel</button>
-              <button class="btn btn-primary" onclick={saveVar} disabled={savingVar} id="shell-save-new-var">
-                {#if savingVar}<div class="spinner-sm"></div>{/if}
-                <Save size={13} /> Save
-              </button>
+              <Button variant="ghost" class="" onclick={() => (addVarForm = null)}>Cancel</Button>
+              <Button variant="primary" class="" onclick={saveVar} disabled={savingVar} id="shell-save-new-var">
+                {#if savingVar}<div class="spinner-sm"></div>{/if} <Save size={13} /> Save
+              </Button>
             </div>
           </div>
         {/if}
 
         {#if varsLoading}
-          <div class="center-state"><div class="spinner"></div> Loading…</div>
+          <div class="center-state"><div class="spinner"></div> Loading...</div>
         {:else if filteredGroups.length === 0}
           <div class="empty-state">No exported variables found in profile files</div>
         {:else}
-          {#each filteredGroups as group}
-            <div class="var-group">
-              <!-- Group header -->
-              <div
-              class="group-header"
-              onclick={() => toggleGroupCollapse(group.source_path)}
-              onkeydown={(e) => e.key === 'Enter' && toggleGroupCollapse(group.source_path)}
-              role="button"
-              tabindex="0"
-              id={`shell-group-${group.source_path}`}
-            >
-                {#if collapsedGroups.has(group.source_path)}<ChevronRight size={14} />{:else}<ChevronDown size={14} />{/if}
-                <span class="group-name">{group.display_name}</span>
-                {#if group.is_system}
-                  <span class="badge badge-warning">system — pkexec required</span>
-                {:else}
-                  <span class="badge badge-muted">user</span>
-                {/if}
-                <span class="group-count">{group.vars.length} var{group.vars.length !== 1 ? 's' : ''}</span>
-              </div>
-              <button class="btn btn-ghost btn-sm ml-auto group-add-btn" onclick={(e) => { e.stopPropagation(); startAddVar(group.source_path); }} id={`shell-add-to-${group.source_path}`}>
-                <Plus size={12} />
-              </button>
-
-              {#if !collapsedGroups.has(group.source_path)}
-                <div class="table-wrap" style="border-radius:0 0 10px 10px; border-top:none">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th style="width:200px">Name</th>
-                        <th>Defined value</th>
-                        {#if showLiveValues}<th>Live value</th>{/if}
-                        <th style="width:100px; text-align:right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each group.vars as v}
-                        {@const conflicts = conflictMap().get(v.name) ?? []}
-                        {@const liveVal = liveValuesMap.get(v.name)}
-                        {@const outOfSync = showLiveValues && liveVal !== undefined && liveVal !== v.value}
-                        <tr class:out-of-sync={outOfSync}>
-                          <td>
-                            {#if editingVar?.v === v}
-                              <input class="inline-edit mono-input" bind:value={editingVar.newName} id="shell-edit-name" />
-                            {:else}
-                              <code class="var-name">{v.name}</code>
-                              {#if conflicts.length > 1}
-                                <span class="badge badge-warning conflict-badge" title="Defined in: {conflicts.join(', ')}">
-                                  ⚠ {conflicts.length} files
-                                </span>
-                              {/if}
-                            {/if}
-                          </td>
-                          <td>
-                            {#if editingVar?.v === v}
-                              <input class="inline-edit mono-input w-full" bind:value={editingVar.newValue} id="shell-edit-value" />
-                            {:else}
-                              <span class="var-value">{v.value || '(empty)'}</span>
-                              <span class="source-badge">{shortPath(v.source_path)}:{v.line_number}</span>
-                            {/if}
-                          </td>
-                          {#if showLiveValues}
-                            <td>
-                              {#if liveVal !== undefined}
-                                <span class="var-value {outOfSync ? 'text-warn' : 'text-ok'}">{liveVal || '(empty)'}</span>
-                                {#if outOfSync}
-                                  <span class="badge badge-warning ml-4">out of sync</span>
-                                {:else}
-                                  <CheckCircle2 size={12} class="icon-ok" />
-                                {/if}
-                              {:else}
-                                <span class="text-muted">—</span>
-                              {/if}
-                            </td>
-                          {/if}
-                          <td>
-                            <div class="row-actions justify-end">
-                              {#if editingVar?.v === v}
-                                <button class="btn btn-sm btn-primary" onclick={saveEditVar} disabled={savingVar} id="shell-save-edit">
-                                  {#if savingVar}<div class="spinner-sm"></div>{:else}<Save size={11} />{/if}
-                                </button>
-                                <button class="btn btn-sm btn-ghost" onclick={() => (editingVar = null)}>✕</button>
-                              {:else}
-                                <button class="btn btn-sm btn-ghost" onclick={() => startEditVar(v)} id={`shell-edit-${v.name}`} title="Edit">
-                                  ✎
-                                </button>
-                                <button class="btn btn-sm btn-danger" onclick={() => confirmDeleteVar(v)} id={`shell-del-${v.name}`} title="Delete">
-                                  <Trash2 size={11} />
-                                </button>
-                              {/if}
-                            </div>
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+          <div class="shell-groups-list">
+            {#each filteredGroups as group}
+              <div class="shell-group-card">
+                <div class="sg-header" tabindex="0" role="button" onclick={() => toggleGroupCollapse(group.source_path)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroupCollapse(group.source_path); } }} id={`shell-group-${group.source_path}`}>
+                  {#if collapsedGroups.has(group.source_path)}<ChevronRight size={16} />{:else}<ChevronDown size={16} />{/if}
+                  <span class="sg-name">{group.display_name}</span>
+                  <div class="sg-badges">
+                    {#if group.is_system}
+                      <span class="user-badge" style="color:var(--color-warning)">system</span>
+                    {:else}
+                      <span class="user-badge">user</span>
+                    {/if}
+                    <span class="var-count">{group.vars.length} var{group.vars.length !== 1 ? 's' : ''}</span>
+                  </div>
                 </div>
-              {/if}
-            </div>
-          {/each}
+
+                {#if !collapsedGroups.has(group.source_path)}
+                  <div class="sg-content">
+                    <div class="sg-table-header">
+                      <div class="col-name">NAME</div>
+                      <div class="col-value">DEFINED VALUE</div>
+                      {#if showLiveValues}<div class="col-value">LIVE VALUE</div>{/if}
+                      <div class="col-meta">METADATA</div>
+                      <div class="col-actions">ACTIONS</div>
+                    </div>
+                    
+                    {#each group.vars as v}
+                      {@const conflicts = conflictMap().get(v.name) ?? []}
+                      {@const liveVal = liveValuesMap.get(v.name)}
+                      {@const outOfSync = showLiveValues && liveVal !== undefined && liveVal !== v.value}
+                      
+                      <div class="sg-row">
+                        <div class="col-name">
+                          {#if editingVar?.v === v}
+                            <input class="sg-input" bind:value={editingVar.newName} />
+                          {:else}
+                            {v.name}
+                            {#if conflicts.length > 1}
+                              <span class="badge badge-warning conflict-badge" title="Defined in: {conflicts.join(', ')}">⚠</span>
+                            {/if}
+                          {/if}
+                        </div>
+                        <div class="col-value">
+                          {#if editingVar?.v === v}
+                            <input class="sg-input" bind:value={editingVar.newValue} />
+                          {:else}
+                            <input class="sg-input" value={v.value || ''} readonly />
+                          {/if}
+                        </div>
+                        {#if showLiveValues}
+                          <div class="col-value">
+                            {#if liveVal !== undefined}
+                              <input class="sg-input" value={liveVal || ''} readonly style="color: {outOfSync ? 'var(--color-warning)' : 'var(--color-success)'}" />
+                            {:else}
+                              <span class="text-muted">—</span>
+                            {/if}
+                          </div>
+                        {/if}
+                        <div class="col-meta">
+                          {#if editingVar?.v !== v}
+                            <span class="src-badge">src: {group.display_name}:{v.line_number}</span>
+                          {/if}
+                        </div>
+                        <div class="col-actions">
+                          {#if editingVar?.v === v}
+                            <button class="icon-btn" style="color:var(--color-accent)" onclick={saveEditVar} disabled={savingVar}>
+                              {#if savingVar}<div class="spinner-sm"></div>{:else}<Save size={14} />{/if}
+                            </button>
+                            <button class="icon-btn" onclick={() => (editingVar = null)}><XCircle size={14} /></button>
+                          {:else}
+                            <button class="icon-btn" onclick={() => startEditVar(v)} title="Edit">
+                              <!-- Inline SVG for Edit icon if Lucide's Edit2 is missing, but I can just use a text pencil or keep the custom layout -->
+                              ✎
+                            </button>
+                            <button class="icon-btn" onclick={() => confirmDeleteVar(v)} title="Delete"><Trash2 size={14}/></button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+
+                    <div class="sg-add-row" onclick={() => startAddVar(group.source_path)}>
+                      <Plus size={14} /> Add another variable to {group.display_name}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
         {/if}
       </div>
-
-    <!-- ══ PATH MANAGER ════════════════════════════════════════════════════ -->
+    <!-- ══ PATH MANAGER<!-- ══ PATH MANAGER ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'path'}
       <div class="tab-section">
         <div class="section-header">
           <h3>$PATH Entries</h3>
           <div class="row-actions">
-            <button class="btn btn-ghost btn-sm" onclick={loadPathEntries} id="shell-reload-path">
+            <Button variant="ghost" class=" btn-sm" onclick={loadPathEntries} id="shell-reload-path">
               <RefreshCw size={13} /> Refresh
-            </button>
-            <button class="btn btn-primary btn-sm" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
+            </Button>
+            <Button variant="primary" class=" btn-sm" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
               <Plus size={13} /> Add Entry
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -685,10 +656,10 @@
               </div>
             {/if}
             <div class="form-actions">
-              <button class="btn btn-ghost" onclick={() => (addPathForm = null)}>Cancel</button>
-              <button class="btn btn-primary" onclick={addPathEntry} id="shell-save-path">
+              <Button variant="ghost" class="" onclick={() => (addPathForm = null)}>Cancel</Button>
+              <Button variant="primary" class="" onclick={addPathEntry} id="shell-save-path">
                 <Save size={13} /> Save
-              </button>
+              </Button>
             </div>
           </div>
         {/if}
@@ -738,9 +709,9 @@
                     </td>
                     <td style="text-align:right">
                       {#if entry.source_path}
-                        <button class="btn btn-sm btn-danger" onclick={() => confirmRemovePath(entry)} id={`shell-rm-path-${i}`}>
+                        <Button class="btn btn-sm -danger" onclick={() => confirmRemovePath(entry)} id={`shell-rm-path-${i}`}>
                           <Trash2 size={11} /> Remove
-                        </button>
+                        </Button>
                       {:else}
                         <span class="text-muted text-xs">system</span>
                       {/if}
@@ -764,18 +735,18 @@
           <div class="files-sidebar-header">
             <span>Profile Files</span>
             <div class="row-actions">
-              <button class="btn btn-ghost btn-sm" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={12} /></button>
-              <button class="btn btn-outline btn-sm" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
+              <Button variant="ghost" class=" btn-sm" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={12} /></Button>
+              <Button variant="outline" class=" btn-sm" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
                 <Plus size={12} />
-              </button>
+              </Button>
             </div>
           </div>
 
           {#if showNewFileForm}
             <div class="new-file-form">
               <input type="text" bind:value={newProfileDName} placeholder="custom-vars.sh" id="shell-new-file-name" />
-              <button class="btn btn-primary btn-sm" onclick={createProfileDFile} id="shell-create-file">Create</button>
-              <button class="btn btn-ghost btn-sm" onclick={() => (showNewFileForm = false)}>✕</button>
+              <Button variant="primary" class=" btn-sm" onclick={createProfileDFile} id="shell-create-file">Create</Button>
+              <Button variant="ghost" class=" btn-sm" onclick={() => (showNewFileForm = false)}>✕</Button>
             </div>
           {/if}
 
@@ -803,15 +774,15 @@
           {/if}
 
           <div class="files-sidebar-sep"></div>
-          <button class="btn btn-outline btn-sm sidebar-backup-btn" onclick={() => { showBackupsFor = 'all'; loadBackups(); }} id="shell-show-backups">
+          <Button variant="outline" class=" btn-sm sidebar-backup-btn" onclick={() => { showBackupsFor = 'all'; loadBackups(); }} id="shell-show-backups">
             <ArchiveRestore size={12} /> Backups
-          </button>
+          </Button>
 
           {#if showBackupsFor}
             <div class="backup-list">
               <div class="backup-list-header">
                 <span>Backups</span>
-                <button class="btn btn-ghost btn-sm" onclick={() => (showBackupsFor = null)}>✕</button>
+                <Button variant="ghost" class=" btn-sm" onclick={() => (showBackupsFor = null)}>✕</Button>
               </div>
               {#if backupsLoading}
                 <div class="center-state"><div class="spinner-sm"></div></div>
@@ -822,9 +793,9 @@
                   <div class="backup-item">
                     <div class="backup-name">{bk.filename}</div>
                     <div class="backup-ts">{bk.timestamp}</div>
-                    <button class="btn btn-sm btn-outline" onclick={() => confirmRestoreBackup(bk)} id={`shell-restore-${bk.filename}`}>
+                    <Button class="btn btn-sm -outline" onclick={() => confirmRestoreBackup(bk)} id={`shell-restore-${bk.filename}`}>
                       <ArchiveRestore size={11} /> Restore
-                    </button>
+                    </Button>
                   </div>
                 {/each}
               {/if}
@@ -844,18 +815,18 @@
               </span>
               <div class="editor-tools">
                 <span class="text-muted text-xs">{selectedFile.last_modified}</span>
-                <button class="btn btn-ghost btn-sm" onclick={() => (wordWrap = !wordWrap)} id="shell-word-wrap">
+                <Button variant="ghost" class=" btn-sm" onclick={() => (wordWrap = !wordWrap)} id="shell-word-wrap">
                   Wrap: {wordWrap ? 'On' : 'Off'}
-                </button>
-                <button
-                  class="btn btn-primary btn-sm"
+                </Button>
+                <Button
+                  variant="primary" class=" btn-sm"
                   onclick={saveFile}
                   disabled={fileSaving || !hasFileChanges}
                   id="shell-save-file"
                 >
                   {#if fileSaving}<div class="spinner-sm"></div>{:else}<Save size={12} />{/if}
                   Save
-                </button>
+                </Button>
               </div>
             </div>
             {#if hasFileChanges}
@@ -889,10 +860,10 @@
         <div class="section-header">
           <h3>Resolved Environment</h3>
           <div class="row-actions">
-            <button class="btn btn-primary btn-sm" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
+            <Button variant="primary" class=" btn-sm" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
               {#if previewLoading}<div class="spinner-sm"></div>{:else}<RefreshCw size={13} />{/if}
               Preview env
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -911,6 +882,7 @@
                 aria-checked={showOnlyUnsynced}
                 type="button"
                 id="shell-unsynced-only"
+                aria-label="Toggle show only out-of-sync"
                 style="transform: scale(0.8);"
               >
                 <span class="ui-toggle-thumb"></span>
@@ -924,9 +896,9 @@
           <div class="source-buttons">
             <span class="text-muted text-xs" style="padding:4px 0">Source a file to refresh:</span>
             {#each profileFiles.filter(f => !f.is_system) as f}
-              <button class="btn btn-outline btn-sm" onclick={() => sourceFile(f)} id={`shell-source-${f.path}`}>
+              <Button variant="outline" class=" btn-sm" onclick={() => sourceFile(f)} id={`shell-source-${f.path}`}>
                 source {f.display_name}
-              </button>
+              </Button>
             {/each}
           </div>
 
@@ -998,7 +970,7 @@
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
   }
-  .tab-btn {
+  :global(.tab-btn) {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1015,8 +987,8 @@
     white-space: nowrap;
     margin-bottom: -1px;
   }
-  .tab-btn:hover { color: var(--color-text-primary); }
-  .tab-btn.active { color: var(--color-accent-soft); border-bottom-color: var(--color-accent); }
+  :global(.tab-btn:hover) { color: var(--color-text-primary); }
+  :global(.tab-btn.active) { color: var(--color-accent-soft); border-bottom-color: var(--color-accent); }
 
   .tab-content { flex: 1; overflow-y: auto; }
   .tab-section { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -1057,8 +1029,7 @@
 
   /* ─── Variable groups ────────────────────────────────────────────── */
   .var-group { display: flex; flex-direction: column; }
-  .var-group-head-row { display: flex; align-items: center; gap: 4px; }
-  .group-add-btn { flex-shrink: 0; padding: 4px 8px; }
+  :global(.group-add-btn) { flex-shrink: 0; padding: 4px 8px; }
   .group-header {
     display: flex;
     align-items: center;
@@ -1079,7 +1050,7 @@
   .group-header:hover { background: rgba(0,0,0,0.35); }
   .group-name { flex: 1; font-family: var(--font-mono); font-size: 12px; }
   .group-count { font-size: 11px; color: var(--color-text-muted); margin-right: 4px; }
-  .ml-auto { margin-left: auto; }
+  :global(.ml-auto) { margin-left: auto; }
 
   /* ─── Variable table cells ───────────────────────────────────────── */
   .var-name {
@@ -1179,7 +1150,7 @@
     margin-bottom: 4px;
   }
   .files-sidebar-sep { border-top: 1px solid var(--color-border); margin: 8px 12px; }
-  .sidebar-backup-btn { margin: 0 12px 8px; }
+  :global(.sidebar-backup-btn) { margin: 0 12px 8px; }
   .new-file-form {
     display: flex; gap: 6px; padding: 8px 12px; align-items: center;
     border-bottom: 1px solid var(--color-border);
@@ -1268,4 +1239,238 @@
     padding: 8px 0;
   }
   .ml-4 { margin-left: 4px; }
+
+  /* ─── ShellEnv Custom Design ────────────────────────────── */
+  .custom-tabs-container {
+    display: inline-flex;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 6px;
+    border-radius: 12px;
+    margin-bottom: 24px;
+    align-self: flex-start;
+  }
+  .custom-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .custom-tab:hover {
+    color: #fff;
+  }
+  .custom-tab.active {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(139, 92, 246, 0.3); /* subtle purple border */
+    color: #fff;
+  }
+
+  .custom-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 0 16px;
+    border-radius: 10px;
+    height: 40px;
+    width: 400px;
+    border: 1px solid rgba(255,255,255,0.05);
+    color: var(--color-text-muted);
+  }
+  .search-box:focus-within {
+    border-color: rgba(255,255,255,0.15);
+  }
+  .search-box input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #fff;
+    font-size: 13px;
+    flex: 1;
+  }
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .toolbar-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 16px;
+    border-radius: 10px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .toolbar-btn:hover {
+    background: rgba(255,255,255,0.05);
+    color: #fff;
+  }
+  .primary-btn {
+    background: #7c3aed;
+    color: #fff;
+  }
+  .primary-btn:hover {
+    background: #6d28d9;
+  }
+
+  .shell-groups-list {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding-bottom: 32px;
+  }
+  .shell-group-card {
+    background: rgba(255,255,255,0.015);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .sg-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .sg-header:hover {
+    background: rgba(255,255,255,0.02);
+  }
+  .sg-name {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 14px;
+    color: #fff;
+  }
+  .sg-badges {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .user-badge {
+    background: rgba(255,255,255,0.05);
+    color: var(--color-text-secondary);
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .var-count {
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+  .sg-content {
+    border-top: 1px solid rgba(255,255,255,0.04);
+  }
+  .sg-table-header {
+    display: flex;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    letter-spacing: 0.5px;
+  }
+  .sg-row {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .sg-row:last-child {
+    border-bottom: none;
+  }
+  .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: #e2e8f0; font-size: 13px; }
+  .col-value { flex: 1; padding-right: 20px; min-width: 0; }
+  .col-meta { width: 160px; }
+  .col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }
+
+  .sg-input {
+    width: 100%;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    outline: none;
+    transition: all 0.2s;
+  }
+  .sg-input:focus, .sg-input:not([readonly]) {
+    border-color: rgba(255,255,255,0.15);
+    color: #fff;
+    background: rgba(0,0,0,0.4);
+  }
+  .src-badge {
+    background: rgba(20, 184, 166, 0.1);
+    color: #2dd4bf;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .icon-btn {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 6px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .icon-btn:hover {
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+  }
+  .icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .sg-add-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 16px 20px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.2s;
+  }
+  .sg-add-row:hover {
+    color: #fff;
+  }
+
+  /* ─── End Custom ShellEnv Design ────────────────────────────── */
+
 </style>

@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { TerminalSquare, Save, RefreshCw, AlertTriangle } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -113,15 +120,15 @@
 
 <div class="module-page">
   <PageHeader title="GRUB Configurator" subtitle="Safely manage bootloader settings and kernel parameters" icon={TerminalSquare}>
-    <button class="btn btn-ghost" onclick={loadConfig} disabled={loading || saving || rebuilding}>
+    <Button variant="ghost" class="" onclick={loadConfig} disabled={loading || saving || rebuilding}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
-    <button class="btn btn-warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || hasChanges}>
+    </Button>
+    <Button class="btn -warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || hasChanges}>
       <RefreshCw size={14} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
-    </button>
-    <button class="btn btn-primary" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding}>
+    </Button>
+    <Button variant="primary" class="" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding}>
       <Save size={14} /> Save Changes
-    </button>
+    </Button>
   </PageHeader>
 
   {#if loading && !config}
@@ -141,7 +148,8 @@
       </div>
     {/if}
 
-    <div style="display:flex; flex-direction:column; gap:16px; flex:1; min-height:0">
+    <div class="module-content-scroll">
+      <div style="display:flex; flex-direction:column; gap:16px; padding-bottom: 24px;">
       
       <div class="card" style="display:flex; flex-direction:column; gap:16px">
         <div>
@@ -149,20 +157,22 @@
           
           <div style="display:flex; gap:24px">
             <div style="flex:1">
-              <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Timeout (seconds)</label>
-              <input type="number" class="w-full" bind:value={editedTimeout} min="-1" />
+              <label for="grub-timeout" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Timeout (seconds)</label>
+              <input id="grub-timeout" type="number" class="w-full" bind:value={editedTimeout} min="-1" />
               <div style="font-size:11px; color:var(--color-text-muted); margin-top:4px">Time to wait before booting default entry (-1 means wait indefinitely).</div>
             </div>
             
             <div style="flex:1; display:flex; flex-direction:column; justify-content:center">
-              <label style="display:flex; align-items:center; gap:8px; font-size:14px; color:var(--color-text-primary); cursor:pointer">
+              <label for="grub-hidden-toggle" style="display:flex; align-items:center; gap:8px; font-size:14px; color:var(--color-text-primary); cursor:pointer">
                 <button
+                  id="grub-hidden-toggle"
                   class="ui-toggle"
                   class:on={editedHidden}
                   onclick={() => editedHidden = !editedHidden}
+                  type="button"
                   role="switch"
                   aria-checked={editedHidden}
-                  type="button"
+                  aria-label="Toggle hidden timeout style"
                 >
                   <span class="ui-toggle-thumb"></span>
                 </button>
@@ -198,11 +208,12 @@
         <div style="padding:16px; border-bottom:1px solid var(--color-border); display:flex; justify-content:space-between; align-items:center">
           <h3 style="margin:0; color:var(--color-text-primary); font-size:14px">Raw /etc/default/grub</h3>
         </div>
-        <div style="flex:1; min-height:200px">
+        <div style="height:300px">
           <CodeEditor value={config.raw_content} readonly={true} />
         </div>
       </div>
 
+      </div>
     </div>
   {/if}
 </div>

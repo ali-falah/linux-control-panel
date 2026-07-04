@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Activity, Wifi, Globe, RefreshCw, Server, Hash, Network, Plus, ArrowLeft, Save, Trash } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -217,25 +224,25 @@
 
   {#if selectedConnectionUuid !== null}
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px; flex-shrink:0;">
-      <button class="btn btn-outline" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" onclick={() => selectedConnectionUuid = null}>
+      <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" onclick={() => selectedConnectionUuid = null}>
         <ArrowLeft size={14}/> Back to Connections
-      </button>
+      </Button>
       <div style="display:flex; gap:8px;">
         {#if selectedConnectionUuid !== ''}
-          <button class="btn btn-outline" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-warning); color:var(--color-warning);" onclick={() => disconnectConnection(selectedConnectionUuid)}>
+          <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-warning); color:var(--color-warning);" onclick={() => disconnectConnection(selectedConnectionUuid)}>
             <Activity size={14}/> Disconnect
-          </button>
-          <button class="btn btn-outline" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-error); color:var(--color-error);" onclick={() => deleteConnection(selectedConnectionUuid)}>
+          </Button>
+          <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-error); color:var(--color-error);" onclick={() => deleteConnection(selectedConnectionUuid)}>
             <Trash size={14}/> Delete
-          </button>
+          </Button>
         {/if}
-        <button class="btn btn-primary" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" disabled={isSaving} onclick={saveConnection}>
+        <Button variant="primary" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" disabled={isSaving} onclick={saveConnection}>
           {#if isSaving}
             <RefreshCw size={14} class="animate-spin-slow" /> Saving...
           {:else}
             <Save size={14}/> Save Settings
           {/if}
-        </button>
+        </Button>
       </div>
     </div>
     
@@ -247,12 +254,12 @@
         
         {#if selectedConnectionUuid === ''}
           <div style="display:flex; flex-direction:column; gap:4px;">
-            <label style="font-size:12px; color:var(--color-text-secondary);">Connection Name</label>
-            <input type="text" class="input" bind:value={editConnectionData['connection.id']} placeholder="e.g. eth0-custom" />
+            <label for="conn-id" style="font-size:12px; color:var(--color-text-secondary);">Connection Name</label>
+            <input id="conn-id" type="text" class="input" bind:value={editConnectionData['connection.id']} placeholder="e.g. eth0-custom" />
           </div>
           <div style="display:flex; flex-direction:column; gap:4px;">
-            <label style="font-size:12px; color:var(--color-text-secondary);">Connection Type</label>
-            <select class="input" bind:value={editConnectionData['connection.type']}>
+            <label for="conn-type" style="font-size:12px; color:var(--color-text-secondary);">Connection Type</label>
+            <select id="conn-type" class="input" bind:value={editConnectionData['connection.type']}>
               <option value="802-3-ethernet">Ethernet</option>
               <option value="802-11-wireless">Wi-Fi</option>
               <option value="wireguard">WireGuard</option>
@@ -266,8 +273,8 @@
             <h4 style="margin:0; color:var(--color-text-primary); border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:8px;">IPv4 Configuration</h4>
             
             <div style="display:flex; flex-direction:column; gap:4px;">
-              <label style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <select class="input" bind:value={editConnectionData['ipv4.method']}>
+              <label for="ipv4-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
+              <select id="ipv4-method" class="input" bind:value={editConnectionData['ipv4.method']}>
                 <option value="auto">Automatic (DHCP)</option>
                 <option value="manual">Manual (Static)</option>
                 <option value="disabled">Disabled</option>
@@ -277,19 +284,19 @@
             
             {#if editConnectionData['ipv4.method'] === 'manual'}
               <div style="display:flex; flex-direction:column; gap:4px;">
-                <label style="font-size:12px; color:var(--color-text-secondary);">Addresses (e.g. 192.168.1.10/24)</label>
-                <input type="text" class="input" bind:value={editConnectionData['ipv4.addresses']} oninput={(e) => editConnectionData['ipv4.addresses'] = e.currentTarget.value.replace(/[^\d./]/g, '')} />
+                <label for="ipv4-addr" style="font-size:12px; color:var(--color-text-secondary);">Addresses (e.g. 192.168.1.10/24)</label>
+                <input id="ipv4-addr" type="text" class="input" bind:value={editConnectionData['ipv4.addresses']} oninput={(e) => editConnectionData['ipv4.addresses'] = e.currentTarget.value.replace(/[^\d./]/g, '')} />
               </div>
               <div style="display:flex; flex-direction:column; gap:4px;">
-                <label style="font-size:12px; color:var(--color-text-secondary);">Gateway</label>
-                <input type="text" class="input" bind:value={editConnectionData['ipv4.gateway']} oninput={(e) => editConnectionData['ipv4.gateway'] = e.currentTarget.value.replace(/[^\d.]/g, '')} />
+                <label for="ipv4-gw" style="font-size:12px; color:var(--color-text-secondary);">Gateway</label>
+                <input id="ipv4-gw" type="text" class="input" bind:value={editConnectionData['ipv4.gateway']} oninput={(e) => editConnectionData['ipv4.gateway'] = e.currentTarget.value.replace(/[^\d.]/g, '')} />
               </div>
             {/if}
             
             {#if editConnectionData['ipv4.method'] !== 'disabled'}
               <div style="display:flex; flex-direction:column; gap:4px;">
-                <label style="font-size:12px; color:var(--color-text-secondary);">DNS Servers (comma-separated)</label>
-                <input type="text" class="input" bind:value={editConnectionData['ipv4.dns']} oninput={(e) => editConnectionData['ipv4.dns'] = e.currentTarget.value.replace(/[^\d., ]/g, '')} placeholder="e.g. 8.8.8.8, 1.1.1.1" />
+                <label for="ipv4-dns" style="font-size:12px; color:var(--color-text-secondary);">DNS Servers (comma-separated)</label>
+                <input id="ipv4-dns" type="text" class="input" bind:value={editConnectionData['ipv4.dns']} oninput={(e) => editConnectionData['ipv4.dns'] = e.currentTarget.value.replace(/[^\d., ]/g, '')} placeholder="e.g. 8.8.8.8, 1.1.1.1" />
               </div>
             {/if}
           </div>
@@ -298,8 +305,8 @@
             <h4 style="margin:0; color:var(--color-text-primary); border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:8px;">IPv6 Configuration</h4>
             
             <div style="display:flex; flex-direction:column; gap:4px;">
-              <label style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <select class="input" bind:value={editConnectionData['ipv6.method']}>
+              <label for="ipv6-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
+              <select id="ipv6-method" class="input" bind:value={editConnectionData['ipv6.method']}>
                 <option value="auto">Automatic</option>
                 <option value="dhcp">DHCP Only</option>
                 <option value="manual">Manual (Static)</option>
@@ -312,18 +319,18 @@
     </div>
   {:else}
     <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin-bottom: 16px; flex-shrink: 0">
-      <button class="tab-btn" class:active={activeTab === 'interfaces'} onclick={() => activeTab = 'interfaces'}>
+      <Button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
         <Activity size={14} style="margin-right:6px" /> Physical Adapters
-      </button>
-      <button class="tab-btn" class:active={activeTab === 'connections'} onclick={() => activeTab = 'connections'}>
+      </Button>
+      <Button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
         <Network size={14} style="margin-right:6px" /> Connections
-      </button>
-      <button class="tab-btn" class:active={activeTab === 'dns'} onclick={() => activeTab = 'dns'}>
+      </Button>
+      <Button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
         <Globe size={14} style="margin-right:6px" /> Global DNS
-      </button>
-      <button class="btn btn-outline" style="margin-left:8px; padding: 4px 8px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
+      </Button>
+      <Button variant="outline" class="" style="margin-left:8px; padding: 4px 8px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
         <RefreshCw size={12} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
+      </Button>
     </div>
 
     <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:24px;">
@@ -341,9 +348,9 @@
                   <span style="font-weight:600; color:var(--color-text-primary); font-size:16px;">{iface.ifname}</span>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
-                  <button class="btn btn-outline" style="padding:4px 8px; font-size:11px;" onclick={() => setInterfaceState(iface.ifname, iface.operstate !== 'UP')}>
+                  <Button variant="outline" class="" style="padding:4px 8px; font-size:11px;" onclick={() => setInterfaceState(iface.ifname, iface.operstate !== 'UP')}>
                     {iface.operstate === 'UP' ? 'Disable' : 'Enable'}
-                  </button>
+                  </Button>
                   <span class="badge {iface.operstate === 'UP' ? 'badge-success' : (iface.operstate === 'UNKNOWN' ? 'badge-warning' : 'badge-muted')}">{iface.operstate}</span>
                 </div>
               </div>
@@ -383,16 +390,26 @@
       {:else if activeTab === 'connections'}
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
           <h3 style="margin:0; font-size:15px; color:var(--color-text-primary)">NetworkManager Profiles</h3>
-          <button class="btn btn-primary" style="padding:6px 12px; font-size:12px; display:flex; align-items:center; gap:6px;" onclick={() => editConnection('')}>
+          <Button variant="primary" class="" style="padding:6px 12px; font-size:12px; display:flex; align-items:center; gap:6px;" onclick={() => editConnection('')}>
             <Plus size={14}/> Add Connection
-          </button>
+          </Button>
         </div>
         
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
           {#each connections as conn}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="card" style="cursor:pointer; transition:all 0.2s; border:1px solid transparent; display:flex; flex-direction:column; gap:8px;" onclick={() => editConnection(conn.uuid)} onmouseenter={(e) => e.currentTarget.style.borderColor='var(--color-accent)'} onmouseleave={(e) => e.currentTarget.style.borderColor='transparent'}>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div 
+              class="card" 
+              style="cursor:pointer; transition:all 0.2s; border:1px solid transparent; display:flex; flex-direction:column; gap:8px;" 
+              tabindex="0"
+              role="button"
+              onclick={() => editConnection(conn.uuid)} 
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editConnection(conn.uuid); } }}
+              onmouseenter={(e) => e.currentTarget.style.borderColor='var(--color-accent)'} 
+              onmouseleave={(e) => e.currentTarget.style.borderColor='transparent'}
+            >
               <div style="display:flex; justify-content:space-between; align-items:center;">
                 <span style="font-weight:600; color:var(--color-text-primary); font-size:15px;">{conn.name}</span>
                 <span class="badge {conn.state === 'activated' ? 'badge-success' : 'badge-muted'}">{conn.state || 'inactive'}</span>
@@ -422,7 +439,7 @@
 </div>
 
 <style>
-  .tab-btn {
+  :global(.tab-btn) {
     padding: 6px 16px;
     border: none;
     border-radius: 6px;
@@ -436,10 +453,10 @@
     display: flex;
     align-items: center;
   }
-  .tab-btn:hover {
+  :global(.tab-btn:hover) {
     color: var(--color-text-primary);
   }
-  .tab-btn.active {
+  :global(.tab-btn.active) {
     background: var(--color-bg-surface);
     color: var(--color-text-primary);
     box-shadow: 0 1px 3px rgba(0,0,0,0.2);

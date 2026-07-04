@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { ShieldAlert, Shield, RefreshCw, Power } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -68,9 +75,9 @@
 
 <div class="module-page">
   <PageHeader title="SELinux Manager" subtitle="Manage Security-Enhanced Linux state and view access denials" icon={ShieldAlert}>
-    <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
+    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
+    </Button>
   </PageHeader>
 
   {#if loading && !status}
@@ -112,12 +119,12 @@
             </div>
           </div>
           <div style="display:flex; gap:8px">
-            <button class="btn {status.current_mode === 'enforcing' ? 'btn-primary' : 'btn-outline'}" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
+            <Button class="btn {status.current_mode === 'enforcing' ? 'btn-primary' : '-outline'}" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
               Enforcing
-            </button>
-            <button class="btn {status.current_mode === 'permissive' ? 'btn-warning' : 'btn-outline'}" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
+            </Button>
+            <Button class="btn {status.current_mode === 'permissive' ? 'btn-warning' : '-outline'}" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
               Permissive
-            </button>
+            </Button>
           </div>
         </div>
       {/if}

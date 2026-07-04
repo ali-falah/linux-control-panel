@@ -66,7 +66,9 @@
       class="menu-dropdown card animate-fade-slide" 
       style={dropdownStyle}
       onclick={closeMenu}
+      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeMenu(); }}
       role="menu"
+      tabindex="0"
     >
       {#if children}
         {@render children()}

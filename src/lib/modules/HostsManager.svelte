@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Globe, RefreshCw, Plus, Trash2, Save, Eye, EyeOff, Search } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -143,14 +150,14 @@
 
 <div class="module-page">
   <PageHeader title="Hosts Manager" subtitle="Edit /etc/hosts — requires polkit authentication to save" icon={Globe}>
-    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+    <Button variant="ghost" class="" onclick={load} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
-    <button class="btn btn-outline" onclick={() => showAddForm = true}>
+    </Button>
+    <Button variant="outline" class="" onclick={() => showAddForm = true}>
       <Plus size={14} /> Add Entry
-    </button>
-    <button
-      class="btn btn-primary"
+    </Button>
+    <Button
+      variant="primary" class=""
       onclick={confirmSave}
       disabled={saving || !hasChanges}
       style={hasChanges ? 'animation: pulse-glow 2s infinite; box-shadow: 0 0 12px var(--color-accent-glow);' : ''}
@@ -160,7 +167,7 @@
       {:else}
         <Save size={14} /> {hasChanges ? 'Save Changes' : 'Saved'}
       {/if}
-    </button>
+    </Button>
   </PageHeader>
 
   {#if hasChanges}
@@ -190,14 +197,14 @@
       </div>
 
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
-        <button class="btn btn-ghost" onclick={() => { showAddForm = false; newIp = ''; newHostnames = ''; }}>Cancel</button>
-        <button
-          class="btn btn-primary"
+        <Button variant="ghost" class="" onclick={() => { showAddForm = false; newIp = ''; newHostnames = ''; }}>Cancel</Button>
+        <Button
+          variant="primary" class=""
           onclick={addEntry}
           disabled={!newIp.trim() || !newHostnames.trim()}
         >
           <Plus size={14} /> Add Entry
-        </button>
+        </Button>
       </div>
     </div>
   </SideDrawer>
@@ -247,9 +254,9 @@
         {filter ? 'Try adjusting your search criteria.' : 'No valid host entries found in /etc/hosts.'}
       </span>
       {#if !filter}
-        <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAddForm = true}>
+        <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAddForm = true}>
           <Plus size={14} /> Add First Entry
-        </button>
+        </Button>
       {/if}
     </div>
   {:else}

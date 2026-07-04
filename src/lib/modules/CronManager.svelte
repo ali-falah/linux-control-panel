@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { Clock, Plus, Trash2, RefreshCw, ShieldAlert, Shield, FolderOpen } from '@lucide/svelte';
@@ -99,49 +106,51 @@
 
 <div class="module-page">
   <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs" icon={Clock}>
-    <button class="btn btn-ghost" onclick={loadJobs} disabled={loading}>
+    <Button variant="ghost" class="" onclick={loadJobs} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
-    <button class="btn btn-primary" onclick={() => showAdd = true}>
+    </Button>
+    <Button variant="primary" class="" onclick={() => showAdd = true}>
       <Plus size={14} /> Add Job
-    </button>
+    </Button>
   </PageHeader>
 
   <SideDrawer bind:isOpen={showAdd} title="Create Scheduled Task" width="500px">
     <div style="display:flex; flex-direction:column; gap:20px;">
       
       <div>
-        <label style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Schedule</label>
-        <input class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newSchedule} />
+        <label for="cron-schedule" style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Schedule</label>
+        <input id="cron-schedule" class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newSchedule} />
         
         <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
-          <button class="btn btn-sm btn-outline" onclick={() => setPreset('* * * * *')}>Every Min</button>
-          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 * * * *')}>Hourly</button>
-          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * *')}>Daily</button>
-          <button class="btn btn-sm btn-outline" onclick={() => setPreset('0 0 * * 0')}>Weekly</button>
-          <button class="btn btn-sm btn-outline" onclick={() => setPreset('@reboot')}>On Boot</button>
+          <Button class="btn btn-sm -outline" onclick={() => setPreset('* * * * *')}>Every Min</Button>
+          <Button class="btn btn-sm -outline" onclick={() => setPreset('0 * * * *')}>Hourly</Button>
+          <Button class="btn btn-sm -outline" onclick={() => setPreset('0 0 * * *')}>Daily</Button>
+          <Button class="btn btn-sm -outline" onclick={() => setPreset('0 0 * * 0')}>Weekly</Button>
+          <Button class="btn btn-sm -outline" onclick={() => setPreset('@reboot')}>On Boot</Button>
         </div>
       </div>
       
       <div>
-        <label style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Command to Execute</label>
+        <label for="cron-command" style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Command to Execute</label>
         <div style="display:flex; gap:8px">
-          <input class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newCommand} placeholder="/path/to/script.sh" />
-          <button class="btn btn-outline" onclick={browseFile} title="Browse for script file">
+          <input id="cron-command" class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newCommand} placeholder="/path/to/script.sh" />
+          <Button variant="outline" class="" onclick={browseFile} title="Browse for script file">
             <FolderOpen size={16} />
-          </button>
+          </Button>
         </div>
       </div>
 
       <div style="margin-top: 8px;">
-        <label style="display:flex; align-items:center; gap:10px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
+        <label for="root-toggle" style="display:flex; align-items:center; gap:10px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
           <button
+            id="root-toggle"
             class="ui-toggle"
             class:on={isRootJob}
             onclick={() => isRootJob = !isRootJob}
+            type="button"
             role="switch"
             aria-checked={isRootJob}
-            type="button"
+            aria-label="Toggle root privileges"
           >
             <span class="ui-toggle-thumb"></span>
           </button>
@@ -150,8 +159,8 @@
       </div>
       
       <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:16px;">
-        <button class="btn btn-ghost" onclick={() => showAdd = false}>Cancel</button>
-        <button class="btn btn-primary" onclick={addJob} disabled={!newCommand.trim()}>Save Job</button>
+        <Button variant="ghost" class="" onclick={() => showAdd = false}>Cancel</Button>
+        <Button variant="primary" class="" onclick={addJob} disabled={!newCommand.trim()}>Save Job</Button>
       </div>
     </div>
   </SideDrawer>
@@ -192,9 +201,9 @@
                   <span style="color:var(--color-text-muted); margin-top:8px;">
                     You haven't added any cron jobs yet.
                   </span>
-                  <button class="btn btn-outline" style="margin-top:24px;" onclick={() => showAdd = true}>
+                  <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAdd = true}>
                     <Plus size={14} /> Add First Job
-                  </button>
+                  </Button>
                 </div>
               </td>
             </tr>

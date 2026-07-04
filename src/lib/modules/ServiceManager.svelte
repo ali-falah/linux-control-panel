@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw, Eye,
@@ -174,13 +181,13 @@
 
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
-    <button class="btn btn-ghost" onclick={load} disabled={loading}>
+    <Button variant="ghost" class="" onclick={load} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-    </button>
+    </Button>
   </PageHeader>
 
   <!-- Controls: Stats & Search -->
-  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+  <div class="service-btns" style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
     <!-- Stats -->
     <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
       <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
@@ -202,7 +209,7 @@
       <Search size={14} style="color:var(--color-text-muted)" />
       <input bind:value={filter} placeholder="Filter services by name or description…" />
       {#if filter}
-        <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</button>
+        <Button class="btn btn-sm -ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</Button>
       {/if}
     </div>
   </div>
@@ -215,13 +222,13 @@
   >
     {#snippet headerActions()}
       {#if activePanel === 'editor'}
-        <button
-          class="btn btn-primary btn-sm"
+        <Button
+          variant="primary" class=" btn-sm"
           onclick={confirmSaveUnitFile}
           disabled={saving || editedContent === unitFileContent}
         >
           {saving ? 'Saving…' : 'Save Override'}
-        </button>
+        </Button>
       {/if}
     {/snippet}
 
@@ -309,25 +316,25 @@
                 <td style="width: 140px;">
                   <div style="display:flex;gap:8px; align-items:center">
                     {#if unit.active_state !== 'active'}
-                      <button
-                        class="btn btn-sm btn-success"
+                      <Button
+                        class="btn btn-sm -success"
                         onclick={() => doAction(unit, 'start')}
                         disabled={!!actionInProgress}
                         title="Start"
                         style="min-width: 70px; display:flex; justify-content:center;"
                       >
                         <Play size={12} style="margin-right:4px"/> Start
-                      </button>
+                      </Button>
                     {:else}
-                      <button
-                        class="btn btn-sm btn-outline btn-danger"
+                      <Button
+                        class="btn btn-sm btn-outline -danger"
                         onclick={() => confirmDoAction(unit, 'stop')}
                         disabled={!!actionInProgress}
                         title="Stop"
                         style="min-width: 70px; display:flex; justify-content:center;"
                       >
                         <Square size={12} style="margin-right:4px"/> Stop
-                      </button>
+                      </Button>
                     {/if}
 
                     <KebabMenu>

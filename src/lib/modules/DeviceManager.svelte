@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { HardDrive, Cpu, RefreshCw, Monitor, Network, MemoryStick, Usb, Settings } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -122,12 +129,12 @@
         bind:value={searchQuery}
         style="width: 250px; padding: 6px 12px;"
       />
-      <button class="btn btn-outline" style="padding: 6px 10px; font-size:12px;" onclick={() => toggleAll(true)}>Expand All</button>
-      <button class="btn btn-outline" style="padding: 6px 10px; font-size:12px;" onclick={() => toggleAll(false)}>Collapse All</button>
+      <Button variant="outline" class="" style="padding: 6px 10px; font-size:12px;" onclick={() => toggleAll(true)}>Expand All</Button>
+      <Button variant="outline" class="" style="padding: 6px 10px; font-size:12px;" onclick={() => toggleAll(false)}>Collapse All</Button>
     </div>
-    <button class="btn btn-outline" style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
+    <Button variant="outline" class="" style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Rescan Devices
-    </button>
+    </Button>
   </div>
 
   <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:16px;">

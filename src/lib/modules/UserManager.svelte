@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { Users, UserPlus, Key, Shield, ShieldOff, Trash2, RefreshCw, Layers } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -208,20 +215,20 @@
 <div class="module-page">
   <PageHeader title="Users & Groups" subtitle="Manage local accounts, passwords, privileges, and groups" icon={Users}>
     <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
-      <button class="btn btn-sm {view === 'users' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'users'}>Users</button>
-      <button class="btn btn-sm {view === 'groups' ? 'btn-primary' : 'btn-ghost'}" onclick={() => view = 'groups'}>Groups</button>
+      <Button class="btn btn-sm {view === 'users' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'users'}>Users</Button>
+      <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>
     </div>
-    <button class="btn btn-ghost" onclick={loadData} disabled={loading}>
+    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
+    </Button>
     {#if view === 'users'}
-      <button class="btn btn-primary" onclick={() => showAddUser = !showAddUser}>
+      <Button variant="primary" class="" onclick={() => showAddUser = !showAddUser}>
         <UserPlus size={14} /> Add User
-      </button>
+      </Button>
     {:else}
-      <button class="btn btn-primary" onclick={() => showAddGroup = !showAddGroup}>
+      <Button variant="primary" class="" onclick={() => showAddGroup = !showAddGroup}>
         <Layers size={14} /> Add Group
-      </button>
+      </Button>
     {/if}
   </PageHeader>
 
@@ -230,15 +237,15 @@
       <h3 style="margin-top:0; color:var(--color-text-primary)">Create New User</h3>
       <div style="display:flex; gap:12px; align-items:flex-end">
         <div style="flex:1">
-          <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Username (lowercase, no spaces)</label>
-          <input class="w-full" bind:value={newUsername} placeholder="e.g. john" />
+          <label for="new-username" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Username</label>
+          <input id="new-username" class="w-full" bind:value={newUsername} placeholder="e.g. john" />
         </div>
         <div style="flex:1">
-          <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Full Name (Optional)</label>
-          <input class="w-full" bind:value={newFullname} placeholder="e.g. John Doe" onkeydown={(e) => e.key === 'Enter' && addUser()} />
+          <label for="new-fullname" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Full Name (Optional)</label>
+          <input id="new-fullname" class="w-full" bind:value={newFullname} placeholder="e.g. John Doe" onkeydown={(e) => e.key === 'Enter' && addUser()} />
         </div>
-        <button class="btn btn-primary" onclick={addUser} disabled={!newUsername.trim()}>Create Account</button>
-        <button class="btn btn-outline" onclick={() => showAddUser = false}>Cancel</button>
+        <Button variant="primary" class="" onclick={addUser} disabled={!newUsername.trim()}>Create Account</Button>
+        <Button variant="outline" class="" onclick={() => showAddUser = false}>Cancel</Button>
       </div>
     </div>
   {/if}
@@ -248,11 +255,11 @@
       <h3 style="margin-top:0; color:var(--color-text-primary)">Create New Group</h3>
       <div style="display:flex; gap:12px; align-items:flex-end">
         <div style="flex:1">
-          <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Group Name</label>
-          <input class="w-full" bind:value={newGroupname} placeholder="e.g. developers" onkeydown={(e) => e.key === 'Enter' && addGroup()} />
+          <label for="group-name" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Group Name</label>
+          <input id="group-name" class="w-full" bind:value={newGroupname} placeholder="e.g. developers" onkeydown={(e) => e.key === 'Enter' && addGroup()} />
         </div>
-        <button class="btn btn-primary" onclick={addGroup} disabled={!newGroupname.trim()}>Create Group</button>
-        <button class="btn btn-outline" onclick={() => showAddGroup = false}>Cancel</button>
+        <Button variant="primary" class="" onclick={addGroup} disabled={!newGroupname.trim()}>Create Group</Button>
+        <Button variant="outline" class="" onclick={() => showAddGroup = false}>Cancel</Button>
       </div>
     </div>
   {/if}
@@ -361,6 +368,8 @@
   </div>
 </div>
 
+<svelte:window onkeydown={(e) => { if (showGroupModal && e.key === 'Escape') showGroupModal = false; }} />
+
 {#if showGroupModal && selectedUser}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -388,7 +397,7 @@
       </div>
 
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px">
-        <button class="btn btn-primary" onclick={() => { showGroupModal = false; groupSearch = ''; }}>Done</button>
+        <Button variant="primary" class="" onclick={() => { showGroupModal = false; groupSearch = ''; }}>Done</Button>
       </div>
     </div>
   </div>

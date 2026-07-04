@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { LayoutGrid, Search, Plus, Minus, Package, ExternalLink, RefreshCw } from '@lucide/svelte';
   import { open } from '@tauri-apps/plugin-shell';
@@ -97,13 +104,13 @@
         onkeydown={(e) => e.key === 'Enter' && search()}
       />
     </div>
-    <button class="btn btn-primary" onclick={search} disabled={loading || !query.trim()}>
+    <Button variant="primary" class="" onclick={search} disabled={loading || !query.trim()}>
       {#if loading}
         <RefreshCw size={14} class="animate-spin-slow" /> Searching…
       {:else}
         <Search size={14} /> Search
       {/if}
-    </button>
+    </Button>
   </div>
 
   <!-- Results -->
@@ -144,26 +151,26 @@
             </div>
             <div style="display:flex; gap:6px; flex-shrink:0">
               <!-- Always show link to Copr project page -->
-              <button
-                class="btn btn-sm btn-ghost"
+              <Button
+                class="btn btn-sm -ghost"
                 title="View on Copr"
                 onclick={() => open(`https://copr.fedorainfracloud.org/coprs/${project.full_name}/`)}
               >
                 <ExternalLink size={12} />
-              </button>
+              </Button>
 
-              <button
-                class="btn btn-sm btn-danger"
+              <Button
+                class="btn btn-sm -danger"
                 onclick={() => disableRepo(project.full_name)}
               >
                 <Minus size={12} /> Disable
-              </button>
-              <button
-                class="btn btn-sm btn-primary"
+              </Button>
+              <Button
+                class="btn btn-sm -primary"
                 onclick={() => enableRepo(project.full_name)}
               >
                 <Plus size={12} /> Enable
-              </button>
+              </Button>
             </div>
           </div>
 

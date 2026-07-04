@@ -163,14 +163,7 @@ pub async fn change_password(username: String, password: String) -> Result<Strin
 #[tauri::command]
 pub async fn toggle_sudo(username: String, grant: bool) -> Result<String, String> {
     // Fedora uses 'wheel' group for sudo privileges
-    let action = if grant { "-aG" } else { "-d" };
-    let output = Command::new("pkexec")
-        .args(["/usr/sbin/usermod", action, "wheel", &username])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec usermod: {e}"))?;
-
-    // usermod -d doesn't work that way. Actually, `gpasswd -d user wheel` is better for removal.
+    // Actually, `gpasswd -d user wheel` is better for removal.
     let (cmd, args) = if grant {
         ("/usr/sbin/usermod", vec!["-aG", "wheel", &username])
     } else {

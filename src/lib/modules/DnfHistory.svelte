@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -61,7 +68,7 @@
   let loadingUpdates = $state(false);
   let upgradeOutput = $state('');
   let isUpgrading = $state(false);
-  let upgradeTerminalRef: HTMLElement | null = null;
+  let upgradeTerminalRef: HTMLElement | null = $state(null);
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenFinished: UnlistenFn | null = null;
   let pendingCr = $state(false);
@@ -315,9 +322,9 @@
 <div class="module-page">
   <PageHeader title="DNF Manager" subtitle="Manage packages, view history, and perform maintenance" icon={Package}>
     {#if activeTab === 'history'}
-      <button class="btn btn-outline" onclick={loadHistory} disabled={loadingHistory}>
+      <Button variant="outline" class="" onclick={loadHistory} disabled={loadingHistory}>
         <RefreshCw size={14} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
+      </Button>
     {/if}
   </PageHeader>
 
@@ -325,13 +332,11 @@
   <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
     <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
       {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'System Logs']] as [id, label]}
-        <button
-          class="tab-btn"
-          class:active={activeTab === id}
+        <Button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
         >
           {label}
-        </button>
+        </Button>
       {/each}
     </div>
 
@@ -362,13 +367,13 @@
             <span style="font-size:13px; color:var(--color-text-secondary)">{updates.length} updates available</span>
           </div>
           <div style="display:flex; gap:12px;">
-            <button class="btn btn-outline" onclick={checkUpdates} disabled={loadingUpdates}>
+            <Button variant="outline" class="" onclick={checkUpdates} disabled={loadingUpdates}>
               <RefreshCw size={14} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
-            </button>
+            </Button>
             {#if updates.length > 0}
-              <button class="btn btn-primary" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
+              <Button variant="primary" class="" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
                 <RefreshCw size={14} /> Update Selected ({selectedUpdates.size})
-              </button>
+              </Button>
             {/if}
           </div>
         </div>
@@ -506,15 +511,15 @@
           <Search size={14} style="color:var(--color-text-muted)" />
           <input bind:value={pkgQuery} placeholder="Enter package name (e.g. htop)..." onkeydown={(e) => e.key === 'Enter' && runPkgCmd('search')} />
         </div>
-        <button class="btn btn-primary" onclick={() => runPkgCmd('search')} disabled={!pkgQuery || pkgLoading}>
+        <Button variant="primary" class="" onclick={() => runPkgCmd('search')} disabled={!pkgQuery || pkgLoading}>
           <Search size={14} /> Search
-        </button>
-        <button class="btn btn-outline" onclick={() => runPkgCmd('info')} disabled={!pkgQuery || pkgLoading}>
+        </Button>
+        <Button variant="outline" class="" onclick={() => runPkgCmd('info')} disabled={!pkgQuery || pkgLoading}>
           <Info size={14} /> Info
-        </button>
-        <button class="btn btn-outline" onclick={() => runPkgCmd('versions')} disabled={!pkgQuery || pkgLoading}>
+        </Button>
+        <Button variant="outline" class="" onclick={() => runPkgCmd('versions')} disabled={!pkgQuery || pkgLoading}>
           <ListTree size={14} /> Versions
-        </button>
+        </Button>
       </div>
       
       <div style="flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
@@ -536,9 +541,9 @@
           <div style="flex:1">
             <div style="font-weight:600; margin-bottom:4px; color:var(--color-text-primary)">Clear DNF Cache</div>
             <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Removes all cached repository data and downloaded packages. Resolves "metadata doesn't match" errors.</div>
-            <button class="btn btn-outline btn-danger" onclick={() => confirmMaintenance('dnf clean all', 'dnf_clean_all', 'Are you sure you want to clear the DNF cache?\n\nThis will remove all cached repository data and downloaded packages. A polkit password prompt will appear.')} disabled={maintRunning}>
+            <Button variant="outline" class=" btn-danger" onclick={() => confirmMaintenance('dnf clean all', 'dnf_clean_all', 'Are you sure you want to clear the DNF cache?\n\nThis will remove all cached repository data and downloaded packages. A polkit password prompt will appear.')} disabled={maintRunning}>
               <Trash2 size={14} /> Run dnf clean all
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -550,9 +555,9 @@
           <div style="flex:1">
             <div style="font-weight:600; margin-bottom:4px; color:var(--color-text-primary)">Autoremove Unused Packages</div>
             <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Removes packages that were installed as dependencies but are no longer needed by any installed program.</div>
-            <button class="btn btn-outline btn-warning" onclick={() => confirmMaintenance('dnf autoremove', 'dnf_autoremove', 'Are you sure you want to autoremove unused packages?\n\nWARNING: This can sometimes remove critical system packages if dependencies were mismanaged. Please review the output carefully. A polkit password prompt will appear.')} disabled={maintRunning}>
+            <Button variant="outline" class=" btn-warning" onclick={() => confirmMaintenance('dnf autoremove', 'dnf_autoremove', 'Are you sure you want to autoremove unused packages?\n\nWARNING: This can sometimes remove critical system packages if dependencies were mismanaged. Please review the output carefully. A polkit password prompt will appear.')} disabled={maintRunning}>
               <Package size={14} /> Run dnf autoremove
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -564,9 +569,9 @@
           <div style="flex:1">
             <div style="font-weight:600; margin-bottom:4px; color:var(--color-text-primary)">Check System Health</div>
             <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Checks the local RPM database and produces information on any problems it discovers (duplicates, broken dependencies).</div>
-            <button class="btn btn-outline" onclick={() => runMaintenance('dnf check', 'dnf_check')} disabled={maintRunning}>
+            <Button variant="outline" class="" onclick={() => runMaintenance('dnf check', 'dnf_check')} disabled={maintRunning}>
               <CheckCircle size={14} /> Run dnf check
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -578,9 +583,9 @@
           <div style="flex:1">
             <div style="font-weight:600; margin-bottom:4px; color:var(--color-text-primary)">Refresh Metadata (Makecache)</div>
             <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Forces DNF to connect to repositories and download the latest package lists and metadata.</div>
-            <button class="btn btn-outline" onclick={() => runMaintenance('dnf makecache', 'dnf_makecache_cmd')} disabled={maintRunning}>
+            <Button variant="outline" class="" onclick={() => runMaintenance('dnf makecache', 'dnf_makecache_cmd')} disabled={maintRunning}>
               <Database size={14} /> Run dnf makecache
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -599,9 +604,9 @@
           <h3 style="font-size:16px; font-weight:600; margin:0; color:var(--color-text-primary)">DNF System Logs</h3>
           <span style="font-size:13px; color:var(--color-text-secondary);">/var/log/dnf.log</span>
         </div>
-        <button class="btn btn-outline" onclick={loadDnfLog} disabled={loadingLog}>
+        <Button variant="outline" class="" onclick={loadDnfLog} disabled={loadingLog}>
           <RefreshCw size={14} class={loadingLog ? 'animate-spin-slow' : ''} /> Refresh
-        </button>
+        </Button>
       </div>
       
       <div style="flex:1; min-height: 400px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">

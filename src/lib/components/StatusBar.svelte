@@ -45,14 +45,7 @@
     checkSudoStatus();
   });
 
-  function formatTime(date: Date): string {
-    return date.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-  }
+
 </script>
 
 <footer class="status-bar" role="status" aria-live="polite">
@@ -94,9 +87,6 @@
     {#if statusStore.lastEntry}
       <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}">
         exit {statusStore.lastEntry.exitCode ?? '—'}
-      </span>
-      <span class="ts-pill">
-        {formatTime(statusStore.lastEntry.timestamp)}
       </span>
     {:else}
       <span class="ts-pill muted">Fedora / RHEL</span>
@@ -182,7 +172,11 @@
   :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0;  }
 </style>
 
+<svelte:window onkeydown={(e) => { if (showRootModal && e.key === 'Escape') showRootModal = false; }} />
+
 {#if showRootModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showRootModal = false; }}>
     <div class="modal-content" style="max-width: 320px;">
       <h3 style="margin-top:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
@@ -206,7 +200,6 @@
           class="input"
           placeholder="Password..."
           style="width: 100%; margin-bottom:16px;"
-          autofocus
         />
         <div style="display:flex; gap:8px; justify-content:flex-end;">
           <button type="button" class="btn btn-outline" onclick={() => showRootModal = false}>Cancel</button>

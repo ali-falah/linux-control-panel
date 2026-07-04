@@ -101,29 +101,7 @@ impl Command {
         }
     }
     
-    // Fallible tokio build
-    #[cfg(feature = "tokio")]
-    fn build_tokio(&self) -> std::io::Result<(tokio::process::Command, Option<String>)> {
-        let guard = SUDO_PASSWORD.lock().unwrap();
-        if self.program == "pkexec" && guard.is_some() {
-            let pw = guard.clone().unwrap();
-            let mut cmd = tokio::process::Command::new("sudo");
-            cmd.arg("-S").arg("--prompt=");
-            for arg in &self.args {
-                cmd.arg(arg);
-            }
-            Ok((cmd, Some(pw)))
-        } else if self.program == "pkexec" && guard.is_none() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Root privileges are required. Please enable Root in the Control Panel.",
-            ))
-        } else {
-            let mut cmd = tokio::process::Command::new(&self.program);
-            cmd.args(&self.args);
-            Ok((cmd, None))
-        }
-    }
+
 
     pub fn output(&mut self) -> std::io::Result<Output> {
         let (mut cmd, pw_opt) = self.build_std()?;

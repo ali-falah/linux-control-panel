@@ -1,4 +1,11 @@
 <script lang="ts">
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -136,16 +143,16 @@
 
 <div class="module-page">
   <PageHeader title="Firewall Manager" subtitle="Manage firewalld zones, open ports, and allowed services" icon={Shield}>
-    <button class="btn btn-ghost" onclick={loadState} disabled={loading}>
+    <Button variant="ghost" class="" onclick={loadState} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </button>
+    </Button>
     {#if state?.is_running}
-      <button 
-        class="btn {state.is_panic ? 'btn-success' : 'btn-danger'}" 
+      <Button 
+        class="btn {state.is_panic ? 'btn-success' : '-danger'}" 
         onclick={confirmTogglePanic}
       >
         <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
-      </button>
+      </Button>
     {/if}
   </PageHeader>
 
@@ -184,8 +191,8 @@
       <div class="card" style="width: 250px; display:flex; flex-direction:column; gap:8px">
         <h3 style="margin-top:0; color:var(--color-text-primary); font-size:14px">Active Zones</h3>
         {#each state.active_zones as zone}
-          <button 
-            class="zone-btn {activeZone === zone ? 'active' : ''}"
+          <Button 
+            class="zone- {activeZone === zone ? 'active' : ''}"
             onclick={() => { activeZone = zone; loadRules(zone); }}
           >
             <ShieldCheck size={16} />
@@ -193,7 +200,7 @@
             {#if zone === state.default_zone}
               <span class="badge badge-info" style="margin-left:auto; font-size:10px; padding:2px 6px">Default</span>
             {/if}
-          </button>
+          </Button>
         {/each}
       </div>
 
@@ -208,9 +215,9 @@
             <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Allowed Services</h3>
             <div style="display:flex; gap:8px; margin-bottom:12px">
               <input class="w-full" bind:value={newService} placeholder="e.g. http, https, ssh" onkeydown={(e) => e.key === 'Enter' && addRule('service')} />
-              <button class="btn btn-outline" onclick={() => addRule('service')} disabled={!newService.trim()}>
+              <Button variant="outline" class="" onclick={() => addRule('service')} disabled={!newService.trim()}>
                 <Plus size={14} /> Add
-              </button>
+              </Button>
             </div>
             
             {#if rules.services.length === 0}
@@ -235,9 +242,9 @@
             <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
             <div style="display:flex; gap:8px; margin-bottom:12px">
               <input class="w-full" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
-              <button class="btn btn-outline" onclick={() => addRule('port')} disabled={!newPort.trim()}>
+              <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
                 <Plus size={14} /> Add
-              </button>
+              </Button>
             </div>
 
             {#if rules.ports.length === 0}
@@ -262,7 +269,7 @@
 </div>
 
 <style>
-  .zone-btn {
+  :global(.zone-btn) {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -277,11 +284,11 @@
     text-align: left;
     transition: all 0.2s ease;
   }
-  .zone-btn:hover {
+  :global(.zone-btn:hover) {
     background: var(--color-bg-raised);
     color: var(--color-text-primary);
   }
-  .zone-btn.active {
+  :global(.zone-btn.active) {
     background: var(--color-bg-raised);
     border-color: var(--color-border-focus);
     color: var(--color-accent);
