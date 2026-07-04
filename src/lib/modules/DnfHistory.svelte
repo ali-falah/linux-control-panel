@@ -353,16 +353,34 @@
 <div class="module-page">
   <PageHeader title="DNF Manager" subtitle="Manage packages, view history, and perform maintenance" icon={Package}>
     {#if activeTab === 'history'}
-      <Button variant="outline" class="" onclick={loadHistory} disabled={loadingHistory}>
-        <RefreshCw size={14} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
+      <Button variant="outline" class="btn-sm" onclick={loadHistory} disabled={loadingHistory}>
+        <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
+      </Button>
+    {:else if activeTab === 'updates'}
+      <Button variant="outline" class="btn-sm" onclick={checkUpdates} disabled={loadingUpdates}>
+        <RefreshCw size={13} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
+      </Button>
+    {:else if activeTab === 'packages'}
+      <Button variant="primary" class="btn-sm" onclick={() => runPkgCmd('search')} disabled={!pkgQuery || pkgLoading}>
+        <Search size={13} /> Search
+      </Button>
+      <Button variant="outline" class="btn-sm" onclick={() => runPkgCmd('info')} disabled={!pkgQuery || pkgLoading}>
+        <Info size={13} /> Info
+      </Button>
+      <Button variant="outline" class="btn-sm" onclick={() => runPkgCmd('versions')} disabled={!pkgQuery || pkgLoading}>
+        <ListTree size={13} /> Versions
+      </Button>
+    {:else if activeTab === 'logs'}
+      <Button variant="outline" class="btn-sm" onclick={loadDnfLog} disabled={loadingLog}>
+        <RefreshCw size={13} class={loadingLog ? 'animate-spin-slow' : ''} /> Refresh
       </Button>
     {/if}
   </PageHeader>
 
-  <!-- Controls: Tabs & Search -->
-  <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
-    <div class="tab-bar" style="margin-bottom: 0;">
-      {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'System Logs']] as [id, label]}
+  <!-- Controls: Tabs & Actions -->
+  <div class="controls-row">
+    <div class="tab-bar">
+      {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'DNF System Logs']] as [id, label]}
         <button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
         >
@@ -371,14 +389,28 @@
       {/each}
     </div>
 
-    {#if activeTab === 'history'}
-      <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
-        <Search size={14} style="color:var(--color-text-muted)" />
-        <input bind:value={historySearch} placeholder="Search history by command or action…" />
-      </div>
-    {:else}
-      <div style="flex:1"></div>
-    {/if}
+    <div class="tab-actions">
+      {#if activeTab === 'history'}
+        <div class="search-bar" style="margin: 0;">
+          <Search size={14} style="color:var(--color-text-muted)" />
+          <input bind:value={historySearch} placeholder="Search history by command or action…" />
+        </div>
+      {:else if activeTab === 'updates'}
+        <span style="font-size:13px; color:var(--color-text-secondary); margin-right:8px;">{updates.length} updates available</span>
+        {#if updates.length > 0}
+          <Button variant="primary" class="btn-sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
+            <RefreshCw size={13} /> Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
+          </Button>
+        {/if}
+      {:else if activeTab === 'packages'}
+        <div class="search-bar" style="margin:0; width: 250px;">
+          <Search size={14} style="color:var(--color-text-muted)" />
+          <input bind:value={pkgQuery} placeholder="Enter package name (e.g. htop)..." onkeydown={(e) => e.key === 'Enter' && runPkgCmd('search')} />
+        </div>
+      {:else if activeTab === 'logs'}
+        <span style="font-size:13px; color:var(--color-text-secondary); margin-right:8px;">reads /var/log/dnf.log</span>
+      {/if}
+    </div>
   </div>
 
   {#if activeTab === 'updates'}
@@ -392,23 +424,7 @@
           >{upgradeOutput}</div>
         </div>
       {:else}
-        <div style="padding: 16px; display:flex; justify-content:space-between; align-items:center; border-bottom: 1px solid var(--color-border);">
-          <div>
-            <h3 style="margin:0; font-size:16px; font-weight:600;">System Updates</h3>
-            <span style="font-size:13px; color:var(--color-text-secondary)">{updates.length} updates available</span>
-          </div>
-          <div style="display:flex; gap:12px;">
-            <Button variant="outline" class="" onclick={checkUpdates} disabled={loadingUpdates}>
-              <RefreshCw size={14} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
-            </Button>
-            {#if updates.length > 0}
-              <Button variant="primary" class="" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
-                <RefreshCw size={14} /> Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
-              </Button>
-            {/if}
-          </div>
-        </div>
-        
+
         <div style="flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;">
           {#if loadingUpdates && updates.length === 0}
           <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;gap:16px;color:var(--color-text-muted)">
@@ -536,33 +552,15 @@
     </div>
 
   {:else if activeTab === 'packages'}
-    <div class="card" style="display:flex; flex-direction:column; gap:16px; flex:1; min-height:0">
-      <div style="display:flex; gap:10px">
-        <div class="search-bar" style="flex:1; margin:0">
-          <Search size={14} style="color:var(--color-text-muted)" />
-          <input bind:value={pkgQuery} placeholder="Enter package name (e.g. htop)..." onkeydown={(e) => e.key === 'Enter' && runPkgCmd('search')} />
-        </div>
-        <Button variant="primary" class="" onclick={() => runPkgCmd('search')} disabled={!pkgQuery || pkgLoading}>
-          <Search size={14} /> Search
-        </Button>
-        <Button variant="outline" class="" onclick={() => runPkgCmd('info')} disabled={!pkgQuery || pkgLoading}>
-          <Info size={14} /> Info
-        </Button>
-        <Button variant="outline" class="" onclick={() => runPkgCmd('versions')} disabled={!pkgQuery || pkgLoading}>
-          <ListTree size={14} /> Versions
-        </Button>
-      </div>
-      
-      <div style="flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
-        <CodeEditor value={pkgOutput || 'Enter a package name and select an action to view output...'} readonly={true} />
+    <div class="card" style="display:flex; flex-direction:column; gap:16px; flex:1; min-height:0;">
+      <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
+        <CodeEditor value={pkgOutput || 'Enter a package name and select an action to view output...'} readonly={true} height="100%" />
       </div>
     </div>
 
   {:else if activeTab === 'maintenance'}
     <div class="card module-content-scroll" style="display:flex; flex-direction:column; gap:16px">
-      <h3 style="font-size:16px; font-weight:600; margin:0; color:var(--color-text-primary)">System Maintenance</h3>
-      <p style="font-size:13px; color:var(--color-text-secondary); margin:0">Run cleanup tasks to free up disk space or fix repository issues.</p>
-      
+
       <div style="display:flex; flex-direction:column; gap:12px">
         <!-- Clear Cache -->
         <div style="display:flex; gap:16px; align-items:flex-start; padding:16px; background:var(--color-bg-base); border:1px solid var(--color-border); border-radius:8px">
@@ -622,26 +620,16 @@
       </div>
 
       {#if maintOutput}
-        <div style="margin-top:10px; height: 300px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
-          <CodeEditor value={maintOutput} readonly={true} />
+        <div style="margin-top:10px; display:flex; flex-direction:column; height: 300px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
+          <CodeEditor value={maintOutput} readonly={true} height="100%" />
         </div>
       {/if}
     </div>
 
   {:else if activeTab === 'logs'}
-    <div class="card module-content-scroll" style="display:flex; flex-direction:column; gap:16px">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div>
-          <h3 style="font-size:16px; font-weight:600; margin:0; color:var(--color-text-primary)">DNF System Logs</h3>
-          <span style="font-size:13px; color:var(--color-text-secondary);">/var/log/dnf.log</span>
-        </div>
-        <Button variant="outline" class="" onclick={loadDnfLog} disabled={loadingLog}>
-          <RefreshCw size={14} class={loadingLog ? 'animate-spin-slow' : ''} /> Refresh
-        </Button>
-      </div>
-      
-      <div style="flex:1; min-height: 400px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden">
-        <CodeEditor value={dnfLogContent || 'Loading...'} readonly={true} />
+    <div class="card" style="display:flex; flex-direction:column; flex:1; min-height:0; padding:0; border:none; background:transparent;">
+      <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden">
+        <CodeEditor value={dnfLogContent || 'Loading...'} readonly={true} height="100%" />
       </div>
     </div>
   {/if}

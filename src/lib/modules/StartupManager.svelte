@@ -138,30 +138,28 @@ $PATH Entries<script lang="ts">
     </Button>
   </PageHeader>
 
-  <!-- Controls: Search & Tabs -->
-  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
-    <!-- Search -->
-    <div class="search-bar" style="flex:1; min-width:150px; margin: 0; align-self: stretch; height: auto;">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={filter} placeholder="Filter entries…" style="height: 100%;" />
-    </div>
-
-    <!-- Tabs -->
-    <div class="tab-bar" style="align-self: stretch; margin-bottom: 0; display: flex; align-items: stretch;">
+  <!-- Controls: Tabs & Actions -->
+  <div class="controls-row">
+    <div class="tab-bar">
       <button class="tab-btn { viewFilter === 'service' ? 'active' : '' }"
-        style="display: flex; align-items: center; justify-content: center; height: auto; gap: 8px;"
         onclick={() => viewFilter = 'service'}
       >
-        <span style="color:var(--color-accent)">⬡</span> systemd Service Units
+        <span style="color:var(--color-accent)">⬡</span> systemd Services
         <span class="badge badge-muted">{systemdUnits.length}</span>
       </button>
       <button class="tab-btn { viewFilter === 'autostart' ? 'active' : '' }"
-        style="display: flex; align-items: center; justify-content: center; height: auto; gap: 8px;"
         onclick={() => viewFilter = 'autostart'}
       >
-        <span style="color:var(--color-success)">⬡</span> XDG Autostart Entries
+        <span style="color:var(--color-success)">⬡</span> XDG Autostart
         <span class="badge badge-muted">{autostartEntries.length}</span>
       </button>
+    </div>
+
+    <div class="tab-actions">
+      <div class="search-bar" style="margin: 0; width: 250px;">
+        <Search size={14} style="color:var(--color-text-muted)" />
+        <input bind:value={filter} placeholder="Filter entries…" />
+      </div>
     </div>
   </div>
 

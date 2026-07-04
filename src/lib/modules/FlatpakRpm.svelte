@@ -152,39 +152,12 @@
     </Button>
   </PageHeader>
 
-  <!-- Controls: Stats, Search & Tabs -->
-  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
-    <!-- Stats -->
-    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-warning);line-height:1;">{duplicates.length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Duplicates</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-info);line-height:1;">{flatpaks.length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Flatpaks</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{rpms.length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">RPMs</span>
-      </div>
-    </div>
-
-    <!-- Search -->
-    {#if activeTab !== 'duplicates'}
-      <div class="search-bar" style="flex:1; min-width:200px; margin: 0; align-self: stretch; height: auto;">
-        <Search size={14} style="color:var(--color-text-muted)" />
-        <input bind:value={filter} placeholder="Filter packages…" style="height: 100%;" />
-      </div>
-    {:else}
-      <div style="flex:1"></div>
-    {/if}
-
+  <!-- Controls: Tabs & Actions -->
+  <div class="controls-row">
     <!-- Tabs -->
-    <div class="tab-bar" style="align-self: stretch; margin-bottom: 0; display: flex; align-items: stretch;">
+    <div class="tab-bar">
       {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
         <button class="tab-btn { activeTab === id ? 'active' : '' }"
-          style="display: flex; align-items: center; justify-content: center; height: auto;"
           onclick={() => activeTab = id as Tab}
         >
           {label}
@@ -193,6 +166,32 @@
           {/if}
         </button>
       {/each}
+    </div>
+
+    <div class="tab-actions">
+      <!-- Stats -->
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
+        <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;box-sizing:border-box;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+          <span style="font-size:14px;font-weight:700;color:var(--color-warning);line-height:1;">{duplicates.length}</span>
+          <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Duplicates</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;box-sizing:border-box;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+          <span style="font-size:14px;font-weight:700;color:var(--color-info);line-height:1;">{flatpaks.length}</span>
+          <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Flatpaks</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;box-sizing:border-box;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+          <span style="font-size:14px;font-weight:700;color:var(--color-text-primary);line-height:1;">{rpms.length}</span>
+          <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">RPMs</span>
+        </div>
+      </div>
+
+      <!-- Search -->
+      {#if activeTab !== 'duplicates'}
+        <div class="search-bar" style="margin: 0; width: 200px;">
+          <Search size={14} style="color:var(--color-text-muted)" />
+          <input bind:value={filter} placeholder="Filter packages…" />
+        </div>
+      {/if}
     </div>
   </div>
 

@@ -691,17 +691,68 @@
       </Button>
     </div>
   {:else}
-    <!-- ─── Tab Bar ─── -->
-    <div class="tab-bar">
-      {#each tabDefs as tab}
-        <button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
-          onclick={() => (activeTab = tab.id)}
-          id={`nginx-tab-${tab.id}`}
-        >
-          <tab.icon size={14} />
-          {tab.label}
-        </button>
-      {/each}
+    <!-- ─── Controls: Tabs & Actions ─── -->
+    <div class="controls-row">
+      <div class="tab-bar">
+        {#each tabDefs as tab}
+          <button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
+            onclick={() => (activeTab = tab.id)}
+            id={`nginx-tab-${tab.id}`}
+          >
+            <tab.icon size={14} />
+            {tab.label}
+          </button>
+        {/each}
+      </div>
+
+      <div class="tab-actions">
+        {#if activeTab === 'sites'}
+          <Button variant="outline" class="btn-sm" onclick={loadSites} id="nginx-refresh-sites">
+            <RefreshCw size={13} /> Refresh
+          </Button>
+          <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
+            <Plus size={13} /> New Site
+          </Button>
+        {:else if activeTab === 'editor'}
+          <Button variant="outline" class="btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
+            <RefreshCw size={13} /> Refresh
+          </Button>
+          <Button variant="outline" class="btn-sm" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
+            <ArchiveRestore size={13} /> Backups ({backups.length})
+          </Button>
+        {:else if activeTab === 'www'}
+          <Button variant="outline" class="btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={13} /> Refresh</Button>
+          <Button variant="primary" class="btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
+            <FolderPlus size={13} /> New Dir
+          </Button>
+        {:else if activeTab === 'logs'}
+          <select bind:value={selectedLog} onchange={loadLog} class="log-select" id="nginx-log-select">
+            {#each logFiles as lf}
+              <option value={lf}>{lf}</option>
+            {/each}
+          </select>
+          <div class="search-bar" style="margin:0; width: 200px;">
+            <Search size={14} style="color:var(--color-text-muted)" />
+            <input type="text" bind:value={logFilter} onchange={loadLog} placeholder="Filter…" id="nginx-log-filter" />
+          </div>
+          <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
+            <RefreshCw size={13} /> Refresh
+          </Button>
+          <Button class="btn-sm {logAutoRefresh ? 'btn-primary' : '-outline'}" onclick={toggleAutoRefresh} id="nginx-log-auto">
+            <Clock size={13} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
+          </Button>
+          <Button variant="outline" class="btn-sm" onclick={exportLog} id="nginx-log-export">
+            <Download size={13} /> Export
+          </Button>
+          <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
+            <Trash2 size={13} /> Clear
+          </Button>
+        {:else if activeTab === 'ssl'}
+          <Button variant="outline" class="btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
+            <RefreshCw size={13} /> Refresh
+          </Button>
+        {/if}
+      </div>
     </div>
 
     <!-- ─── Tab Content ─── -->
@@ -773,7 +824,9 @@
                 {/if}
               </div>
               <p class="ov-since">{testResult.timestamp}</p>
-              <pre class="test-output">{testResult.output}</pre>
+              {#if testResult.output && testResult.output.trim()}
+                <pre class="test-output">{testResult.output}</pre>
+              {/if}
             {:else}
               <p class="ov-since">Run test to see result</p>
             {/if}
@@ -811,7 +864,9 @@
             <div class="ov-card-header">
               <div class="ov-card-title"><Server size={16} />Version</div>
             </div>
-            <div class="version-display">{installInfo.version}</div>
+            {#if installInfo.version}
+              <div class="version-display">{installInfo.version}</div>
+            {/if}
             <p class="ov-since">Installed at <code>/usr/sbin/nginx</code></p>
           </div>
         </div>
@@ -819,17 +874,7 @@
       <!-- ══ SITES ══════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'sites'}
         <div class="tab-section">
-          <div class="section-header">
-            <h3>Site Configurations</h3>
-            <div class="header-actions">
-              <Button variant="ghost" class=" btn-sm" onclick={loadSites} id="nginx-refresh-sites">
-                <RefreshCw size={13} /> Refresh
-              </Button>
-              <Button variant="primary" class=" btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
-                <Plus size={13} /> New Site
-              </Button>
-            </div>
-          </div>
+
 
           {#if showNewSiteForm}
             <div class="card new-site-form">
@@ -984,12 +1029,7 @@
         <div class="editor-layout">
           <!-- File List -->
           <div class="editor-sidebar">
-            <div class="editor-sidebar-header">
-              <span>Files</span>
-              <Button variant="ghost" class=" btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
-                <RefreshCw size={12} />
-              </Button>
-            </div>
+
 
             {#if editorLoading && configs.length === 0}
               <div class="center-state"><div class="spinner-sm"></div></div>
@@ -1013,10 +1053,7 @@
               {/each}
             {/if}
 
-            <div class="editor-sidebar-sep"></div>
-            <Button variant="outline" class=" btn-sm sidebar-backup-btn" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
-              <ArchiveRestore size={12} /> Backups ({backups.length})
-            </Button>
+
           </div>
 
           <!-- Editor Panel -->
@@ -1108,15 +1145,7 @@
         <div class="www-layout">
           <!-- Tree -->
           <div class="www-tree">
-            <div class="www-tree-header">
-              <span>/var/www</span>
-              <div class="header-actions">
-                <Button variant="ghost" class=" btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={12} /></Button>
-                <Button variant="outline" class=" btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
-                  <FolderPlus size={12} />
-                </Button>
-              </div>
-            </div>
+
             {#if showNewDirForm}
               <div class="new-dir-form">
                 <input type="text" bind:value={newDirName} placeholder="folder-name" id="nginx-new-dir-name" />
@@ -1167,33 +1196,7 @@
       <!-- ══ LOGS ══════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'logs'}
         <div class="tab-section">
-          <div class="logs-toolbar">
-            <select bind:value={selectedLog} onchange={loadLog} class="log-select" id="nginx-log-select">
-              {#each logFiles as lf}
-                <option value={lf}>{lf}</option>
-              {/each}
-            </select>
-            <div class="search-bar" style="margin:0; padding:8px 14px;">
-              <Search size={14} style="color:var(--color-text-muted)" />
-              <input type="text" bind:value={logFilter} onchange={loadLog} placeholder="Filter…" id="nginx-log-filter" />
-            </div>
-            <Button variant="outline" class="" onclick={loadLog} id="nginx-log-refresh">
-              <RefreshCw size={14} /> Refresh
-            </Button>
-            <Button
-              class="btn {logAutoRefresh ? 'btn-primary' : '-outline'}"
-              onclick={toggleAutoRefresh}
-              id="nginx-log-auto"
-            >
-              <Clock size={14} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
-            </Button>
-            <Button variant="outline" class="" onclick={exportLog} id="nginx-log-export">
-              <Download size={14} /> Export
-            </Button>
-            <Button variant="danger" class="" onclick={confirmClearLog} id="nginx-log-clear">
-              <Trash2 size={14} /> Clear
-            </Button>
-          </div>
+
           {#if logLoading}
             <div class="center-state"><div class="spinner"></div></div>
           {:else}
@@ -1204,12 +1207,7 @@
       <!-- ══ SSL ════════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'ssl'}
         <div class="tab-section">
-          <div class="section-header">
-            <h3>SSL Certificates — Let's Encrypt</h3>
-            <Button variant="ghost" class=" btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
-              <RefreshCw size={13} /> Refresh
-            </Button>
-          </div>
+
           <div class="ssl-notice">
             <AlertTriangle size={14} />
             To issue a <strong>new</strong> certificate, use the terminal:
@@ -1379,7 +1377,7 @@
   /* ─── Layout ─────────────────────────────────────────────────────────── */
   .module-page { overflow: hidden; }
   .tab-content { flex: 1; overflow-y: auto; padding: 0; }
-  .tab-section { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .tab-section { padding: 0; display: flex; flex-direction: column; gap: 16px; }
 
   /* ─── Not Installed ──────────────────────────────────────────────────── */
   .not-installed {
@@ -1450,7 +1448,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 20px;
-    padding: 24px;
+    padding: 0;
   }
   .ov-card { display: flex; flex-direction: column; gap: 12px; }
   .ov-card-header {

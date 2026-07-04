@@ -78,6 +78,7 @@
   let previewLoading = $state(false);
   let filterLive = $state('');
   let showOnlyUnsynced = $state(false);
+  let selectedSourceFile = $state('');
 
   // ─── Computed ─────────────────────────────────────────────────────────────
 
@@ -449,22 +450,75 @@
 <!-- ─── Page ────────────────────────────────────────────────────────────── -->
 <div class="module-page">
   <!-- Header -->
-  <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal} />
+  <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal}>
+    {#if activeTab === 'variables'}
+      <Button variant="outline" class="btn-sm" onclick={loadVarGroups} disabled={varsLoading}>
+        <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
+      </Button>
+      <Button variant="primary" class="btn-sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
+        <Plus size={13} /> Add Variable
+      </Button>
+    {/if}
+  </PageHeader>
 
-  <!-- Tab Bar -->
-  <div class="tab-bar">
-    <button class="tab-btn" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
-      <Variable size={14} /> Variables
-    </button>
-    <button class="tab-btn" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
-      <FolderOpen size={14} /> PATH Manager
-    </button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
-      <FileCode size={14} /> Profile Files
-    </button>
-    <button class="tab-btn" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
-      <Eye size={14} /> Live Preview
-    </button>
+  <!-- Controls: Tabs & Actions -->
+  <div class="controls-row">
+    <div class="tab-bar">
+      <button class="tab-btn" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
+        <Variable size={14} /> Variables
+      </button>
+      <button class="tab-btn" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
+        <FolderOpen size={14} /> PATH Manager
+      </button>
+      <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
+        <FileCode size={14} /> Profile Files
+      </button>
+      <button class="tab-btn" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
+        <Eye size={14} /> Live Preview
+      </button>
+    </div>
+
+    <div class="tab-actions">
+      {#if activeTab === 'variables'}
+        <div class="search-bar" style="margin:0; width:200px">
+          <Search size={16} />
+          <input bind:value={filterVars} placeholder="Filter variables..." />
+          {#if filterVars}<Button class="btn btn-sm -ghost" style="padding:2px; height:24px" onclick={() => filterVars = ''}>✕</Button>{/if}
+        </div>
+        <Button variant="outline" class="btn-sm" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
+          <Eye size={13} /> Live values
+        </Button>
+      {:else if activeTab === 'path'}
+        <Button variant="outline" class="btn-sm" onclick={loadPathEntries} id="shell-reload-path">
+          <RefreshCw size={13} /> Refresh
+        </Button>
+        <Button variant="primary" class="btn-sm" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
+          <Plus size={13} /> Add Entry
+        </Button>
+      {:else if activeTab === 'files'}
+        <Button variant="outline" class="btn-sm" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={13} /> Refresh</Button>
+        <Button variant="primary" class="btn-sm" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
+          <Plus size={13} /> New File
+        </Button>
+      {:else if activeTab === 'preview'}
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span class="text-muted text-xs">Source:</span>
+          <select bind:value={selectedSourceFile} class="form-select" style="padding:4px 24px 4px 8px; font-size:12px; height:28px; width: 140px;">
+            <option value="">Select file...</option>
+            {#each profileFiles.filter(f => !f.is_system) as f}
+              <option value={f.path}>{f.display_name}</option>
+            {/each}
+          </select>
+          <Button variant="outline" class="btn-sm" disabled={!selectedSourceFile} onclick={() => { const f = profileFiles.find(pf => pf.path === selectedSourceFile); if(f) sourceFile(f); }}>
+            Run
+          </Button>
+        </div>
+        <Button variant="primary" class="btn-sm" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
+          {#if previewLoading}<div class="spinner-sm"></div>{:else}<RefreshCw size={13} />{/if}
+          Preview env
+        </Button>
+      {/if}
+    </div>
   </div>
 
   <div class="tab-content">
@@ -472,24 +526,7 @@
     <!-- ══ VARIABLES ══════════════════════════════════════════════════════ -->
     {#if activeTab === 'variables'}
       <div class="tab-section" style="padding: 0; display: flex; flex-direction: column; flex: 1; min-height: 0;">
-        <div class="custom-toolbar">
-          <div class="search-bar" style="flex:1; margin:0">
-            <Search size={16} />
-            <input bind:value={filterVars} placeholder="Filter variables..." />
-            {#if filterVars}<Button class="btn btn-sm -ghost" style="padding:2px; height:24px" onclick={() => filterVars = ''}>✕</Button>{/if}
-          </div>
-          <div class="toolbar-actions">
-            <button class="toolbar-btn" onclick={loadVarGroups} disabled={varsLoading}>
-              <RefreshCw size={14} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
-            </button>
-            <button class="toolbar-btn" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
-              <Eye size={14} /> Live values
-            </button>
-            <button class="toolbar-btn primary-btn" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
-              <Plus size={14} /> Add Variable
-            </button>
-          </div>
-        </div>
+
 
         {#if addVarForm}
           <div class="card add-var-form" style="margin-bottom:24px">
@@ -622,20 +659,8 @@
     <!-- ══ PATH MANAGER ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'path'}
       <div class="tab-section" style="display:flex; flex-direction:column; flex:1; min-height:0; padding: 0;">
-        <div class="custom-toolbar">
-          <div style="display:flex; align-items:center;">
-            <h3 style="margin:0; font-size:15px; font-weight:600; color:var(--color-text-primary);">$PATH Entries</h3>
-          </div>
-          <div class="row-actions">
-            <Button variant="ghost" class=" btn-sm" onclick={loadPathEntries} id="shell-reload-path">
-              <RefreshCw size={13} /> Refresh
-            </Button>
-            <Button variant="primary" class=" btn-sm" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
-              <Plus size={13} /> Add Entry
-            </Button>
-          </div>
-        </div>
-        <div style="display:flex; flex-direction:column; padding: 16px; gap: 12px; flex: 1; min-height:0;">
+
+        <div style="display:flex; flex-direction:column; padding: 0; gap: 12px; flex: 1; min-height:0;">
         {#if addPathForm}
           <div class="card add-var-form">
             <div class="form-title">Add PATH entry</div>
@@ -736,15 +761,7 @@
       <div class="files-layout">
         <!-- File list -->
         <div class="files-sidebar">
-          <div class="files-sidebar-header">
-            <span>Profile Files</span>
-            <div class="row-actions">
-              <Button variant="ghost" class=" btn-sm" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={12} /></Button>
-              <Button variant="outline" class=" btn-sm" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
-                <Plus size={12} />
-              </Button>
-            </div>
-          </div>
+
 
           {#if showNewFileForm}
             <div class="new-file-form">
@@ -860,16 +877,8 @@
 
     <!-- ══ LIVE PREVIEW ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'preview'}
-      <div class="tab-section" style="display:flex; flex-direction:column; flex:1; min-height:0;">
-        <div class="section-header">
-          <h3>Resolved Environment</h3>
-          <div class="row-actions">
-            <Button variant="primary" class=" btn-sm" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
-              {#if previewLoading}<div class="spinner-sm"></div>{:else}<RefreshCw size={13} />{/if}
-              Preview env
-            </Button>
-          </div>
-        </div>
+      <div class="tab-section" style="display:flex; flex-direction:column; flex:1; min-height:0; padding: 0;">
+
 
         {#if liveEnv.length > 0}
           <div class="preview-toolbar">
@@ -897,15 +906,7 @@
             <span class="text-muted text-xs" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">{filteredLiveEnv.length} / {liveEnv.length} vars</span>
           </div>
 
-          <!-- Source buttons -->
-          <div class="source-buttons">
-            <span class="text-muted text-xs" style="padding:4px 0">Source a file to refresh:</span>
-            {#each profileFiles.filter(f => !f.is_system) as f}
-              <Button variant="outline" class=" btn-sm" onclick={() => sourceFile(f)} id={`shell-source-${f.path}`}>
-                source {f.display_name}
-              </Button>
-            {/each}
-          </div>
+
 
           <!-- Diff table -->
           <div class="table-wrap module-content-scroll" style="flex: 1; min-height: 0; margin-top: 16px;">

@@ -318,19 +318,29 @@
       </div>
     </div>
   {:else}
-    <div class="tab-bar">
-      <button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
-        <Activity size={14} style="margin-right:6px" /> Physical Adapters
-      </button>
-      <button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
-        <Network size={14} style="margin-right:6px" /> Connections
-      </button>
-      <button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
-        <Globe size={14} style="margin-right:6px" /> Global DNS
-      </button>
-      <Button variant="outline" class="" style="margin-left:8px; padding: 4px 8px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
-        <RefreshCw size={12} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+    <div class="controls-row">
+      <div class="tab-bar">
+        <button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
+          <Activity size={14} style="margin-right:6px" /> Physical Adapters
+        </button>
+        <button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
+          <Network size={14} style="margin-right:6px" /> Connections
+        </button>
+        <button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
+          <Globe size={14} style="margin-right:6px" /> Global DNS
+        </button>
+      </div>
+
+      <div class="tab-actions">
+        <Button variant="outline" class="btn-sm" onclick={loadData}>
+          <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+        </Button>
+        {#if activeTab === 'connections'}
+          <Button variant="primary" class="btn-sm" onclick={() => editConnection('')}>
+            <Plus size={13}/> Add Connection
+          </Button>
+        {/if}
+      </div>
     </div>
 
     <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:24px;">
@@ -388,12 +398,7 @@
           {/each}
         </div>
       {:else if activeTab === 'connections'}
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <h3 style="margin:0; font-size:15px; color:var(--color-text-primary)">NetworkManager Profiles</h3>
-          <Button variant="primary" class="" style="padding:6px 12px; font-size:12px; display:flex; align-items:center; gap:6px;" onclick={() => editConnection('')}>
-            <Plus size={14}/> Add Connection
-          </Button>
-        </div>
+
         
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
           {#each connections as conn}

@@ -607,13 +607,27 @@ pre {
 }
 
 /* ─── Global Tab Design ───────────────────────────────────────────── */
+.controls-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  justify-content: flex-end;
+}
 .tab-bar {
   display: inline-flex;
   gap: 4px;
   background: rgba(0, 0, 0, 0.2);
   padding: 6px;
   border-radius: 12px;
-  margin-bottom: 16px;
   align-self: flex-start;
 }
 .tab-btn {
