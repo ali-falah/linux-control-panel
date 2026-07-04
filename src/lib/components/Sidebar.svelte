@@ -91,7 +91,7 @@
     {#if !uiStore.sidebarCollapsed}
       <div class="logo-text">
         <span class="logo-title">Control Panel</span>
-        <span class="logo-version">v0.1.0</span>
+        <span class="logo-version">v0.2.0</span>
       </div>
     {/if}
   </div>
