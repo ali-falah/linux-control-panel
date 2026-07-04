@@ -78,6 +78,36 @@
     updates.length > 0 && selectedUpdates.size === updates.length
   );
 
+  function parseSize(sizeStr: string): number {
+    const units: Record<string, number> = {
+      'B': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3,
+      'KiB': 1024, 'MiB': 1024 ** 2, 'GiB': 1024 ** 3, 'TiB': 1024 ** 4,
+      'k': 1024, 'm': 1024 ** 2, 'g': 1024 ** 3,
+    };
+    const match = sizeStr.trim().match(/^([\d.]+)\s*([a-zA-Z]+)?$/);
+    if (!match) return 0;
+    const val = parseFloat(match[1]);
+    const unit = match[2] || 'B';
+    const multiplier = units[unit] || 1;
+    return val * multiplier;
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  }
+
+  let totalSelectedSize = $derived(
+    formatSize(
+      updates
+        .filter(u => selectedUpdates.has(u.package))
+        .reduce((acc, u) => acc + parseSize(u.size), 0)
+    )
+  );
+
   function toggleSelectAll(e: Event) {
     const checked = (e.target as HTMLInputElement).checked;
     if (checked) {
@@ -331,7 +361,7 @@
 
   <!-- Controls: Tabs & Search -->
   <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
-    <div class="tab-bar">
+    <div class="tab-bar" style="margin-bottom: 0;">
       {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'System Logs']] as [id, label]}
         <button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
@@ -373,7 +403,7 @@
             </Button>
             {#if updates.length > 0}
               <Button variant="primary" class="" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
-                <RefreshCw size={14} /> Update Selected ({selectedUpdates.size})
+                <RefreshCw size={14} /> Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
               </Button>
             {/if}
           </div>
