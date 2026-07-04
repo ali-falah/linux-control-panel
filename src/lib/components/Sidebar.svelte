@@ -231,6 +231,7 @@
     flex-direction: column;
     gap: 1px;
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
   }
@@ -247,6 +248,7 @@
     text-align: left;
     color: var(--color-text-muted);
     transition: color 0.15s ease;
+    flex-shrink: 0;
   }
 
   .group-label-btn:hover {
@@ -284,6 +286,7 @@
     flex-direction: column;
     gap: 1px;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   .group-sep {

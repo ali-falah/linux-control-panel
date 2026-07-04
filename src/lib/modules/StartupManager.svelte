@@ -168,14 +168,15 @@
     </div>
   </div>
 
-  <!-- Systemd Units -->
-  {#if viewFilter !== 'autostart'}
-    <div>
-      <h3 class="section-title" style="margin-bottom:10px">
-        <span style="color:var(--color-accent)">⬡</span> systemd Service Units
-        <span class="badge badge-muted">{filteredSystemd.length}</span>
-      </h3>
-      <div class="card module-content-scroll" style="padding:0">
+  <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:24px;">
+    <!-- Systemd Units -->
+    {#if viewFilter !== 'autostart'}
+      <div>
+        <h3 class="section-title" style="margin-bottom:10px">
+          <span style="color:var(--color-accent)">⬡</span> systemd Service Units
+          <span class="badge badge-muted">{filteredSystemd.length}</span>
+        </h3>
+        <div class="card" style="padding:0">
         {#if loading}
           <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted)">
             <RefreshCw size={14} class="animate-spin-slow" /> Loading…
@@ -185,7 +186,7 @@
             <span>No units match your filter</span>
           </div>
         {:else}
-          <div class="table-wrap" style="border:none;border-radius:0;max-height:300px;overflow-y:auto">
+          <div class="table-wrap" style="border:none;border-radius:0">
             <table>
               <thead>
                 <tr>
@@ -235,7 +236,7 @@
         <span style="color:var(--color-success)">⬡</span> XDG Autostart Entries
         <span class="badge badge-muted">{filteredAutostart.length}</span>
       </h3>
-      <div class="card module-content-scroll" style="padding:0">
+      <div class="card" style="padding:0">
         {#if loading}
           <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted)">
             <RefreshCw size={14} class="animate-spin-slow" /> Loading…
@@ -286,6 +287,7 @@
       </div>
     </div>
   {/if}
+  </div>
 </div>
 
 <style>
