@@ -326,6 +326,63 @@ input[type="text"]::placeholder, input[type="password"]::placeholder {
   color: var(--color-text-muted);
 }
 
+
+/* ─── Premium Checkbox ────────────────────────────────────────────────── */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  position: relative;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+  margin: 0;
+  flex-shrink: 0;
+}
+input[type="checkbox"]:hover {
+  border-color: var(--color-accent-soft);
+  background: rgba(255, 255, 255, 0.05);
+  transform: scale(1.05);
+}
+input[type="checkbox"]:focus-visible {
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4);
+}
+input[type="checkbox"]:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 10px var(--color-accent-glow);
+  transform: scale(1.05);
+  animation: check-pop 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  width: 5px;
+  height: 9px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  animation: check-draw 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.1s forwards;
+  margin-top: -2px;
+}
+@keyframes check-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(0.9); }
+  100% { transform: scale(1.05); }
+}
+@keyframes check-draw {
+  0% { transform: rotate(45deg) scale(0); opacity: 0; }
+  100% { transform: rotate(45deg) scale(1); opacity: 1; }
+}
+
+
 /* ─── Elegant UI Toggle Switch ─────────────────────────────────────── */
 .ui-toggle {
   position: relative;

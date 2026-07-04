@@ -38,6 +38,7 @@
   // Group membership modal
   let showGroupModal = $state(false);
   let selectedUser = $state<UserInfo | null>(null);
+  let groupSearch = $state('');
 
   async function loadData() {
     loading = true;
@@ -366,10 +367,14 @@
   <div class="modal-backdrop" onclick={() => showGroupModal = false}>
     <div class="modal" onclick={(e) => e.stopPropagation()} style="width: 500px; max-height: 80vh; display:flex; flex-direction:column">
       <h2 style="margin-top:0; color:var(--color-text-primary)">Manage Groups for {selectedUser.username}</h2>
-      <p style="font-size:13px; color:var(--color-text-secondary); margin-bottom:16px">Check the groups you want this user to be a member of.</p>
+      <p style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Check the groups you want this user to be a member of.</p>
       
-      <div style="flex:1; overflow-y:auto; border:1px solid var(--color-border); border-radius:8px; padding:8px; display:grid; grid-template-columns: 1fr 1fr; gap:8px">
-        {#each groupsList as group}
+      <div style="margin-bottom: 16px;">
+        <input type="text" class="input" placeholder="Search groups..." bind:value={groupSearch} />
+      </div>
+
+      <div class="module-content-scroll" style="flex:1; border:1px solid var(--color-border); border-radius:8px; padding:8px; display:grid; grid-template-columns: 1fr 1fr; gap:8px">
+        {#each groupsList.filter(g => g.groupname.toLowerCase().includes(groupSearch.toLowerCase())) as group (group.groupname)}
           {@const isMember = selectedUser.groups.includes(group.groupname) || group.members.includes(selectedUser.username)}
           <label style="display:flex; align-items:center; gap:8px; padding:8px; border-radius:6px; background:var(--color-bg-raised); cursor:pointer">
             <input 
@@ -383,7 +388,7 @@
       </div>
 
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px">
-        <button class="btn btn-primary" onclick={() => showGroupModal = false}>Done</button>
+        <button class="btn btn-primary" onclick={() => { showGroupModal = false; groupSearch = ''; }}>Done</button>
       </div>
     </div>
   </div>
