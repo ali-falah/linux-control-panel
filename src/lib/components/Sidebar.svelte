@@ -125,9 +125,6 @@
               </span>
               {#if !uiStore.sidebarCollapsed}
                 <span class="nav-label">{item.label}</span>
-                {#if isActive}
-                  <span class="nav-active-dot"></span>
-                {/if}
               {/if}
             </button>
           {/each}
@@ -160,9 +157,8 @@
     width: 220px;
     min-width: 220px;
     height: 100%;
-    background: rgba(12, 12, 20, 0.75);
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(16px);
+    background: var(--color-sidebar-bg);
+    border-right: 1px solid var(--color-sidebar-border);
     transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1),
                 min-width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
     overflow: hidden;
@@ -249,7 +245,7 @@
     border: none;
     cursor: pointer;
     text-align: left;
-    color: #475569;
+    color: var(--color-text-muted);
     transition: color 0.15s ease;
   }
 
@@ -272,7 +268,7 @@
     align-items: center;
     justify-content: center;
     transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    color: #475569;
+    color: var(--color-text-muted);
   }
 
   .group-label-btn:hover .group-chevron {
@@ -323,8 +319,8 @@
   }
 
   .nav-item.active {
-    background: rgba(99, 102, 241, 0.15);
-    color: #a5b4fc;
+    background: var(--color-active-bg);
+    color: var(--color-text-primary);
   }
 
   .nav-icon {
@@ -339,7 +335,7 @@
   }
 
   .nav-icon.active {
-    color: var(--color-accent);
+    color: var(--color-text-primary);
   }
 
   .nav-label {

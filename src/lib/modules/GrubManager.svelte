@@ -156,7 +156,16 @@
             
             <div style="flex:1; display:flex; flex-direction:column; justify-content:center">
               <label style="display:flex; align-items:center; gap:8px; font-size:14px; color:var(--color-text-primary); cursor:pointer">
-                <input type="checkbox" bind:checked={editedHidden} />
+                <button
+                  class="ui-toggle"
+                  class:on={editedHidden}
+                  onclick={() => editedHidden = !editedHidden}
+                  role="switch"
+                  aria-checked={editedHidden}
+                  type="button"
+                >
+                  <span class="ui-toggle-thumb"></span>
+                </button>
                 Hide Boot Menu (Timeout Style = hidden)
               </label>
               <div style="font-size:11px; color:var(--color-text-muted); margin-top:4px; padding-left:22px">

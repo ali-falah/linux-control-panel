@@ -903,7 +903,18 @@
               <input bind:value={filterLive} placeholder="Filter…" id="shell-live-filter" />
             </div>
             <label class="toggle-label-row">
-              <input type="checkbox" bind:checked={showOnlyUnsynced} id="shell-unsynced-only" />
+              <button
+                class="ui-toggle"
+                class:on={showOnlyUnsynced}
+                onclick={() => showOnlyUnsynced = !showOnlyUnsynced}
+                role="switch"
+                aria-checked={showOnlyUnsynced}
+                type="button"
+                id="shell-unsynced-only"
+                style="transform: scale(0.8);"
+              >
+                <span class="ui-toggle-thumb"></span>
+              </button>
               Show out-of-sync only
             </label>
             <span class="text-muted text-xs">{filteredLiveEnv.length} / {liveEnv.length} vars</span>

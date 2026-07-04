@@ -135,7 +135,16 @@
 
       <div style="margin-top: 8px;">
         <label style="display:flex; align-items:center; gap:10px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
-          <input type="checkbox" bind:checked={isRootJob} />
+          <button
+            class="ui-toggle"
+            class:on={isRootJob}
+            onclick={() => isRootJob = !isRootJob}
+            role="switch"
+            aria-checked={isRootJob}
+            type="button"
+          >
+            <span class="ui-toggle-thumb"></span>
+          </button>
           Run as Root User (System-wide)
         </label>
       </div>

@@ -110,7 +110,7 @@
   });
 </script>
 
-<div class="module-page">
+<div class="module-page"> 
   <PageHeader title="Repo Manager" subtitle="Manage DNF repositories from /etc/yum.repos.d/" icon={Package}>
     <button class="btn btn-primary" onclick={() => showAddDialog = true}>
       <Plus size={14} /> Add Repo
@@ -125,63 +125,39 @@
     </KebabMenu>
   </PageHeader>
 
-  <!-- Search -->
-  <div class="search-bar">
-    <Search size={14} style="color: var(--color-text-muted)" />
-    <input bind:value={filter} placeholder="Filter repositories…" />
-    {#if filter}
-      <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">
-        ✕
-      </button>
+  <!-- Controls: Stats & Search -->
+  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+    <!-- Stats -->
+    {#if repos.length > 0}
+      <div class="stat-cards" style="margin: 0;">
+        <div class="stat-card">
+          <span class="stat-value">{repos.length}</span>
+          <span class="stat-label">Total</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-value enabled">{repos.filter(r => r.enabled).length}</span>
+          <span class="stat-label">Enabled</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-value disabled">{repos.filter(r => !r.enabled).length}</span>
+          <span class="stat-label">Disabled</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-value errors">{repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}</span>
+          <span class="stat-label">Errors</span>
+        </div>
+      </div>
     {/if}
+
+    <!-- Search -->
+    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+      <Search size={14} style="color: var(--color-text-muted)" />
+      <input bind:value={filter} placeholder="Filter repositories…" />
+      {#if filter}
+        <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</button>
+      {/if}
+    </div>
   </div>
-
-  <SideDrawer bind:isOpen={showAddDialog} title="Add Repository" width="400px">
-    <div style="display:flex; flex-direction:column; gap:16px;">
-      <p style="color:var(--color-text-secondary); margin:0;">
-        Enter the URL of a .repo file or a baseurl to add it to your system.
-      </p>
-      <div class="search-bar">
-        <Link size={14} style="color:var(--color-text-muted)" />
-        <input
-          bind:value={addUrl}
-          placeholder="https://example.com/repo.repo"
-          onkeydown={(e) => e.key === 'Enter' && addRepo()}
-          style="width: 100%"
-        />
-      </div>
-      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:10px;">
-        <button class="btn btn-ghost" onclick={() => { showAddDialog = false; addUrl = ''; }}>
-          Cancel
-        </button>
-        <button class="btn btn-primary" onclick={addRepo} disabled={addLoading || !addUrl.trim()}>
-          {addLoading ? 'Adding…' : 'Add Repository'}
-        </button>
-      </div>
-    </div>
-  </SideDrawer>
-
-  <!-- Stats -->
-  {#if repos.length > 0}
-    <div class="stat-cards">
-      <div class="stat-card">
-        <span class="stat-value">{repos.length}</span>
-        <span class="stat-label">Total</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-value enabled">{repos.filter(r => r.enabled).length}</span>
-        <span class="stat-label">Enabled</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-value disabled">{repos.filter(r => !r.enabled).length}</span>
-        <span class="stat-label">Disabled</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-value errors">{repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}</span>
-        <span class="stat-label">Errors</span>
-      </div>
-    </div>
-  {/if}
 
   <!-- Repo List -->
   <div class="card module-content-scroll" style="padding:0">
@@ -244,7 +220,7 @@
                 </td>
                 <td style="text-align:center">
                   <button
-                    class="repo-toggle"
+                    class="ui-toggle"
                     class:on={repo.enabled}
                     onclick={() => toggleRepo(repo)}
                     disabled={togglingId === repo.id}
@@ -252,7 +228,7 @@
                     aria-checked={repo.enabled}
                     role="switch"
                   >
-                    <span class="repo-toggle-thumb"></span>
+                    <span class="ui-toggle-thumb"></span>
                   </button>
                 </td>
               </tr>
@@ -274,21 +250,21 @@
     display: flex;
     gap: 12px;
     flex-wrap: wrap;
+    align-items: stretch;
   }
   .stat-card {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 14px 20px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    min-width: 90px;
-    backdrop-filter: blur(8px);
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
   .stat-value {
-    font-size: 22px;
+    font-size: 16px;
     font-weight: 700;
     line-height: 1;
     color: var(--color-text-primary);
@@ -301,49 +277,7 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    font-weight: 500;
+    font-weight: 600;
   }
 
-  /* ── Repo toggle switch ─────────────────────────────────────── */
-  .repo-toggle {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    width: 36px;
-    height: 20px;
-    border-radius: 10px;
-    border: none;
-    background: #2a2f3e;
-    cursor: pointer;
-    transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-                box-shadow 0.2s ease;
-    flex-shrink: 0;
-    outline: none;
-    padding: 0;
-  }
-  .repo-toggle:focus-visible {
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4);
-  }
-  .repo-toggle.on {
-    background: #4f46e5;
-    box-shadow: 0 0 8px rgba(79, 70, 229, 0.45);
-  }
-  .repo-toggle:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .repo-toggle-thumb {
-    position: absolute;
-    left: 3px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.9);
-    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-                box-shadow 0.2s ease;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-  }
-  .repo-toggle.on .repo-toggle-thumb {
-    transform: translateX(16px);
-  }
 </style>

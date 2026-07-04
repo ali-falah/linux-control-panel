@@ -59,14 +59,15 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 26px;
-    padding: 0 14px;
-    background: rgba(8, 8, 14, 0.7);
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    height: 32px;
+    padding: 0 16px;
+    background: rgba(37, 40, 54, 0.4);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
     font-size: 11px;
     font-family: var(--font-mono);
     flex-shrink: 0;
-    backdrop-filter: blur(8px);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     gap: 12px;
   }
 

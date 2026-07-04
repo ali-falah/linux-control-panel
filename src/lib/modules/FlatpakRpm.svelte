@@ -144,45 +144,50 @@
     </button>
   </PageHeader>
 
-  <!-- Stats -->
-  <div style="display:flex; gap:12px; flex-wrap:wrap">
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-warning)">{duplicates.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Duplicates</span>
+  <!-- Controls: Stats, Search & Tabs -->
+  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+    <!-- Stats -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-warning);line-height:1;">{duplicates.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Duplicates</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-info);line-height:1;">{flatpaks.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Flatpaks</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{rpms.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">RPMs</span>
+      </div>
     </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-info)">{flatpaks.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Flatpaks</span>
-    </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-text-primary)">{rpms.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">RPMs</span>
+
+    <!-- Search -->
+    {#if activeTab !== 'duplicates'}
+      <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+        <Search size={14} style="color:var(--color-text-muted)" />
+        <input bind:value={filter} placeholder="Filter packages…" />
+      </div>
+    {:else}
+      <div style="flex:1"></div>
+    {/if}
+
+    <!-- Tabs -->
+    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
+      {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
+        <button
+          class="tab-btn"
+          class:active={activeTab === id}
+          onclick={() => activeTab = id as Tab}
+        >
+          {label}
+          {#if id === 'duplicates' && duplicates.length > 0}
+            <span class="badge badge-warning" style="margin-left:4px;padding:1px 5px">{duplicates.length}</span>
+          {/if}
+        </button>
+      {/each}
     </div>
   </div>
-
-  <!-- Tabs -->
-  <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content">
-    {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
-      <button
-        class="tab-btn"
-        class:active={activeTab === id}
-        onclick={() => activeTab = id as Tab}
-      >
-        {label}
-        {#if id === 'duplicates' && duplicates.length > 0}
-          <span class="badge badge-warning" style="margin-left:4px;padding:1px 5px">{duplicates.length}</span>
-        {/if}
-      </button>
-    {/each}
-  </div>
-
-  <!-- Search -->
-  {#if activeTab !== 'duplicates'}
-    <div class="search-bar">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={filter} placeholder="Filter packages…" />
-    </div>
-  {/if}
 
   <!-- Content -->
   {#if activeTab === 'duplicates'}

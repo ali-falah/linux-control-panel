@@ -202,26 +202,29 @@
     </div>
   </SideDrawer>
 
-  <!-- Stats -->
-  <div style="display:flex; gap:12px; flex-wrap:wrap">
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-text-primary)">{entries.filter(e => e.ip).length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Entries</span>
+  <!-- Controls: Stats & Search -->
+  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+    <!-- Stats -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{entries.filter(e => e.ip).length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Entries</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-success);line-height:1;">{entries.filter(e => e.ip && e.enabled).length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Active</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-accent);line-height:1;">{categories.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Categories</span>
+      </div>
     </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-success)">{entries.filter(e => e.ip && e.enabled).length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Active</span>
-    </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-accent)">{categories.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Categories</span>
-    </div>
-  </div>
 
-  <!-- Search -->
-  <div class="search-bar">
-    <Search size={14} style="color:var(--color-text-muted)" />
-    <input bind:value={filter} placeholder="Filter by IP, hostname, or comment…" />
+    <!-- Search -->
+    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+      <Search size={14} style="color:var(--color-text-muted)" />
+      <input bind:value={filter} placeholder="Filter by IP, hostname, or comment…" />
+    </div>
   </div>
 
   <!-- Grouped by category -->
@@ -295,14 +298,16 @@
                         />
                       </td>
                       <td style="text-align:center">
-                        <label class="toggle">
-                          <input
-                            type="checkbox"
-                            checked={entry.enabled}
-                            onchange={() => toggleEntry(entry)}
-                          />
-                          <span class="toggle-slider"></span>
-                        </label>
+                        <button
+                          class="ui-toggle"
+                          class:on={entry.enabled}
+                          onclick={() => toggleEntry(entry)}
+                          title="{entry.enabled ? 'Disable' : 'Enable'} entry"
+                          aria-checked={entry.enabled}
+                          role="switch"
+                        >
+                          <span class="ui-toggle-thumb"></span>
+                        </button>
                       </td>
                       <td style="text-align:right">
                         <KebabMenu>

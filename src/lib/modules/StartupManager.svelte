@@ -130,29 +130,32 @@
     </button>
   </PageHeader>
 
-  <!-- Stats -->
-  <div style="display:flex; gap:12px; flex-wrap:wrap">
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-text-primary)">{systemdUnits.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">System Services</span>
+  <!-- Controls: Stats, Search & Tabs -->
+  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+    <!-- Stats -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{systemdUnits.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">System Services</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-success);line-height:1;">{systemdUnits.filter(u => u.state === 'enabled').length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Enabled</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-accent);line-height:1;">{autostartEntries.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Autostart Apps</span>
+      </div>
     </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-success)">{systemdUnits.filter(u => u.state === 'enabled').length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Enabled</span>
-    </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-accent)">{autostartEntries.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Autostart Apps</span>
-    </div>
-  </div>
 
-  <!-- Filters -->
-  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-    <div class="search-bar" style="flex:1; min-width:200px">
+    <!-- Search -->
+    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
       <Search size={14} style="color:var(--color-text-muted)" />
       <input bind:value={filter} placeholder="Filter entries…" />
     </div>
-    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:8px">
+
+    <!-- Tabs -->
+    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:8px; margin: 0;">
       {#each [['all','All'],['service','Services'],['autostart','Autostart']] as [id, label]}
         <button
           class="filter-btn"
@@ -203,15 +206,17 @@
                       <span class="badge {stateBadge(unit.state)}">{unit.state}</span>
                     </td>
                     <td style="text-align:center">
-                      <label class="toggle">
-                        <input
-                          type="checkbox"
-                          checked={unit.state === 'enabled'}
-                          disabled={togglingId === unit.name || unit.state === 'masked' || unit.state === 'static'}
-                          onchange={() => toggleUnit(unit)}
-                        />
-                        <span class="toggle-slider"></span>
-                      </label>
+                      <button
+                        class="ui-toggle"
+                        class:on={unit.state === 'enabled'}
+                        onclick={() => toggleUnit(unit)}
+                        disabled={togglingId === unit.name || unit.state === 'masked' || unit.state === 'static'}
+                        title="{unit.state === 'enabled' ? 'Disable' : 'Enable'} unit"
+                        aria-checked={unit.state === 'enabled'}
+                        role="switch"
+                      >
+                        <span class="ui-toggle-thumb"></span>
+                      </button>
                     </td>
                   </tr>
                 {/each}
@@ -260,15 +265,17 @@
                     <td><code style="font-size:11px;color:var(--color-text-secondary)">{entry.exec}</code></td>
                     <td style="font-size:12px;color:var(--color-text-muted)">{entry.comment || '—'}</td>
                     <td style="text-align:center">
-                      <label class="toggle">
-                        <input
-                          type="checkbox"
-                          checked={entry.enabled}
-                          disabled={togglingId === entry.file_path}
-                          onchange={() => toggleAutostart(entry)}
-                        />
-                        <span class="toggle-slider"></span>
-                      </label>
+                      <button
+                        class="ui-toggle"
+                        class:on={entry.enabled}
+                        onclick={() => toggleAutostart(entry)}
+                        disabled={togglingId === entry.file_path}
+                        title="{entry.enabled ? 'Disable' : 'Enable'} autostart"
+                        aria-checked={entry.enabled}
+                        role="switch"
+                      >
+                        <span class="ui-toggle-thumb"></span>
+                      </button>
                     </td>
                   </tr>
                 {/each}

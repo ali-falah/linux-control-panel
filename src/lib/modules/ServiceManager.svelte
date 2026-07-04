@@ -179,29 +179,32 @@
     </button>
   </PageHeader>
 
-  <!-- Stats -->
-  <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom: 8px;">
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-success)">{units.filter(u => u.active_state === 'active').length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Active</span>
+  <!-- Controls: Stats & Search -->
+  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+    <!-- Stats -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-success);line-height:1;">{units.filter(u => u.active_state === 'active').length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Active</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-error);line-height:1;">{units.filter(u => u.active_state === 'failed').length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Failed</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
+        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{units.length}</span>
+        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Total Units</span>
+      </div>
     </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-error)">{units.filter(u => u.active_state === 'failed').length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Failed</span>
-    </div>
-    <div class="card-raised" style="display:flex;align-items:center;gap:10px;padding:12px 16px">
-      <span style="font-size:22px;font-weight:700;color:var(--color-text-primary)">{units.length}</span>
-      <span style="font-size:12px;color:var(--color-text-muted)">Total Units</span>
-    </div>
-  </div>
 
-  <!-- Search -->
-  <div class="search-bar">
-    <Search size={14} style="color:var(--color-text-muted)" />
-    <input bind:value={filter} placeholder="Filter services by name or description…" />
-    {#if filter}
-      <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</button>
-    {/if}
+    <!-- Search -->
+    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+      <Search size={14} style="color:var(--color-text-muted)" />
+      <input bind:value={filter} placeholder="Filter services by name or description…" />
+      {#if filter}
+        <button class="btn btn-sm btn-ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</button>
+      {/if}
+    </div>
   </div>
 
   <!-- Side panel: Logs or Editor -->

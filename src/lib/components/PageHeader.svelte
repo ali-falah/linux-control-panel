@@ -14,79 +14,73 @@
   } = $props();
 </script>
 
-<div class="page-header">
-  <div class="header-content">
-    {#if Icon}
-      <div class="header-icon">
-        <Icon size={24} />
-      </div>
-    {/if}
-    <div class="header-text">
-      <h1 class="title">{title}</h1>
-      <p class="subtitle">{subtitle}</p>
+<div class="header-wrapper">
+  <div class="page-header">
+    <div class="breadcrumb">
+      <span class="crumb-text">Control Panel</span>
+      <span class="crumb-separator">&rsaquo;</span>
+      <span class="crumb-text active">{title}</span>
+      {#if subtitle}
+        <span class="crumb-separator" style="margin: 0 4px; opacity: 0.3;">&mdash;</span>
+        <span class="crumb-subtitle">{subtitle}</span>
+      {/if}
     </div>
-  </div>
-  <div class="header-actions">
-    {#if children}
-      {@render children()}
-    {/if}
+    <div class="header-actions">
+      {#if children}
+        {@render children()}
+      {/if}
+    </div>
   </div>
 </div>
 
 <style>
+  .header-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    margin: -32px -32px 32px -32px;
+  }
+
   .page-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 24px 32px;
-    background: rgba(15, 15, 24, 0.4);
+    padding: 12px 24px;
+    background: var(--color-bg-surface);
     border-bottom: 1px solid var(--color-border);
-    backdrop-filter: blur(12px);
-    margin: -24px -24px 24px -24px;
+    border-radius: 0;
   }
-  
-  .header-content {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-  
-  .header-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
-    background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(79,70,229,0.05));
-    border: 1px solid rgba(99,102,241,0.3);
-    color: var(--color-accent);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1), inset 0 0 12px rgba(99,102,241,0.1);
-  }
-  
-  .header-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  
-  .title {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-    letter-spacing: -0.01em;
-  }
-  
-  .subtitle {
-    margin: 0;
-    font-size: 13px;
-    color: var(--color-text-secondary);
-  }
-  
-  .header-actions {
+
+  .breadcrumb {
     display: flex;
     align-items: center;
     gap: 12px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .crumb-text {
+    color: var(--color-text-primary);
+  }
+
+  .crumb-text.active {
+    color: var(--color-text-muted);
+  }
+
+  .crumb-separator {
+    color: var(--color-text-muted);
+    font-size: 16px;
+    opacity: 0.5;
+  }
+
+  .crumb-subtitle {
+    color: var(--color-text-secondary);
+    font-weight: 400;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
 </style>

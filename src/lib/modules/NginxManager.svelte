@@ -839,10 +839,17 @@
                 </label>
                 <label class="form-field form-toggle">
                   <span>Reverse Proxy</span>
-                  <div class="toggle-wrap">
-                    <input type="checkbox" bind:checked={newSite.is_proxy} id="nginx-site-proxy" />
-                    <label for="nginx-site-proxy" class="toggle-label"></label>
-                  </div>
+                  <button
+                    class="ui-toggle"
+                    class:on={newSite.is_proxy}
+                    onclick={() => newSite.is_proxy = !newSite.is_proxy}
+                    role="switch"
+                    aria-checked={newSite.is_proxy}
+                    type="button"
+                    id="nginx-site-proxy"
+                  >
+                    <span class="ui-toggle-thumb"></span>
+                  </button>
                 </label>
                 {#if newSite.is_proxy}
                   <label class="form-field form-full">
@@ -859,13 +866,35 @@
                     <input type="text" bind:value={newSite.index_file} id="nginx-site-index" />
                   </label>
                 {/if}
-                <label class="form-field form-check">
-                  <input type="checkbox" bind:checked={newSite.enable_404} id="nginx-site-404" />
-                  <span>Include 404 error page</span>
+                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
+                  <button
+                    class="ui-toggle"
+                    class:on={newSite.enable_404}
+                    onclick={() => newSite.enable_404 = !newSite.enable_404}
+                    role="switch"
+                    aria-checked={newSite.enable_404}
+                    type="button"
+                    id="nginx-site-404"
+                    style="transform: scale(0.8);"
+                  >
+                    <span class="ui-toggle-thumb"></span>
+                  </button>
+                  Include 404 error page
                 </label>
-                <label class="form-field form-check">
-                  <input type="checkbox" bind:checked={newSite.enable_50x} id="nginx-site-50x" />
-                  <span>Include 50x error pages</span>
+                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
+                  <button
+                    class="ui-toggle"
+                    class:on={newSite.enable_50x}
+                    onclick={() => newSite.enable_50x = !newSite.enable_50x}
+                    role="switch"
+                    aria-checked={newSite.enable_50x}
+                    type="button"
+                    id="nginx-site-50x"
+                    style="transform: scale(0.8);"
+                  >
+                    <span class="ui-toggle-thumb"></span>
+                  </button>
+                  Include 50x error pages
                 </label>
               </div>
               <div class="form-actions">
@@ -1135,25 +1164,25 @@
                 <option value={lf}>{lf}</option>
               {/each}
             </select>
-            <div class="log-filter">
-              <Search size={13} />
+            <div class="search-bar" style="margin:0; padding:8px 14px;">
+              <Search size={14} style="color:var(--color-text-muted)" />
               <input type="text" bind:value={logFilter} onchange={loadLog} placeholder="Filter…" id="nginx-log-filter" />
             </div>
-            <button class="btn btn-outline btn-sm" onclick={loadLog} id="nginx-log-refresh">
-              <RefreshCw size={13} /> Refresh
+            <button class="btn btn-outline" onclick={loadLog} id="nginx-log-refresh">
+              <RefreshCw size={14} /> Refresh
             </button>
             <button
-              class="btn btn-sm {logAutoRefresh ? 'btn-primary' : 'btn-outline'}"
+              class="btn {logAutoRefresh ? 'btn-primary' : 'btn-outline'}"
               onclick={toggleAutoRefresh}
               id="nginx-log-auto"
             >
-              <Clock size={13} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
+              <Clock size={14} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
             </button>
-            <button class="btn btn-outline btn-sm" onclick={exportLog} id="nginx-log-export">
-              <Download size={13} /> Export
+            <button class="btn btn-outline" onclick={exportLog} id="nginx-log-export">
+              <Download size={14} /> Export
             </button>
-            <button class="btn btn-danger btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
-              <Trash2 size={13} /> Clear
+            <button class="btn btn-danger" onclick={confirmClearLog} id="nginx-log-clear">
+              <Trash2 size={14} /> Clear
             </button>
           </div>
           {#if logLoading}
@@ -1476,19 +1505,21 @@
   .test-fail { background: var(--color-error-muted); color: var(--color-error); border: 1px solid rgba(244,63,94,0.2); }
   .test-output { max-height: 80px; overflow: auto; font-size: 11px; }
   .ov-stats-card {}
-  .stats-grid { display: flex; gap: 16px; }
+  .stats-grid { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; }
   .stat-item {
     flex: 1;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    padding: 16px 12px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
-  .stat-value { font-size: 28px; font-weight: 700; color: var(--color-text-primary); line-height: 1; }
-  .stat-label { font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; margin-top: 4px; }
+  .stat-value { font-size: 16px; font-weight: 700; color: var(--color-text-primary); line-height: 1; }
+  .stat-label { font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin: 0; }
   .stat-enabled .stat-value { color: var(--color-success); }
   .stat-disabled .stat-value { color: var(--color-error); }
   .version-display {
@@ -1527,25 +1558,6 @@
   .form-field.form-check { flex-direction: row; align-items: center; gap: 8px; }
   .form-field.form-toggle { flex-direction: row; align-items: center; justify-content: space-between; }
   .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-
-  /* Toggle switch */
-  .toggle-wrap { position: relative; display: inline-flex; align-items: center; }
-  .toggle-wrap input[type="checkbox"] {
-    width: 36px; height: 20px; border-radius: 10px;
-    background: var(--color-bg-hover);
-    transition: background 0.2s;
-    cursor: pointer;
-  }
-  .toggle-wrap input[type="checkbox"]:checked { background: var(--color-accent); }
-  .toggle-wrap input[type="checkbox"]::after {
-    content: ''; position: absolute;
-    top: 3px; left: 3px;
-    width: 14px; height: 14px;
-    border-radius: 50%; background: white;
-    transition: transform 0.2s;
-    transform: none; border: none; border-width: 0;
-  }
-  .toggle-wrap input[type="checkbox"]:checked::after { transform: translateX(16px); }
 
   /* ─── Config Editor ──────────────────────────────────────────────────── */
   .editor-layout {
@@ -1809,18 +1821,20 @@
   /* ─── Logs ───────────────────────────────────────────────────────────── */
   .logs-toolbar {
     display: flex;
-    gap: 8px;
+    gap: 16px;
     align-items: center;
     flex-wrap: wrap;
-    margin-bottom: 4px;
+    margin-bottom: 16px;
   }
   .log-select {
     padding: 8px 14px;
-    background: rgba(15, 15, 24, 0.9);
-    border: 1px solid var(--color-border-hover);
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 10px;
     color: var(--color-text-primary);
-    font-size: 13px;
+    font-size: 12px;
     font-family: var(--font-mono);
     outline: none;
     cursor: pointer;

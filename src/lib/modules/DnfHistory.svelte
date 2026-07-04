@@ -158,24 +158,31 @@
     {/if}
   </PageHeader>
 
-  <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content">
-    {#each [['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance']] as [id, label]}
-      <button
-        class="tab-btn"
-        class:active={activeTab === id}
-        onclick={() => activeTab = id as Tab}
-      >
-        {label}
-      </button>
-    {/each}
+  <!-- Controls: Tabs & Search -->
+  <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
+    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
+      {#each [['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance']] as [id, label]}
+        <button
+          class="tab-btn"
+          class:active={activeTab === id}
+          onclick={() => activeTab = id as Tab}
+        >
+          {label}
+        </button>
+      {/each}
+    </div>
+
+    {#if activeTab === 'history'}
+      <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+        <Search size={14} style="color:var(--color-text-muted)" />
+        <input bind:value={historySearch} placeholder="Search history by command or action…" />
+      </div>
+    {:else}
+      <div style="flex:1"></div>
+    {/if}
   </div>
 
   {#if activeTab === 'history'}
-    <div class="search-bar">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={historySearch} placeholder="Search history by command or action…" />
-    </div>
-
     <div class="card module-content-scroll" style="padding:0">
       {#if loadingHistory && history.length === 0}
         <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
