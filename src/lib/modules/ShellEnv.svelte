@@ -635,7 +635,7 @@
             </Button>
           </div>
         </div>
-        <div style="display:flex; flex-direction:column; padding: 24px; gap: 16px; flex: 1; min-height:0;">
+        <div style="display:flex; flex-direction:column; padding: 16px; gap: 12px; flex: 1; min-height:0;">
         {#if addPathForm}
           <div class="card add-var-form">
             <div class="form-title">Add PATH entry</div>
@@ -990,7 +990,7 @@
   :global(.tab-btn.active) { color: var(--color-accent-soft); border-bottom-color: var(--color-accent); }
 
   .tab-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
-  .tab-section { padding: 24px; display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0; }
+  .tab-section { padding: 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
 
   /* ─── Spinners ────────────────────────────────────────────────────── */
   .spinner {
@@ -1291,8 +1291,8 @@
   .shell-groups-list {
     display: flex;
     flex-direction: column;
-    gap: 24px;
-    padding-bottom: 32px;
+    gap: 16px;
+    padding-bottom: 24px;
   }
   .shell-group-card {
     background: rgba(255,255,255,0.015);

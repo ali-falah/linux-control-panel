@@ -37,8 +37,7 @@
   .header-wrapper {
     display: flex;
     flex-direction: column;
-    gap: 32px;
-    margin: -32px -32px 32px -32px;
+    margin: -24px -24px 24px -24px;
   }
 
   .page-header {
