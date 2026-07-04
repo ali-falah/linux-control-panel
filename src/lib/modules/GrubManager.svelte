@@ -40,10 +40,10 @@
       editedHidden = config.hidden_timeout;
       editedCmdline = config.cmdline_linux;
       editedDefault = config.default_entry;
-      statusStore.setLastCommand('read /etc/default/grub', 0, true);
+      statusStore.setLastCommand('cat /etc/default/grub', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load GRUB config: ${e}`, 'error');
-      statusStore.setLastCommand('read_grub_config', 1, false);
+      uiStore.addToast(`Failed to load config: ${e}`, 'error');
+      statusStore.setLastCommand('cat /etc/default/grub', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -82,10 +82,12 @@
         default_entry: editedDefault,
       };
       await invoke('write_grub_config', { config: newConfig });
+      statusStore.setLastCommand('echo "..." > /etc/default/grub', 0, true);
       uiStore.addToast('Saved /etc/default/grub successfully', 'success');
       await loadConfig();
     } catch (e) {
       uiStore.addToast(`Failed to save config: ${e}`, 'error');
+      statusStore.setLastCommand('echo "..." > /etc/default/grub', 1, false);
     } finally {
       saving = false;
       statusStore.clearBusy();
@@ -106,9 +108,11 @@
     statusStore.setBusy('Running grub2-mkconfig…');
     try {
       await invoke('rebuild_grub');
+      statusStore.setLastCommand('grub2-mkconfig -o /boot/grub2/grub.cfg', 0, true);
       uiStore.addToast('GRUB configuration rebuilt successfully', 'success');
     } catch (e) {
       uiStore.addToast(`Failed to rebuild GRUB: ${e}`, 'error');
+      statusStore.setLastCommand('grub2-mkconfig -o /boot/grub2/grub.cfg', 1, false);
     } finally {
       rebuilding = false;
       statusStore.clearBusy();

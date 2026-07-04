@@ -73,10 +73,10 @@ $PATH Entries<script lang="ts">
         invoke<SystemdUnit[]>('list_systemd_units'),
         invoke<AutostartEntry[]>('list_autostart_entries'),
       ]);
-      statusStore.setLastCommand('list_systemd_units + list_autostart_entries', 0, true);
+      statusStore.setLastCommand('systemctl list-unit-files; ls ~/.config/autostart', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load startup items: ${e}`, 'error');
-      statusStore.setLastCommand('list_systemd_units', 1, false);
+      statusStore.setLastCommand('systemctl list-unit-files; ls ~/.config/autostart', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -101,7 +101,7 @@ $PATH Entries<script lang="ts">
       statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} ${unit.name}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to toggle service: ${e}`, 'error');
-      statusStore.setLastCommand(`systemctl toggle ${unit.name}`, 1, false);
+      statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} ${unit.name}`, 1, false);
     } finally {
       togglingId = null;
     }
@@ -121,8 +121,10 @@ $PATH Entries<script lang="ts">
         `Autostart "${entry.name}" ${newEnabled ? 'enabled' : 'disabled'}`,
         'success'
       );
+      statusStore.setLastCommand(`sed -i 's/Hidden=.*/Hidden=${!newEnabled}/' ${entry.file_path}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to toggle autostart: ${e}`, 'error');
+      statusStore.setLastCommand(`sed -i 's/Hidden=.*/Hidden=${!newEnabled}/' ${entry.file_path}`, 1, false);
     } finally {
       togglingId = null;
     }

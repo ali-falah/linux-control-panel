@@ -46,8 +46,10 @@
           state: parts[4]
         };
       });
+      statusStore.setLastCommand('nmcli connection show', 0, true);
     } catch (e) {
       console.error(e);
+      statusStore.setLastCommand('nmcli connection show', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -81,8 +83,10 @@
          }
       });
       editConnectionData = parsed;
+      statusStore.setLastCommand(`nmcli connection show ${uuid}`, 0, true);
     } catch(e) {
       console.error(e);
+      statusStore.setLastCommand(`nmcli connection show ${uuid}`, 1, false);
     }
     statusStore.clearBusy();
   }
@@ -163,6 +167,7 @@
       }
       
       await invoke('network_save_connection', { uuid: selectedConnectionUuid, settings });
+      statusStore.setLastCommand(`nmcli connection modify ${selectedConnectionUuid || 'new'}`, 0, true);
       
       // If we modified an existing one, try to bring it up
       if (selectedConnectionUuid) {
@@ -173,6 +178,7 @@
       activeTab = 'connections';
     } catch(e: any) {
       alert("Error saving connection: " + e);
+      statusStore.setLastCommand(`nmcli connection modify`, 1, false);
     } finally {
       isSaving = false;
       statusStore.clearBusy();
@@ -184,10 +190,12 @@
     statusStore.setBusy('Deleting connection…');
     try {
       await invoke('network_delete_connection', { uuid });
+      statusStore.setLastCommand(`nmcli connection delete ${uuid}`, 0, true);
       await loadData();
       selectedConnectionUuid = null;
     } catch(e) {
       alert("Error deleting connection");
+      statusStore.setLastCommand(`nmcli connection delete ${uuid}`, 1, false);
     }
     statusStore.clearBusy();
   }
@@ -196,9 +204,11 @@
     statusStore.setBusy('Disconnecting…');
     try {
       await invoke('network_down_connection', { uuid });
+      statusStore.setLastCommand(`nmcli connection down ${uuid}`, 0, true);
       await loadData();
     } catch(e) {
       alert("Error disconnecting: " + e);
+      statusStore.setLastCommand(`nmcli connection down ${uuid}`, 1, false);
     }
     statusStore.clearBusy();
   }
@@ -207,9 +217,11 @@
     statusStore.setBusy(up ? 'Enabling interface…' : 'Disabling interface…');
     try {
       await invoke('network_set_interface_state', { iface, up });
+      statusStore.setLastCommand(`ip link set ${iface} ${up ? 'up' : 'down'}`, 0, true);
       await loadData();
     } catch(e) {
       alert("Error setting interface state: " + e);
+      statusStore.setLastCommand(`ip link set ${iface} ${up ? 'up' : 'down'}`, 1, false);
     }
     statusStore.clearBusy();
   }

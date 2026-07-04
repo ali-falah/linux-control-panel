@@ -47,10 +47,10 @@
     statusStore.setBusy('Loading repos…');
     try {
       repos = await invoke<RepoEntry[]>('list_repos');
-      statusStore.setLastCommand('list_repos', 0, true);
+      statusStore.setLastCommand('dnf repolist -v', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load repos: ${e}`, 'error');
-      statusStore.setLastCommand('list_repos', 1, false);
+      statusStore.setLastCommand('dnf repolist -v', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -71,11 +71,12 @@
       uiStore.addToast(
         `Repo "${repo.name}" ${newEnabled ? 'enabled' : 'disabled'}`,
         'success'
-      );
-      statusStore.setLastCommand(`toggle_repo ${repo.id}`, 0, true);
+      const action = enable ? 'set-enabled' : 'set-disabled';
+      statusStore.setLastCommand(`dnf config-manager --${action} ${repo.id}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to toggle repo: ${e}`, 'error');
-      statusStore.setLastCommand(`toggle_repo ${repo.id}`, 1, false);
+      const action = enable ? 'set-enabled' : 'set-disabled';
+      statusStore.setLastCommand(`dnf config-manager --${action} ${repo.id}`, 1, false);
     } finally {
       togglingId = null;
     }
@@ -90,10 +91,10 @@
       showAddDialog = false;
       addUrl = '';
       await loadRepos();
-      statusStore.setLastCommand(`add_repo ${addUrl}`, 0, true);
+      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to add repo: ${e}`, 'error');
-      statusStore.setLastCommand('add_repo', 1, false);
+      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 1, false);
     } finally {
       addLoading = false;
     }

@@ -58,10 +58,10 @@
       ]);
       users = u;
       groupsList = g;
-      statusStore.setLastCommand('Read /etc/passwd & /etc/group', 0, true);
+      statusStore.setLastCommand('cat /etc/passwd; cat /etc/group', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load data: ${e}`, 'error');
-      statusStore.setLastCommand('list_users/groups', 1, false);
+      statusStore.setLastCommand('cat /etc/passwd; cat /etc/group', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -74,6 +74,7 @@
     statusStore.setBusy(`Adding user ${newUsername}…`);
     try {
       await invoke('add_user', { username: newUsername, fullname: newFullname });
+      statusStore.setLastCommand(`useradd -m -s /bin/bash ${newUsername}`, 0, true);
       uiStore.addToast(`User ${newUsername} created successfully`, 'success');
       showAddUser = false;
       newUsername = '';
@@ -81,6 +82,7 @@
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to add user: ${e}`, 'error');
+      statusStore.setLastCommand(`useradd -m -s /bin/bash ${newUsername}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -103,10 +105,12 @@
     statusStore.setBusy(`Deleting user ${username}…`);
     try {
       await invoke('delete_user', { username, removeHome });
+      statusStore.setLastCommand(`userdel ${removeHome ? '-r ' : ''}${username}`, 0, true);
       uiStore.addToast(`User ${username} deleted`, 'success');
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to delete user: ${e}`, 'error');
+      statusStore.setLastCommand(`userdel ${removeHome ? '-r ' : ''}${username}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -122,9 +126,11 @@
     statusStore.setBusy(`Changing password for ${username}…`);
     try {
       await invoke('change_password', { username, password });
+      statusStore.setLastCommand(`passwd ${username}`, 0, true);
       uiStore.addToast('Password updated successfully', 'success');
     } catch (e) {
       uiStore.addToast(`Failed to change password: ${e}`, 'error');
+      statusStore.setLastCommand(`passwd ${username}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -144,10 +150,12 @@
     statusStore.setBusy(`Modifying sudo access for ${username}…`);
     try {
       await invoke('toggle_sudo', { username, grant });
+      statusStore.setLastCommand(grant ? `usermod -aG wheel ${username}` : `gpasswd -d ${username} wheel`, 0, true);
       uiStore.addToast(`Sudo privileges ${grant ? 'granted' : 'revoked'}`, 'success');
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to modify sudo access: ${e}`, 'error');
+      statusStore.setLastCommand(grant ? `usermod -aG wheel ${username}` : `gpasswd -d ${username} wheel`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -159,12 +167,14 @@
     statusStore.setBusy(`Adding group ${newGroupname}…`);
     try {
       await invoke('add_group', { groupname: newGroupname });
+      statusStore.setLastCommand(`groupadd ${newGroupname}`, 0, true);
       uiStore.addToast(`Group ${newGroupname} created successfully`, 'success');
       showAddGroup = false;
       newGroupname = '';
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to add group: ${e}`, 'error');
+      statusStore.setLastCommand(`groupadd ${newGroupname}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -182,10 +192,12 @@
     statusStore.setBusy(`Deleting group ${groupname}…`);
     try {
       await invoke('delete_group', { groupname });
+      statusStore.setLastCommand(`groupdel ${groupname}`, 0, true);
       uiStore.addToast(`Group ${groupname} deleted`, 'success');
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to delete group: ${e}`, 'error');
+      statusStore.setLastCommand(`groupdel ${groupname}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -196,6 +208,7 @@
     statusStore.setBusy(`Updating membership for ${selectedUser.username}…`);
     try {
       await invoke('modify_user_group', { username: selectedUser.username, groupname, add: !isMember });
+      statusStore.setLastCommand(!isMember ? `usermod -aG ${groupname} ${selectedUser.username}` : `gpasswd -d ${selectedUser.username} ${groupname}`, 0, true);
       // Update local state temporarily for UI responsiveness
       if (isMember) {
         selectedUser.groups = selectedUser.groups.filter(g => g !== groupname);
@@ -205,6 +218,7 @@
       await loadData(); // refresh full list
     } catch (e) {
       uiStore.addToast(`Failed to modify membership: ${e}`, 'error');
+      statusStore.setLastCommand(!isMember ? `usermod -aG ${groupname} ${selectedUser.username}` : `gpasswd -d ${selectedUser.username} ${groupname}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }

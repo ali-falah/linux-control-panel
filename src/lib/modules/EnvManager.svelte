@@ -23,16 +23,17 @@
   let vars = $state<EnvVar[]>([]);
   let loading = $state(true);
   let saving = $state(false);
+  let hasChanges = $state(false);
 
   async function loadVars() {
     loading = true;
     statusStore.setBusy('Reading /etc/environment…');
     try {
       vars = await invoke<EnvVar[]>('read_env_vars');
-      statusStore.setLastCommand('read /etc/environment', 0, true);
+      statusStore.setLastCommand('cat /etc/environment', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load environment variables: ${e}`, 'error');
-      statusStore.setLastCommand('read_env_vars', 1, false);
+      uiStore.addToast(`Failed to load env vars: ${e}`, 'error');
+      statusStore.setLastCommand('cat /etc/environment', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -63,10 +64,13 @@
     statusStore.setBusy('Saving /etc/environment…');
     try {
       await invoke('write_env_vars', { vars: validVars });
-      uiStore.addToast('Saved /etc/environment successfully', 'success');
+      statusStore.setLastCommand('echo "..." > /etc/environment', 0, true);
+      uiStore.addToast('/etc/environment saved successfully', 'success');
+      hasChanges = false;
       await loadVars();
     } catch (e) {
-      uiStore.addToast(`Failed to save environment variables: ${e}`, 'error');
+      uiStore.addToast(`Failed to save env vars: ${e}`, 'error');
+      statusStore.setLastCommand('echo "..." > /etc/environment', 1, false);
     } finally {
       saving = false;
       statusStore.clearBusy();

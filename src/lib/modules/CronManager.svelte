@@ -39,7 +39,7 @@
       statusStore.setLastCommand('crontab -l', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load cron jobs: ${e}`, 'error');
-      statusStore.setLastCommand('crontab', 1, false);
+      statusStore.setLastCommand('crontab -l', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -51,12 +51,14 @@
     statusStore.setBusy('Adding cron job…');
     try {
       await invoke('add_cron_job', { schedule: newSchedule, command: newCommand, isRoot: isRootJob });
+      statusStore.setLastCommand(`(crontab -l; echo "${newSchedule} ${newCommand}") | crontab -`, 0, true);
       uiStore.addToast('Cron job added', 'success');
       showAdd = false;
       newCommand = '';
       await loadJobs();
     } catch (e) {
       uiStore.addToast(`Failed to add cron job: ${e}`, 'error');
+      statusStore.setLastCommand(`(crontab -l; echo "${newSchedule} ${newCommand}") | crontab -`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -75,10 +77,12 @@
     statusStore.setBusy('Deleting cron job…');
     try {
       await invoke('delete_cron_job', { raw: job.raw, isRoot: job.is_root });
+      statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 0, true);
       uiStore.addToast('Cron job deleted', 'success');
       await loadJobs();
     } catch (e) {
       uiStore.addToast(`Failed to delete cron job: ${e}`, 'error');
+      statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 1, false);
     } finally {
       statusStore.clearBusy();
     }

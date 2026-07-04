@@ -129,9 +129,13 @@
           loadTestResult(),
           loadStats(),
         ]);
+        statusStore.setLastCommand('nginx -v; systemctl is-active nginx', 0, true);
+      } else {
+        statusStore.setLastCommand('nginx -v', 0, true);
       }
     } catch (e) {
       uiStore.addToast(`Init error: ${e}`, 'error');
+      statusStore.setLastCommand('nginx -v', 1, false);
     } finally {
       loading = false;
     }
@@ -142,19 +146,28 @@
   async function loadServiceStatus() {
     try {
       serviceStatus = await invoke<NginxServiceStatus>('nginx_service_status');
-    } catch {}
+      statusStore.setLastCommand('systemctl is-active nginx', 0, true);
+    } catch {
+      statusStore.setLastCommand('systemctl is-active nginx', 1, false);
+    }
   }
 
   async function loadTestResult() {
     try {
       testResult = await invoke<NginxTestResult>('nginx_test_config');
-    } catch {}
+      statusStore.setLastCommand('nginx -t', testResult.passed ? 0 : 1, testResult.passed);
+    } catch {
+      statusStore.setLastCommand('nginx -t', 1, false);
+    }
   }
 
   async function loadStats() {
     try {
       stats = await invoke<NginxStats>('nginx_get_stats');
-    } catch {}
+      statusStore.setLastCommand('curl -s http://localhost/nginx_status', 0, true);
+    } catch {
+      statusStore.setLastCommand('curl -s http://localhost/nginx_status', 1, false);
+    }
   }
 
   async function doServiceAction(action: string) {
@@ -199,8 +212,10 @@
     sitesLoading = true;
     try {
       sites = await invoke<NginxSite[]>('nginx_list_sites');
+      statusStore.setLastCommand('ls -l /etc/nginx/sites-available', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load sites: ${e}`, 'error');
+      statusStore.setLastCommand('ls -l /etc/nginx/sites-available', 1, false);
     } finally {
       sitesLoading = false;
     }
@@ -220,7 +235,7 @@
             enable: !site.enabled,
           });
           uiStore.removeToast(toastId);
-          statusStore.setLastCommand('nginx -t', result.passed ? 0 : 1, result.passed);
+          statusStore.setLastCommand(!site.enabled ? `ln -s /etc/nginx/sites-available/${site.name} /etc/nginx/sites-enabled/ && nginx -t` : `rm /etc/nginx/sites-enabled/${site.name} && nginx -t`, result.passed ? 0 : 1, result.passed);
 
           if (result.passed) {
             uiStore.addToast(`Site "${site.name}" ${action}d and nginx reloaded ✓`, 'success');
@@ -251,6 +266,7 @@
     newSiteLoading = true;
     try {
       const path = await invoke<string>('nginx_create_site', { config: newSite });
+      statusStore.setLastCommand(`echo "..." > ${path}`, 0, true);
       uiStore.addToast(`Site created at ${path} ✓`, 'success');
       showNewSiteForm = false;
       newSite = { server_name: '', root_dir: '/var/www/html', port: 80, is_proxy: false, proxy_url: '', index_file: 'index.html', enable_404: true, enable_50x: true };
@@ -258,6 +274,7 @@
       await loadStats();
     } catch (e) {
       uiStore.addToast(`Create site failed: ${e}`, 'error');
+      statusStore.setLastCommand(`echo "..." > /etc/nginx/sites-available/${newSite.server_name}.conf`, 1, false);
       showOutputModal = true;
       outputModalTitle = 'Site Creation Failed';
       outputModalContent = String(e);
@@ -277,11 +294,13 @@
           async () => {
             try {
               await invoke('nginx_delete_site', { name: site.name, path: site.path });
+              statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 0, true);
               uiStore.addToast(`Site "${site.name}" deleted`, 'success');
               await loadSites();
               await loadStats();
             } catch (e) {
               uiStore.addToast(`Delete failed: ${e}`, 'error');
+              statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 1, false);
             }
           },
           true,
@@ -297,8 +316,10 @@
     editorLoading = true;
     try {
       configs = await invoke<NginxConfigFile[]>('nginx_list_configs');
+      statusStore.setLastCommand('find /etc/nginx -name "*.conf"', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load configs: ${e}`, 'error');
+      statusStore.setLastCommand('find /etc/nginx -name "*.conf"', 1, false);
     } finally {
       editorLoading = false;
     }
@@ -312,8 +333,10 @@
       const content = await invoke<string>('nginx_read_config', { path: cfg.path });
       editorContent = content;
       savedContent = content;
+      statusStore.setLastCommand(`cat ${cfg.path}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to read config: ${e}`, 'error');
+      statusStore.setLastCommand(`cat ${cfg.path}`, 1, false);
     } finally {
       editorLoading = false;
     }
@@ -329,7 +352,7 @@
         content: editorContent,
       });
       uiStore.removeToast(toastId);
-      statusStore.setLastCommand('nginx -t', result.passed ? 0 : 1, result.passed);
+      statusStore.setLastCommand(`echo "..." > ${selectedConfig.path} && nginx -t`, result.passed ? 0 : 1, result.passed);
 
       if (result.passed) {
         uiStore.addToast('Config saved and nginx reloaded ✓', 'success');
@@ -357,8 +380,10 @@
     backupsLoading = true;
     try {
       backups = await invoke<NginxBackup[]>('nginx_list_backups');
+      statusStore.setLastCommand('ls -l /etc/nginx/backups', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load backups: ${e}`, 'error');
+      statusStore.setLastCommand('ls -l /etc/nginx/backups', 1, false);
     } finally {
       backupsLoading = false;
     }
@@ -374,6 +399,7 @@
             backupPath: backup.backup_path,
             originalPath: backup.original_path,
           });
+          statusStore.setLastCommand(`cp ${backup.backup_path} ${backup.original_path} && nginx -t`, result.passed ? 0 : 1, result.passed);
           if (result.passed) {
             uiStore.addToast('Backup restored and nginx reloaded ✓', 'success');
           } else {
@@ -389,6 +415,7 @@
           }
         } catch (e) {
           uiStore.addToast(`Restore failed: ${e}`, 'error');
+          statusStore.setLastCommand(`cp ${backup.backup_path} ${backup.original_path} && nginx -t`, 1, false);
         }
       },
     );
@@ -431,8 +458,10 @@
     wwwLoading = true;
     try {
       wwwEntries = await invoke<WwwEntry[]>('nginx_list_www');
+      statusStore.setLastCommand('ls -l /var/www', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load /var/www: ${e}`, 'error');
+      statusStore.setLastCommand('ls -l /var/www', 1, false);
     } finally {
       wwwLoading = false;
     }
@@ -452,8 +481,10 @@
     wwwFileLoading = true;
     try {
       wwwFileContent = await invoke<string>('nginx_read_www_file', { path: entry.path });
+      statusStore.setLastCommand(`cat ${entry.path}`, 0, true);
     } catch (e) {
       wwwFileContent = String(e);
+      statusStore.setLastCommand(`cat ${entry.path}`, 1, false);
     } finally {
       wwwFileLoading = false;
     }
@@ -465,10 +496,12 @@
       if (!selected) return;
       const srcPath = typeof selected === 'string' ? selected : selected[0];
       await invoke('nginx_upload_www_file', { srcPath, destDir });
+      statusStore.setLastCommand(`cp ${srcPath} ${destDir}`, 0, true);
       uiStore.addToast('File uploaded ✓', 'success');
       await loadWww();
     } catch (e) {
       uiStore.addToast(`Upload failed: ${e}`, 'error');
+      statusStore.setLastCommand(`cp ... ${destDir}`, 1, false);
     }
   }
 
@@ -477,12 +510,14 @@
     const full = `${newDirParent}/${newDirName}`.replace(/\/\//g, '/');
     try {
       await invoke('nginx_create_www_dir', { path: full });
+      statusStore.setLastCommand(`mkdir -p ${full}`, 0, true);
       uiStore.addToast(`Directory created: ${full}`, 'success');
       showNewDirForm = false;
       newDirName = '';
       await loadWww();
     } catch (e) {
       uiStore.addToast(`Create dir failed: ${e}`, 'error');
+      statusStore.setLastCommand(`mkdir -p ${full}`, 1, false);
     }
   }
 
@@ -497,11 +532,13 @@
           async () => {
             try {
               await invoke('nginx_delete_www_entry', { path: entry.path });
+              statusStore.setLastCommand(`rm -rf ${entry.path}`, 0, true);
               uiStore.addToast(`Deleted "${entry.name}"`, 'success');
               if (selectedWwwEntry?.path === entry.path) selectedWwwEntry = null;
               await loadWww();
             } catch (e) {
               uiStore.addToast(`Delete failed: ${e}`, 'error');
+              statusStore.setLastCommand(`rm -rf ${entry.path}`, 1, false);
             }
           },
           true,
@@ -517,11 +554,13 @@
     const newPath = `${parentDir}/${renameValue}`;
     try {
       await invoke('nginx_rename_www_entry', { oldPath: renamingEntry.path, newPath });
+      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 0, true);
       uiStore.addToast('Renamed ✓', 'success');
       renamingEntry = null;
       await loadWww();
     } catch (e) {
       uiStore.addToast(`Rename failed: ${e}`, 'error');
+      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 1, false);
     }
   }
 
@@ -537,12 +576,14 @@
   async function loadLogFiles() {
     try {
       logFiles = await invoke<string[]>('nginx_list_log_files');
+      statusStore.setLastCommand('ls /var/log/nginx/*.log', 0, true);
       if (logFiles.length > 0 && !selectedLog) {
         selectedLog = logFiles[0];
         await loadLog();
       }
     } catch (e) {
       uiStore.addToast(`Failed to load log files: ${e}`, 'error');
+      statusStore.setLastCommand('ls /var/log/nginx/*.log', 1, false);
     }
   }
 
@@ -555,8 +596,10 @@
         lines: 200,
         filter: logFilter || null,
       });
+      statusStore.setLastCommand(logFilter ? `grep "${logFilter}" ${selectedLog} | tail -n 200` : `tail -n 200 ${selectedLog}`, 0, true);
     } catch (e) {
       logContent = String(e);
+      statusStore.setLastCommand(logFilter ? `grep "${logFilter}" ${selectedLog} | tail -n 200` : `tail -n 200 ${selectedLog}`, 1, false);
     } finally {
       logLoading = false;
     }
@@ -578,10 +621,12 @@
       async () => {
         try {
           await invoke('nginx_clear_log', { path: selectedLog });
+          statusStore.setLastCommand(`truncate -s 0 ${selectedLog}`, 0, true);
           uiStore.addToast('Log cleared ✓', 'success');
           await loadLog();
         } catch (e) {
           uiStore.addToast(`Clear failed: ${e}`, 'error');
+          statusStore.setLastCommand(`truncate -s 0 ${selectedLog}`, 1, false);
         }
       },
       true,
@@ -604,8 +649,10 @@
     sslLoading = true;
     try {
       sslCerts = await invoke<SslCert[]>('nginx_list_ssl_certs');
+      statusStore.setLastCommand('certbot certificates', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load certs: ${e}`, 'error');
+      statusStore.setLastCommand('certbot certificates', 1, false);
     } finally {
       sslLoading = false;
     }
@@ -619,6 +666,7 @@
         renewingCert = domain;
         try {
           const output = await invoke<string>('nginx_renew_cert', { domain });
+          statusStore.setLastCommand(`certbot renew --cert-name ${domain}`, 0, true);
           uiStore.addToast(`Cert renewed for ${domain} ✓`, 'success');
           showOutputModal = true;
           outputModalTitle = 'certbot renew output';
@@ -626,6 +674,7 @@
           await loadSslCerts();
         } catch (e) {
           uiStore.addToast(`Renewal failed: ${e}`, 'error');
+          statusStore.setLastCommand(`certbot renew --cert-name ${domain}`, 1, false);
           showOutputModal = true;
           outputModalTitle = 'certbot renew failed';
           outputModalContent = String(e);

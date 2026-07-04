@@ -82,8 +82,10 @@
       }
       
       devicesByClass = finalGrouped;
+      statusStore.setLastCommand('lshw -json', 0, true);
     } catch (e) {
       console.error(e);
+      statusStore.setLastCommand('lshw -json', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();

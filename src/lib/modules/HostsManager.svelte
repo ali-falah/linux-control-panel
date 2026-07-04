@@ -58,10 +58,10 @@
     statusStore.setBusy('Reading /etc/hosts…');
     try {
       entries = await invoke<HostEntry[]>('read_hosts');
-      statusStore.setLastCommand('read /etc/hosts', 0, true);
+      statusStore.setLastCommand('cat /etc/hosts', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to read /etc/hosts: ${e}`, 'error');
-      statusStore.setLastCommand('read /etc/hosts', 1, false);
+      uiStore.addToast(`Failed to load hosts: ${e}`, 'error');
+      statusStore.setLastCommand('cat /etc/hosts', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -90,10 +90,10 @@
       await invoke('write_hosts', { entries });
       uiStore.addToast('/etc/hosts saved successfully', 'success');
       hasChanges = false;
-      statusStore.setLastCommand('write /etc/hosts', 0, true);
+      statusStore.setLastCommand('echo "..." > /etc/hosts', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to save /etc/hosts: ${e}`, 'error');
-      statusStore.setLastCommand('write /etc/hosts', 1, false);
+      uiStore.addToast(`Failed to save hosts: ${e}`, 'error');
+      statusStore.setLastCommand('echo "..." > /etc/hosts', 1, false);
     } finally {
       saving = false;
       statusStore.clearBusy();

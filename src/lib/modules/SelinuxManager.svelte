@@ -61,10 +61,12 @@
     statusStore.setBusy(`Setting SELinux to ${newMode}…`);
     try {
       await invoke('set_selinux_state', { mode: newMode });
-      uiStore.addToast(`SELinux set to ${newMode}`, 'success');
+      statusStore.setLastCommand(`setenforce ${newMode === 'enforcing' ? '1' : '0'}`, 0, true);
+      uiStore.addToast(`SELinux mode changed to ${newMode}`, 'success');
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to change SELinux mode: ${e}`, 'error');
+      statusStore.setLastCommand(`setenforce ${newMode === 'enforcing' ? '1' : '0'}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }

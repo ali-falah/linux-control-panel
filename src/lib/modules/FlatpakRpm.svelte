@@ -87,10 +87,10 @@
         invoke<RpmPackage[]>('list_rpms'),
         invoke<DuplicateEntry[]>('detect_duplicates'),
       ]);
-      statusStore.setLastCommand('list_flatpaks + list_rpms', 0, true);
+      statusStore.setLastCommand('flatpak list; rpm -qa', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load packages: ${e}`, 'error');
-      statusStore.setLastCommand('list_flatpaks + list_rpms', 1, false);
+      statusStore.setLastCommand('flatpak list; rpm -qa', 1, false);
     } finally {
       loadingFlatpak = false;
       loadingRpm = false;
@@ -111,9 +111,11 @@
             systemWide: app.installation === 'system',
           });
           uiStore.addToast(`Removed Flatpak: ${app.name}`, 'success');
+          statusStore.setLastCommand(`flatpak uninstall -y ${app.app_id}`, 0, true);
           await loadAll();
         } catch (e) {
           uiStore.addToast(`Failed to remove Flatpak: ${e}`, 'error');
+          statusStore.setLastCommand(`flatpak uninstall -y ${app.app_id}`, 1, false);
         } finally {
           removingId = null;
         }
@@ -131,9 +133,11 @@
         try {
           await invoke('remove_rpm', { name: pkg.name });
           uiStore.addToast(`Removed RPM: ${pkg.name}`, 'success');
+          statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 0, true);
           await loadAll();
         } catch (e) {
           uiStore.addToast(`Failed to remove RPM: ${e}`, 'error');
+          statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 1, false);
         } finally {
           removingId = null;
         }

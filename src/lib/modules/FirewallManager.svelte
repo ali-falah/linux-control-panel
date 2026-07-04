@@ -61,8 +61,10 @@
     loadingRules = true;
     try {
       rules = await invoke<ZoneRules>('get_zone_rules', { zone });
+      statusStore.setLastCommand(`firewall-cmd --zone=${zone} --list-all`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load rules for zone ${zone}: ${e}`, 'error');
+      statusStore.setLastCommand(`firewall-cmd --zone=${zone} --list-all`, 1, false);
     } finally {
       loadingRules = false;
     }
@@ -84,10 +86,12 @@
     statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} panic mode…`);
     try {
       await invoke('toggle_panic_mode', { enable });
+      statusStore.setLastCommand(`firewall-cmd --panic-${enable ? 'on' : 'off'}`, 0, true);
       uiStore.addToast(`Panic mode ${enable ? 'enabled' : 'disabled'}`, 'success');
       await loadState();
     } catch (e) {
       uiStore.addToast(`Failed to toggle panic mode: ${e}`, 'error');
+      statusStore.setLastCommand(`firewall-cmd --panic-${enable ? 'on' : 'off'}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -105,12 +109,14 @@
     statusStore.setBusy(`Adding ${type} ${val}…`);
     try {
       await invoke('modify_firewall_rule', { zone: activeZone, ruleType: type, value: val, add: true });
+      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --add-${type}=${val}`, 0, true);
       uiStore.addToast(`Added ${type} ${val} successfully`, 'success');
       if (type === 'port') newPort = '';
       if (type === 'service') newService = '';
       await loadRules(activeZone);
     } catch (e) {
       uiStore.addToast(`Failed to add ${type}: ${e}`, 'error');
+      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --add-${type}=${val}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -129,10 +135,12 @@
     statusStore.setBusy(`Removing ${type} ${val}…`);
     try {
       await invoke('modify_firewall_rule', { zone: activeZone, ruleType: type, value: val, add: false });
+      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --remove-${type}=${val}`, 0, true);
       uiStore.addToast(`Removed ${type} ${val} successfully`, 'success');
       await loadRules(activeZone);
     } catch (e) {
       uiStore.addToast(`Failed to remove ${type}: ${e}`, 'error');
+      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --remove-${type}=${val}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }

@@ -46,11 +46,11 @@
     statusStore.setBusy('Loading DNF log…');
     try {
       dnfLogContent = await invoke('dnf_read_log');
-      statusStore.setLastCommand('read /var/log/dnf.log', 0, true);
+      statusStore.setLastCommand('cat /var/log/dnf.log', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load DNF log: ${e}`, 'error');
       dnfLogContent = `Error: ${e}`;
-      statusStore.setLastCommand('read /var/log/dnf.log', 1, false);
+      statusStore.setLastCommand('cat /var/log/dnf.log', 1, false);
     } finally {
       loadingLog = false;
       statusStore.clearBusy();

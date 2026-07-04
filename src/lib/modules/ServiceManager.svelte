@@ -114,8 +114,10 @@
     logs = '';
     try {
       logs = await invoke<string>('get_service_logs', { name: unit.name, lines: 100 });
+      statusStore.setLastCommand(`journalctl -u ${unit.name} -n 100`, 0, true);
     } catch (e) {
-      logs = `Error loading logs: ${e}`;
+      uiStore.addToast(`Failed to load logs: ${e}`, 'error');
+      statusStore.setLastCommand(`journalctl -u ${unit.name} -n 100`, 1, false);
     } finally {
       logsLoading = false;
     }
@@ -130,9 +132,11 @@
     try {
       unitFileContent = await invoke<string>('read_unit_file', { name: unit.name });
       editedContent = unitFileContent;
+      statusStore.setLastCommand(`systemctl cat ${unit.name}`, 0, true);
     } catch (e) {
       unitFileContent = `# Error reading unit file: ${e}`;
       editedContent = unitFileContent;
+      statusStore.setLastCommand(`systemctl cat ${unit.name}`, 1, false);
     } finally {
       unitFileLoading = false;
     }
@@ -155,10 +159,12 @@
         name: selectedUnit.name,
         content: editedContent,
       });
+      statusStore.setLastCommand(`echo "..." > /etc/systemd/system/${selectedUnit.name} && systemctl daemon-reload`, 0, true);
       uiStore.addToast(`Unit file saved for ${selectedUnit.name}`, 'success');
       unitFileContent = editedContent;
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
+      statusStore.setLastCommand(`echo "..." > /etc/systemd/system/${selectedUnit.name}`, 1, false);
     } finally {
       saving = false;
     }

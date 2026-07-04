@@ -140,10 +140,10 @@
     statusStore.setBusy('Parsing profile files…');
     try {
       varGroups = await invoke<ShellVarGroup[]>('shell_parse_all_exports');
-      statusStore.setLastCommand('shell_parse_all_exports', 0, true);
+      statusStore.setLastCommand('grep -r "export" /etc/profile.d ~/.bashrc', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to parse profiles: ${e}`, 'error');
-      statusStore.setLastCommand('shell_parse_all_exports', 1, false);
+      statusStore.setLastCommand('grep -r "export" /etc/profile.d ~/.bashrc', 1, false);
     } finally {
       varsLoading = false;
       statusStore.clearBusy();
@@ -262,9 +262,10 @@
     statusStore.setBusy('Parsing $PATH…');
     try {
       pathEntries = await invoke<PathEntry[]>('shell_parse_path');
-      statusStore.setLastCommand('shell_parse_path', 0, true);
+      statusStore.setLastCommand('echo $PATH | tr ":" "\\n"', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to parse PATH: ${e}`, 'error');
+      statusStore.setLastCommand('echo $PATH | tr ":" "\\n"', 1, false);
     } finally {
       pathLoading = false;
       statusStore.clearBusy();
@@ -282,11 +283,12 @@
         profilePath: addPathForm.profile_path,
       });
       uiStore.addToast(`Added ${addPathForm.directory} to PATH ✓`, 'success');
-      statusStore.setLastCommand('shell_add_path_entry', 0, true);
+      statusStore.setLastCommand(`echo 'export PATH="$PATH:${addPathForm.directory}"' >> ${addPathForm.profile_path}`, 0, true);
       addPathForm = null;
       await loadPathEntries();
     } catch (e) {
       uiStore.addToast(`Failed to add PATH entry: ${e}`, 'error');
+      statusStore.setLastCommand(`echo 'export PATH="$PATH:${addPathForm.directory}"' >> ${addPathForm.profile_path}`, 1, false);
     }
   }
 
@@ -305,9 +307,11 @@
             profilePath: entry.source_path,
           });
           uiStore.addToast(`Removed ${entry.directory} from PATH ✓`, 'success');
+          statusStore.setLastCommand(`sed -i 's|${entry.directory}||g' ${entry.source_path}`, 0, true);
           await loadPathEntries();
         } catch (e) {
           uiStore.addToast(`Remove failed: ${e}`, 'error');
+          statusStore.setLastCommand(`sed -i 's|${entry.directory}||g' ${entry.source_path}`, 1, false);
         }
       },
       true,
@@ -320,8 +324,10 @@
     filesLoading = true;
     try {
       profileFiles = await invoke<ProfileFile[]>('shell_list_profile_files');
+      statusStore.setLastCommand('ls /etc/profile /etc/profile.d/* ~/.bashrc ~/.bash_profile', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to list profile files: ${e}`, 'error');
+      statusStore.setLastCommand('ls /etc/profile /etc/profile.d/* ~/.bashrc ~/.bash_profile', 1, false);
     } finally {
       filesLoading = false;
     }
@@ -333,8 +339,10 @@
     try {
       fileContent = await invoke<string>('shell_read_profile_file', { path: f.path });
       savedFileContent = fileContent;
+      statusStore.setLastCommand(`cat ${f.path}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Cannot read ${f.path}: ${e}`, 'error');
+      statusStore.setLastCommand(`cat ${f.path}`, 1, false);
     } finally {
       fileEditorLoading = false;
     }
@@ -347,11 +355,11 @@
     try {
       await invoke('shell_write_profile_file', { path: selectedFile.path, content: fileContent });
       uiStore.addToast(`Saved ${selectedFile.display_name} ✓`, 'success');
-      statusStore.setLastCommand(`shell_write_profile_file`, 0, true);
+      statusStore.setLastCommand(`echo "..." > ${selectedFile.path}`, 0, true);
       savedFileContent = fileContent;
     } catch (e) {
       uiStore.addToast(`Save failed: ${e}`, 'error');
-      statusStore.setLastCommand('shell_write_profile_file', 1, false);
+      statusStore.setLastCommand(`echo "..." > ${selectedFile.path}`, 1, false);
     } finally {
       fileSaving = false;
       statusStore.clearBusy();
@@ -362,8 +370,10 @@
     backupsLoading = true;
     try {
       backups = await invoke<ShellBackup[]>('shell_list_backups');
+      statusStore.setLastCommand('ls /etc/profile.d/backups', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load backups: ${e}`, 'error');
+      statusStore.setLastCommand('ls /etc/profile.d/backups', 1, false);
     } finally {
       backupsLoading = false;
     }
@@ -377,12 +387,14 @@
         try {
           await invoke('shell_restore_backup', { backupPath: bk.backup_path, originalPath: bk.original_path });
           uiStore.addToast('Backup restored ✓', 'success');
+          statusStore.setLastCommand(`cp ${bk.backup_path} ${bk.original_path}`, 0, true);
           if (selectedFile?.path === bk.original_path) {
             fileContent = await invoke<string>('shell_read_profile_file', { path: bk.original_path });
             savedFileContent = fileContent;
           }
         } catch (e) {
           uiStore.addToast(`Restore failed: ${e}`, 'error');
+          statusStore.setLastCommand(`cp ${bk.backup_path} ${bk.original_path}`, 1, false);
         }
       },
     );
@@ -396,11 +408,13 @@
     try {
       const path = await invoke<string>('shell_create_profile_d_file', { name: newProfileDName });
       uiStore.addToast(`Created ${path} ✓`, 'success');
+      statusStore.setLastCommand(`touch /etc/profile.d/${newProfileDName}.sh`, 0, true);
       showNewFileForm = false;
       newProfileDName = '';
       await loadProfileFiles();
     } catch (e) {
       uiStore.addToast(`Create failed: ${e}`, 'error');
+      statusStore.setLastCommand(`touch /etc/profile.d/${newProfileDName}.sh`, 1, false);
     }
   }
 
