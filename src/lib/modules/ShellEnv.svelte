@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -618,11 +619,13 @@
           </div>
         {/if}
       </div>
-    <!-- ══ PATH MANAGER<!-- ══ PATH MANAGER ════════════════════════════════════════════════════ -->
+    <!-- ══ PATH MANAGER ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'path'}
-      <div class="tab-section">
-        <div class="section-header">
-          <h3>$PATH Entries</h3>
+      <div class="tab-section" style="display:flex; flex-direction:column; flex:1; min-height:0; padding: 0;">
+        <div class="custom-toolbar">
+          <div style="display:flex; align-items:center;">
+            <h3 style="margin:0; font-size:15px; font-weight:600; color:var(--color-text-primary);">$PATH Entries</h3>
+          </div>
           <div class="row-actions">
             <Button variant="ghost" class=" btn-sm" onclick={loadPathEntries} id="shell-reload-path">
               <RefreshCw size={13} /> Refresh
@@ -632,7 +635,7 @@
             </Button>
           </div>
         </div>
-        <div class="module-content-scroll" style="display:flex; flex-direction:column; padding: 20px; gap: 16px;">
+        <div style="display:flex; flex-direction:column; padding: 24px; gap: 16px; flex: 1; min-height:0;">
         {#if addPathForm}
           <div class="card add-var-form">
             <div class="form-title">Add PATH entry</div>
@@ -669,8 +672,8 @@
         {:else if pathEntries.length === 0}
           <div class="empty-state">$PATH is empty or could not be parsed</div>
         {:else}
-          <div class="table-wrap">
-            <table>
+          <div class="table-wrap module-content-scroll" style="margin:0; border:none; border-radius:12px; flex:1; min-height:0; border: 1px solid var(--color-border);">
+            <table use:tableFeatures>
               <thead>
                 <tr>
                   <th>#</th>
@@ -906,7 +909,7 @@
 
           <!-- Diff table -->
           <div class="table-wrap">
-            <table>
+            <table use:tableFeatures>
               <thead>
                 <tr>
                   <th>Variable</th>
@@ -1031,7 +1034,7 @@
     align-items: center;
     gap: 8px;
     padding: 10px 14px;
-    background: rgba(0,0,0,0.2);
+    background: rgba(0,0,0,0.4);
     border: 1px solid var(--color-border);
     border-radius: 10px 10px 0 0;
     cursor: pointer;
@@ -1043,7 +1046,7 @@
     transition: background 0.15s;
     text-align: left;
   }
-  .group-header:hover { background: rgba(0,0,0,0.35); }
+  .group-header:hover { background: rgba(0,0,0,0.6); }
   .group-name { flex: 1; font-family: var(--font-mono); font-size: 12px; }
   .group-count { font-size: 11px; color: var(--color-text-muted); margin-right: 4px; }
   :global(.ml-auto) { margin-left: auto; }
@@ -1303,10 +1306,12 @@
     gap: 12px;
     padding: 16px 20px;
     cursor: pointer;
+    background: rgba(0, 0, 0, 0.4);
+    border-bottom: 1px solid rgba(255,255,255,0.04);
     transition: background 0.2s;
   }
   .sg-header:hover {
-    background: rgba(255,255,255,0.02);
+    background: rgba(0, 0, 0, 0.5);
   }
   .sg-name {
     font-family: var(--font-mono);
@@ -1490,10 +1495,12 @@
     gap: 12px;
     padding: 16px 20px;
     cursor: pointer;
+    background: rgba(0, 0, 0, 0.4);
+    border-bottom: 1px solid rgba(255,255,255,0.04);
     transition: background 0.2s;
   }
   .sg-header:hover {
-    background: rgba(255,255,255,0.02);
+    background: rgba(0, 0, 0, 0.5);
   }
   .sg-name {
     font-family: var(--font-mono);

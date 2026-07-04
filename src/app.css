@@ -463,7 +463,6 @@ input[type="checkbox"]:checked::after {
 /* ─── Table Redesign ─────────────────────────────────────────────────────── */
 .table-wrap {
   min-width: 100%;
-  width: max-content;
   border-radius: 12px;
   border: 1px solid var(--color-border);
   background: var(--color-bg-surface);
@@ -481,8 +480,43 @@ thead th {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
-  background: rgba(0, 0, 0, 0.15);
+  background: rgba(0, 0, 0, 0.4);
   border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  user-select: none;
+  backdrop-filter: blur(8px);
+}
+.th-sortable {
+  cursor: pointer;
+}
+.th-sortable:hover {
+  background: rgba(0, 0, 0, 0.5);
+}
+.sort-indicator {
+  display: inline-block;
+  margin-left: 4px;
+  opacity: 0.4;
+  font-size: 10px;
+}
+.sort-asc .sort-indicator, .sort-desc .sort-indicator {
+  opacity: 1;
+  color: var(--color-accent);
+}
+.resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 15;
+}
+.resize-handle:hover, .resize-handle.active {
+  background: var(--color-accent);
+  opacity: 0.5;
 }
 tbody tr {
   border-bottom: 1px solid rgba(255, 255, 255, 0.02);

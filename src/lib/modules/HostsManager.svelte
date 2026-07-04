@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -271,7 +272,7 @@
           </h3>
           <div class="card module-content-scroll" style="padding:0">
             <div class="table-wrap" style="border:none;border-radius:0">
-              <table>
+              <table use:tableFeatures>
                 <thead>
                   <tr>
                     <th style="width:140px">IP Address</th>

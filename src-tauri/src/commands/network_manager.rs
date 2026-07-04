@@ -35,8 +35,7 @@ pub fn network_get_dns() -> Result<String, String> {
 
 #[tauri::command]
 pub fn network_list_connections() -> Result<String, String> {
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli");
+    let mut cmd = Command::new("nmcli");
     cmd.args(["-t", "-c", "no", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     
@@ -48,8 +47,7 @@ pub fn network_list_connections() -> Result<String, String> {
 
 #[tauri::command]
 pub fn network_get_connection(uuid: String) -> Result<String, String> {
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli");
+    let mut cmd = Command::new("nmcli");
     cmd.args(["-t", "-c", "no", "-f", "ipv4,ipv6,connection", "connection", "show", &uuid]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     

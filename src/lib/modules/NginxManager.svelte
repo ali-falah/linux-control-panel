@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -921,7 +922,7 @@
             <div class="empty-state">No site configurations found</div>
           {:else}
             <div class="table-wrap">
-              <table>
+              <table use:tableFeatures>
                 <thead>
                   <tr>
                     <th>Name</th>

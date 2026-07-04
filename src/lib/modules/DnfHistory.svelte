@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -391,7 +392,7 @@
           </div>
           {:else}
             <div class="table-wrap" style="border:none; border-radius:0; flex:1; overflow: visible;">
-            <table>
+            <table use:tableFeatures>
               <thead>
                 <tr>
                   <th style="width: 40px; text-align:center;">
@@ -448,7 +449,7 @@
         </div>
       {:else}
         <div class="table-wrap" style="border:none; border-radius:0">
-          <table>
+          <table use:tableFeatures>
             <thead>
               <tr>
                 <th style="width:60px">ID</th>

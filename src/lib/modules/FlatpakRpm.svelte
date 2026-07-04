@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -171,18 +172,19 @@
 
     <!-- Search -->
     {#if activeTab !== 'duplicates'}
-      <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+      <div class="search-bar" style="flex:1; min-width:200px; margin: 0; align-self: stretch; height: auto;">
         <Search size={14} style="color:var(--color-text-muted)" />
-        <input bind:value={filter} placeholder="Filter packages…" />
+        <input bind:value={filter} placeholder="Filter packages…" style="height: 100%;" />
       </div>
     {:else}
       <div style="flex:1"></div>
     {/if}
 
     <!-- Tabs -->
-    <div class="tab-bar">
+    <div class="tab-bar" style="align-self: stretch; margin-bottom: 0; display: flex; align-items: stretch;">
       {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
         <button class="tab-btn { activeTab === id ? 'active' : '' }"
+          style="display: flex; align-items: center; justify-content: center; height: auto;"
           onclick={() => activeTab = id as Tab}
         >
           {label}
@@ -279,7 +281,7 @@
         </div>
       {:else}
         <div class="table-wrap" style="border:none;border-radius:0">
-          <table>
+          <table use:tableFeatures>
             <thead>
               <tr>
                 <th>App Name</th>
@@ -344,7 +346,7 @@
         </div>
       {:else}
         <div class="table-wrap" style="border:none;border-radius:0">
-          <table>
+          <table use:tableFeatures>
             <thead>
               <tr>
                 <th>Package</th>

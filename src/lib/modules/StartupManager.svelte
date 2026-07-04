@@ -1,4 +1,5 @@
-<script lang="ts">
+$PATH Entries<script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -29,13 +30,13 @@
     icon: string | null;
   }
 
-  type ViewFilter = 'all' | 'service' | 'autostart';
+  type ViewFilter = 'service' | 'autostart';
 
   let systemdUnits = $state<SystemdUnit[]>([]);
   let autostartEntries = $state<AutostartEntry[]>([]);
   let loading = $state(false);
   let filter = $state('');
-  let viewFilter = $state<ViewFilter>('all');
+  let viewFilter = $state<ViewFilter>('service');
   let togglingId = $state<string | null>(null);
 
   const filteredSystemd = $derived(
@@ -137,62 +138,48 @@
     </Button>
   </PageHeader>
 
-  <!-- Controls: Stats, Search & Tabs -->
+  <!-- Controls: Search & Tabs -->
   <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
-    <!-- Stats -->
-    <div style="display:flex; gap:12px; flex-wrap:wrap; margin: 0; align-items:stretch;">
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-text-primary);line-height:1;">{systemdUnits.length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">System Services</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-success);line-height:1;">{systemdUnits.filter(u => u.state === 'enabled').length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Enabled</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);">
-        <span style="font-size:16px;font-weight:700;color:var(--color-accent);line-height:1;">{autostartEntries.length}</span>
-        <span style="font-size:11px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Autostart Apps</span>
-      </div>
-    </div>
-
     <!-- Search -->
-    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
+    <div class="search-bar" style="flex:1; min-width:150px; margin: 0; align-self: stretch; height: auto;">
       <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={filter} placeholder="Filter entries…" />
+      <input bind:value={filter} placeholder="Filter entries…" style="height: 100%;" />
     </div>
 
     <!-- Tabs -->
-    <div class="tab-bar">
-      {#each [['all','All'],['service','Services'],['autostart','Autostart']] as [id, label]}
-        <button class="tab-btn { viewFilter === id ? 'active' : '' }"
-          onclick={() => viewFilter = id as ViewFilter}
-        >
-          {label}
-        </button>
-      {/each}
+    <div class="tab-bar" style="align-self: stretch; margin-bottom: 0; display: flex; align-items: stretch;">
+      <button class="tab-btn { viewFilter === 'service' ? 'active' : '' }"
+        style="display: flex; align-items: center; justify-content: center; height: auto; gap: 8px;"
+        onclick={() => viewFilter = 'service'}
+      >
+        <span style="color:var(--color-accent)">⬡</span> systemd Service Units
+        <span class="badge badge-muted">{systemdUnits.length}</span>
+      </button>
+      <button class="tab-btn { viewFilter === 'autostart' ? 'active' : '' }"
+        style="display: flex; align-items: center; justify-content: center; height: auto; gap: 8px;"
+        onclick={() => viewFilter = 'autostart'}
+      >
+        <span style="color:var(--color-success)">⬡</span> XDG Autostart Entries
+        <span class="badge badge-muted">{autostartEntries.length}</span>
+      </button>
     </div>
   </div>
 
-  <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:24px;">
+  <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
     <!-- Systemd Units -->
-    {#if viewFilter !== 'autostart'}
-      <div>
-        <h3 class="section-title" style="margin-bottom:10px">
-          <span style="color:var(--color-accent)">⬡</span> systemd Service Units
-          <span class="badge badge-muted">{filteredSystemd.length}</span>
-        </h3>
-        <div class="card" style="padding:0">
+    {#if viewFilter === 'service'}
+      <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0;">
         {#if loading}
-          <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted)">
+          <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted); flex:1;">
             <RefreshCw size={14} class="animate-spin-slow" /> Loading…
           </div>
         {:else if filteredSystemd.length === 0}
-          <div class="empty-state" style="padding:24px">
+          <div class="empty-state" style="padding:24px; flex:1;">
             <span>No units match your filter</span>
           </div>
         {:else}
-          <div class="table-wrap" style="border:none;border-radius:0">
-            <table>
+          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;">
+            <table use:tableFeatures>
               <thead>
                 <tr>
                   <th>Unit Name</th>
@@ -231,28 +218,22 @@
           </div>
         {/if}
       </div>
-    </div>
-  {/if}
+    {/if}
 
   <!-- Autostart Entries -->
-  {#if viewFilter !== 'service'}
-    <div>
-      <h3 class="section-title" style="margin-bottom:10px">
-        <span style="color:var(--color-success)">⬡</span> XDG Autostart Entries
-        <span class="badge badge-muted">{filteredAutostart.length}</span>
-      </h3>
-      <div class="card" style="padding:0">
+  {#if viewFilter === 'autostart'}
+      <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0;">
         {#if loading}
-          <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted)">
+          <div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--color-text-muted); flex:1;">
             <RefreshCw size={14} class="animate-spin-slow" /> Loading…
           </div>
         {:else if filteredAutostart.length === 0}
-          <div class="empty-state" style="padding:24px">
+          <div class="empty-state" style="padding:24px; flex:1;">
             <span>No XDG autostart entries in ~/.config/autostart/</span>
           </div>
         {:else}
-          <div class="table-wrap" style="border:none;border-radius:0">
-            <table>
+          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;">
+            <table use:tableFeatures>
               <thead>
                 <tr>
                   <th>Application</th>
@@ -290,8 +271,7 @@
           </div>
         {/if}
       </div>
-    </div>
-  {/if}
+    {/if}
   </div>
 </div>
 
