@@ -180,16 +180,16 @@
     {/if}
 
     <!-- Tabs -->
-    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
+    <div class="tab-bar">
       {#each [['duplicates','Duplicates'],['flatpaks','Flatpaks'],['rpms','RPMs']] as [id, label]}
-        <Button class="tab-btn { activeTab === id ? 'active' : '' }"
+        <button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
         >
           {label}
           {#if id === 'duplicates' && duplicates.length > 0}
             <span class="badge badge-warning" style="margin-left:4px;padding:1px 5px">{duplicates.length}</span>
           {/if}
-        </Button>
+        </button>
       {/each}
     </div>
   </div>
@@ -392,24 +392,8 @@
 </div>
 
 <style>
-  :global(.tab-btn) {
-    padding: 6px 14px;
-    border: none;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--color-text-muted);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    font-family: var(--font-sans);
-    display: flex;
-    align-items: center;
-    transition: all 0.15s;
-  }
-  :global(.tab-btn.active) {
-    background: var(--color-bg-card);
-    color: var(--color-text-primary);
-  }
+  
+  
 
   .dup-row {
     padding: 16px 20px;

@@ -451,17 +451,17 @@
   <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal} />
 
   <!-- Tab Bar -->
-  <div class="tab-bar">
-    <button class="tab-btn" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
+  <div class="custom-tabs-container">
+    <button class="custom-tab" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
       <Variable size={14} /> Variables
     </button>
-    <button class="tab-btn" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
+    <button class="custom-tab" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
       <FolderOpen size={14} /> PATH Manager
     </button>
-    <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
+    <button class="custom-tab" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
       <FileCode size={14} /> Profile Files
     </button>
-    <button class="tab-btn" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
+    <button class="custom-tab" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
       <Eye size={14} /> Live Preview
     </button>
   </div>
@@ -472,7 +472,7 @@
     {#if activeTab === 'variables'}
       <div class="tab-section" style="padding: 0;">
         <div class="custom-toolbar">
-          <div class="search-bar" style="flex:1; margin:0">
+          <div class="search-box">
             <Search size={16} />
             <input bind:value={filterVars} placeholder="Filter variables..." />
             {#if filterVars}<Button class="btn btn-sm -ghost" style="padding:2px; height:24px" onclick={() => filterVars = ''}>✕</Button>{/if}
@@ -632,7 +632,7 @@
             </Button>
           </div>
         </div>
-        <div class="module-content-scroll" style="display:flex; flex-direction:column; padding: 20px; gap: 16px;">
+
         {#if addPathForm}
           <div class="card add-var-form">
             <div class="form-title">Add PATH entry</div>
@@ -724,9 +724,8 @@
           <div class="path-legend">
             <XCircle size={12} style="color:var(--color-error)" /> Red = directory does not exist on disk
           </div>
-          {/if}
-        </div><!-- module-content-scroll -->
-      </div><!-- tab-section -->
+        {/if}
+      </div>
 
     <!-- ══ PROFILE FILES ══════════════════════════════════════════════════ -->
     {:else if activeTab === 'files'}
@@ -870,12 +869,11 @@
 
         {#if liveEnv.length > 0}
           <div class="preview-toolbar">
-            <div class="search-bar" style="flex:1; margin:0">
+            <div class="search-bar" style="flex:1">
               <Search size={13} style="color:var(--color-text-muted)" />
-              <input bind:value={filterLive} placeholder="Filter variables…" id="shell-live-filter" />
+              <input bind:value={filterLive} placeholder="Filter…" id="shell-live-filter" />
             </div>
-            
-            <label class="toggle-label-row" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">
+            <label class="toggle-label-row">
               <button
                 class="ui-toggle"
                 class:on={showOnlyUnsynced}
@@ -885,13 +883,13 @@
                 type="button"
                 id="shell-unsynced-only"
                 aria-label="Toggle show only out-of-sync"
-                style="transform: scale(0.8); margin-right:4px;"
+                style="transform: scale(0.8);"
               >
                 <span class="ui-toggle-thumb"></span>
               </button>
               Show out-of-sync only
             </label>
-            <span class="text-muted text-xs" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">{filteredLiveEnv.length} / {liveEnv.length} vars</span>
+            <span class="text-muted text-xs">{filteredLiveEnv.length} / {liveEnv.length} vars</span>
           </div>
 
           <!-- Source buttons -->
@@ -965,7 +963,13 @@
 
 <style>
   /* ─── Tab bar ─────────────────────────────────────────────────────── */
-  
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+    padding: 0 32px;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
   :global(.tab-btn) {
     display: inline-flex;
     align-items: center;
@@ -1237,10 +1241,37 @@
   .ml-4 { margin-left: 4px; }
 
   /* ─── ShellEnv Custom Design ────────────────────────────── */
-  
-  
-  
-  
+  .custom-tabs-container {
+    display: inline-flex;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 6px;
+    border-radius: 12px;
+    margin-bottom: 24px;
+    align-self: flex-start;
+  }
+  .custom-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .custom-tab:hover {
+    color: #fff;
+  }
+  .custom-tab.active {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(139, 92, 246, 0.3); /* subtle purple border */
+    color: #fff;
+  }
 
   .custom-toolbar {
     display: flex;
@@ -1250,196 +1281,29 @@
     flex-wrap: wrap;
     gap: 16px;
   }
-  
-  
-  
-  .toolbar-actions {
+  .search-box {
     display: flex;
     align-items: center;
-    gap: 12px;
-  }
-  .toolbar-btn {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 40px;
+    gap: 10px;
+    background: rgba(0, 0, 0, 0.2);
     padding: 0 16px;
     border-radius: 10px;
-    border: none;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .toolbar-btn:hover {
-    background: rgba(255,255,255,0.05);
-    color: #fff;
-  }
-  .primary-btn {
-    background: #7c3aed;
-    color: #fff;
-  }
-  .primary-btn:hover {
-    background: #6d28d9;
-  }
-
-  .shell-groups-list {
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
-    padding-bottom: 32px;
-  }
-  .shell-group-card {
-    background: rgba(255,255,255,0.015);
-    border: 1px solid rgba(255,255,255,0.04);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  .sg-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 16px 20px;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-  .sg-header:hover {
-    background: rgba(255,255,255,0.02);
-  }
-  .sg-name {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    font-size: 14px;
-    color: #fff;
-  }
-  .sg-badges {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .user-badge {
-    background: rgba(255,255,255,0.05);
-    color: var(--color-text-secondary);
-    padding: 4px 12px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 500;
-  }
-  .var-count {
-    font-size: 12px;
-    color: var(--color-text-muted);
-  }
-  .sg-content {
-    border-top: 1px solid rgba(255,255,255,0.04);
-  }
-  .sg-table-header {
-    display: flex;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    letter-spacing: 0.5px;
-  }
-  .sg-row {
-    display: flex;
-    align-items: center;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-  }
-  .sg-row:last-child {
-    border-bottom: none;
-  }
-  .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: #e2e8f0; font-size: 13px; }
-  .col-value { flex: 1; padding-right: 20px; min-width: 0; }
-  .col-meta { width: 160px; }
-  .col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }
-
-  .sg-input {
-    width: 100%;
-    background: rgba(0,0,0,0.25);
-    border: 1px solid rgba(255,255,255,0.04);
-    border-radius: 6px;
-    padding: 8px 12px;
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-    font-size: 13px;
-    outline: none;
-    transition: all 0.2s;
-  }
-  .sg-input:focus, .sg-input:not([readonly]) {
-    border-color: rgba(255,255,255,0.15);
-    color: #fff;
-    background: rgba(0,0,0,0.4);
-  }
-  .src-badge {
-    background: rgba(20, 184, 166, 0.1);
-    color: #2dd4bf;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-  }
-  .icon-btn {
-    background: rgba(255,255,255,0.03);
+    height: 40px;
+    width: 400px;
     border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 6px;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .icon-btn:hover {
-    background: rgba(255,255,255,0.08);
-    color: #fff;
-  }
-  .icon-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .sg-add-row {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
     color: var(--color-text-muted);
-    font-size: 13px;
-    cursor: pointer;
-    transition: color 0.2s;
   }
-  .sg-add-row:hover {
+  .search-box:focus-within {
+    border-color: rgba(255,255,255,0.15);
+  }
+  .search-box input {
+    background: transparent;
+    border: none;
+    outline: none;
     color: #fff;
+    font-size: 13px;
+    flex: 1;
   }
-
-  /* ─── End Custom ShellEnv Design ────────────────────────────── */
-
-
-  /* ─── ShellEnv Custom Design ────────────────────────────── */
-  
-  
-  
-  
-
-  .custom-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-    gap: 16px;
-  }
-  
-  
-  
   .toolbar-actions {
     display: flex;
     align-items: center;

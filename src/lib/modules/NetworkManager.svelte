@@ -318,16 +318,16 @@
       </div>
     </div>
   {:else}
-    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin-bottom: 16px; flex-shrink: 0">
-      <Button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
+    <div class="tab-bar">
+      <button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
         <Activity size={14} style="margin-right:6px" /> Physical Adapters
-      </Button>
-      <Button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
+      </button>
+      <button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
         <Network size={14} style="margin-right:6px" /> Connections
-      </Button>
-      <Button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
+      </button>
+      <button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
         <Globe size={14} style="margin-right:6px" /> Global DNS
-      </Button>
+      </button>
       <Button variant="outline" class="" style="margin-left:8px; padding: 4px 8px; font-size:12px; display:flex; align-items:center; gap:6px" onclick={loadData}>
         <RefreshCw size={12} class={loading ? 'animate-spin-slow' : ''} /> Refresh
       </Button>
@@ -439,26 +439,7 @@
 </div>
 
 <style>
-  :global(.tab-btn) {
-    padding: 6px 16px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--color-text-muted);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    font-family: var(--font-sans);
-    transition: all 0.15s;
-    display: flex;
-    align-items: center;
-  }
-  :global(.tab-btn:hover) {
-    color: var(--color-text-primary);
-  }
-  :global(.tab-btn.active) {
-    background: var(--color-bg-surface);
-    color: var(--color-text-primary);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  }
+  
+  
+  
 </style>

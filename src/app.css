@@ -571,3 +571,36 @@ pre {
   overflow: auto;
   border-radius: 16px;
 }
+
+/* ─── Global Tab Design ───────────────────────────────────────────── */
+.tab-bar {
+  display: inline-flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 6px;
+  border-radius: 12px;
+  margin-bottom: 24px;
+  align-self: flex-start;
+}
+.tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.tab-btn:hover {
+  color: #fff;
+}
+.tab-btn.active {
+  background: rgba(255,255,255,0.03);
+  border-color: rgba(139, 92, 246, 0.3); /* subtle purple border */
+  color: #fff;
+}

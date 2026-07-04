@@ -330,13 +330,13 @@
 
   <!-- Controls: Tabs & Search -->
   <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom: 16px;">
-    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:10px; width:fit-content; margin: 0;">
+    <div class="tab-bar">
       {#each [['updates', 'Updates'], ['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs', 'System Logs']] as [id, label]}
-        <Button class="tab-btn { activeTab === id ? 'active' : '' }"
+        <button class="tab-btn { activeTab === id ? 'active' : '' }"
           onclick={() => activeTab = id as Tab}
         >
           {label}
-        </Button>
+        </button>
       {/each}
     </div>
 
@@ -617,23 +617,7 @@
 </div>
 
 <style>
-  .tab-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    padding: 6px 16px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-  .tab-btn:hover {
-    color: var(--color-text-primary);
-  }
-  .tab-btn.active {
-    background: var(--color-bg-base);
-    color: var(--color-text-primary);
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-  }
+  
+  
+  
 </style>

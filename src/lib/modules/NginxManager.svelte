@@ -693,13 +693,13 @@
     <!-- ─── Tab Bar ─── -->
     <div class="tab-bar">
       {#each tabDefs as tab}
-        <Button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
+        <button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
           onclick={() => (activeTab = tab.id)}
           id={`nginx-tab-${tab.id}`}
         >
           <tab.icon size={14} />
           {tab.label}
-        </Button>
+        </button>
       {/each}
     </div>
 
@@ -1408,35 +1408,10 @@
   .ni-cmd code { font-family: var(--font-mono); font-size: 13px; color: var(--color-accent-soft); }
 
   /* ─── Tab Bar ────────────────────────────────────────────────────────── */
-  .tab-bar {
-    display: flex;
-    gap: 4px;
-    padding: 0 32px;
-    border-bottom: 1px solid var(--color-border);
-    flex-shrink: 0;
-  }
-  .tab-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 16px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 13px;
-    font-weight: 500;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    white-space: nowrap;
-    margin-bottom: -1px;
-  }
-  .tab-btn:hover { color: var(--color-text-primary); }
-  .tab-btn.active {
-    color: var(--color-accent-soft);
-    border-bottom-color: var(--color-accent);
-  }
+  
+  
+  
+  
 
   /* ─── Spinners ───────────────────────────────────────────────────────── */
   .spinner {

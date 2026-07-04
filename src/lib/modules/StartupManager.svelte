@@ -162,14 +162,13 @@
     </div>
 
     <!-- Tabs -->
-    <div style="display:flex; gap:2px; background:var(--color-bg-raised); padding:4px; border-radius:8px; margin: 0;">
+    <div class="tab-bar">
       {#each [['all','All'],['service','Services'],['autostart','Autostart']] as [id, label]}
-        <Button
-          class="filter-btn { viewFilter === id ? 'active' : '' }"
+        <button class="tab-btn { viewFilter === id ? 'active' : '' }"
           onclick={() => viewFilter = id as ViewFilter}
         >
           {label}
-        </Button>
+        </button>
       {/each}
     </div>
   </div>
