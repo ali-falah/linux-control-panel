@@ -1,4 +1,6 @@
 $PATH Entries<script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -158,10 +160,7 @@ $PATH Entries<script lang="ts">
     </div>
 
     <div class="tab-actions">
-      <div class="search-bar" style="margin: 0; width: 250px;">
-        <Search size={14} style="color:var(--color-text-muted)" />
-        <input bind:value={filter} placeholder="Filter entries…" />
-      </div>
+      <SearchBar bind:value={filter} placeholder="Filter entries…" style="margin: 0; width: 250px;" />
     </div>
   </div>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -212,13 +213,7 @@
     </div>
 
     <!-- Search -->
-    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={filter} placeholder="Filter services by name or description…" />
-      {#if filter}
-        <Button class="btn btn-sm -ghost" onclick={() => filter = ''} style="padding:2px 6px">✕</Button>
-      {/if}
-    </div>
+    <SearchBar bind:value={filter} placeholder="Filter services by name or description…" style="flex:1; min-width:200px; margin: 0;" />
   </div>
 
   <!-- Side panel: Logs or Editor -->

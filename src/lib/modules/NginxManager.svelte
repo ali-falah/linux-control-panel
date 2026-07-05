@@ -1,4 +1,7 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import Select from '../components/ui/Select.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -775,15 +778,12 @@
             <FolderPlus size={13} /> New Dir
           </Button>
         {:else if activeTab === 'logs'}
-          <select bind:value={selectedLog} onchange={loadLog} class="log-select" id="nginx-log-select">
+          <Select bind:value={selectedLog} onchange={loadLog}  id="nginx-log-select">
             {#each logFiles as lf}
               <option value={lf}>{lf}</option>
             {/each}
-          </select>
-          <div class="search-bar" style="margin:0; width: 200px;">
-            <Search size={14} style="color:var(--color-text-muted)" />
-            <input type="text" bind:value={logFilter} onchange={loadLog} placeholder="Filter…" id="nginx-log-filter" />
-          </div>
+          </Select>
+          <SearchBar bind:value={logFilter} placeholder="Filter…" style="margin:0; width: 200px;" />
           <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
             <RefreshCw size={13} /> Refresh
           </Button>

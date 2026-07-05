@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -229,10 +230,7 @@
     </div>
 
     <!-- Search -->
-    <div class="search-bar" style="flex:1; min-width:200px; margin: 0;">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input bind:value={filter} placeholder="Filter by IP, hostname, or comment…" />
-    </div>
+    <SearchBar bind:value={filter} placeholder="Filter by IP, hostname, or comment…" style="flex:1; min-width:200px; margin: 0;" />
   </div>
 
   <!-- Grouped by category -->

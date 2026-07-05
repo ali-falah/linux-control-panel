@@ -6,6 +6,9 @@
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
+  import Select from '../components/ui/Select.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
 
@@ -33,7 +36,7 @@
   let sourceFilter = $state<SourceFilter>('All');
 
   type SortOption = 'name' | 'size' | 'date' | 'source';
-  let sortBy = $state<SortOption>('name');
+  let sortBy = $state<SortOption>('size');
 
   // Terminal log state
   let uninstallLog = $state<string[]>([]);
@@ -257,32 +260,28 @@
 
   <div class="controls-row">
     <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
-      <div class="search-bar" style="height: 42px; box-sizing: border-box;">
-        <Search size={14} style="color:var(--color-text-muted)" />
-        <input bind:value={filter} placeholder="Search installed apps..." disabled={isUninstalling} />
-      </div>
+      <SearchBar bind:value={filter} placeholder="Search installed apps..." disabled={isUninstalling} style="flex: 1; max-width: 300px;" />
       
-      <div class="tab-bar" style="margin: 0; height: 42px; box-sizing: border-box; padding: 4px; display: flex; align-items: stretch;">
-        {#each ['All', 'RPM', 'Flatpak'] as src}
-          <button class="tab-btn { sourceFilter === src ? 'active' : '' }"
-            onclick={() => sourceFilter = src as SourceFilter}
-            disabled={isUninstalling}
-          >
-            {src === 'All' ? 'All Sources' : src}
-          </button>
-        {/each}
-      </div>
+      <TabGroup 
+        tabs={[
+          {id: 'All', label: 'All Sources'},
+          {id: 'RPM', label: 'RPM'},
+          {id: 'Flatpak', label: 'Flatpak'}
+        ]}
+        bind:activeTab={sourceFilter}
+        disabled={isUninstalling}
+      />
     </div>
     
     <div style="display:flex;align-items:center;gap:16px;">
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size: 12px; color: var(--color-text-muted);">Sort by:</span>
-        <select bind:value={sortBy} class="sort-select" disabled={isUninstalling}>
+        <Select bind:value={sortBy} disabled={isUninstalling}>
           <option value="name">Name</option>
           <option value="size">Size</option>
           <option value="date">Install Date</option>
           <option value="source">Source</option>
-        </select>
+        </Select>
       </div>
       
       <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;box-sizing:border-box;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;">
@@ -477,50 +476,6 @@
     border-bottom: 1px solid var(--color-border);
     background: var(--color-bg-base);
     flex-shrink: 0;
-  }
-
-  .search-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid var(--color-border);
-    padding: 0 16px;
-    border-radius: 12px;
-    width: 300px;
-  }
-
-  .search-bar input {
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--color-text-primary);
-    width: 100%;
-    font-size: 13px;
-  }
-
-  .sort-select {
-    background-color: rgba(0, 0, 0, 0.2);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-    padding: 0 12px;
-    border-radius: 8px;
-    height: 32px;
-    font-size: 12px;
-    outline: none;
-    cursor: pointer;
-    -webkit-appearance: none;
-    appearance: none;
-    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-    background-size: 14px;
-    padding-right: 28px;
-  }
-
-  .sort-select option {
-    background-color: #1a1b26; /* Dark background for dropdown menu */
-    color: #a6accd;
   }
 
   .content {

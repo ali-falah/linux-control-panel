@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -96,14 +97,7 @@
 
   <!-- Search Box -->
   <div style="display:flex; gap:8px">
-    <div class="search-bar" style="flex:1; border: 1px solid var(--color-border-focus)">
-      <Search size={14} style="color:var(--color-text-muted)" />
-      <input
-        bind:value={query}
-        placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming')…"
-        onkeydown={(e) => e.key === 'Enter' && search()}
-      />
-    </div>
+    <SearchBar bind:value={query} placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming')…" style="flex:1; border: 1px solid var(--color-border-focus)" />
     <Button variant="primary" class="" onclick={search} disabled={loading || !query.trim()}>
       {#if loading}
         <RefreshCw size={14} class="animate-spin-slow" /> Searching…

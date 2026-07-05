@@ -1,4 +1,6 @@
 <script lang="ts">
+  import TabGroup from '../components/ui/TabGroup.svelte';
+  import Select from '../components/ui/Select.svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -271,12 +273,12 @@
           </div>
           <div style="display:flex; flex-direction:column; gap:4px;">
             <label for="conn-type" style="font-size:12px; color:var(--color-text-secondary);">Connection Type</label>
-            <select id="conn-type" class="input" bind:value={editConnectionData['connection.type']}>
+            <Select id="conn-type"  bind:value={editConnectionData['connection.type']}>
               <option value="802-3-ethernet">Ethernet</option>
               <option value="802-11-wireless">Wi-Fi</option>
               <option value="wireguard">WireGuard</option>
               <option value="bridge">Bridge</option>
-            </select>
+            </Select>
           </div>
         {/if}
         
@@ -286,12 +288,12 @@
             
             <div style="display:flex; flex-direction:column; gap:4px;">
               <label for="ipv4-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <select id="ipv4-method" class="input" bind:value={editConnectionData['ipv4.method']}>
+              <Select id="ipv4-method"  bind:value={editConnectionData['ipv4.method']}>
                 <option value="auto">Automatic (DHCP)</option>
                 <option value="manual">Manual (Static)</option>
                 <option value="disabled">Disabled</option>
                 <option value="link-local">Link-Local</option>
-              </select>
+              </Select>
             </div>
             
             {#if editConnectionData['ipv4.method'] === 'manual'}
@@ -318,12 +320,12 @@
             
             <div style="display:flex; flex-direction:column; gap:4px;">
               <label for="ipv6-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <select id="ipv6-method" class="input" bind:value={editConnectionData['ipv6.method']}>
+              <Select id="ipv6-method"  bind:value={editConnectionData['ipv6.method']}>
                 <option value="auto">Automatic</option>
                 <option value="dhcp">DHCP Only</option>
                 <option value="manual">Manual (Static)</option>
                 <option value="ignore">Disabled / Ignore</option>
-              </select>
+              </Select>
             </div>
           </div>
         </div>

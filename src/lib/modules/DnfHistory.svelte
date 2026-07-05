@@ -1,4 +1,6 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -391,10 +393,7 @@
 
     <div class="tab-actions">
       {#if activeTab === 'history'}
-        <div class="search-bar" style="margin: 0;">
-          <Search size={14} style="color:var(--color-text-muted)" />
-          <input bind:value={historySearch} placeholder="Search history by command or action…" />
-        </div>
+        <SearchBar bind:value={historySearch} placeholder="Search history by command or action…" style="margin: 0;" />
       {:else if activeTab === 'updates'}
         <span style="font-size:13px; color:var(--color-text-secondary); margin-right:8px;">{updates.length} updates available</span>
         {#if updates.length > 0}
@@ -403,10 +402,7 @@
           </Button>
         {/if}
       {:else if activeTab === 'packages'}
-        <div class="search-bar" style="margin:0; width: 250px;">
-          <Search size={14} style="color:var(--color-text-muted)" />
-          <input bind:value={pkgQuery} placeholder="Enter package name (e.g. htop)..." onkeydown={(e) => e.key === 'Enter' && runPkgCmd('search')} />
-        </div>
+        <SearchBar bind:value={pkgQuery} placeholder="Enter package name (e.g. htop)..." style="margin:0; width: 250px;" />
       {:else if activeTab === 'logs'}
         <span style="font-size:13px; color:var(--color-text-secondary); margin-right:8px;">reads /var/log/dnf.log</span>
       {/if}

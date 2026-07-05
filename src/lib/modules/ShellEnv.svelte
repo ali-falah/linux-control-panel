@@ -1,4 +1,7 @@
 <script lang="ts">
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import Select from '../components/ui/Select.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -495,11 +498,7 @@
 
     <div class="tab-actions">
       {#if activeTab === 'variables'}
-        <div class="search-bar" style="margin:0; width:200px">
-          <Search size={16} />
-          <input bind:value={filterVars} placeholder="Filter variables..." />
-          {#if filterVars}<Button class="btn btn-sm -ghost" style="padding:2px; height:24px" onclick={() => filterVars = ''}>✕</Button>{/if}
-        </div>
+        <SearchBar bind:value={filterVars} placeholder="Filter variables..." style="margin:0; width:200px" />
         <Button variant="outline" class="btn-sm" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
           <Eye size={13} /> Live values
         </Button>
@@ -518,12 +517,12 @@
       {:else if activeTab === 'preview'}
         <div style="display:flex; align-items:center; gap:6px;">
           <span class="text-muted text-xs">Source:</span>
-          <select bind:value={selectedSourceFile} class="form-select" style="padding:4px 24px 4px 8px; font-size:12px; height:28px; width: 140px;">
+          <Select bind:value={selectedSourceFile}  style="padding:4px 24px 4px 8px; font-size:12px; height:28px; width: 140px;">
             <option value="">Select file...</option>
             {#each profileFiles.filter(f => !f.is_system) as f}
               <option value={f.path}>{f.display_name}</option>
             {/each}
-          </select>
+          </Select>
           <Button variant="outline" class="btn-sm" disabled={!selectedSourceFile} onclick={() => { const f = profileFiles.find(pf => pf.path === selectedSourceFile); if(f) sourceFile(f); }}>
             Run
           </Button>
@@ -557,11 +556,11 @@
               </label>
               <label class="form-field form-full">
                 <span>Target profile file</span>
-                <select bind:value={addVarForm.targetFile} class="form-select" id="shell-new-var-target">
+                <Select bind:value={addVarForm.targetFile}  id="shell-new-var-target">
                   {#each profileFiles as f}
                     <option value={f.path}>{f.display_name}</option>
                   {/each}
-                </select>
+                </Select>
               </label>
             </div>
             {#if addVarForm.name}
@@ -686,11 +685,11 @@
               </label>
               <label class="form-field">
                 <span>Append to</span>
-                <select bind:value={addPathForm.profile_path} class="form-select" id="shell-path-target">
+                <Select bind:value={addPathForm.profile_path}  id="shell-path-target">
                   {#each profileFiles as f}
                     <option value={f.path}>{f.display_name}</option>
                   {/each}
-                </select>
+                </Select>
               </label>
             </div>
             {#if addPathForm.directory}
@@ -897,10 +896,7 @@
 
         {#if liveEnv.length > 0}
           <div class="preview-toolbar">
-            <div class="search-bar" style="flex:1; margin:0">
-              <Search size={13} style="color:var(--color-text-muted)" />
-              <input bind:value={filterLive} placeholder="Filter variables…" id="shell-live-filter" />
-            </div>
+            <SearchBar bind:value={filterLive} placeholder="Filter variables…" style="flex:1; margin:0" />
             
             <label class="toggle-label-row" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">
               <button

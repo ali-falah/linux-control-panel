@@ -1,5 +1,7 @@
 <script lang="ts">
   import { tableFeatures } from '../actions/tableFeatures';
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -191,10 +193,7 @@
 
       <!-- Search -->
       {#if activeTab !== 'duplicates'}
-        <div class="search-bar" style="margin: 0; width: 200px;">
-          <Search size={14} style="color:var(--color-text-muted)" />
-          <input bind:value={filter} placeholder="Filter packages…" />
-        </div>
+        <SearchBar bind:value={filter} placeholder="Filter packages…" style="margin: 0; width: 200px;" />
       {/if}
     </div>
   </div>
