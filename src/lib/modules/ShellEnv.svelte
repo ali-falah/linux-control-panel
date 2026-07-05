@@ -201,12 +201,12 @@
         oldLine: null,
       });
       uiStore.addToast(`Added export ${addVarForm.name} ✓`, 'success');
-      statusStore.setLastCommand(`shell_write_var ${addVarForm.name}`, 0, true);
+      statusStore.setLastCommand(`echo "export ${addVarForm.name}=..." >> ${addVarForm.targetFile}`, 0, true);
       addVarForm = null;
       await loadVarGroups();
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand('shell_write_var', 1, false);
+      statusStore.setLastCommand(`echo "export ${addVarForm.name}=..." >> ${addVarForm.targetFile}`, 1, false);
     } finally {
       savingVar = false;
       statusStore.clearBusy();
@@ -225,12 +225,12 @@
         oldLine: editingVar.v.raw_line,
       });
       uiStore.addToast(`Updated ${editingVar.newName} ✓`, 'success');
-      statusStore.setLastCommand(`shell_write_var ${editingVar.newName}`, 0, true);
+      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar.file}`, 0, true);
       editingVar = null;
       await loadVarGroups();
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand('shell_write_var', 1, false);
+      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar.file}`, 1, false);
     } finally {
       savingVar = false;
       statusStore.clearBusy();
@@ -245,10 +245,11 @@
         try {
           await invoke('shell_delete_var', { path: v.source_path, rawLine: v.raw_line });
           uiStore.addToast(`Deleted ${v.name} ✓`, 'success');
-          statusStore.setLastCommand(`shell_delete_var ${v.name}`, 0, true);
+          statusStore.setLastCommand(`sed -i '/${v.name}=/d' ${v.source_path}`, 0, true);
           await loadVarGroups();
         } catch (e) {
           uiStore.addToast(`Delete failed: ${e}`, 'error');
+          statusStore.setLastCommand(`sed -i '/${v.name}=/d' ${v.source_path}`, 1, false);
         }
       },
       true,

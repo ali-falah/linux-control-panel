@@ -398,8 +398,8 @@
       {:else if activeTab === 'updates'}
         <span style="font-size:13px; color:var(--color-text-secondary); margin-right:8px;">{updates.length} updates available</span>
         {#if updates.length > 0}
-          <Button variant="primary" class="btn-sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0}>
-            <RefreshCw size={13} /> Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
+          <Button variant="primary" class="btn-sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0 || isUpgrading}>
+            <RefreshCw size={13} class={isUpgrading ? 'animate-spin-slow' : ''} /> Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
           </Button>
         {/if}
       {:else if activeTab === 'packages'}

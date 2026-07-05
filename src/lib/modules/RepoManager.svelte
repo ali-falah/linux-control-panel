@@ -71,6 +71,7 @@
       uiStore.addToast(
         `Repo "${repo.name}" ${newEnabled ? 'enabled' : 'disabled'}`,
         'success'
+      );
       const action = enable ? 'set-enabled' : 'set-disabled';
       statusStore.setLastCommand(`dnf config-manager --${action} ${repo.id}`, 0, true);
     } catch (e) {
