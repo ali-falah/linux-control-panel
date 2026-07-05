@@ -21,6 +21,7 @@
   import ShellEnv from './lib/modules/ShellEnv.svelte';
   import NetworkManager from './lib/modules/NetworkManager.svelte';
   import DeviceManager from './lib/modules/DeviceManager.svelte';
+  import AppManager from './lib/modules/AppManager.svelte';
 
   import { uiStore } from './lib/stores/ui.svelte.ts';
 </script>
@@ -70,6 +71,8 @@
           <NetworkManager />
         {:else if uiStore.activeTab === 'device-manager'}
           <DeviceManager />
+        {:else if uiStore.activeTab === 'app-manager'}
+          <AppManager />
         {/if}
       {/key}
     </div>

@@ -24,7 +24,8 @@ export type TabId =
   | 'nginx-manager'
   | 'shell-env'
   | 'device-manager'
-  | 'network-manager';
+  | 'network-manager'
+  | 'app-manager';
 
 class UIStore {
   activeTab = $state<TabId>('repo-manager');

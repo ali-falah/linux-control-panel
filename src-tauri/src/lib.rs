@@ -55,6 +55,7 @@ use commands::{
         network_set_interface_state
     },
     device_manager::{device_get_all},
+    app_manager::{list_desktop_apps, get_app_meta, get_app_details},
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -228,6 +229,10 @@ pub fn run() {
             network_set_interface_state,
             // Device Manager
             device_get_all,
+            // App Manager
+            list_desktop_apps,
+            get_app_meta,
+            get_app_details,
             // Privilege Manager
             set_sudo_password,
             clear_sudo_password,

@@ -6,6 +6,13 @@
     HardDrive, Wifi
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
+  import { getVersion } from '@tauri-apps/api/app';
+
+  let appVersion = $state('...');
+  
+  $effect(() => {
+    getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
+  });
 
   let expandedGroups = $state<Record<string, boolean>>({
     'Packages': true,
@@ -35,6 +42,7 @@
     {
       label: 'Packages',
       items: [
+        { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid },
         { id: 'repo-manager',  label: 'Repo Manager',   icon: Database },
         { id: 'dnf-history',   label: 'DNF Manager',    icon: Package },
         { id: 'copr-browser',  label: 'Copr Browser',   icon: LayoutGrid },
@@ -91,7 +99,7 @@
     {#if !uiStore.sidebarCollapsed}
       <div class="logo-text">
         <span class="logo-title">Control Panel</span>
-        <span class="logo-version">v0.2.0</span>
+        <span class="logo-version">{appVersion}</span>
       </div>
     {/if}
   </div>
