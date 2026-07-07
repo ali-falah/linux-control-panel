@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { Command } from '@tauri-apps/plugin-shell';
   import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
@@ -140,7 +141,7 @@
     }
   }
 
-  async function performUninstall(app: DesktopApp) {
+    async function performUninstall(app: DesktopApp) {
     if (!app.package_id) {
       uiStore.addToast('Cannot uninstall: Unknown package ID', 'error');
       return;
@@ -152,64 +153,22 @@
     uninstallLog = [];
     appendLog(`Starting uninstallation for ${app.name} (${app.package_id})...`);
 
-    let cmd: any;
     if (app.source === 'Flatpak') {
-      appendLog(`> flatpak uninstall -y ${app.package_id}`);
-      cmd = Command.create('pkexec', ['flatpak', 'uninstall', '-y', app.package_id]);
+      appendLog(`> pkexec flatpak uninstall -y ${app.package_id}`);
     } else {
-      appendLog(`> dnf remove -y ${app.package_id}`);
-      cmd = Command.create('pkexec', ['dnf', 'remove', '-y', app.package_id]);
+      appendLog(`> pkexec dnf remove -y ${app.package_id}`);
     }
 
-    cmd.on('close', async (data: any) => {
-      if (data.code !== 0) {
-        appendLog(`\nUninstallation failed with code ${data.code}.`);
-        isUninstalling = false;
-        return;
-      }
-      
-      appendLog('\nUninstallation completed. Running cleanup...');
-      
-      let cleanupCmd: any;
-      if (app.source === 'Flatpak') {
-        appendLog(`> flatpak uninstall --unused -y`);
-        cleanupCmd = Command.create('pkexec', ['flatpak', 'uninstall', '--unused', '-y']);
-      } else {
-        appendLog(`> dnf autoremove -y`);
-        cleanupCmd = Command.create('pkexec', ['dnf', 'autoremove', '-y']);
-      }
-
-      cleanupCmd.on('close', (cleanupData: any) => {
-        appendLog(`\nCleanup finished with code ${cleanupData.code}.`);
-        appendLog(`\nSuccessfully uninstalled ${app.name} and cleaned dependencies.`);
-        uiStore.addToast(`Removed ${app.name}`, 'success');
-        isUninstalling = false;
-        loadApps();
-      });
-      cleanupCmd.on('error', (error: any) => appendLog(`Cleanup Error: ${error}`));
-      cleanupCmd.stdout.on('data', (line: string) => appendLog(line));
-      cleanupCmd.stderr.on('data', (line: string) => appendLog(`[STDERR] ${line}`));
-
-      try {
-        await cleanupCmd.spawn();
-      } catch (e) {
-        appendLog(`Cleanup execution error: ${e}`);
-        isUninstalling = false;
-      }
-    });
-
-    cmd.on('error', (error: any) => {
-      appendLog(`Error: ${error}`);
-      isUninstalling = false;
-    });
-
-    cmd.stdout.on('data', (line: string) => appendLog(line));
-    cmd.stderr.on('data', (line: string) => appendLog(`[STDERR] ${line}`));
-
     try {
-      await cmd.spawn();
+      await invoke('uninstall_app', { packageId: app.package_id, source: app.source });
+      appendLog(`
+Successfully uninstalled ${app.name} and cleaned dependencies.`);
+      uiStore.addToast(`Removed ${app.name}`, 'success');
+      loadApps();
     } catch (e) {
-      appendLog(`Execution error: ${e}`);
+      appendLog(`
+Execution error: ${e}`);
+    } finally {
       isUninstalling = false;
     }
   }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
 

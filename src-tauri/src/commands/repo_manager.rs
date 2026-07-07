@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
 

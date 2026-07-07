@@ -1,4 +1,4 @@
-use std::process::Command;
+use crate::utils::privilege::Command;
 
 #[tauri::command]
 pub fn device_get_all() -> Result<String, String> {

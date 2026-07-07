@@ -143,6 +143,8 @@ pub mod tokio {
     pub struct Command {
         program: String,
         args: Vec<String>,
+        capture_stdout: bool,
+        capture_stderr: bool,
     }
 
     impl Command {
@@ -150,6 +152,8 @@ pub mod tokio {
             Self {
                 program: program.as_ref().to_string_lossy().to_string(),
                 args: Vec::new(),
+                capture_stdout: false,
+                capture_stderr: false,
             }
         }
 
@@ -175,10 +179,12 @@ pub mod tokio {
         }
 
         pub fn stdout<T: Into<Stdio>>(&mut self, _cfg: T) -> &mut Self {
+            self.capture_stdout = true;
             self
         }
 
         pub fn stderr<T: Into<Stdio>>(&mut self, _cfg: T) -> &mut Self {
+            self.capture_stderr = true;
             self
         }
 
@@ -206,6 +212,8 @@ pub mod tokio {
                     cmd.arg(arg);
                 }
                 cmd.stdin(Stdio::piped());
+                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
+                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
                 let mut child = cmd.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
                     use ::tokio::io::AsyncWriteExt;
@@ -217,6 +225,8 @@ pub mod tokio {
             } else {
                 let mut cmd = ::tokio::process::Command::new(&self.program);
                 cmd.args(&self.args);
+                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
+                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
                 cmd.output().await
             }
         }
@@ -245,6 +255,8 @@ pub mod tokio {
                     cmd.arg(arg);
                 }
                 cmd.stdin(Stdio::piped());
+                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
+                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
                 let mut child = cmd.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
                     // We must spawn a background task to write the password, 
@@ -261,6 +273,8 @@ pub mod tokio {
             } else {
                 let mut cmd = ::tokio::process::Command::new(&self.program);
                 cmd.args(&self.args);
+                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
+                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
                 cmd.spawn()
             }
         }

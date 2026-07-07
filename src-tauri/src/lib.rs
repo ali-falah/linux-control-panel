@@ -55,7 +55,7 @@ use commands::{
         network_set_interface_state
     },
     device_manager::{device_get_all},
-    app_manager::{list_desktop_apps, get_app_meta, get_app_details},
+    app_manager::{list_desktop_apps, get_app_meta, get_app_details, uninstall_app},
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -86,7 +86,7 @@ pub fn log_to_file(level: &str, message: &str) {
 
 /// Check if a binary exists in PATH.
 pub async fn binary_exists(name: &str) -> bool {
-    tokio::process::Command::new("which")
+    crate::utils::privilege::tokio::Command::new("which")
         .arg(name)
         .output()
         .await
@@ -233,6 +233,7 @@ pub fn run() {
             list_desktop_apps,
             get_app_meta,
             get_app_details,
+            uninstall_app,
             // Privilege Manager
             set_sudo_password,
             clear_sudo_password,

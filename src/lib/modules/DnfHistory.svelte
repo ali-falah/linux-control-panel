@@ -190,6 +190,7 @@
         if (event.payload) {
           uiStore.addToast('Upgrade completed successfully', 'success');
           statusStore.setLastCommand('dnf upgrade -y', 0, true);
+          selectedUpdates = new Set();
           checkUpdates();
         } else {
           uiStore.addToast('Upgrade failed', 'error');

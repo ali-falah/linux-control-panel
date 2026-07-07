@@ -1,7 +1,9 @@
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use crate::utils::privilege::tokio::Command;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Serialize, Clone)]
 pub struct DesktopApp {
@@ -101,7 +103,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                     if let Ok(output) = Command::new("rpm")
                         .arg("-qf")
                         .arg(&path)
-                        .output()
+                        .output().await
                     {
                         if output.status.success() {
                             let pkg = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -155,7 +157,7 @@ pub struct AppDetails {
 pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta, String> {
     if source == "Flatpak" {
         let mut size_bytes = 0;
-        if let Ok(output) = Command::new("flatpak").arg("info").arg("--show-size").arg(&package_id).output() {
+        if let Ok(output) = Command::new("flatpak").arg("info").arg("--show-size").arg(&package_id).output().await {
             if output.status.success() {
                 let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if let Ok(bytes) = s.parse::<u64>() {
@@ -169,7 +171,7 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
         })
     } else {
         // RPM
-        if let Ok(output) = Command::new("rpm").arg("-q").arg("--queryformat").arg("%{SIZE}|%{INSTALLTIME}").arg(&package_id).output() {
+        if let Ok(output) = Command::new("rpm").arg("-q").arg("--queryformat").arg("%{SIZE}|%{INSTALLTIME}").arg(&package_id).output().await {
             if output.status.success() {
                 let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let parts: Vec<&str> = s.split('|').collect();
@@ -190,7 +192,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
         let mut version = "Unknown".to_string();
         let mut description = "No description available.".to_string();
         
-        if let Ok(output) = Command::new("flatpak").arg("info").arg(&package_id).output() {
+        if let Ok(output) = Command::new("flatpak").arg("info").arg(&package_id).output().await {
             if output.status.success() {
                 let info = String::from_utf8_lossy(&output.stdout).to_string();
                 for line in info.lines() {
@@ -215,7 +217,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
         let mut description = String::new();
         let mut files = Vec::new();
         
-        if let Ok(output) = Command::new("rpm").arg("-qi").arg(&package_id).output() {
+        if let Ok(output) = Command::new("rpm").arg("-qi").arg(&package_id).output().await {
             if output.status.success() {
                 let info = String::from_utf8_lossy(&output.stdout).to_string();
                 let mut in_desc = false;
@@ -234,7 +236,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             }
         }
         
-        if let Ok(output) = Command::new("rpm").arg("-ql").arg(&package_id).output() {
+        if let Ok(output) = Command::new("rpm").arg("-ql").arg(&package_id).output().await {
             if output.status.success() {
                 let list = String::from_utf8_lossy(&output.stdout).to_string();
                 for line in list.lines() {
@@ -243,9 +245,6 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             }
         }
         
-        if description.is_empty() {
-            description = "No description available.".to_string();
-        }
         
         Ok(AppDetails {
             version,
@@ -253,4 +252,87 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             files,
         })
     }
+}
+
+#[tauri::command]
+pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: String) -> Result<(), String> {
+    let mut cmd = if source == "Flatpak" {
+        let mut c = Command::new("pkexec");
+        c.args(&["flatpak", "uninstall", "-y", &package_id]);
+        c
+    } else {
+        let mut c = Command::new("pkexec");
+        c.args(&["dnf", "remove", "-y", &package_id]);
+        c
+    };
+
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let app_handle_clone = app_handle.clone();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = app_handle_clone.emit("uninstall-log", line);
+        }
+    });
+
+    let app_handle_clone2 = app_handle.clone();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = app_handle_clone2.emit("uninstall-log", line);
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    
+    if !status.success() {
+        return Err(format!("Uninstallation failed with status: {}", status));
+    }
+
+    let _ = app_handle.emit("uninstall-log", "
+Uninstallation completed. Running cleanup...");
+
+    let mut cleanup_cmd = if source == "Flatpak" {
+        let mut c = Command::new("pkexec");
+        c.args(&["flatpak", "uninstall", "--unused", "-y"]);
+        c
+    } else {
+        let mut c = Command::new("pkexec");
+        c.args(&["dnf", "autoremove", "-y"]);
+        c
+    };
+
+    cleanup_cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut cleanup_child = cleanup_cmd.spawn().map_err(|e| e.to_string())?;
+
+    let cleanup_stdout = cleanup_child.stdout.take().unwrap();
+    let cleanup_stderr = cleanup_child.stderr.take().unwrap();
+
+    let app_handle_clone3 = app_handle.clone();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(cleanup_stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = app_handle_clone3.emit("uninstall-log", line);
+        }
+    });
+
+    let app_handle_clone4 = app_handle.clone();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(cleanup_stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = app_handle_clone4.emit("uninstall-log", line);
+        }
+    });
+
+    let cleanup_status = cleanup_child.wait().await.map_err(|e| e.to_string())?;
+    let _ = app_handle.emit("uninstall-log", format!("
+Cleanup finished with code {}.", cleanup_status.code().unwrap_or(1)));
+
+    Ok(())
 }

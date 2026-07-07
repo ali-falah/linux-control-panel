@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 use tauri::{AppHandle, Emitter};
 
 use crate::{binary_exists, log_to_file};

@@ -1,4 +1,4 @@
-use std::process::Command;
+use crate::utils::privilege::Command;
 use crate::utils::privilege::Command as PrivCommand;
 
 #[tauri::command]
