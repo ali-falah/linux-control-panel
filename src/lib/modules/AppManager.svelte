@@ -152,22 +152,22 @@
     isUninstalling = true;
     uninstallLog = [];
     appendLog(`Starting uninstallation for ${app.name} (${app.package_id})...`);
-
-    if (app.source === 'Flatpak') {
-      appendLog(`> pkexec flatpak uninstall -y ${app.package_id}`);
-    } else {
-      appendLog(`> pkexec dnf remove -y ${app.package_id}`);
-    }
-
     try {
+      let cmdString = app.source === 'Flatpak' 
+        ? `flatpak uninstall -y ${app.package_id}`
+        : `dnf remove -y ${app.package_id}`;
+      
       await invoke('uninstall_app', { packageId: app.package_id, source: app.source });
-      appendLog(`
-Successfully uninstalled ${app.name} and cleaned dependencies.`);
+      appendLog(`\nSuccessfully uninstalled ${app.name} and cleaned dependencies.`);
+      statusStore.setLastCommand(cmdString, 0, true);
       uiStore.addToast(`Removed ${app.name}`, 'success');
       loadApps();
     } catch (e) {
-      appendLog(`
-Execution error: ${e}`);
+      appendLog(`\nExecution error: ${e}`);
+      let cmdString = app.source === 'Flatpak' 
+        ? `flatpak uninstall -y ${app.package_id}`
+        : `dnf remove -y ${app.package_id}`;
+      statusStore.setLastCommand(cmdString, 1, false);
     } finally {
       isUninstalling = false;
     }

@@ -58,6 +58,7 @@ use commands::{
     device_manager::{device_get_all},
     app_manager::{list_desktop_apps, get_app_meta, get_app_details, uninstall_app},
     system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process},
+    journal_viewer::{get_journal_logs},
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -249,6 +250,8 @@ pub fn run() {
             set_sudo_password,
             clear_sudo_password,
             check_sudo_status,
+            // Journal Viewer
+            get_journal_logs,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

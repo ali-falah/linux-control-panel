@@ -123,7 +123,7 @@
     {#if statusStore.busy}
       <div class="status-indicator">
         <Loader size={11} class="spin-icon" />
-        <span class="cmd-text">{statusStore.busyLabel}</span>
+        <span class="cmd-text" title={statusStore.busyLabel}>{statusStore.busyLabel}</span>
       </div>
     {:else if statusStore.lastEntry}
       <div class="status-indicator">
@@ -132,7 +132,7 @@
         {:else}
           <XCircle size={11} class="icon-fail" />
         {/if}
-        <span class="cmd-text" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success}>
+        <span class="cmd-text" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success} title={statusStore.lastEntry.command}>
           {statusStore.lastEntry.command}
         </span>
       </div>

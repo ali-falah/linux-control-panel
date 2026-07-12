@@ -26,7 +26,8 @@ export type TabId =
   | 'shell-env'
   | 'device-manager'
   | 'network-manager'
-  | 'app-manager';
+  | 'app-manager'
+  | 'journal-logs';
 
 class UIStore {
   activeTab = $state<TabId>('system-monitor');

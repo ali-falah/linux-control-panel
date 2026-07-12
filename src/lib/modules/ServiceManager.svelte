@@ -53,6 +53,23 @@
     })
   );
 
+  let visibleLimit = $state(50);
+  const visibleUnits = $derived(filteredUnits.slice(0, visibleLimit));
+
+  $effect(() => {
+    filter;
+    visibleLimit = 50;
+  });
+
+  function handleScroll(e: Event) {
+    const target = e.target as HTMLElement;
+    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
+      if (visibleLimit < filteredUnits.length) {
+        visibleLimit += 50;
+      }
+    }
+  }
+
   function activeStateBadge(state: string): string {
     switch (state) {
       case 'active': return 'badge-success';
@@ -260,7 +277,7 @@
   </SideDrawer>
 
   <!-- Service List -->
-  <div class="card module-content-scroll" style="padding:0">
+  <div class="card module-content-scroll" style="padding:0" onscroll={handleScroll}>
     {#if loading}
       <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
         <Skeleton height="42px" borderRadius="8px" />
@@ -293,7 +310,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredUnits as unit (unit.name)}
+            {#each visibleUnits as unit (unit.name)}
               {@const key = `${unit.name}-`}
               <tr class:selected-unit={selectedUnit?.name === unit.name}>
                 <td style="min-width:220px">

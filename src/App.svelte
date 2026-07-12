@@ -5,6 +5,7 @@
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
 
   import SystemMonitor from './lib/modules/SystemMonitor.svelte';
+  import JournalViewer from './lib/modules/JournalViewer.svelte';
   import RepoManager from './lib/modules/RepoManager.svelte';
   import DnfHistory from './lib/modules/DnfHistory.svelte';
   import CoprBrowser from './lib/modules/CoprBrowser.svelte';
@@ -40,6 +41,8 @@
       {#key uiStore.activeTab}
         {#if uiStore.activeTab === 'system-monitor'}
           <SystemMonitor />
+        {:else if uiStore.activeTab === 'journal-logs'}
+          <JournalViewer />
         {:else if uiStore.activeTab === 'repo-manager'}
           <RepoManager />
         {:else if uiStore.activeTab === 'dnf-history'}

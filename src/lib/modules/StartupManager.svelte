@@ -57,6 +57,27 @@ $PATH Entries<script lang="ts">
     })
   );
 
+  let visibleLimit = $state(50);
+  const visibleSystemd = $derived(filteredSystemd.slice(0, visibleLimit));
+  const visibleAutostart = $derived(filteredAutostart.slice(0, visibleLimit));
+
+  $effect(() => {
+    filter;
+    viewFilter;
+    visibleLimit = 50;
+  });
+
+  function handleScroll(e: Event) {
+    const target = e.target as HTMLElement;
+    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
+      if (viewFilter === 'service' && visibleLimit < filteredSystemd.length) {
+        visibleLimit += 50;
+      } else if (viewFilter === 'autostart' && visibleLimit < filteredAutostart.length) {
+        visibleLimit += 50;
+      }
+    }
+  }
+
   function stateBadge(state: string): string {
     switch (state.toLowerCase()) {
       case 'enabled': return 'badge-success';
@@ -177,7 +198,7 @@ $PATH Entries<script lang="ts">
             <span>No units match your filter</span>
           </div>
         {:else}
-          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;">
+          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
             <table use:tableFeatures>
               <thead>
                 <tr>
@@ -189,7 +210,7 @@ $PATH Entries<script lang="ts">
                 </tr>
               </thead>
               <tbody>
-                {#each filteredSystemd as unit (unit.name + unit.scope)}
+                {#each visibleSystemd as unit (unit.name + unit.scope)}
                   <tr>
                     <td style="font-family:var(--font-mono);font-size:12px;color:var(--color-text-primary)">{unit.name}</td>
                     <td><span class="badge badge-muted">{unit.scope}</span></td>
@@ -231,7 +252,7 @@ $PATH Entries<script lang="ts">
             <span>No XDG autostart entries in ~/.config/autostart/</span>
           </div>
         {:else}
-          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;">
+          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
             <table use:tableFeatures>
               <thead>
                 <tr>
@@ -242,7 +263,7 @@ $PATH Entries<script lang="ts">
                 </tr>
               </thead>
               <tbody>
-                {#each filteredAutostart as entry (entry.file_path)}
+                {#each visibleAutostart as entry (entry.file_path)}
                   <tr>
                     <td>
                       <div style="font-weight:500;color:var(--color-text-primary)">{entry.name}</div>

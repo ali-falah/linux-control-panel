@@ -21,14 +21,18 @@
   // Processes
   let processes = $state<any[]>([]);
   let processSearch = $state('');
+  let isRefreshing = $state(false);
 
   // Auto-refresh timer
   let refreshTimer: ReturnType<typeof setInterval>;
-  let isRefreshing = $state(false);
 
   onMount(async () => {
     await refreshAll();
-    refreshTimer = setInterval(refreshAll, 2000); // 2s poll rate
+    refreshTimer = setInterval(() => {
+      if (currentTab === 'overview') {
+        refreshAll();
+      }
+    }, 2000);
   });
 
   onDestroy(() => {
@@ -114,9 +118,11 @@
 
     try {
       const res = await invoke('kill_process', { pid, signal: 15 });
+      statusStore.setLastCommand(`kill -15 ${pid}`, 0, true);
       uiStore.addToast(res as string, 'success');
       refreshAll();
     } catch (e: any) {
+      statusStore.setLastCommand(`kill -15 ${pid}`, 1, false);
       uiStore.addToast(e, 'error');
     }
   }
@@ -129,18 +135,15 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="System Monitor" description="Real-time system health and process management.">
-    {#snippet icon()}<Activity size={24} />{/snippet}
-    {#snippet actions()}
-      <div class="tab-switcher">
-        <button class:active={currentTab === 'overview'} onclick={() => currentTab = 'overview'}>Overview</button>
-        <button class:active={currentTab === 'processes'} onclick={() => currentTab = 'processes'}>Processes</button>
-      </div>
-      <Button onclick={refreshAll} variant="secondary">
-        <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
-        Refresh
-      </Button>
-    {/snippet}
+  <PageHeader title="System Monitor" subtitle="Real-time system health and process management." icon={Activity}>
+    <div class="tab-switcher">
+      <button class:active={currentTab === 'overview'} onclick={() => currentTab = 'overview'}>Overview</button>
+      <button class:active={currentTab === 'processes'} onclick={() => currentTab = 'processes'}>Processes</button>
+    </div>
+    <Button onclick={refreshAll} variant="secondary">
+      <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
+      Refresh
+    </Button>
   </PageHeader>
 
   <div class="page-content">

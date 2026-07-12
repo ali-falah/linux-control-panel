@@ -55,6 +55,7 @@
       label: 'System',
       items: [
         { id: 'system-monitor',  label: 'System Monitor',  icon: Activity },
+        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText },
         { id: 'startup-manager', label: 'Startup Manager', icon: Rocket },
         { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive },
