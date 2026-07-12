@@ -9,6 +9,8 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import { tableFeatures } from '../actions/tableFeatures';
 
   let currentTab = $state<'overview' | 'processes'>('overview');
 
@@ -241,7 +243,7 @@
         </div>
 
         <div class="table-scroll">
-          <table class="process-table">
+          <Table tableAction={tableFeatures}>
             <thead>
               <tr>
                 <th class="col-pid">PID</th>
@@ -279,7 +281,7 @@
                 </tr>
               {/each}
             </tbody>
-          </table>
+          </Table>
         </div>
       </div>
     {/if}
@@ -530,29 +532,6 @@
     flex: 1;
     overflow-y: auto;
   }
-  .process-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
-  .process-table th {
-    text-align: left;
-    padding: 10px 16px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    border-bottom: 1px solid var(--color-border);
-    position: sticky;
-    top: 0;
-    background: var(--color-bg-card);
-    z-index: 10;
-  }
-  .process-table td {
-    padding: 10px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
-    vertical-align: middle;
-  }
-  .process-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-  
   .is-root td { opacity: 0.8; }
   .is-kernel td { opacity: 0.5; }
 

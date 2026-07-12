@@ -299,91 +299,74 @@
         </span>
       </div>
     {:else}
-      <div class="table-wrap" style="border:none;border-radius:0">
-        <table use:tableFeatures>
-          <thead>
-            <tr>
-              <th>Service</th>
-              <th>State</th>
-              <th>Unit File</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each visibleUnits as unit (unit.name)}
-              {@const key = `${unit.name}-`}
-              <tr class:selected-unit={selectedUnit?.name === unit.name}>
-                <td style="min-width:220px">
-                  <div style="font-weight:500;color:var(--color-text-primary);font-family:var(--font-mono);font-size:12px">{unit.name}</div>
-                  {#if unit.description}
-                    <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px">{unit.description}</div>
-                  {/if}
-                </td>
-                <td>
-                  <span class="badge {activeStateBadge(unit.active_state)}">{unit.active_state}</span>
-                  <div style="font-size:10px;color:var(--color-text-muted);margin-top:2px">{unit.sub_state}</div>
-                </td>
-                <td>
-                  {#if unit.unit_file_state}
-                    <span class="badge {unit.unit_file_state === 'enabled' ? 'badge-success' : unit.unit_file_state === 'masked' ? 'badge-error' : 'badge-muted'}">
-                      {unit.unit_file_state}
-                    </span>
+      <Table tableAction={tableFeatures}>
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>State</th>
+            <th>Unit File</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each visibleUnits as unit (unit.name)}
+            <tr class:selected-unit={selectedUnit?.name === unit.name}>
+              <td style="min-width:220px">
+                <div style="font-weight:500;color:var(--color-text-primary);font-family:var(--font-mono);font-size:12px">{unit.name}</div>
+                {#if unit.description}
+                  <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px">{unit.description}</div>
+                {/if}
+              </td>
+              <td>
+                <span class="badge {activeStateBadge(unit.active_state)}">{unit.active_state}</span>
+                <div style="font-size:10px;color:var(--color-text-muted);margin-top:2px">{unit.sub_state}</div>
+              </td>
+              <td>
+                {#if unit.unit_file_state}
+                  <span class="badge {unit.unit_file_state === 'enabled' ? 'badge-success' : unit.unit_file_state === 'masked' ? 'badge-error' : 'badge-muted'}">
+                    {unit.unit_file_state}
+                  </span>
+                {:else}
+                  <span class="badge badge-muted">—</span>
+                {/if}
+              </td>
+              <td style="width: 140px;">
+                <div style="display:flex;gap:8px; align-items:center">
+                  {#if unit.active_state !== 'active'}
+                    <button class="action-btn" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={actionInProgress === `${unit.name}-start`}><Play size={14}/></button>
                   {:else}
-                    <span class="badge badge-muted">—</span>
+                    <button class="action-btn" onclick={() => confirmDoAction(unit, 'stop')} title="Stop" disabled={actionInProgress === `${unit.name}-stop`}><Square size={14}/></button>
+                    <button class="action-btn" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={actionInProgress === `${unit.name}-restart`}><RotateCcw size={14}/></button>
                   {/if}
-                </td>
-                <td style="width: 140px;">
-                  <div style="display:flex;gap:8px; align-items:center">
-                    {#if unit.active_state !== 'active'}
-                      <Button
-                        class="btn btn-sm -success"
-                        onclick={() => doAction(unit, 'start')}
-                        disabled={!!actionInProgress}
-                        title="Start"
-                        style="min-width: 70px; display:flex; justify-content:center;"
-                      >
-                        <Play size={12} style="margin-right:4px"/> Start
-                      </Button>
+                  
+                  
+                  <KebabMenu align="right">
+                    <button class="menu-item" onclick={() => confirmDoAction(unit, 'restart')} disabled={!!actionInProgress}>
+                      <RotateCcw size={14} /> Restart
+                    </button>
+                    <button class="menu-item" onclick={() => openLogs(unit)}>
+                      <FileText size={14} /> View Logs
+                    </button>
+                    <button class="menu-item" onclick={() => openEditor(unit)}>
+                      <Settings size={14} /> Edit Unit File
+                    </button>
+                    <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
+                    {#if unit.unit_file_state !== 'enabled'}
+                      <button class="menu-item" onclick={() => confirmDoAction(unit, 'enable')}>
+                        <ShieldCheck size={14} /> Enable (Autostart)
+                      </button>
                     {:else}
-                      <Button
-                        class="btn btn-sm btn-outline -danger"
-                        onclick={() => confirmDoAction(unit, 'stop')}
-                        disabled={!!actionInProgress}
-                        title="Stop"
-                        style="min-width: 70px; display:flex; justify-content:center;"
-                      >
-                        <Square size={12} style="margin-right:4px"/> Stop
-                      </Button>
+                      <button class="menu-item text-error" onclick={() => confirmDoAction(unit, 'disable')}>
+                        <ShieldBan size={14} /> Disable (Autostart)
+                      </button>
                     {/if}
-
-                    <KebabMenu>
-                      <button
-                        class="menu-item"
-                        onclick={() => confirmDoAction(unit, 'restart')}
-                        disabled={!!actionInProgress}
-                      >
-                        <RotateCcw size={14} /> Restart
-                      </button>
-                      <button
-                        class="menu-item"
-                        onclick={() => openLogs(unit)}
-                      >
-                        <Eye size={14} /> View Logs
-                      </button>
-                      <button
-                        class="menu-item"
-                        onclick={() => openEditor(unit)}
-                      >
-                        <FileText size={14} /> Edit Unit File
-                      </button>
-                    </KebabMenu>
-                  </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+                  </KebabMenu>
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </Table>
     {/if}
   </div>
 </div>

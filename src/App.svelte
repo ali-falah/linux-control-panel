@@ -3,7 +3,6 @@
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
-
   import SystemMonitor from './lib/modules/SystemMonitor.svelte';
   import JournalViewer from './lib/modules/JournalViewer.svelte';
   import RepoManager from './lib/modules/RepoManager.svelte';

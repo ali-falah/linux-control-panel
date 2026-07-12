@@ -1,4 +1,4 @@
-$PATH Entries<script lang="ts">
+<script lang="ts">
   import SearchBar from '../components/ui/SearchBar.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
@@ -198,44 +198,42 @@ $PATH Entries<script lang="ts">
             <span>No units match your filter</span>
           </div>
         {:else}
-          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
-            <table use:tableFeatures>
-              <thead>
+          <Table tableAction={tableFeatures} style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
+            <thead>
+              <tr>
+                <th>Unit Name</th>
+                <th>Scope</th>
+                <th>Preset</th>
+                <th style="text-align:center">State</th>
+                <th style="text-align:center">Toggle</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each visibleSystemd as unit (unit.name + unit.scope)}
                 <tr>
-                  <th>Unit Name</th>
-                  <th>Scope</th>
-                  <th>Preset</th>
-                  <th style="text-align:center">State</th>
-                  <th style="text-align:center">Toggle</th>
+                  <td style="font-family:var(--font-mono);font-size:12px;color:var(--color-text-primary)">{unit.name}</td>
+                  <td><span class="badge badge-muted">{unit.scope}</span></td>
+                  <td style="color:var(--color-text-muted);font-size:12px">{unit.vendor_preset || '—'}</td>
+                  <td style="text-align:center">
+                    <span class="badge {stateBadge(unit.state)}">{unit.state}</span>
+                  </td>
+                  <td style="text-align:center">
+                    <button
+                      class="ui-toggle"
+                      class:on={unit.state === 'enabled'}
+                      onclick={() => toggleUnit(unit)}
+                      disabled={togglingId === unit.name || unit.state === 'masked' || unit.state === 'static'}
+                      title="{unit.state === 'enabled' ? 'Disable' : 'Enable'} unit"
+                      aria-checked={unit.state === 'enabled'}
+                      role="switch"
+                    >
+                      <span class="ui-toggle-thumb"></span>
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {#each visibleSystemd as unit (unit.name + unit.scope)}
-                  <tr>
-                    <td style="font-family:var(--font-mono);font-size:12px;color:var(--color-text-primary)">{unit.name}</td>
-                    <td><span class="badge badge-muted">{unit.scope}</span></td>
-                    <td style="color:var(--color-text-muted);font-size:12px">{unit.vendor_preset || '—'}</td>
-                    <td style="text-align:center">
-                      <span class="badge {stateBadge(unit.state)}">{unit.state}</span>
-                    </td>
-                    <td style="text-align:center">
-                      <button
-                        class="ui-toggle"
-                        class:on={unit.state === 'enabled'}
-                        onclick={() => toggleUnit(unit)}
-                        disabled={togglingId === unit.name || unit.state === 'masked' || unit.state === 'static'}
-                        title="{unit.state === 'enabled' ? 'Disable' : 'Enable'} unit"
-                        aria-checked={unit.state === 'enabled'}
-                        role="switch"
-                      >
-                        <span class="ui-toggle-thumb"></span>
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+              {/each}
+            </tbody>
+          </Table>
         {/if}
       </div>
     {/if}
@@ -252,43 +250,41 @@ $PATH Entries<script lang="ts">
             <span>No XDG autostart entries in ~/.config/autostart/</span>
           </div>
         {:else}
-          <div class="table-wrap module-content-scroll" style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
-            <table use:tableFeatures>
-              <thead>
+          <Table tableAction={tableFeatures} style="border:none; border-radius:0; flex:1; min-height:0;" onscroll={handleScroll}>
+            <thead>
+              <tr>
+                <th>Application</th>
+                <th>Command</th>
+                <th>Comment</th>
+                <th style="text-align:center">Enabled</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each visibleAutostart as entry (entry.file_path)}
                 <tr>
-                  <th>Application</th>
-                  <th>Command</th>
-                  <th>Comment</th>
-                  <th style="text-align:center">Enabled</th>
+                  <td>
+                    <div style="font-weight:500;color:var(--color-text-primary)">{entry.name}</div>
+                    <div style="font-size:11px;color:var(--color-text-muted)">{entry.file_path.split('/').pop()}</div>
+                  </td>
+                  <td><code style="font-size:11px;color:var(--color-text-secondary)">{entry.exec}</code></td>
+                  <td style="font-size:12px;color:var(--color-text-muted)">{entry.comment || '—'}</td>
+                  <td style="text-align:center">
+                    <button
+                      class="ui-toggle"
+                      class:on={entry.enabled}
+                      onclick={() => toggleAutostart(entry)}
+                      disabled={togglingId === entry.file_path}
+                      title="{entry.enabled ? 'Disable' : 'Enable'} autostart"
+                      aria-checked={entry.enabled}
+                      role="switch"
+                    >
+                      <span class="ui-toggle-thumb"></span>
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {#each visibleAutostart as entry (entry.file_path)}
-                  <tr>
-                    <td>
-                      <div style="font-weight:500;color:var(--color-text-primary)">{entry.name}</div>
-                      <div style="font-size:11px;color:var(--color-text-muted)">{entry.file_path.split('/').pop()}</div>
-                    </td>
-                    <td><code style="font-size:11px;color:var(--color-text-secondary)">{entry.exec}</code></td>
-                    <td style="font-size:12px;color:var(--color-text-muted)">{entry.comment || '—'}</td>
-                    <td style="text-align:center">
-                      <button
-                        class="ui-toggle"
-                        class:on={entry.enabled}
-                        onclick={() => toggleAutostart(entry)}
-                        disabled={togglingId === entry.file_path}
-                        title="{entry.enabled ? 'Disable' : 'Enable'} autostart"
-                        aria-checked={entry.enabled}
-                        role="switch"
-                      >
-                        <span class="ui-toggle-thumb"></span>
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+              {/each}
+            </tbody>
+          </Table>
         {/if}
       </div>
     {/if}

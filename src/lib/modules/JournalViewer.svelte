@@ -12,7 +12,28 @@
   let isLoading = $state(false);
   let filterUnit = $state('');
   let filterPriority = $state('all');
+  let filterDate = $state('');
+  let filterTime = $state('00:00');
   let logContainer: HTMLElement;
+
+  let dateInputRef: HTMLInputElement;
+  let timeInputRef: HTMLInputElement;
+
+  function handleDateTimeChange(e: Event) {
+    if (e.currentTarget instanceof HTMLInputElement) {
+      e.currentTarget.blur(); // Force close the native WebKitGTK popup
+    }
+    fetchLogs();
+  }
+
+  function handleWindowClick(e: MouseEvent) {
+    if (dateInputRef && e.target instanceof Node && !dateInputRef.contains(e.target)) {
+      dateInputRef.blur();
+    }
+    if (timeInputRef && e.target instanceof Node && !timeInputRef.contains(e.target)) {
+      timeInputRef.blur();
+    }
+  }
 
   async function fetchLogs() {
     isLoading = true;
@@ -20,10 +41,12 @@
     try {
       const unitF = filterUnit.trim() !== '' ? filterUnit.trim() : null;
       const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
+      const sinceF = filterDate ? `${filterDate} ${filterTime || '00:00'}:00` : null;
       
       const lines = await invoke<string[]>('get_journal_logs', {
         unitFilter: unitF,
         priority: prioF,
+        sinceFilter: sinceF,
       });
 
       logs = lines.map(line => {
@@ -41,7 +64,7 @@
         }
       }, 50);
 
-      statusStore.setLastCommand(`journalctl -n 100 -o json ${unitF ? '-u '+unitF : ''} ${prioF ? '-p '+prioF : ''}`, 0, true);
+      statusStore.setLastCommand(`journalctl -n 100 -o json ${unitF ? '-u '+unitF : ''} ${prioF ? '-p '+prioF : ''} ${sinceF ? '--since="'+sinceF+'"' : ''}`, 0, true);
     } catch (e) {
       console.error("Error fetching journal logs:", e);
       statusStore.setLastCommand(`journalctl`, 1, false);
@@ -62,7 +85,9 @@
   function formatTimestamp(us: string) {
     if (!us) return '';
     const date = new Date(parseInt(us) / 1000);
-    return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + String(date.getMilliseconds()).padStart(3, '0');
+    const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const timeStr = date.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    return `${dateStr}, ${timeStr}`;
   }
 
   function getPriorityClass(prio: string | number) {
@@ -75,6 +100,8 @@
   }
 </script>
 
+<svelte:window onclick={handleWindowClick} />
+
 <div class="module-page">
   <PageHeader title="Journal Logs" subtitle="Systemd journal log viewer" icon={FileText}>
     <div class="toolbar">
@@ -86,12 +113,30 @@
           onkeydown={(e) => e.key === 'Enter' && fetchLogs()}
           style="width: 160px; height: 32px; background: transparent; border: none; padding-left: 4px;"
         />
-        <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 32px; background: transparent; border: none; border-left: 1px solid var(--color-border); border-radius: 0;">
+        <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 32px; background: transparent; border: none; border-left: 1px solid var(--color-border); border-right: 1px solid var(--color-border); border-radius: 0;">
           <option value="all">All Levels</option>
           <option value="3">Error & Above</option>
           <option value="4">Warning & Above</option>
           <option value="6">Info & Above</option>
         </Select>
+        <div style="display:flex; align-items:center; padding-left: 8px; padding-right: 4px;">
+          <span class="text-muted" style="font-size:12px; margin-right:6px;">Since:</span>
+          <input 
+            type="date" 
+            bind:this={dateInputRef}
+            bind:value={filterDate}
+            onchange={handleDateTimeChange}
+            class="datetime-input"
+          />
+          <input 
+            type="time" 
+            bind:this={timeInputRef}
+            bind:value={filterTime}
+            onchange={handleDateTimeChange}
+            class="datetime-input"
+            style="margin-left:4px;"
+          />
+        </div>
       </div>
 
       <div class="actions-group">
@@ -148,6 +193,26 @@
     border: 1px solid var(--color-border);
   }
 
+  .datetime-input {
+    background: transparent;
+    border: none;
+    color: var(--color-text-primary);
+    font-size: 13px;
+    font-family: var(--font-sans);
+    outline: none;
+    padding: 4px;
+    color-scheme: dark;
+  }
+  
+  .datetime-input::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+    opacity: 0.6;
+    cursor: pointer;
+  }
+  .datetime-input::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+  }
+
   .actions-group {
     display: flex;
     gap: 6px;
@@ -200,7 +265,7 @@
   }
 
   .col-time {
-    width: 110px;
+    width: 160px;
     color: var(--color-text-muted);
     white-space: nowrap;
   }

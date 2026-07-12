@@ -465,28 +465,30 @@ input[type="checkbox"]:checked::after {
   min-width: 100%;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-surface);
+  background: var(--color-bg-card);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
 }
 thead th {
-  padding: 12px 18px;
+  padding: 10px 16px;
   text-align: left;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--color-bg-card);
   border-bottom: 1px solid var(--color-border);
   position: sticky;
   top: 0;
   z-index: 10;
   user-select: none;
-  backdrop-filter: blur(8px);
 }
 .th-sortable {
   cursor: pointer;
@@ -527,7 +529,7 @@ tbody tr:hover {
   background: rgba(255, 255, 255, 0.02);
 }
 tbody td {
-  padding: 14px 18px;
+  padding: 10px 16px;
   color: var(--color-text-primary);
   vertical-align: middle;
 }

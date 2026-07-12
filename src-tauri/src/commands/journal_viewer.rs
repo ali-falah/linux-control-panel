@@ -6,6 +6,7 @@ use std::process::Stdio;
 pub async fn get_journal_logs(
     unit_filter: Option<String>,
     priority: Option<u8>,
+    since_filter: Option<String>,
 ) -> Result<Vec<String>, String> {
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
 
@@ -21,6 +22,12 @@ pub async fn get_journal_logs(
 
     if let Some(prio) = priority {
         cmd.arg("-p").arg(prio.to_string());
+    }
+
+    if let Some(since) = since_filter {
+        if !since.is_empty() {
+            cmd.arg("--since").arg(since);
+        }
     }
 
     let output = match cmd.output().await {
