@@ -4,6 +4,7 @@
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
 
+  import SystemMonitor from './lib/modules/SystemMonitor.svelte';
   import RepoManager from './lib/modules/RepoManager.svelte';
   import DnfHistory from './lib/modules/DnfHistory.svelte';
   import CoprBrowser from './lib/modules/CoprBrowser.svelte';
@@ -37,7 +38,9 @@
   <main class="main-content">
     <div class="content-area">
       {#key uiStore.activeTab}
-        {#if uiStore.activeTab === 'repo-manager'}
+        {#if uiStore.activeTab === 'system-monitor'}
+          <SystemMonitor />
+        {:else if uiStore.activeTab === 'repo-manager'}
           <RepoManager />
         {:else if uiStore.activeTab === 'dnf-history'}
           <DnfHistory />

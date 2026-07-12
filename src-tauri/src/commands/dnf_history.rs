@@ -1,8 +1,16 @@
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 use tauri::{AppHandle, Emitter};
+use std::sync::Mutex;
 
 use crate::{binary_exists, log_to_file};
+
+// ─── Shared child PID for cancel support ────────────────────────────────────
+
+/// Holds the PID of the currently running dnf upgrade child process.
+static UPGRADE_PID: Mutex<Option<u32>> = Mutex::new(None);
+
+// ─── Data Types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnfHistoryEntry {
@@ -22,7 +30,17 @@ pub struct DnfUpdateEntry {
     pub size: String,
 }
 
-/// Parse `dnf history list` output into structured entries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnfLockInfo {
+    pub locked: bool,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub lock_path: Option<String>,
+}
+
+// ─── History ─────────────────────────────────────────────────────────────────
+
+/// Parse `dnf history list` output into structured entries.
 #[tauri::command]
 pub async fn list_dnf_history() -> Result<Vec<DnfHistoryEntry>, String> {
     if !binary_exists("dnf").await {
@@ -42,7 +60,6 @@ pub async fn list_dnf_history() -> Result<Vec<DnfHistoryEntry>, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let entries = parse_dnf_history(&stdout);
-
     Ok(entries)
 }
 
@@ -58,40 +75,25 @@ fn parse_dnf_history(output: &str) -> Vec<DnfHistoryEntry> {
         if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.starts_with("ID") {
             continue;
         }
-
         if let Some(caps) = re.captures(line) {
-            let id = caps
-                .get(1)
-                .map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
+            let id = caps.get(1).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
             let command = caps.get(2).map_or("", |m| m.as_str()).to_string();
             let date = caps.get(3).map_or("", |m| m.as_str()).to_string();
             let action = caps.get(4).map_or("", |m| m.as_str()).to_string();
-            let altered = caps
-                .get(5)
-                .map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
-
-            entries.push(DnfHistoryEntry {
-                id,
-                command,
-                date,
-                action,
-                altered,
-            });
+            let altered = caps.get(5).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
+            entries.push(DnfHistoryEntry { id, command, date, action, altered });
         }
     }
-
     entries
 }
 
-/// Undo a DNF transaction by ID
+/// Undo a DNF transaction by ID.
 #[tauri::command]
 pub async fn undo_transaction(id: u32) -> Result<String, String> {
     if !binary_exists("dnf").await {
         return Err("dnf is not available on this system".to_string());
     }
-
     let id_str = id.to_string();
-
     let output = Command::new("pkexec")
         .args(["/usr/bin/dnf", "history", "undo", &id_str, "-y"])
         .output()
@@ -100,15 +102,15 @@ pub async fn undo_transaction(id: u32) -> Result<String, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
     if !output.status.success() {
         log_to_file("ERROR", &format!("undo_transaction {id} failed: {stderr}"));
         return Err(format!("dnf history undo failed: {stderr}"));
     }
-
     log_to_file("INFO", &format!("Undid transaction #{id}"));
     Ok(stdout)
 }
+
+// ─── Package Queries ──────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn dnf_search_packages(query: String) -> Result<String, String> {
@@ -151,6 +153,8 @@ pub async fn dnf_list_versions(pkg: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr))
 }
+
+// ─── Maintenance Commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn dnf_clean_all() -> Result<String, String> {
@@ -215,6 +219,8 @@ pub fn dnf_read_log() -> Result<String, String> {
     std::fs::read_to_string("/var/log/dnf.log").map_err(|e| e.to_string())
 }
 
+// ─── Check Updates ────────────────────────────────────────────────────────────
+
 #[tauri::command]
 pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
     if !crate::binary_exists("dnf").await {
@@ -233,16 +239,12 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
 
     let extract_value = |line: &str| -> String {
         let parts: Vec<&str> = line.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            parts[1].trim().to_string()
-        } else {
-            String::new()
-        }
+        if parts.len() == 2 { parts[1].trim().to_string() } else { String::new() }
     };
 
     for line in stdout.lines() {
         let line = line.trim();
-        if line.starts_with("Name ") || line.starts_with("Name\t") || line.starts_with("Name:") || line.starts_with("Name ") {
+        if line.starts_with("Name ") || line.starts_with("Name\t") || line.starts_with("Name:") {
             let val = extract_value(line);
             if !val.is_empty() {
                 if !current_entry.package.is_empty() {
@@ -275,20 +277,183 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
     Ok(entries)
 }
 
+// ─── Lock Detection ───────────────────────────────────────────────────────────
+
+const LOCK_PATHS: &[&str] = &[
+    "/run/dnf.pid",
+    "/run/dnf.lock",
+    "/var/cache/dnf/dnf.pid",
+];
+
+/// Check if DNF is currently locked by another process.
+/// Returns lock info including PID and process name if locked.
+#[tauri::command]
+pub async fn dnf_check_lock_status() -> Result<DnfLockInfo, String> {
+    for path in LOCK_PATHS {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let pid_str = content.trim().to_string();
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                // Verify the process is actually running
+                let proc_exists = std::path::Path::new(&format!("/proc/{pid}")).exists();
+                if proc_exists {
+                    // Try to read the process name
+                    let proc_name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .unwrap_or_else(|_| "unknown".to_string())
+                        .trim()
+                        .to_string();
+                    return Ok(DnfLockInfo {
+                        locked: true,
+                        pid: Some(pid),
+                        process_name: Some(proc_name),
+                        lock_path: Some(path.to_string()),
+                    });
+                }
+                // Stale lock — process is dead but file remains
+                return Ok(DnfLockInfo {
+                    locked: false,
+                    pid: Some(pid),
+                    process_name: None,
+                    lock_path: Some(path.to_string()),
+                });
+            }
+        }
+    }
+    Ok(DnfLockInfo { locked: false, pid: None, process_name: None, lock_path: None })
+}
+
+/// Remove a stale DNF lock file. Only works if the owning process is NOT running.
+/// Safety: blocked if the PID is still alive (can't forcibly remove a live lock).
+#[tauri::command]
+pub async fn dnf_kill_lock() -> Result<String, String> {
+    let lock_info = dnf_check_lock_status().await?;
+
+    if lock_info.locked {
+        // Live process owns the lock — refuse to remove it
+        return Err(format!(
+            "Cannot remove lock: process '{}' (PID {}) is still running and owns the lock. Wait for it to finish.",
+            lock_info.process_name.unwrap_or("unknown".to_string()),
+            lock_info.pid.unwrap_or(0)
+        ));
+    }
+
+    // Only proceed if we found a stale lock (file exists but PID is dead)
+    if let Some(lock_path) = lock_info.lock_path {
+        std::fs::remove_file(&lock_path)
+            .map_err(|e| format!("Failed to remove lock file '{lock_path}': {e}. Try running as root."))?;
+        log_to_file("INFO", &format!("Removed stale DNF lock: {lock_path}"));
+        Ok(format!("Stale lock file removed: {lock_path}\nRun 'dnf check' to verify database integrity."))
+    } else {
+        Ok("No stale lock file found. Nothing to remove.".to_string())
+    }
+}
+
+// ─── Cancel Running Upgrade ───────────────────────────────────────────────────
+
+/// Cancel the currently running DNF upgrade process (sends SIGTERM).
+/// This is a graceful termination — DNF will clean up its transaction.
+#[tauri::command]
+pub fn dnf_cancel_upgrade() -> Result<(), String> {
+    let pid_opt = {
+        let guard = UPGRADE_PID.lock().unwrap();
+        *guard
+    };
+    if let Some(pid) = pid_opt {
+        // SIGTERM (signal 15) — graceful termination
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        log_to_file("INFO", &format!("Sent SIGTERM to DNF upgrade process (PID {pid})"));
+        Ok(())
+    } else {
+        Err("No active upgrade process to cancel.".to_string())
+    }
+}
+
+// ─── Pre-flight Safety Checks ─────────────────────────────────────────────────
+
+/// Check available disk space on / in bytes.
+fn check_disk_space() -> Result<u64, String> {
+    let output = std::process::Command::new("df")
+        .args(["--output=avail", "-B1", "/"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // df output: header line + data line
+    stdout.lines()
+        .nth(1)
+        .and_then(|l| l.trim().parse::<u64>().ok())
+        .ok_or_else(|| "Failed to parse disk space".to_string())
+}
+
+const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024; // 500 MiB
+
+/// Stop PackageKit to prevent it from holding the DNF lock during upgrade.
+/// Returns Ok(true) if PackageKit was running and was stopped, Ok(false) if not running.
+async fn pause_packagekit() -> bool {
+    // Check if running first
+    let is_running = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "packagekit"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if is_running {
+        let _ = std::process::Command::new("systemctl")
+            .args(["stop", "packagekit"])
+            .status();
+        log_to_file("INFO", "Paused PackageKit before DNF upgrade");
+        true
+    } else {
+        false
+    }
+}
+
+// ─── Main Upgrade Command (with all safety guards) ───────────────────────────
+
 #[tauri::command]
 pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // ── Guard 1: Root required ───────────────────────────────────────────────
     let (is_none, pw_opt) = {
         let guard = crate::utils::privilege::SUDO_PASSWORD.lock().unwrap();
-        (guard.is_none(), if guard.is_some() { Some(guard.clone().unwrap()) } else { None })
+        (guard.is_none(), guard.clone())
     };
     if is_none {
-        return Err("Root privileges are required to perform upgrades. Please enable Root in the Control Panel.".to_string());
+        return Err("Root privileges are required. Please enable Root in the status bar before upgrading.".to_string());
     }
     let pw = pw_opt.unwrap();
 
+    // ── Guard 2: DNF lock check ──────────────────────────────────────────────
+    let lock_info = dnf_check_lock_status().await?;
+    if lock_info.locked {
+        return Err(format!(
+            "DNF is locked by '{}' (PID {}). Another package operation is in progress.\n\nWait for it to finish, or use Maintenance → Kill DNF Lock if the process is stuck.",
+            lock_info.process_name.unwrap_or("unknown".to_string()),
+            lock_info.pid.unwrap_or(0)
+        ));
+    }
+
+    // ── Guard 3: Disk space ──────────────────────────────────────────────────
+    match check_disk_space() {
+        Ok(free_bytes) if free_bytes < MIN_FREE_BYTES => {
+            let free_mb = free_bytes / (1024 * 1024);
+            return Err(format!(
+                "Insufficient disk space: only {free_mb} MB free on /.\nAt least 500 MB is required to safely upgrade packages.\nFree up space before retrying."
+            ));
+        }
+        Err(e) => log_to_file("WARN", &format!("Could not check disk space: {e}")),
+        _ => {}
+    }
+
+    // ── Guard 4: Pause PackageKit ────────────────────────────────────────────
+    let packagekit_paused = pause_packagekit().await;
+    if packagekit_paused {
+        let _ = app.emit("dnf-upgrade-output", "ℹ PackageKit paused to prevent lock conflicts.\n");
+    }
+
+    // ── Launch upgrade process ───────────────────────────────────────────────
     let mut cmd = tokio::process::Command::new("sudo");
     cmd.arg("-S")
        .arg("--prompt=")
@@ -298,14 +463,22 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
        .arg("dnf")
        .arg("upgrade")
        .arg("-y")
+       .arg("--setopt=timeout=120")   // network timeout guard
        .args(&packages);
-    
+
     cmd.stdin(Stdio::piped())
        .stdout(Stdio::piped())
        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
+    // Store PID for cancel support
+    if let Some(pid) = child.id() {
+        let mut guard = UPGRADE_PID.lock().unwrap();
+        *guard = Some(pid);
+    }
+
+    // Write password to stdin
     if let Some(mut stdin) = child.stdin.take() {
         let mut p = pw;
         p.push('\n');
@@ -317,6 +490,7 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
+    // Stream stdout
     let app_clone = app.clone();
     tokio::spawn(async move {
         let mut buf = [0u8; 1024];
@@ -332,6 +506,7 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
         }
     });
 
+    // Stream stderr
     let app_clone = app.clone();
     tokio::spawn(async move {
         let mut buf = [0u8; 1024];
@@ -348,10 +523,20 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     });
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    // Clear the PID
+    {
+        let mut guard = UPGRADE_PID.lock().unwrap();
+        *guard = None;
+    }
+
     let _ = app.emit("dnf-upgrade-finished", status.success());
 
     if !status.success() {
-        return Err("Upgrade process failed".to_string());
+        log_to_file("ERROR", "DNF upgrade process failed");
+        return Err("Upgrade process failed. Check the terminal output above for details.".to_string());
     }
+
+    log_to_file("INFO", "DNF upgrade completed successfully");
     Ok(())
 }

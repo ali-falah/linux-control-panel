@@ -3,7 +3,7 @@
     Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
     Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
     ChevronLeft, ChevronRight, Database, Terminal, ChevronDown,
-    HardDrive, Wifi
+    HardDrive, Wifi, Activity, Search
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { getVersion } from '@tauri-apps/api/app';
@@ -13,6 +13,8 @@
   $effect(() => {
     getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
   });
+
+  let searchQuery = $state('');
 
   let expandedGroups = $state<Record<string, boolean>>({
     'Packages': true,
@@ -52,6 +54,7 @@
     {
       label: 'System',
       items: [
+        { id: 'system-monitor',  label: 'System Monitor',  icon: Activity },
         { id: 'startup-manager', label: 'Startup Manager', icon: Rocket },
         { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive },
@@ -106,40 +109,51 @@
 
   <div class="sidebar-divider"></div>
 
+  <!-- Search -->
+  {#if !uiStore.sidebarCollapsed}
+    <div class="sidebar-search">
+      <Search size={14} class="search-icon" />
+      <input type="text" placeholder="Search..." bind:value={searchQuery} />
+    </div>
+  {/if}
+
   <!-- Grouped Navigation -->
   <nav class="sidebar-nav">
     {#each groups as group}
-      {#if !uiStore.sidebarCollapsed}
-        <button class="group-label-btn" onclick={() => toggleGroup(group.label)}>
-          <span class="group-label">{group.label}</span>
-          <span class="group-chevron" class:expanded={expandedGroups[group.label]}>
-            <ChevronDown size={14} />
-          </span>
-        </button>
-      {:else}
-        <div class="group-sep"></div>
-      {/if}
+      {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
+      {#if filteredItems.length > 0}
+        {#if !uiStore.sidebarCollapsed && !searchQuery}
+          <button class="group-label-btn" onclick={() => toggleGroup(group.label)}>
+            <span class="group-label">{group.label}</span>
+            <span class="group-chevron" class:expanded={expandedGroups[group.label]}>
+              <ChevronDown size={14} />
+            </span>
+          </button>
+        {:else if !searchQuery}
+          <div class="group-sep"></div>
+        {/if}
 
-      {#if uiStore.sidebarCollapsed || expandedGroups[group.label]}
-        <div class="group-items">
-          {#each group.items as item}
-            {@const isActive = uiStore.activeTab === item.id}
-            <button
-              class="nav-item"
-              class:active={isActive}
-              onclick={() => uiStore.setActiveTab(item.id)}
-              title={uiStore.sidebarCollapsed ? item.label : ''}
-              aria-current={isActive ? 'page' : undefined}
-            >
-              <span class="nav-icon" class:active={isActive}>
-                <item.icon size={16} />
-              </span>
-              {#if !uiStore.sidebarCollapsed}
-                <span class="nav-label">{item.label}</span>
-              {/if}
-            </button>
-          {/each}
-        </div>
+        {#if uiStore.sidebarCollapsed || expandedGroups[group.label] || searchQuery}
+          <div class="group-items">
+            {#each filteredItems as item}
+              {@const isActive = uiStore.activeTab === item.id}
+              <button
+                class="nav-item"
+                class:active={isActive}
+                onclick={() => { uiStore.setActiveTab(item.id); searchQuery = ''; }}
+                title={uiStore.sidebarCollapsed ? item.label : ''}
+                aria-current={isActive ? 'page' : undefined}
+              >
+                <span class="nav-icon" class:active={isActive}>
+                  <item.icon size={16} />
+                </span>
+                {#if !uiStore.sidebarCollapsed}
+                  <span class="nav-label">{item.label}</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
       {/if}
     {/each}
   </nav>
@@ -234,6 +248,49 @@
     background: rgba(255, 255, 255, 0.05);
     margin: 0 2px 8px;
     flex-shrink: 0;
+  }
+
+  .sidebar-search {
+    margin: 4px 10px 12px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.02);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .sidebar-search:focus-within {
+    background: rgba(0, 0, 0, 0.35);
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .sidebar-search :global(.search-icon) {
+    position: absolute;
+    left: 10px;
+    color: var(--color-text-muted);
+    transition: color 0.2s ease;
+    pointer-events: none;
+    opacity: 0.7;
+  }
+  .sidebar-search:focus-within :global(.search-icon) {
+    color: var(--color-text-primary);
+    opacity: 1;
+  }
+  .sidebar-search input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 8px 10px 8px 32px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-weight: 500;
+    outline: none;
+  }
+  .sidebar-search input::placeholder {
+    color: var(--color-text-muted);
+    font-weight: 400;
   }
 
   /* ── Grouped nav ──────────────────────────────────────────────────── */

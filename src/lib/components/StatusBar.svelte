@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
+
+  // ─── Root Auth State ────────────────────────────────────────────────────────
 
   let hasRoot = $state(false);
   let showRootModal = $state(false);
@@ -10,9 +13,7 @@
   let isTestingSudo = $state(false);
 
   async function checkSudoStatus() {
-    try {
-      hasRoot = await invoke('check_sudo_status');
-    } catch(e) {}
+    try { hasRoot = await invoke('check_sudo_status'); } catch(e) {}
   }
 
   async function toggleRoot() {
@@ -41,18 +42,86 @@
     }
   }
 
+  // ─── Network Interfaces State ────────────────────────────────────────────────
+
+  interface NetworkInterface {
+    name: string;
+    ip4: string | null;
+    ip6: string | null;
+    is_up: boolean;
+    iface_type: string; // "ethernet" | "wifi" | "loopback" | "virtual" | "other"
+    mac: string | null;
+  }
+
+  let interfaces = $state<NetworkInterface[]>([]);
+  let showIfacePopover = $state(false);
+  let copySuccess = $state(false);
+
+  /** The primary interface: first non-loopback, non-virtual, UP interface with an IP4 */
+  let primaryIface = $derived(
+    interfaces.find(i => i.is_up && i.ip4 && i.iface_type !== 'loopback' && i.iface_type !== 'virtual')
+    ?? interfaces.find(i => i.ip4 && i.iface_type !== 'loopback')
+    ?? null
+  );
+
+  async function loadInterfaces() {
+    try {
+      interfaces = await invoke<NetworkInterface[]>('get_network_interfaces');
+    } catch (e) {
+      interfaces = [];
+    }
+  }
+
+  async function copyPrimaryIp() {
+    if (!primaryIface?.ip4) return;
+    try {
+      await navigator.clipboard.writeText(primaryIface.ip4);
+      copySuccess = true;
+      setTimeout(() => (copySuccess = false), 1800);
+    } catch {}
+  }
+
+  function openInterface(ifaceName: string) {
+    showIfacePopover = false;
+    uiStore.setActiveTabWithInterface('network-manager', ifaceName);
+  }
+
+  function closePopover() {
+    showIfacePopover = false;
+  }
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────────────
+
   $effect(() => {
     checkSudoStatus();
+    loadInterfaces();
+    // Refresh every 30 seconds
+    const interval = setInterval(loadInterfaces, 30_000);
+    return () => clearInterval(interval);
   });
-
-
 </script>
 
+<!-- Click-outside to close popover -->
+<svelte:window
+  onkeydown={(e) => {
+    if (showRootModal && e.key === 'Escape') showRootModal = false;
+    if (showIfacePopover && e.key === 'Escape') showIfacePopover = false;
+  }}
+  onclick={(e) => {
+    // If popover open and click is outside the popover anchor, close it
+    const target = e.target as Element;
+    if (showIfacePopover && !target.closest('.ip-anchor')) {
+      showIfacePopover = false;
+    }
+  }}
+/>
+
 <footer class="status-bar" role="status" aria-live="polite">
-  <!-- Left: last command -->
+
+  <!-- LEFT: command / status text -->
   <div class="status-left">
     {#if statusStore.busy}
-      <div class="status-indicator busy">
+      <div class="status-indicator">
         <Loader size={11} class="spin-icon" />
         <span class="cmd-text">{statusStore.busyLabel}</span>
       </div>
@@ -75,15 +144,87 @@
     {/if}
   </div>
 
-  <!-- Right: exit code + timestamp pill -->
+  <!-- CENTER: IP pill with popover -->
+  <div class="status-center">
+    <div class="ip-anchor">
+      <button
+        class="ip-pill {primaryIface ? (primaryIface.is_up ? 'ip-connected' : 'ip-down') : 'ip-none'}"
+        onclick={(e) => { e.stopPropagation(); showIfacePopover = !showIfacePopover; }}
+        title="Click to view all network interfaces"
+      >
+        {#if primaryIface?.iface_type === 'wifi'}
+          <Wifi size={10} />
+        {:else}
+          <Network size={10} />
+        {/if}
+        <span class="ip-ifname">{primaryIface?.name ?? '—'}</span>
+        <span class="ip-sep">·</span>
+        <span class="ip-addr">{primaryIface?.ip4 ?? 'No IP'}</span>
+        <span class="ip-caret">▾</span>
+      </button>
+
+      <!-- Popover panel -->
+      {#if showIfacePopover}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="iface-popover animate-fade" onclick={(e) => e.stopPropagation()}>
+          <div class="popover-header">
+            <span class="popover-title">Network Interfaces</span>
+          </div>
+          <div class="popover-list">
+            {#each interfaces.filter(i => i.iface_type !== 'loopback') as iface (iface.name)}
+              <div class="iface-row">
+                <div class="iface-icon {iface.iface_type}">
+                  {#if iface.iface_type === 'wifi'}
+                    <Wifi size={12} />
+                  {:else}
+                    <Network size={12} />
+                  {/if}
+                </div>
+                <div class="iface-info">
+                  <span class="iface-name">{iface.name}</span>
+                  <span class="iface-ip">{iface.ip4 ?? (iface.is_up ? 'No IPv4' : 'Down')}</span>
+                </div>
+                <div class="iface-status-dot {iface.is_up && iface.ip4 ? 'dot-up' : 'dot-down'}"></div>
+                <button
+                  class="iface-open-btn"
+                  onclick={() => openInterface(iface.name)}
+                  title="Open in Network Manager"
+                >
+                  <ExternalLink size={11} />
+                </button>
+              </div>
+            {/each}
+            {#if interfaces.filter(i => i.iface_type !== 'loopback').length === 0}
+              <div class="popover-empty">No active interfaces found</div>
+            {/if}
+          </div>
+          {#if primaryIface?.ip4}
+            <div class="popover-footer">
+              <button class="copy-btn {copySuccess ? 'copy-ok' : ''}" onclick={copyPrimaryIp}>
+                <Copy size={10} />
+                {copySuccess ? 'Copied!' : 'Copy primary IP'}
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </div>
+
+  <!-- RIGHT: Root toggle + exit code -->
   <div class="status-right">
-    <button class="pill {hasRoot ? 'pill-root-on' : 'pill-root-off'}" style="cursor: pointer; display: flex; align-items: center; gap: 4px; border: none; font-family: inherit; font-size: inherit;" onclick={toggleRoot}>
+    <button
+      class="pill {hasRoot ? 'pill-root-on' : 'pill-root-off'}"
+      onclick={toggleRoot}
+      title={hasRoot ? 'Click to disable root privileges' : 'Click to enable root privileges'}
+    >
       {#if hasRoot}
         <ShieldCheck size={11} /> Root: ON
       {:else}
         <Shield size={11} /> Root: OFF
       {/if}
     </button>
+    <div class="right-divider"></div>
     {#if statusStore.lastEntry}
       <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}">
         exit {statusStore.lastEntry.exitCode ?? '—'}
@@ -100,7 +241,7 @@
     align-items: center;
     justify-content: space-between;
     height: 32px;
-    padding: 0 16px;
+    padding: 0 12px;
     background: rgba(37, 40, 54, 0.4);
     border-top: 1px solid rgba(255, 255, 255, 0.08);
     font-size: 11px;
@@ -108,14 +249,41 @@
     flex-shrink: 0;
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
-    gap: 12px;
+    gap: 8px;
+    position: relative;
   }
 
-  .status-left, .status-right {
+  /* ── Sections ──────────────────────────────────────────────────────────── */
+  .status-left {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    flex: 1;          /* grows to fill left half */
     min-width: 0;
+    overflow: hidden;
+  }
+
+  .status-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;   /* sized to IP pill content only */
+  }
+
+  .status-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;          /* grows to fill right half, items pushed to the right */
+    justify-content: flex-end;
+    min-width: 0;
+  }
+
+  .right-divider {
+    width: 1px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
   }
 
   .status-indicator {
@@ -127,7 +295,7 @@
 
   .cmd-text {
     color: var(--color-text-muted);
-    max-width: 480px;
+    max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -136,20 +304,26 @@
   .cmd-text.fail { color: var(--color-error); }
   .cmd-text.idle { color: var(--color-text-muted); }
 
-  /* pill badges on the right */
+  /* ── Pill badges ──────────────────────────────────────────────────────── */
   .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     padding: 1px 7px;
     border-radius: 20px;
     font-size: 10px;
     font-weight: 600;
     white-space: nowrap;
     letter-spacing: 0.02em;
+    cursor: pointer;
+    border: none;
+    font-family: inherit;
   }
-  .pill-ok   { background: var(--color-success-muted); color: var(--color-success); }
-  .pill-fail { background: rgba(239, 68, 68, 0.1); color: var(--color-error); }
-  .pill-root-on { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
-  .pill-root-off { background: rgba(255, 255, 255, 0.05); color: var(--color-text-muted); }
-  .pill-root-on:hover { background: rgba(34, 197, 94, 0.25); }
+  .pill-ok   { background: var(--color-success-muted); color: var(--color-success); cursor: default; }
+  .pill-fail { background: rgba(239, 68, 68, 0.1); color: var(--color-error); cursor: default; }
+  .pill-root-on  { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+  .pill-root-off { background: rgba(255, 255, 255, 0.05); color: var(--color-text-muted); border: 1px solid transparent; }
+  .pill-root-on:hover  { background: rgba(34, 197, 94, 0.25); }
   .pill-root-off:hover { background: rgba(255, 255, 255, 0.1); color: var(--color-text-primary); }
 
   .ts-pill {
@@ -162,40 +336,216 @@
   }
   .ts-pill.muted { color: var(--color-text-muted); }
 
+  /* ── IP pill ──────────────────────────────────────────────────────────── */
+  .ip-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 9px;
+    border-radius: 20px;
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .ip-connected {
+    background: rgba(9, 132, 227, 0.12);
+    color: #74b9ff;
+    border: 1px solid rgba(9, 132, 227, 0.25);
+  }
+  .ip-down {
+    background: rgba(253, 203, 110, 0.1);
+    color: var(--color-warning);
+    border: 1px solid rgba(253, 203, 110, 0.2);
+  }
+  .ip-none {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--color-text-muted);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .ip-pill:hover { filter: brightness(1.2); }
+  .ip-ifname { color: inherit; opacity: 0.75; }
+  .ip-sep    { opacity: 0.4; margin: 0 1px; }
+  .ip-addr   { font-weight: 700; }
+  .ip-caret  { font-size: 8px; opacity: 0.5; margin-left: 2px; }
+
+  /* ── Popover ──────────────────────────────────────────────────────────── */
+  .ip-anchor {
+    position: relative;
+  }
+
+  .iface-popover {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--color-bg-surface);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    min-width: 280px;
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4), 0 -2px 8px rgba(0,0,0,0.2);
+    z-index: 2000;
+    overflow: hidden;
+  }
+
+  .popover-header {
+    padding: 10px 14px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  .popover-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+  }
+
+  .popover-list {
+    padding: 6px 0;
+  }
+
+  .iface-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px;
+    transition: background 0.12s ease;
+  }
+  .iface-row:hover {
+    background: rgba(255,255,255,0.03);
+  }
+
+  .iface-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .iface-icon.ethernet { background: rgba(9, 132, 227, 0.15); color: #74b9ff; }
+  .iface-icon.wifi     { background: rgba(0, 210, 211, 0.15); color: var(--color-success); }
+  .iface-icon.virtual  { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }
+  .iface-icon.other    { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }
+
+  .iface-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    gap: 1px;
+  }
+  .iface-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+  }
+  .iface-ip {
+    font-size: 10px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+  }
+
+  .iface-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-up   { background: var(--color-success); box-shadow: 0 0 4px rgba(0,210,211,0.5); }
+  .dot-down { background: var(--color-text-muted); }
+
+  .iface-open-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.12s ease;
+    flex-shrink: 0;
+  }
+  .iface-open-btn:hover {
+    background: rgba(108, 92, 231, 0.15);
+    border-color: rgba(108, 92, 231, 0.4);
+    color: var(--color-accent-soft);
+  }
+
+  .popover-empty {
+    padding: 12px 14px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+    text-align: center;
+    font-family: var(--font-sans);
+  }
+
+  .popover-footer {
+    padding: 8px 14px 10px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 10px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    width: 100%;
+    justify-content: center;
+  }
+  .copy-btn:hover { background: rgba(255,255,255,0.05); color: var(--color-text-primary); }
+  .copy-btn.copy-ok { color: var(--color-success); border-color: rgba(0,210,211,0.3); }
+
+  /* ── Spin/icon helpers ─────────────────────────────────────────────── */
   :global(.spin-icon) {
     animation: spin 1s linear infinite;
     color: var(--color-info);
     flex-shrink: 0;
   }
   :global(.icon-ok)   { color: var(--color-success); flex-shrink: 0; }
-  :global(.icon-fail) { color: var(--color-error); flex-shrink: 0; }
-  :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0;  }
+  :global(.icon-fail) { color: var(--color-error);   flex-shrink: 0; }
+  :global(.icon-idle) { color: var(--color-text-muted); flex-shrink: 0; }
 </style>
 
-<svelte:window onkeydown={(e) => { if (showRootModal && e.key === 'Escape') showRootModal = false; }} />
-
+<!-- Root auth modal -->
 {#if showRootModal}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showRootModal = false; }}>
-    <div class="modal-content" style="max-width: 320px;">
+    <div class="modal" style="max-width: 320px;">
       <h3 style="margin-top:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
         <Shield size={18} style="color:var(--color-accent)"/>
         Root Privileges
       </h3>
       <p style="font-size:13px; color:var(--color-text-secondary); margin-bottom:16px;">
-        Enter your sudo password. This will be securely held in memory to bypass OS prompts for this session.
+        Enter your sudo password. It will be securely held in memory to bypass OS prompts for this session.
       </p>
-      
       {#if sudoError}
         <div style="background:rgba(239,68,68,0.1); color:var(--color-error); padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;">
           {sudoError}
         </div>
       {/if}
-
       <form onsubmit={(e) => { e.preventDefault(); submitSudo(); }}>
-        <input 
-          type="password" 
+        <input
+          type="password"
           bind:value={sudoPassword}
           class="input"
           placeholder="Password..."

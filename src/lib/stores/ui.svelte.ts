@@ -8,6 +8,7 @@ export interface Toast {
 }
 
 export type TabId =
+  | 'system-monitor'
   | 'repo-manager'
   | 'dnf-history'
   | 'copr-browser'
@@ -28,9 +29,11 @@ export type TabId =
   | 'app-manager';
 
 class UIStore {
-  activeTab = $state<TabId>('repo-manager');
+  activeTab = $state<TabId>('system-monitor');
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
+  /** Interface name to auto-select when network-manager opens (set by IP popover deep-link) */
+  selectedInterface = $state<string | null>(null);
   confirmDialog = $state<{
     isOpen: boolean;
     title: string;
@@ -47,6 +50,16 @@ class UIStore {
 
   setActiveTab(tab: TabId) {
     this.activeTab = tab;
+  }
+
+  /** Navigate to a tab and pre-select a network interface (used by IP popover deep-link). */
+  setActiveTabWithInterface(tab: TabId, ifaceName: string) {
+    this.selectedInterface = ifaceName;
+    this.activeTab = tab;
+  }
+
+  clearSelectedInterface() {
+    this.selectedInterface = null;
   }
 
   toggleSidebar() {

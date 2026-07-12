@@ -10,6 +10,7 @@ use commands::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
         dnf_check_updates, dnf_run_upgrade, dnf_read_log,
+        dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
     firewall_manager::{
@@ -56,6 +57,7 @@ use commands::{
     },
     device_manager::{device_get_all},
     app_manager::{list_desktop_apps, get_app_meta, get_app_details, uninstall_app},
+    system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process},
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -120,6 +122,9 @@ pub fn run() {
             dnf_check_updates,
             dnf_run_upgrade,
             dnf_read_log,
+            dnf_check_lock_status,
+            dnf_kill_lock,
+            dnf_cancel_upgrade,
             // Copr Browser
             search_copr,
             enable_copr,
@@ -234,6 +239,12 @@ pub fn run() {
             get_app_meta,
             get_app_details,
             uninstall_app,
+            // System Info
+            get_network_interfaces,
+            get_system_stats,
+            get_disk_usage,
+            get_process_list,
+            kill_process,
             // Privilege Manager
             set_sudo_password,
             clear_sudo_password,
