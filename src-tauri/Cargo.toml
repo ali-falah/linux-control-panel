@@ -1,6 +1,6 @@
 [package]
 name = "linux-control-panel"
-version = "0.1.0"
+version = "0.2.4"
 description = "Linux System Management Control Panel"
 authors = []
 edition = "2021"
