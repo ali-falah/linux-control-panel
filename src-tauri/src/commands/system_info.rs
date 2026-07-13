@@ -564,3 +564,138 @@ pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
         Err(format!("Failed to signal process {pid}: permission denied or process not found."))
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkTraffic {
+    pub interface: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartHealth {
+    pub disk_path: String,
+    pub model: String,
+    pub health_status: String,
+}
+
+#[tauri::command]
+pub async fn get_network_traffic() -> Result<Vec<NetworkTraffic>, String> {
+    let content = fs::read_to_string("/proc/net/dev").map_err(|e| e.to_string())?;
+    let mut traffics = Vec::new();
+    
+    for line in content.lines().skip(2) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 10 {
+            let interface = parts[0].trim_end_matches(':').to_string();
+            let rx_bytes = parts[1].parse::<u64>().unwrap_or(0);
+            let tx_bytes = parts[9].parse::<u64>().unwrap_or(0);
+            traffics.push(NetworkTraffic { interface, rx_bytes, tx_bytes });
+        }
+    }
+    
+    Ok(traffics)
+}
+
+#[tauri::command]
+pub async fn get_smart_health() -> Result<Vec<SmartHealth>, String> {
+    if !crate::utils::privilege::check_sudo_status() {
+        return Ok(Vec::new());
+    }
+
+    let lsblk = crate::utils::privilege::tokio::Command::new("lsblk")
+        .args(["-d", "-n", "-o", "NAME,TYPE"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let out = String::from_utf8_lossy(&lsblk.stdout);
+    let mut results = Vec::new();
+
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[1] == "disk" {
+            let dev_name = parts[0];
+            if dev_name.starts_with("zram") || dev_name.starts_with("loop") {
+                continue;
+            }
+            let dev = format!("/dev/{}", dev_name);
+            
+            let mut cmd = crate::utils::privilege::tokio::Command::new("pkexec");
+            cmd.args(["smartctl", "-H", "-i", &dev]);
+            cmd.stdout(std::process::Stdio::piped());
+            let smart = cmd.output().await;
+                
+            if let Ok(smart_out) = smart {
+                let stdout = String::from_utf8_lossy(&smart_out.stdout);
+                
+                let mut health_status = "UNKNOWN".to_string();
+                let mut model = "Unknown Device".to_string();
+                
+                for s_line in stdout.lines() {
+                    if s_line.starts_with("SMART overall-health self-assessment test result:") || s_line.starts_with("SMART Health Status:") {
+                        health_status = s_line.split(':').nth(1).unwrap_or("UNKNOWN").trim().to_string();
+                    } else if s_line.starts_with("Device Model:") || s_line.starts_with("Model Number:") || s_line.starts_with("Model Family:") {
+                        model = s_line.split(':').nth(1).unwrap_or("Unknown").trim().to_string();
+                    }
+                }
+                
+                // If it is just an empty return or failed authentication, we might default to UNKNOWN.
+                // We only add if we successfully got some real info, or at least we skip if it's completely empty.
+                if health_status != "UNKNOWN" || model != "Unknown Device" {
+                    results.push(SmartHealth {
+                        disk_path: dev,
+                        model,
+                        health_status,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OS INFO
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OsInfo {
+    pub hostname: String,
+    pub name: String,
+    pub os_version: String,
+    pub kernel_version: String,
+}
+
+#[tauri::command]
+pub async fn get_os_info() -> Result<OsInfo, String> {
+    let hostname = fs::read_to_string("/proc/sys/kernel/hostname")
+        .unwrap_or_else(|_| "Unknown".to_string())
+        .trim()
+        .to_string();
+
+    let kernel_version = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .unwrap_or_else(|_| "Unknown".to_string())
+        .trim()
+        .to_string();
+
+    let os_release = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut name = "Linux".to_string();
+    let mut os_version = "".to_string();
+
+    for line in os_release.lines() {
+        if line.starts_with("NAME=") {
+            name = line.trim_start_matches("NAME=").trim_matches('"').to_string();
+        } else if line.starts_with("VERSION=") {
+            os_version = line.trim_start_matches("VERSION=").trim_matches('"').to_string();
+        }
+    }
+
+    Ok(OsInfo {
+        hostname,
+        name,
+        os_version,
+        kernel_version,
+    })
+}

@@ -8,6 +8,7 @@ export interface Toast {
 }
 
 export type TabId =
+  | 'system-dashboard'
   | 'system-monitor'
   | 'repo-manager'
   | 'dnf-history'
@@ -30,7 +31,7 @@ export type TabId =
   | 'journal-logs';
 
 class UIStore {
-  activeTab = $state<TabId>('system-monitor');
+  activeTab = $state<TabId>('system-dashboard');
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
   /** Interface name to auto-select when network-manager opens (set by IP popover deep-link) */

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus, Shield } from '@lucide/svelte';
+  import { ShieldCheck, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';

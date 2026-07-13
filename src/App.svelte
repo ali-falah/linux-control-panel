@@ -3,6 +3,7 @@
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
+  import Dashboard from './lib/modules/Dashboard.svelte';
   import SystemMonitor from './lib/modules/SystemMonitor.svelte';
   import JournalViewer from './lib/modules/JournalViewer.svelte';
   import RepoManager from './lib/modules/RepoManager.svelte';
@@ -38,7 +39,9 @@
   <main class="main-content">
     <div class="content-area">
       {#key uiStore.activeTab}
-        {#if uiStore.activeTab === 'system-monitor'}
+        {#if uiStore.activeTab === 'system-dashboard'}
+          <Dashboard />
+        {:else if uiStore.activeTab === 'system-monitor'}
           <SystemMonitor />
         {:else if uiStore.activeTab === 'journal-logs'}
           <JournalViewer />

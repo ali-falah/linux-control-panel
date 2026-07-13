@@ -3,7 +3,7 @@
     Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
     Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
     ChevronLeft, ChevronRight, Database, Terminal, ChevronDown,
-    HardDrive, Wifi, Activity, Search
+    HardDrive, Wifi, Activity, Search, LayoutDashboard
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { getVersion } from '@tauri-apps/api/app';
@@ -17,6 +17,7 @@
   let searchQuery = $state('');
 
   let expandedGroups = $state<Record<string, boolean>>({
+    'Overview': true,
     'Packages': true,
     'System': false,
     'Network & Security': false,
@@ -41,6 +42,12 @@
     label: string;
     items: { id: TabId; label: string; icon: any }[];
   }[] = [
+    {
+      label: 'Overview',
+      items: [
+        { id: 'system-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+      ],
+    },
     {
       label: 'Packages',
       items: [

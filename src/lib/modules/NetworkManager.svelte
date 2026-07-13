@@ -59,7 +59,6 @@
   }
 
   async function editConnection(uuid: string) {
-    selectedConnectionUuid = uuid;
     if (uuid === '') {
        // New connection profile defaults
        editConnectionData = { 
@@ -71,6 +70,7 @@
          'ipv4.gateway': '', 
          'ipv4.dns': '' 
        };
+       selectedConnectionUuid = uuid;
        return;
     }
     
@@ -85,6 +85,7 @@
          }
       });
       editConnectionData = parsed;
+      selectedConnectionUuid = uuid;
       statusStore.setLastCommand(`nmcli connection show ${uuid}`, 0, true);
     } catch(e) {
       console.error(e);
@@ -238,7 +239,7 @@
 
   {#if selectedConnectionUuid !== null}
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px; flex-shrink:0;">
-      <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" onclick={() => selectedConnectionUuid = null}>
+      <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" onclick={() => { selectedConnectionUuid = null; editConnectionData = null; }}>
         <ArrowLeft size={14}/> Back to Connections
       </Button>
       <div style="display:flex; gap:8px;">

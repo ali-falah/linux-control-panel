@@ -18,7 +18,7 @@
   
 </script>
 
-<div class="table-wrap" style="overflow-x: auto; flex: 1; min-height: 0;">
+<div class="table-wrap" style="flex: 1; min-height: 0;">
   {#if tableAction}
     <table class={className} use:tableAction={actionParams} {...rest}>
       {@render children?.()}
