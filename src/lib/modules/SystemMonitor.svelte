@@ -2,8 +2,8 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import {
-    Activity, Cpu, Database, HardDrive, TerminalSquare, AlertCircle,
-    RefreshCw, Play, Trash2, PowerOff, Loader, CheckCircle2, ChevronRight
+    Activity, Cpu, Database, HardDrive, TerminalSquare,
+    RefreshCw, PowerOff, Loader, Wifi
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -13,60 +13,154 @@
   import { tableFeatures } from '../actions/tableFeatures';
 
   let currentTab = $state<'overview' | 'processes'>('overview');
+  let currentUser = $state('unknown');
 
   // Overview Stats
   let stats = $state<any>(null);
-  let disks = $state<any[]>([]);
   let cpuHistory = $state<number[]>(Array(40).fill(0));
-  let ramHistory = $state<number[]>(Array(40).fill(0));
+
+  // Disk I/O
+  let diskIoStats = $state<any[]>([]);
+  let lastDiskIoTime = $state<number>(0);
+  let lastDiskIoData = $state<any[]>([]);
+  let diskIoSpeeds = $state<Record<string, { readSpeed: number, writeSpeed: number }>>({});
+
+  // Network Live Traffic
+  let networkTraffic = $state<any[]>([]);
+  let lastNetworkTime = $state<number>(0);
+  let lastNetworkData = $state<any[]>([]);
+  let networkSpeeds = $state<Record<string, { rxSpeed: number, txSpeed: number }>>({});
+
+  // Active Connections
+  let activeConnections = $state<any[]>([]);
 
   // Processes
   let processes = $state<any[]>([]);
   let processSearch = $state('');
   let isRefreshing = $state(false);
 
-  // Auto-refresh timer
-  let refreshTimer: ReturnType<typeof setInterval>;
+  // Timers
+  let leftTimer: any;
+  let rightTimer: any;
+  let processesTimer: any;
 
-  onMount(async () => {
-    await refreshAll();
-    refreshTimer = setInterval(() => {
-      if (currentTab === 'overview') {
-        refreshAll();
-      }
-    }, 2000);
-  });
+  function clearTimers() {
+    clearInterval(leftTimer);
+    clearInterval(rightTimer);
+    clearInterval(processesTimer);
+  }
 
-  onDestroy(() => {
-    clearInterval(refreshTimer);
-  });
+  async function pollLeftAndCenter() {
+    try {
+      const sysStats = await invoke('get_system_stats');
+      stats = sysStats;
+      cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
+    } catch(e) {}
+    await fetchDiskIo();
+  }
 
-  async function refreshAll() {
+  async function pollRight() {
+    await Promise.all([
+      fetchNetworkTraffic(),
+      fetchActiveConnections()
+    ]);
+  }
+
+  async function pollProcesses() {
     isRefreshing = true;
     try {
-      if (currentTab === 'overview') {
-        const [sysStats, sysDisks] = await Promise.all([
-          invoke('get_system_stats'),
-          invoke('get_disk_usage')
-        ]);
-        stats = sysStats;
-        disks = sysDisks as any[];
+      processes = await invoke('get_process_list');
+    } catch(e) {}
+    isRefreshing = false;
+  }
 
-        cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
-        ramHistory = [...ramHistory.slice(1), stats.ram_percent];
-      } else {
-        processes = await invoke('get_process_list');
+  async function fetchDiskIo() {
+    try {
+      const newDiskIo: any[] = await invoke('get_disk_io_stats');
+      const now = performance.now();
+      if (lastDiskIoTime > 0 && lastDiskIoData.length > 0) {
+        const deltaSec = (now - lastDiskIoTime) / 1000;
+        let speeds: Record<string, { readSpeed: number, writeSpeed: number }> = {};
+        for (const current of newDiskIo) {
+          const prev = lastDiskIoData.find(d => d.device === current.device);
+          if (prev) {
+            const readDiff = current.read_bytes - prev.read_bytes;
+            const writeDiff = current.write_bytes - prev.write_bytes;
+            speeds[current.device] = {
+              readSpeed: Math.max(0, readDiff / deltaSec),
+              writeSpeed: Math.max(0, writeDiff / deltaSec)
+            };
+          }
+        }
+        diskIoSpeeds = speeds;
       }
+      lastDiskIoData = newDiskIo;
+      lastDiskIoTime = now;
+      diskIoStats = newDiskIo;
     } catch (e) {
       console.error(e);
-    } finally {
-      isRefreshing = false;
+    }
+  }
+
+  async function fetchNetworkTraffic() {
+    try {
+      const newTraffic: any[] = await invoke('get_network_traffic');
+      const now = performance.now();
+      if (lastNetworkTime > 0 && lastNetworkData.length > 0) {
+        const deltaSec = (now - lastNetworkTime) / 1000;
+        let speeds: Record<string, { rxSpeed: number, txSpeed: number }> = {};
+        for (const current of newTraffic) {
+          const prev = lastNetworkData.find(t => t.interface === current.interface);
+          if (prev) {
+            const rxDiff = current.rx_bytes - prev.rx_bytes;
+            const txDiff = current.tx_bytes - prev.tx_bytes;
+            speeds[current.interface] = {
+              rxSpeed: Math.max(0, rxDiff / deltaSec),
+              txSpeed: Math.max(0, txDiff / deltaSec)
+            };
+          }
+        }
+        networkSpeeds = speeds;
+      }
+      lastNetworkData = newTraffic;
+      lastNetworkTime = now;
+      networkTraffic = newTraffic;
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function fetchActiveConnections() {
+    try {
+      activeConnections = await invoke('get_active_connections');
+    } catch(e) {
+      console.error(e);
     }
   }
 
   $effect(() => {
-    // Immediate refresh on tab change
-    refreshAll();
+    clearTimers();
+    if (currentTab === 'overview') {
+      pollLeftAndCenter();
+      pollRight();
+      leftTimer = setInterval(pollLeftAndCenter, 2000);
+      rightTimer = setInterval(pollRight, 3000);
+    } else if (currentTab === 'processes') {
+      pollProcesses();
+      processesTimer = setInterval(pollProcesses, 3000);
+    }
+  });
+
+  onMount(async () => {
+    try {
+      currentUser = await invoke('get_current_user');
+    } catch(e) {
+      console.error(e);
+    }
+  });
+
+  onDestroy(() => {
+    clearTimers();
   });
 
   // Sparkline generator helper
@@ -82,6 +176,7 @@
     // Fill path
     return `M 0,${height} L ${points} L ${width},${height} Z`;
   }
+  
   function generateSparklineStroke(data: number[], height: number, width: number): string {
     if (data.length === 0) return '';
     const max = 100;
@@ -97,152 +192,266 @@
     if (mb < 1024) return `${mb.toFixed(0)} MB`;
     return `${(mb / 1024).toFixed(1)} GB`;
   };
-  const formatTime = (secs: number) => {
-    const d = Math.floor(secs / 86400);
-    const h = Math.floor((secs % 86400) / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    if (d > 0) return `${d}d ${h}h`;
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m`;
-  };
 
-  async function killProcess(pid: number, name: string) {
-    if (!statusStore.rootEnabled) {
-      uiStore.addToast('Root required to kill processes', 'error');
-      return;
-    }
-    const confirmed = await uiStore.confirm(
-      `Kill ${name}?`,
-      `Are you sure you want to terminate process ${pid}? Data may be lost.`,
-      true
-    );
-    if (!confirmed) return;
-
-    try {
-      const res = await invoke('kill_process', { pid, signal: 15 });
-      statusStore.setLastCommand(`kill -15 ${pid}`, 0, true);
-      uiStore.addToast(res as string, 'success');
-      refreshAll();
-    } catch (e: any) {
-      statusStore.setLastCommand(`kill -15 ${pid}`, 1, false);
-      uiStore.addToast(e, 'error');
-    }
+  function formatSpeed(bytesPerSec: number) {
+    if (bytesPerSec < 1024) return Math.round(bytesPerSec) + " B/s";
+    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + " KB/s";
+    if (bytesPerSec < 1024 * 1024 * 1024) return (bytesPerSec / (1024 * 1024)).toFixed(1) + " MB/s";
+    return (bytesPerSec / (1024 * 1024 * 1024)).toFixed(1) + " GB/s";
   }
 
-  let filteredProcesses = $derived(
-    processSearch
-      ? processes.filter(p => p.name.toLowerCase().includes(processSearch.toLowerCase()) || p.pid.toString().includes(processSearch))
-      : processes
-  );
+  function killProcess(pid: number, name: string) {
+    uiStore.confirm(
+      `Confirm Kill Process`,
+      `Kill process ${name} (PID ${pid})?`,
+      async () => {
+        try {
+          const res = await invoke('kill_process', { pid, signal: 15 });
+          statusStore.setLastCommand(`kill -15 ${pid}`, 0, true);
+          uiStore.addToast(res as string, 'success');
+          pollProcesses();
+        } catch (e: any) {
+          statusStore.setLastCommand(`kill -15 ${pid}`, 1, false);
+          uiStore.addToast(e.toString(), 'error');
+        }
+      },
+      true
+    );
+  }
+
+  interface GroupedProcess {
+    pid: number;
+    name: string;
+    cmdline: string;
+    cpu_percent: number;
+    mem_percent: number;
+    mem_rss_mb: number;
+    user: string;
+    count: number;
+    pids: number[];
+  }
+
+  // Deduplicate and collapse processes by identical name
+  let groupedProcesses = $derived.by(() => {
+    const search = processSearch.toLowerCase();
+    const list = processes.filter(p => 
+      !search || 
+      p.name.toLowerCase().includes(search) || 
+      p.pid.toString().includes(search)
+    );
+
+    const groups = new Map<string, GroupedProcess>();
+    for (const p of list) {
+      const existing = groups.get(p.name);
+      if (existing) {
+        existing.cpu_percent += p.cpu_percent;
+        existing.mem_percent += p.mem_percent;
+        existing.mem_rss_mb += p.mem_rss_mb;
+        existing.count += 1;
+        existing.pids.push(p.pid);
+        if (p.pid < existing.pid) {
+          existing.pid = p.pid;
+          existing.cmdline = p.cmdline;
+          existing.user = p.user;
+        }
+      } else {
+        groups.set(p.name, {
+          pid: p.pid,
+          name: p.name,
+          cmdline: p.cmdline,
+          cpu_percent: p.cpu_percent,
+          mem_percent: p.mem_percent,
+          mem_rss_mb: p.mem_rss_mb,
+          user: p.user,
+          count: 1,
+          pids: [p.pid],
+        });
+      }
+    }
+    return Array.from(groups.values());
+  });
+
+  async function forceRefresh() {
+    if (currentTab === 'overview') {
+      await Promise.all([pollLeftAndCenter(), pollRight()]);
+    } else {
+      await pollProcesses();
+    }
+  }
 </script>
 
 <div class="module-page">
-  <PageHeader title="System Monitor" subtitle="Real-time system health and process management." icon={Activity}>
+  <PageHeader title="Monitoring" subtitle="Real-time system health and process management." icon={Activity}>
     <div class="tab-switcher">
       <button class:active={currentTab === 'overview'} onclick={() => currentTab = 'overview'}>Overview</button>
       <button class:active={currentTab === 'processes'} onclick={() => currentTab = 'processes'}>Processes</button>
     </div>
-    <Button onclick={refreshAll} variant="secondary">
+    <Button onclick={forceRefresh} variant="secondary" disabled={isRefreshing}>
       <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
       Refresh
     </Button>
   </PageHeader>
 
-  <div class="page-content">
+  <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 24px; overflow-y: auto;">
     {#if currentTab === 'overview'}
       {#if stats}
-        <!-- Core Stats Row -->
-        <div class="stats-grid">
-          <!-- CPU Card -->
-          <div class="stat-card">
-            <div class="card-header">
-              <div class="card-title"><Cpu size={16} /> CPU Usage</div>
-              <div class="card-val">{stats.cpu_percent.toFixed(1)}%</div>
+        <div class="monitor-layout">
+          <!-- COLUMN 1: Resource Usage & Disk I/O -->
+          <div class="monitor-column-left">
+            <!-- Core Resource Usage -->
+            <div class="monitor-panel">
+              <h3 class="panel-title"><Cpu size={16} class="text-primary" /> Core Resource Usage</h3>
+              <div class="panel-scroll">
+                <!-- CPU -->
+                <div class="metric-block" style="display:flex; flex-direction:column; gap:8px;">
+                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
+                    <span>CPU Usage</span>
+                    <span>{stats.cpu_percent.toFixed(1)}%</span>
+                  </div>
+                  <div style="height: 60px; background: rgba(0,0,0,0.2); border-radius: 8px; overflow:hidden; padding: 4px;">
+                    <svg viewBox="0 0 200 60" preserveAspectRatio="none" style="width: 100%; height: 100%;">
+                      <path d={generateSparkline(cpuHistory, 60, 200)} class="spark-fill cpu-fill" />
+                      <polyline points={generateSparklineStroke(cpuHistory, 60, 200)} class="spark-stroke cpu-stroke" fill="none" />
+                    </svg>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
+                    <span>{stats.cpu_cores} Cores</span>
+                    <span>Load: {stats.load_1.toFixed(2)}, {stats.load_5.toFixed(2)}</span>
+                  </div>
+                </div>
+                
+                <!-- Memory -->
+                <div class="metric-block" style="display:flex; flex-direction:column; gap:6px;">
+                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
+                    <span>Memory</span>
+                    <span>{stats.ram_percent.toFixed(1)}%</span>
+                  </div>
+                  <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
+                    <div class="progress-fill ram-fill" style="width: {stats.ram_percent}%; height: 100%; transition: width 0.3s ease;"></div>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
+                    <span>Used: {formatBytes(stats.ram_used_mb)}</span>
+                    <span>Total: {formatBytes(stats.ram_total_mb)}</span>
+                  </div>
+                </div>
+                
+                <!-- Swap -->
+                <div class="metric-block" style="display:flex; flex-direction:column; gap:6px;">
+                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
+                    <span>Swap Space</span>
+                    <span>{stats.swap_percent.toFixed(1)}%</span>
+                  </div>
+                  <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
+                    <div class="progress-fill swap-fill" style="width: {stats.swap_percent}%; height: 100%; transition: width 0.3s ease;"></div>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
+                    <span>Used: {formatBytes(stats.swap_used_mb)}</span>
+                    <span>Total: {formatBytes(stats.swap_total_mb)}</span>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="sparkline-container">
-              <svg viewBox="0 0 200 40" preserveAspectRatio="none" class="sparkline-svg">
-                <path d={generateSparkline(cpuHistory, 40, 200)} class="spark-fill cpu-fill" />
-                <polyline points={generateSparklineStroke(cpuHistory, 40, 200)} class="spark-stroke cpu-stroke" fill="none" />
-              </svg>
-            </div>
-            <div class="card-meta">
-              <span>{stats.cpu_cores} Cores</span>
-              <span>Load: {stats.load_1.toFixed(2)}, {stats.load_5.toFixed(2)}</span>
+
+            <!-- Disk I/O -->
+            <div class="monitor-panel">
+              <h3 class="panel-title"><HardDrive size={16} class="text-purple" /> Disk I/O</h3>
+              <div class="panel-scroll" style="gap:10px;">
+                {#if diskIoStats.length > 0}
+                  {#each diskIoStats as disk}
+                    <div style="background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                      <div style="font-weight: 600; font-family: var(--font-mono); font-size: 13px; color: var(--color-text-primary);">{disk.device}</div>
+                      <div style="display:flex; justify-content:space-between; font-size: 12px; font-family: var(--font-mono);">
+                        <div>
+                          <span style="color: var(--color-text-muted); font-size: 10px; margin-right: 4px;">READ</span>
+                          <strong class="text-info">{formatSpeed(diskIoSpeeds[disk.device]?.readSpeed || 0)}</strong>
+                        </div>
+                        <div>
+                          <span style="color: var(--color-text-muted); font-size: 10px; margin-right: 4px;">WRITE</span>
+                          <strong class="text-success">{formatSpeed(diskIoSpeeds[disk.device]?.writeSpeed || 0)}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  {/each}
+                {:else}
+                  <span class="text-muted">Loading disk I/O metrics...</span>
+                {/if}
+              </div>
             </div>
           </div>
 
-          <!-- RAM Card -->
-          <div class="stat-card">
-            <div class="card-header">
-              <div class="card-title"><Database size={16} /> Memory</div>
-              <div class="card-val">{stats.ram_percent.toFixed(1)}%</div>
-            </div>
-            <div class="sparkline-container">
-              <svg viewBox="0 0 200 40" preserveAspectRatio="none" class="sparkline-svg">
-                <path d={generateSparkline(ramHistory, 40, 200)} class="spark-fill ram-fill" />
-                <polyline points={generateSparklineStroke(ramHistory, 40, 200)} class="spark-stroke ram-stroke" fill="none" />
-              </svg>
-            </div>
-            <div class="card-meta">
-              <span>{formatBytes(stats.ram_used_mb)} / {formatBytes(stats.ram_total_mb)}</span>
-              <span>Swap: {stats.swap_percent.toFixed(1)}%</span>
+          <!-- COLUMN 2: Network & Connections -->
+          <div class="monitor-panel">
+            <h3 class="panel-title"><Wifi size={16} class="text-info" /> Network & Connections</h3>
+            <div class="panel-scroll" style="gap:16px;">
+              <div>
+                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Interface Speeds</h4>
+                <div style="display:flex; flex-direction:column; gap: 8px;">
+                  {#each networkTraffic as iface}
+                    {#if iface.interface !== 'lo'}
+                      <div style="background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px; display:flex; flex-direction:column; gap:4px;">
+                        <div style="font-weight:600; font-family:var(--font-mono); font-size:12px;">{iface.interface}</div>
+                        <div style="display:flex; justify-content:space-between; font-size:11px; font-family:var(--font-mono);">
+                          <div><span style="color:var(--color-text-muted); font-size:9px;">DL</span> <strong class="text-success">{formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</strong></div>
+                          <div><span style="color:var(--color-text-muted); font-size:9px;">UL</span> <strong class="text-warning">{formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</strong></div>
+                        </div>
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              </div>
+              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
+                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections</h4>
+                <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2);">
+                  <table style="width:100%; border-collapse:collapse; font-size:11px; font-family:var(--font-mono);">
+                    <thead>
+                      <tr style="border-bottom:1px solid var(--color-border); background:rgba(0,0,0,0.2); position:sticky; top:0; z-index:5;">
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Proto</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Local</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Remote</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">State</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Process</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each activeConnections as conn}
+                        <tr style="border-bottom:1px solid rgba(255,255,255,0.02);">
+                          <td style="padding:6px; color:var(--color-text-primary);">{conn.protocol}</td>
+                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.local_address}>{conn.local_address}</td>
+                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.remote_address}>{conn.remote_address}</td>
+                          <td style="padding:6px; color:var(--color-success);">{conn.state}</td>
+                          <td style="padding:6px; color:var(--color-text-secondary);">{conn.process_name}</td>
+                        </tr>
+                      {/each}
+                      {#if activeConnections.length === 0}
+                        <tr>
+                          <td colspan="5" style="padding:16px; text-align:center; color:var(--color-text-muted);">No active connections</td>
+                        </tr>
+                      {/if}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
-
-          <!-- Uptime Card -->
-          <div class="stat-card uptime-card">
-            <div class="card-header">
-              <div class="card-title"><Activity size={16} /> Uptime</div>
-              <div class="card-val uptime-val">{formatTime(stats.uptime_seconds)}</div>
-            </div>
-            <div class="uptime-visual">
-              <div class="pulse-ring"></div>
-              <span>System Online</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Disk Usage -->
-        <h3 class="section-title"><HardDrive size={16} /> Mounted Disks</h3>
-        <div class="disk-grid">
-          {#each disks as disk}
-            <div class="disk-card">
-              <div class="disk-header">
-                <span class="disk-mount">{disk.mount}</span>
-                <span class="disk-pct {disk.percent > 90 ? 'pct-danger' : disk.percent > 75 ? 'pct-warn' : ''}">
-                  {disk.percent.toFixed(1)}%
-                </span>
-              </div>
-              <div class="progress-track">
-                <div class="progress-bar {disk.percent > 90 ? 'bg-danger' : disk.percent > 75 ? 'bg-warn' : 'bg-primary'}" 
-                     style="width: {Math.min(disk.percent, 100)}%"></div>
-              </div>
-              <div class="disk-meta">
-                <span>{disk.device} • {disk.fs_type}</span>
-                <span>{disk.free_gb.toFixed(1)} GB free of {disk.total_gb.toFixed(1)} GB</span>
-              </div>
-            </div>
-          {/each}
         </div>
       {:else}
         <div class="loading-state">
           <Loader size={24} class="animate-spin-slow" /> Loading system metrics...
         </div>
       {/if}
-
     {:else}
       <!-- Processes Tab -->
-      <div class="table-container">
+      <div class="table-container" style="flex:1; min-height:0; display:flex; flex-direction:column;">
         <div class="table-toolbar">
           <div class="search-box">
             <input type="text" placeholder="Search processes by name or PID..." bind:value={processSearch} />
           </div>
           <div class="toolbar-stats">
-            Showing top {filteredProcesses.length} processes
+            Showing {groupedProcesses.length} process groups
           </div>
         </div>
 
-        <div class="table-scroll">
+        <div class="table-scroll" style="flex:1; overflow:auto;">
           <Table tableAction={tableFeatures}>
             <thead>
               <tr>
@@ -251,26 +460,40 @@
                 <th class="col-user">User</th>
                 <th class="col-cpu">CPU %</th>
                 <th class="col-mem">Mem %</th>
-                <th class="col-rss">RSS (MB)</th>
+                <th class="col-rss">RSS</th>
                 <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
-              {#each filteredProcesses as p (p.pid)}
+              {#each groupedProcesses as p (p.name)}
                 <tr class:is-root={p.user === 'root'} class:is-kernel={p.pid <= 100}>
                   <td class="col-pid">{p.pid}</td>
                   <td class="col-name">
-                    <div class="proc-name">{p.name}</div>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                      <div class="proc-name">{p.name}</div>
+                      {#if p.count > 1}
+                        <span style="background:rgba(255,255,255,0.06); border:1px solid var(--color-border); color:var(--color-text-accent); font-size:10px; font-weight:bold; padding:1px 5px; border-radius:4px;">
+                          {p.count}
+                        </span>
+                      {/if}
+                    </div>
                     <div class="proc-cmd">{p.cmdline}</div>
                   </td>
-                  <td class="col-user"><span class="user-badge">{p.user}</span></td>
+                  <td class="col-user">
+                    <span 
+                      class="user-badge"
+                      style="color: {p.user === 'root' ? 'var(--color-error)' : p.user === currentUser ? 'var(--color-success)' : 'var(--color-text-secondary)'}; font-weight: 600;"
+                    >
+                      {p.user}
+                    </span>
+                  </td>
                   <td class="col-cpu {p.cpu_percent > 20 ? 'text-warn' : p.cpu_percent > 50 ? 'text-danger' : ''}">
-                    {p.cpu_percent.toFixed(1)}
+                    {p.cpu_percent.toFixed(1)}%
                   </td>
                   <td class="col-mem {p.mem_percent > 15 ? 'text-warn' : ''}">
-                    {p.mem_percent.toFixed(1)}
+                    {p.mem_percent.toFixed(1)}%
                   </td>
-                  <td class="col-rss">{p.mem_rss_mb.toFixed(1)}</td>
+                  <td class="col-rss">{p.mem_rss_mb.toFixed(1)} MB</td>
                   <td class="col-actions">
                     {#if p.pid > 100}
                       <button class="action-btn kill" onclick={() => killProcess(p.pid, p.name)} title="Kill Process (SIGTERM)">
@@ -346,49 +569,68 @@
     font-size: 14px;
   }
 
-  /* ── OVERVIEW TAB ──────────────────────────────────────────── */
-  .stats-grid {
+  /* 2-column layout */
+  .monitor-layout {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: 4fr 6fr;
     gap: 20px;
+    align-items: stretch;
+    height: 100%;
+    min-height: 0;
   }
-  
-  .stat-card {
+  .monitor-column-left {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    height: 100%;
+    min-height: 0;
+  }
+  .monitor-column-left .monitor-panel {
+    min-height: 0;
+  }
+  .monitor-column-left .monitor-panel:first-child {
+    flex: 1.5;
+  }
+  .monitor-column-left .monitor-panel:last-child {
+    flex: 0.8;
+  }
+
+  .monitor-panel {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 12px;
-    padding: 16px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    gap: 16px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    overflow: hidden;
+    height: 100%;
+    min-height: 0;
   }
-  
-  .card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-  }
-  .card-title {
+  .panel-title {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--color-text-secondary);
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: 12px;
+    margin: 0;
+    flex-shrink: 0;
   }
-  .card-val {
-    font-size: 24px;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--color-text-primary);
-    line-height: 1;
+  .panel-scroll {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
-  
+
   .sparkline-container {
-    height: 40px;
+    height: 60px;
     width: 100%;
-    margin-top: 4px;
   }
   .sparkline-svg {
     width: 100%;
@@ -402,100 +644,21 @@
   .ram-stroke { stroke: var(--color-accent); }
   .ram-fill { fill: var(--color-accent); opacity: 0.15; }
   
-  .card-meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--color-text-muted);
-    border-top: 1px dashed rgba(255, 255, 255, 0.05);
-    padding-top: 10px;
-  }
-
-  .uptime-card {
-    justify-content: space-between;
-  }
-  .uptime-val { font-size: 20px; }
-  .uptime-visual {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    background: rgba(0, 210, 211, 0.05);
-    border: 1px solid rgba(0, 210, 211, 0.1);
-    padding: 12px 16px;
-    border-radius: 8px;
-    color: var(--color-success);
-    font-weight: 600;
-    font-size: 13px;
-  }
-  .pulse-ring {
-    width: 10px;
-    height: 10px;
-    background: var(--color-success);
-    border-radius: 50%;
-    box-shadow: 0 0 0 rgba(0, 210, 211, 0.4);
-    animation: pulse 2s infinite;
-  }
-  @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(0, 210, 211, 0.4); }
-    70% { box-shadow: 0 0 0 6px rgba(0, 210, 211, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(0, 210, 211, 0); }
-  }
-
-  .section-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    margin: 8px 0 0;
-  }
-
-  .disk-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 16px;
-  }
-  .disk-card {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: 16px;
-  }
-  .disk-header {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 12px;
-  }
-  .disk-mount { font-weight: 600; font-family: var(--font-mono); font-size: 13px; }
-  .disk-pct { font-weight: 700; font-size: 13px; font-family: var(--font-mono); }
-  .pct-danger { color: var(--color-error); }
-  .pct-warn { color: var(--color-warning); }
-
-  .progress-track {
+  .progress-bg {
     height: 6px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 3px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 4px;
     overflow: hidden;
-    margin-bottom: 12px;
   }
-  .progress-bar {
+  .progress-fill {
     height: 100%;
-    border-radius: 3px;
-    transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 4px;
+    transition: width 0.3s ease;
   }
-  .bg-primary { background: var(--color-accent); }
-  .bg-warn { background: var(--color-warning); }
-  .bg-danger { background: var(--color-error); }
+  .ram-fill { background: linear-gradient(90deg, #f59e0b, #ef4444); }
+  .swap-fill { background: linear-gradient(90deg, #ef4444, #b91c1c); }
 
-  .disk-meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }
-
-  /* ── PROCESSES TAB ─────────────────────────────────────────── */
+  /* PROCESSES TAB */
   .table-container {
     display: flex;
     flex-direction: column;
@@ -553,26 +716,7 @@
     border-radius: 4px;
     font-size: 11px;
   }
-  .is-root .user-badge {
-    background: rgba(255, 118, 117, 0.1);
-    color: var(--color-error);
-  }
 
   .text-warn { color: var(--color-warning) !important; font-weight: 600; }
   .text-danger { color: var(--color-error) !important; font-weight: 700; }
-
-  .action-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    padding: 6px;
-    border-radius: 6px;
-    display: inline-flex;
-    transition: all 0.2s;
-  }
-  .action-btn.kill:hover {
-    background: rgba(255, 118, 117, 0.15);
-    color: var(--color-error);
-  }
 </style>

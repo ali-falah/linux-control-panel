@@ -1,232 +1,351 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutDashboard, Cpu, MemoryStick, HardDrive, Wifi, Activity, Heart, Server, Layers } from '@lucide/svelte';
+  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Badge from '../components/ui/Badge.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import { uiStore } from '../stores/ui.svelte.ts';
   
   let osInfo = $state<any>(null);
   let systemStats = $state<any>(null);
   let diskUsage = $state<any[]>([]);
   let smartHealth = $state<any[]>([]);
-  let networkTraffic = $state<any[]>([]);
+  let networkInterfaces = $state<any[]>([]);
   
-  let trafficSpeeds = $state<Record<string, { rxSpeed: number, txSpeed: number }>>({});
-  let lastTrafficData = $state<any[]>([]);
-  let lastTrafficTime = $state<number>(0);
+  // Resource Strip State (CPU, RAM, Swap)
+  let resources = $state<any>(null);
+  // Network details (gateway, dns)
+  let networkDetails = $state<any>(null);
+  let gatewayPing = $state<string>('');
+  // System Events State (Boot time, Err/Warn counts)
+  let systemEvents = $state<any>(null);
 
   let pollInterval: any;
+  let resourcesInterval: any;
+  let pingInterval: any;
 
-  async function fetchStaticInfo() {
+  let isRefreshing = $state(false);
+
+  async function handleManualRefresh() {
+    isRefreshing = true;
     try {
-      osInfo = await invoke('get_os_info');
-      smartHealth = await invoke('get_smart_health');
+      await Promise.all([fetchData(), fetchResources()]);
     } catch (e) {
       console.error(e);
+    } finally {
+      isRefreshing = false;
     }
   }
 
-  async function fetchLiveStats() {
+  async function fetchResources() {
     try {
-      systemStats = await invoke('get_system_stats');
-      diskUsage = await invoke('get_disk_usage');
+      resources = await invoke('get_dashboard_resources');
+    } catch (e) {
+      console.error("Error fetching resources:", e);
+    }
+  }
+
+  async function fetchSystemEvents() {
+    try {
+      systemEvents = await invoke('get_system_events');
+    } catch (e) {
+      console.error("Error fetching system events:", e);
+    }
+  }
+
+  async function fetchNetworkDetails() {
+    try {
+      networkDetails = await invoke('get_network_details');
+      updateGatewayPing();
+    } catch (e) {
+      console.error("Error fetching network details:", e);
+    }
+  }
+
+  async function updateGatewayPing() {
+    if (networkDetails && networkDetails.gateway) {
+      invoke<string>('ping_gateway', { ip: networkDetails.gateway })
+        .then(latency => {
+          gatewayPing = latency;
+        })
+        .catch(() => {
+          gatewayPing = 'timeout';
+        });
+    }
+  }
+
+  async function fetchData() {
+    try {
+      const [os, stats, disks, smart, ifaces] = await Promise.all([
+        invoke('get_os_info'),
+        invoke('get_system_stats'),
+        invoke('get_disk_usage'),
+        invoke('get_smart_health'),
+        invoke('get_network_interfaces')
+      ]);
+      osInfo = os;
+      systemStats = stats;
+      diskUsage = disks as any[];
+      smartHealth = smart as any[];
+      networkInterfaces = ifaces as any[];
       
-      const newTraffic: any[] = await invoke('get_network_traffic');
-      const now = performance.now();
-      
-      if (lastTrafficTime > 0 && lastTrafficData.length > 0) {
-        const deltaSec = (now - lastTrafficTime) / 1000;
-        let speeds: Record<string, { rxSpeed: number, txSpeed: number }> = {};
-        
-        for (const current of newTraffic) {
-          const prev = lastTrafficData.find(t => t.interface === current.interface);
-          if (prev) {
-            const rxDiff = current.rx_bytes - prev.rx_bytes;
-            const txDiff = current.tx_bytes - prev.tx_bytes;
-            speeds[current.interface] = {
-              rxSpeed: Math.max(0, rxDiff / deltaSec),
-              txSpeed: Math.max(0, txDiff / deltaSec)
-            };
-          }
-        }
-        trafficSpeeds = speeds;
-      }
-      
-      lastTrafficData = newTraffic;
-      lastTrafficTime = now;
-      networkTraffic = newTraffic;
+      // Secondary updates
+      fetchNetworkDetails();
+      fetchSystemEvents();
     } catch (e) {
       console.error(e);
     }
   }
 
   onMount(() => {
-    fetchStaticInfo();
-    fetchLiveStats();
-    pollInterval = setInterval(fetchLiveStats, 2000);
+    fetchData();
+    fetchResources();
+    fetchNetworkDetails();
+    pollInterval = setInterval(fetchData, 30000);
+    resourcesInterval = setInterval(fetchResources, 5000);
+    pingInterval = setInterval(updateGatewayPing, 10000);
   });
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
+    if (resourcesInterval) clearInterval(resourcesInterval);
+    if (pingInterval) clearInterval(pingInterval);
   });
-  
-  function formatBytes(bytes: number) {
-    if (bytes < 1024) return Math.round(bytes) + " B";
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
-  }
-
-  function formatSpeed(bytesPerSec: number) {
-    return formatBytes(bytesPerSec) + "/s";
-  }
 </script>
 
 <div class="module-page">
-  <PageHeader title="Dashboard" subtitle="System Analytics Overview" icon={LayoutDashboard} />
+  <PageHeader title="Dashboard" subtitle="System Analytics Overview" icon={LayoutDashboard}>
+    <Button variant="ghost" onclick={handleManualRefresh} disabled={isRefreshing}>
+      <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} /> Refresh
+    </Button>
+  </PageHeader>
 
   <div class="dashboard-grid">
-    <!-- OS Overview -->
-    <div class="card-glass panel-overview">
-      <div class="panel-header">
-        <Server size={18} class="text-primary" />
-        <h3>System Overview</h3>
+    <!-- Column 1: System Overview & Resources -->
+    <div class="dashboard-column">
+      <div class="card-glass panel-overview">
+        <div class="panel-header">
+          <Server size={18} class="text-primary" />
+          <h3>System Overview</h3>
+        </div>
+        <div class="panel-body">
+          {#if osInfo}
+            <div class="info-row"><span>Hostname:</span> <strong>{osInfo.hostname}</strong></div>
+            <div class="info-row"><span>OS Name:</span> <strong>{osInfo.name} {osInfo.os_version}</strong></div>
+            <div class="info-row"><span>Kernel:</span> <strong>{osInfo.kernel_version}</strong></div>
+            <div class="info-row"><span>Uptime:</span> <strong>{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong></div>
+          {:else}
+            <span class="text-muted">Loading OS information...</span>
+          {/if}
+        </div>
       </div>
-      <div class="panel-body">
-        {#if osInfo}
-          <div class="info-row"><span>Hostname:</span> <strong>{osInfo.hostname}</strong></div>
-          <div class="info-row"><span>OS Name:</span> <strong>{osInfo.name} {osInfo.os_version}</strong></div>
-          <div class="info-row"><span>Kernel:</span> <strong>{osInfo.kernel_version}</strong></div>
-          <div class="info-row"><span>Uptime:</span> <strong>{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong></div>
-        {:else}
-          <span class="text-muted">Loading OS information...</span>
-        {/if}
-      </div>
-    </div>
 
-    <!-- Resource Utilization -->
-    <div class="card-glass panel-resources">
-      <div class="panel-header">
-        <Activity size={18} class="text-success" />
-        <h3>Resource Utilization</h3>
-      </div>
-      <div class="panel-body">
-        {#if systemStats}
+      <!-- Resource Utilization Strip -->
+      <div class="resource-strip-card" style="background: rgba(30, 30, 42, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px;">
+        {#if resources}
           <!-- CPU -->
-          <div class="metric-block">
-            <div class="metric-label">
-              <span><Cpu size={14} class="inline-icon text-primary"/> CPU Usage</span>
-              <span>{systemStats.cpu_percent.toFixed(1)}%</span>
-            </div>
-            <div class="progress-bg">
-              <div class="progress-fill cpu-fill" style="width: {systemStats.cpu_percent}%"></div>
-            </div>
+          <div style="display: flex; align-items: center; gap: 6px; flex: 1.2; min-width: 65px;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">CPU</span>
+            <strong style="font-size: 12px; font-family: var(--font-mono); color: var(--color-text-primary);">{resources.cpu_percent.toFixed(0)}%</strong>
           </div>
+          
           <!-- RAM -->
-          <div class="metric-block">
-            <div class="metric-label">
-              <span><MemoryStick size={14} class="inline-icon text-warning"/> Memory ({(systemStats.ram_used_mb / 1024).toFixed(1)}GB / {(systemStats.ram_total_mb / 1024).toFixed(1)}GB)</span>
-              <span>{systemStats.ram_percent.toFixed(1)}%</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex: 2; min-width: 110px;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">RAM</span>
+            <div class="progress-bg" style="flex: 1; height: 6px; background: rgba(0,0,0,0.3); border-radius: 3px; overflow: hidden;">
+              <div class="progress-fill ram-fill" style="width: {resources.ram_percent}%; height: 100%; transition: width 0.4s ease;"></div>
             </div>
-            <div class="progress-bg">
-              <div class="progress-fill ram-fill" style="width: {systemStats.ram_percent}%"></div>
-            </div>
+            <span style="font-size: 10px; font-family: var(--font-mono); color: var(--color-text-muted); white-space: nowrap;">
+              {resources.ram_used_gb.toFixed(1)}/{resources.ram_total_gb.toFixed(0)}G
+            </span>
           </div>
+          
           <!-- Swap -->
-          <div class="metric-block">
-            <div class="metric-label">
-              <span><Layers size={14} class="inline-icon text-error"/> Swap Space</span>
-              <span>{systemStats.swap_percent.toFixed(1)}%</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex: 2; min-width: 110px;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">SWAP</span>
+            <div class="progress-bg" style="flex: 1; height: 6px; background: rgba(0,0,0,0.3); border-radius: 3px; overflow: hidden;">
+              <div class="progress-fill swap-fill" style="width: {resources.swap_percent}%; height: 100%; transition: width 0.4s ease;"></div>
             </div>
-            <div class="progress-bg">
-              <div class="progress-fill swap-fill" style="width: {systemStats.swap_percent}%"></div>
+            <span style="font-size: 10px; font-family: var(--font-mono); color: var(--color-text-muted); white-space: nowrap;">
+              {resources.swap_used_gb.toFixed(1)}/{resources.swap_total_gb.toFixed(0)}G
+            </span>
+          </div>
+        {:else}
+          <span class="text-muted" style="font-size: 11px;">Loading resources...</span>
+        {/if}
+      </div>
+
+      <!-- System Events -->
+      <div class="card-glass panel-events">
+        <div class="panel-header">
+          <Activity size={18} class="text-warning" />
+          <h3>System Events</h3>
+        </div>
+        <div class="panel-body" style="gap: 12px;">
+          {#if systemEvents}
+            <div class="info-row" style="display:flex; justify-content:space-between; margin-bottom:4px; font-size: 13px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 6px;">
+              <span>Last Boot Time:</span> 
+              <strong>{systemEvents.last_boot_time}</strong>
             </div>
-          </div>
-        {:else}
-           <span class="text-muted">Loading resource metrics...</span>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Network Live Traffic -->
-    <div class="card-glass panel-network">
-      <div class="panel-header">
-        <Wifi size={18} class="text-info" />
-        <h3>Network Live Traffic</h3>
-      </div>
-      <div class="panel-body">
-        {#if networkTraffic.length > 0}
-          <div class="network-list">
-            {#each networkTraffic as iface}
-              {#if iface.interface !== 'lo'}
-                <div class="network-item">
-                  <div class="iface-name">{iface.interface}</div>
-                  <div class="iface-speeds">
-                    <div class="speed-down">
-                      <span class="speed-lbl">DL</span>
-                      <strong class="text-success">{formatSpeed(trafficSpeeds[iface.interface]?.rxSpeed || 0)}</strong>
-                    </div>
-                    <div class="speed-up">
-                      <span class="speed-lbl">UL</span>
-                      <strong class="text-warning">{formatSpeed(trafficSpeeds[iface.interface]?.txSpeed || 0)}</strong>
-                    </div>
-                  </div>
-                </div>
-              {/if}
-            {/each}
-          </div>
-        {:else}
-          <span class="text-muted">Loading network traffic...</span>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Storage & SMART -->
-    <div class="card-glass panel-storage">
-      <div class="panel-header">
-        <HardDrive size={18} class="text-purple" />
-        <h3>Storage & SMART Health</h3>
-      </div>
-      <div class="panel-body storage-scroll">
-        {#if diskUsage.length > 0}
-          <div class="disks-list">
-            {#each diskUsage as disk}
-              {#if disk.device.startsWith('/dev/')}
-                <div class="disk-item">
-                  <div class="disk-header">
-                    <strong>{disk.mount}</strong>
-                    <span class="text-muted" style="font-size: 11px;">{disk.device} ({disk.fs_type})</span>
-                  </div>
-                  <div class="disk-stats">
-                    <div class="progress-bg" style="flex:1;">
-                      <div class="progress-fill storage-fill" style="width: {disk.percent}%"></div>
-                    </div>
-                    <span class="disk-pct">{disk.percent.toFixed(1)}% ({disk.used_gb.toFixed(1)}GB / {disk.total_gb.toFixed(1)}GB)</span>
-                  </div>
-                </div>
-              {/if}
-            {/each}
-          </div>
-        {:else}
-          <span class="text-muted">Loading storage data...</span>
-        {/if}
-        
-        {#if smartHealth.length > 0}
-          <div class="smart-health-section mt-4">
-            <h4 class="text-sm font-semibold mb-2 flex items-center gap-2" style="font-size: 13px; font-weight: 600;"><Heart size={14} class="text-error" /> SMART Status</h4>
-            {#each smartHealth as smart}
-              <div class="smart-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; margin-bottom: 8px;">
-                <div>
-                  <div style="font-size: 12px; font-weight: 600;">{smart.disk_path}</div>
-                  <div style="font-size: 10px; color: var(--color-text-muted);">{smart.model}</div>
-                </div>
-                <Badge variant={smart.health_status === 'PASSED' || smart.health_status === 'OK' ? 'success' : (smart.health_status === 'UNKNOWN' ? 'warning' : 'error')}>
-                  {smart.health_status}
+            
+            <div style="display: flex; gap: 12px; margin-top: 4px;">
+              <!-- Errors Button -->
+              <button 
+                onclick={() => {
+                  uiStore.preAppliedJournalPriority = '3'; // Error & Above
+                  uiStore.setActiveTab('journal-logs');
+                }}
+                style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                class="hover-bg-error-light"
+              >
+                <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Errors</span>
+                <Badge variant={systemEvents.error_count > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
+                  {systemEvents.error_count}
                 </Badge>
-              </div>
-            {/each}
-          </div>
-        {/if}
+              </button>
+              
+              <!-- Warnings Button -->
+              <button 
+                onclick={() => {
+                  uiStore.preAppliedJournalPriority = '4'; // Warning & Above
+                  uiStore.setActiveTab('journal-logs');
+                }}
+                style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                class="hover-bg-warn-light"
+              >
+                <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Warnings</span>
+                <Badge variant={systemEvents.warning_count > 0 ? 'warning' : 'muted'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
+                  {systemEvents.warning_count}
+                </Badge>
+              </button>
+            </div>
+          {:else}
+            <span class="text-muted" style="font-size: 11px;">Loading system events...</span>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    <!-- Column 2: Network Interfaces -->
+    <div class="dashboard-column">
+      <div class="card-glass panel-network">
+        <div class="panel-header">
+          <Wifi size={18} class="text-info" />
+          <h3>Network Interfaces</h3>
+        </div>
+        <div class="panel-body">
+          {#if networkInterfaces.length > 0}
+            <div class="network-list">
+              {#each networkInterfaces as iface}
+                {#if iface.name !== 'lo'}
+                  <div class="network-item" style="display:flex; justify-content:space-between; align-items:center; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: 8px; margin-bottom: 8px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <span class="iface-name" style="font-weight:600; font-size:13px; font-family:var(--font-mono); color: var(--color-text-primary);">{iface.name}</span>
+                      <Badge variant={iface.is_up ? 'success' : 'muted'} style="font-size: 9px; padding: 2px 6px;">{iface.is_up ? 'UP' : 'DOWN'}</Badge>
+                    </div>
+                    <div style="font-family:var(--font-mono); font-size:12px; color:var(--color-text-secondary); display: flex; align-items: center; gap: 4px;">
+                      {iface.ip4 || 'No IP'}
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {:else}
+            <span class="text-muted">Loading network interfaces...</span>
+          {/if}
+
+          <!-- Divider -->
+          <div style="height: 1px; background: rgba(255, 255, 255, 0.05); margin: 12px 0;"></div>
+
+          <!-- Gateway & DNS details -->
+          {#if networkDetails}
+            <div style="display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--color-text-secondary); padding: 0 4px;">
+              {#if networkDetails.gateway}
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>Gateway IP:</span>
+                  <strong style="font-family: var(--font-mono); color: var(--color-text-primary);">
+                    {networkDetails.gateway}
+                    {#if gatewayPing}
+                      <span style="color: var(--color-text-muted); margin: 0 2px;">·</span>
+                      {#if gatewayPing === 'timeout'}
+                        <span style="color: var(--color-error); font-weight: 600;">timeout</span>
+                      {:else}
+                        <span style="color: var(--color-success); font-weight: 600;">{gatewayPing}</span>
+                      {/if}
+                    {:else}
+                      <span style="color: var(--color-text-muted); font-size: 10px; margin-left: 4px;" class="animate-pulse">pinging...</span>
+                    {/if}
+                  </strong>
+                </div>
+              {/if}
+              
+              {#if networkDetails.dns && networkDetails.dns.length > 0}
+                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                  <span>DNS Servers:</span>
+                  <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px;">
+                    {#each networkDetails.dns as dnsIp}
+                      <strong style="font-family: var(--font-mono); color: var(--color-text-primary);">{dnsIp}</strong>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <span class="text-muted" style="font-size: 11px;">Loading gateway & DNS details...</span>
+          {/if}
+    </div>
+    </div>
+    </div>
+
+    <!-- Column 3: Storage & SMART Health & System Events -->
+    <div class="dashboard-column">
+      <div class="card-glass panel-storage">
+        <div class="panel-header">
+          <HardDrive size={18} class="text-purple" />
+          <h3>Storage & SMART Health</h3>
+        </div>
+        <div class="panel-body storage-scroll">
+          {#if diskUsage.length > 0}
+            <div class="disks-list">
+              {#each diskUsage as disk}
+                {#if disk.device.startsWith('/dev/')}
+                  <div class="disk-item">
+                    <div class="disk-header">
+                      <strong>{disk.mount}</strong>
+                      <span class="text-muted" style="font-size: 11px;">{disk.device} ({disk.fs_type})</span>
+                    </div>
+                    <div class="disk-stats">
+                      <div class="progress-bg" style="flex:1;">
+                        <div class="progress-fill storage-fill" style="width: {disk.percent}%"></div>
+                      </div>
+                      <span class="disk-pct">{disk.percent.toFixed(1)}% ({disk.used_gb.toFixed(1)}GB / {disk.total_gb.toFixed(1)}GB)</span>
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {:else}
+            <span class="text-muted">Loading storage data...</span>
+          {/if}
+          
+          {#if smartHealth.length > 0}
+            <div class="smart-health-section mt-4">
+              <h4 class="text-sm font-semibold mb-2 flex items-center gap-2" style="font-size: 13px; font-weight: 600;"><Heart size={14} class="text-error" /> SMART Status</h4>
+              {#each smartHealth as smart}
+                <div class="smart-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; margin-bottom: 8px;">
+                  <div>
+                    <div style="font-size: 12px; font-weight: 600;">{smart.disk_path}</div>
+                    <div style="font-size: 10px; color: var(--color-text-muted);">{smart.model}</div>
+                  </div>
+                  <Badge variant={smart.health_status === 'PASSED' || smart.health_status === 'OK' ? 'success' : (smart.health_status === 'UNKNOWN' ? 'warning' : 'error')}>
+                    {smart.health_status}
+                  </Badge>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
   </div>
@@ -240,6 +359,13 @@
     padding: 16px;
     overflow-y: auto;
     height: 100%;
+    align-items: start;
+  }
+
+  .dashboard-column {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .card-glass {
@@ -286,19 +412,6 @@
   .info-row:last-child { border-bottom: none; }
   .info-row span { color: var(--color-text-muted); }
 
-  .metric-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .metric-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-    font-weight: 500;
-  }
-  .inline-icon { vertical-align: -2px; margin-right: 4px; }
-
   .progress-bg {
     height: 6px;
     background: rgba(0,0,0,0.3);
@@ -310,7 +423,6 @@
     border-radius: 4px;
     transition: width 0.3s ease;
   }
-  .cpu-fill { background: linear-gradient(90deg, #3b82f6, #8b5cf6); }
   .ram-fill { background: linear-gradient(90deg, #f59e0b, #ef4444); }
   .swap-fill { background: linear-gradient(90deg, #ef4444, #b91c1c); }
   .storage-fill { background: linear-gradient(90deg, #8b5cf6, #d946ef); }
@@ -325,9 +437,7 @@
     border-radius: 8px;
   }
   .iface-name { font-weight: 600; font-size: 13px; font-family: var(--font-mono); }
-  .iface-speeds { display: flex; gap: 16px; font-size: 12px; font-family: var(--font-mono); }
-  .speed-lbl { color: var(--color-text-muted); font-size: 10px; margin-right: 4px; }
-
+  
   .disks-list { display: flex; flex-direction: column; gap: 12px; }
   .disk-item { display: flex; flex-direction: column; gap: 6px; }
   .disk-header { display: flex; justify-content: space-between; font-size: 13px; }
@@ -337,6 +447,15 @@
   .storage-scroll {
       overflow-y: auto;
       max-height: 400px;
+  }
+
+  .hover-bg-error-light:hover {
+    background: rgba(239, 68, 68, 0.15) !important;
+    border-color: rgba(239, 68, 68, 0.3) !important;
+  }
+  .hover-bg-warn-light:hover {
+    background: rgba(245, 158, 11, 0.15) !important;
+    border-color: rgba(245, 158, 11, 0.3) !important;
   }
 
   .text-primary { color: #3b82f6; }

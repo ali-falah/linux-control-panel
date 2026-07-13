@@ -699,3 +699,450 @@ pub async fn get_os_info() -> Result<OsInfo, String> {
         kernel_version,
     })
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DISK I/O STATS
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DiskStats {
+    pub device: String,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn get_disk_io_stats() -> Result<Vec<DiskStats>, String> {
+    // Get valid physical disk names from /sys/block
+    let mut block_devices = std::collections::HashSet::new();
+    if let Ok(entries) = fs::read_dir("/sys/block") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("loop") && !name.starts_with("ram") && !name.starts_with("zram") {
+                block_devices.insert(name);
+            }
+        }
+    }
+
+    let content = fs::read_to_string("/proc/diskstats").map_err(|e| e.to_string())?;
+    let mut stats = Vec::new();
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 10 {
+            let device = parts[2].to_string();
+            if block_devices.contains(&device) {
+                // sectors read is at index 5, sectors written is at index 9
+                let sectors_read = parts[5].parse::<u64>().unwrap_or(0);
+                let sectors_written = parts[9].parse::<u64>().unwrap_or(0);
+                stats.push(DiskStats {
+                    device,
+                    read_bytes: sectors_read * 512,
+                    write_bytes: sectors_written * 512,
+                });
+            }
+        }
+    }
+    Ok(stats)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACTIVE CONNECTIONS (ss -tunp)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ActiveConnection {
+    pub protocol: String,
+    pub local_address: String,
+    pub remote_address: String,
+    pub state: String,
+    pub process_name: String,
+}
+
+#[tauri::command]
+pub async fn get_active_connections() -> Result<Vec<ActiveConnection>, String> {
+    // If root privileges are active, run with pkexec to get process names for all users
+    let mut cmd = if crate::utils::privilege::check_sudo_status() {
+        let mut c = crate::utils::privilege::tokio::Command::new("pkexec");
+        c.args(["ss", "-tunp"]);
+        c
+    } else {
+        let mut c = crate::utils::privilege::tokio::Command::new("ss");
+        c.args(["-tunp"]);
+        c
+    };
+    cmd.stdout(std::process::Stdio::piped());
+    
+    let output = cmd.output().await.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    
+    let mut connections = Vec::new();
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5 {
+            let protocol = parts[0].to_string();
+            let state = parts[1].to_string();
+            let local_address = parts[4].to_string();
+            let remote_address = parts[5].to_string();
+            
+            let mut process_name = "N/A".to_string();
+            if parts.len() >= 7 {
+                let proc_part = parts[6..].join(" ");
+                if let Some(start) = proc_part.find("\"") {
+                    if let Some(end) = proc_part[start+1..].find("\"") {
+                        process_name = proc_part[start+1..start+1+end].to_string();
+                    }
+                }
+            }
+            
+            connections.push(ActiveConnection {
+                protocol,
+                local_address,
+                remote_address,
+                state,
+                process_name,
+            });
+        }
+    }
+    
+    Ok(connections)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CURRENT USER
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub fn get_current_user() -> Result<String, String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_default();
+    if !user.is_empty() {
+        return Ok(user);
+    }
+    
+    // Fallback using whoami
+    let output = std::process::Command::new("whoami").output();
+    if let Ok(o) = output {
+        let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Ok(name);
+        }
+    }
+    Ok("unknown".to_string())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DASHBOARD RESOURCES, GATEWAY PING, AND SYSTEM EVENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct DashboardResources {
+    pub cpu_percent: f64,
+    pub ram_used_gb: f64,
+    pub ram_total_gb: f64,
+    pub ram_percent: f64,
+    pub swap_used_gb: f64,
+    pub swap_total_gb: f64,
+    pub swap_percent: f64,
+}
+
+struct CpuStats {
+    total: u64,
+    idle: u64,
+}
+
+fn get_last_cpu_stats() -> &'static std::sync::Mutex<Option<CpuStats>> {
+    static LAST_CPU: std::sync::OnceLock<std::sync::Mutex<Option<CpuStats>>> = std::sync::OnceLock::new();
+    LAST_CPU.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn read_cpu_stats() -> Result<(u64, u64), String> {
+    let stat = fs::read_to_string("/proc/stat").map_err(|e| e.to_string())?;
+    if let Some(line) = stat.lines().next() {
+        if line.starts_with("cpu ") {
+            let parts: Vec<&str> = line.split_whitespace().skip(1).collect();
+            let mut total = 0;
+            let mut idle = 0;
+            for (i, val) in parts.iter().enumerate() {
+                let parsed = val.parse::<u64>().unwrap_or(0);
+                total += parsed;
+                if i == 3 || i == 4 { // idle and iowait are at index 3 and 4
+                    idle += parsed;
+                }
+            }
+            return Ok((total, idle));
+        }
+    }
+    Err("Failed to parse /proc/stat".to_string())
+}
+
+#[tauri::command]
+pub async fn get_dashboard_resources() -> Result<DashboardResources, String> {
+    // 1. CPU Usage % from /proc/stat
+    let (cpu_total, cpu_idle) = read_cpu_stats()?;
+    let mutex = get_last_cpu_stats();
+    let mut last_opt = mutex.lock().unwrap();
+    let cpu_percent = if let Some(last) = &*last_opt {
+        let total_delta = cpu_total - last.total;
+        let idle_delta = cpu_idle - last.idle;
+        if total_delta > 0 {
+            (1.0 - (idle_delta as f64 / total_delta as f64)) * 100.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    *last_opt = Some(CpuStats { total: cpu_total, idle: cpu_idle });
+
+    // 2. RAM and Swap from /proc/meminfo
+    let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+    let mut mem_total = 0.0;
+    let mut mem_avail = 0.0;
+    let mut swap_total = 0.0;
+    let mut swap_free = 0.0;
+
+    for line in meminfo.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let key = parts[0].trim_end_matches(':');
+            let val = parts[1].parse::<f64>().unwrap_or(0.0);
+            match key {
+                "MemTotal" => mem_total = val,
+                "MemAvailable" => mem_avail = val,
+                "SwapTotal" => swap_total = val,
+                "SwapFree" => swap_free = val,
+                _ => {}
+            }
+        }
+    }
+
+    let ram_used = (mem_total - mem_avail).max(0.0);
+    let ram_percent = if mem_total > 0.0 { (ram_used / mem_total) * 100.0 } else { 0.0 };
+    
+    let swap_used = (swap_total - swap_free).max(0.0);
+    let swap_percent = if swap_total > 0.0 { (swap_used / swap_total) * 100.0 } else { 0.0 };
+
+    Ok(DashboardResources {
+        cpu_percent,
+        ram_used_gb: ram_used / (1024.0 * 1024.0),
+        ram_total_gb: mem_total / (1024.0 * 1024.0),
+        ram_percent,
+        swap_used_gb: swap_used / (1024.0 * 1024.0),
+        swap_total_gb: swap_total / (1024.0 * 1024.0),
+        swap_percent,
+    })
+}
+
+fn get_default_gateway() -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(via_idx) = parts.iter().position(|&x| x == "via") {
+            if via_idx + 1 < parts.len() {
+                return Some(parts[via_idx + 1].to_string());
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub async fn ping_interface_gateway(iface: String) -> Result<String, String> {
+    let gateway = get_default_gateway().ok_or_else(|| "No default gateway".to_string())?;
+    
+    let mut cmd = std::process::Command::new("ping");
+    cmd.args(["-I", &iface, "-c", "1", "-W", "1", &gateway]);
+    
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("timeout".to_string());
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains("time=") {
+            if let Some(idx) = line.find("time=") {
+                let time_part = &line[idx + 5..];
+                if let Some(space_idx) = time_part.find(' ') {
+                    let ms_val = &time_part[..space_idx];
+                    if let Ok(ms) = ms_val.parse::<f64>() {
+                        let rounded = ms.round() as u64;
+                        let display = if rounded == 0 { "<1ms".to_string() } else { format!("{}ms", rounded) };
+                        return Ok(display);
+                    }
+                }
+            }
+        }
+    }
+    
+    Err("timeout".to_string())
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct SystemEvents {
+    pub last_boot_time: String,
+    pub error_count: u64,
+    pub warning_count: u64,
+}
+
+fn get_last_boot_time() -> Option<String> {
+    let output = std::process::Command::new("who")
+        .arg("-b")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout.lines().next() {
+        if line.contains("system boot") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                return Some(format!("{} {}", parts[2], parts[3]));
+            }
+        }
+    }
+    
+    // Fallback: current time - uptime
+    let uptime = fs::read_to_string("/proc/uptime").ok()?;
+    let uptime_secs = uptime.split_whitespace().next()?.parse::<f64>().ok()?;
+    let boot_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).ok()?
+        .as_secs_f64() - uptime_secs;
+        
+    let output = std::process::Command::new("date")
+        .args(["-d", &format!("@{}", boot_epoch as u64), "+%Y-%m-%d %H:%M"])
+        .output()
+        .ok()?;
+    let date_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !date_str.is_empty() {
+        return Some(date_str);
+    }
+    
+    None
+}
+
+#[tauri::command]
+pub async fn get_system_events() -> Result<SystemEvents, String> {
+    let last_boot_time = get_last_boot_time().unwrap_or_else(|| "Unknown".to_string());
+    
+    let error_output = std::process::Command::new("sh")
+        .args(["-c", "journalctl -p err -b --no-pager -q | wc -l"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let error_count = String::from_utf8_lossy(&error_output.stdout)
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+
+    let warning_output = std::process::Command::new("sh")
+        .args(["-c", "journalctl -p warning -b --no-pager -q | wc -l"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let warning_count = String::from_utf8_lossy(&warning_output.stdout)
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+
+    Ok(SystemEvents {
+        last_boot_time,
+        error_count,
+        warning_count,
+    })
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct NetworkDetails {
+    pub gateway: Option<String>,
+    pub dns: Vec<String>,
+}
+
+fn get_dns_servers() -> Vec<String> {
+    let mut dns = Vec::new();
+    
+    // 1. Try systemd-resolved upstream resolv.conf first
+    if let Ok(content) = fs::read_to_string("/run/systemd/resolve/resolv.conf") {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[0] == "nameserver" {
+                let ip = parts[1].to_string();
+                if ip != "127.0.0.53" && !dns.contains(&ip) {
+                    dns.push(ip);
+                }
+            }
+        }
+    }
+    
+    // 2. Fallback to /etc/resolv.conf
+    if dns.is_empty() {
+        if let Ok(content) = fs::read_to_string("/etc/resolv.conf") {
+            for line in content.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 && parts[0] == "nameserver" {
+                    let ip = parts[1].to_string();
+                    if !dns.contains(&ip) {
+                        dns.push(ip);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 3. Fallback to resolvectl
+    if dns.is_empty() || (dns.len() == 1 && dns[0] == "127.0.0.53") {
+        if let Ok(output) = std::process::Command::new("resolvectl").arg("dns").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                for part in parts {
+                    if part.parse::<std::net::IpAddr>().is_ok() {
+                        let ip = part.to_string();
+                        if !dns.contains(&ip) && ip != "127.0.0.53" {
+                            dns.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    dns
+}
+
+#[tauri::command]
+pub async fn get_network_details() -> Result<NetworkDetails, String> {
+    let gateway = get_default_gateway();
+    let dns = get_dns_servers();
+    Ok(NetworkDetails { gateway, dns })
+}
+
+#[tauri::command]
+pub async fn ping_gateway(ip: String) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("ping");
+    cmd.args(["-c", "1", "-W", "1", &ip]);
+    
+    let output = cmd.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("timeout".to_string());
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains("time=") {
+            if let Some(idx) = line.find("time=") {
+                let time_part = &line[idx + 5..];
+                if let Some(space_idx) = time_part.find(' ') {
+                    let ms_val = &time_part[..space_idx];
+                    if let Ok(ms) = ms_val.parse::<f64>() {
+                        let rounded = ms.round() as u64;
+                        let display = if rounded == 0 { "<1ms".to_string() } else { format!("{}ms", rounded) };
+                        return Ok(display);
+                    }
+                }
+            }
+        }
+    }
+    Err("timeout".to_string())
+}

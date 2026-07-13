@@ -14,7 +14,7 @@ export type TabId =
   | 'dnf-history'
   | 'copr-browser'
   | 'flatpak-rpm'
-  | 'startup-manager'
+
   | 'service-manager'
   | 'hosts-manager'
   | 'user-manager'
@@ -34,6 +34,7 @@ class UIStore {
   activeTab = $state<TabId>('system-dashboard');
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
+  preAppliedJournalPriority = $state<string>('all');
   /** Interface name to auto-select when network-manager opens (set by IP popover deep-link) */
   selectedInterface = $state<string | null>(null);
   confirmDialog = $state<{

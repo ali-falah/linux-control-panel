@@ -1,93 +1,89 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { Trash2, Filter, FileText, RefreshCw } from '@lucide/svelte';
+  import { FileText, RefreshCw, Search, X, Trash2 } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
-  import Input from '../components/ui/Input.svelte';
-  import Select from '../components/ui/Select.svelte';
-  import Button from '../components/ui/Button.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { uiStore } from '../stores/ui.svelte.ts';
 
   let logs = $state<any[]>([]);
   let isLoading = $state(false);
-  let filterUnit = $state('');
+
+  // Backend filters (re-fetch journalctl)
   let filterPriority = $state('all');
   let filterDate = $state('');
   let filterTime = $state('00:00');
-  let logContainer: HTMLElement;
 
+  // Client-side live search (instant, no fetch)
+  let searchQuery = $state('');
+
+  let logContainer: HTMLElement;
   let dateInputRef: HTMLInputElement;
   let timeInputRef: HTMLInputElement;
+  let searchInputRef: HTMLInputElement;
 
   function handleDateTimeChange(e: Event) {
     if (e.currentTarget instanceof HTMLInputElement) {
-      e.currentTarget.blur(); // Force close the native WebKitGTK popup
+      const input = e.currentTarget;
+      input.blur();
+      input.disabled = true;
+      setTimeout(() => { input.disabled = false; }, 100);
     }
     fetchLogs();
-  }
-
-  function handleWindowClick(e: MouseEvent) {
-    if (dateInputRef && e.target instanceof Node && !dateInputRef.contains(e.target)) {
-      dateInputRef.blur();
-    }
-    if (timeInputRef && e.target instanceof Node && !timeInputRef.contains(e.target)) {
-      timeInputRef.blur();
-    }
   }
 
   async function fetchLogs() {
     isLoading = true;
     statusStore.setBusy('Fetching journal logs...');
     try {
-      const unitF = filterUnit.trim() !== '' ? filterUnit.trim() : null;
       const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
       const sinceF = filterDate ? `${filterDate} ${filterTime || '00:00'}:00` : null;
-      
+
       const lines = await invoke<string[]>('get_journal_logs', {
-        unitFilter: unitF,
+        unitFilter: null,
         priority: prioF,
         sinceFilter: sinceF,
       });
 
       logs = lines.map(line => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
+        try { return JSON.parse(line); } catch { return null; }
       }).filter(Boolean);
-      
-      // Auto-scroll to bottom after render
+
       setTimeout(() => {
-        if (logContainer) {
-          logContainer.scrollTop = logContainer.scrollHeight;
-        }
+        if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
       }, 50);
 
-      statusStore.setLastCommand(`journalctl -n 100 -o json ${unitF ? '-u '+unitF : ''} ${prioF ? '-p '+prioF : ''} ${sinceF ? '--since="'+sinceF+'"' : ''}`, 0, true);
+      statusStore.setLastCommand(
+        `journalctl -n 100 -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''}`,
+        0, true
+      );
     } catch (e) {
-      console.error("Error fetching journal logs:", e);
-      statusStore.setLastCommand(`journalctl`, 1, false);
+      console.error('Error fetching journal logs:', e);
+      statusStore.setLastCommand('journalctl', 1, false);
     } finally {
       isLoading = false;
       statusStore.clearBusy();
     }
   }
 
-  function clearLogs() {
+  function clearAll() {
     logs = [];
+    searchQuery = '';
   }
 
   onMount(() => {
+    if (uiStore.preAppliedJournalPriority && uiStore.preAppliedJournalPriority !== 'all') {
+      filterPriority = uiStore.preAppliedJournalPriority;
+      uiStore.preAppliedJournalPriority = 'all';
+    }
     fetchLogs();
   });
 
   function formatTimestamp(us: string) {
     if (!us) return '';
     const date = new Date(parseInt(us) / 1000);
-    const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const timeStr = date.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' });
-    return `${dateStr}, ${timeStr}`;
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
+      date.toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' });
   }
 
   function getPriorityClass(prio: string | number) {
@@ -95,67 +91,139 @@
     if (isNaN(p)) return 'log-info';
     if (p <= 3) return 'log-error';
     if (p === 4) return 'log-warn';
-    if (p >= 7) return 'log-debug';
-    return 'log-info';
+    if (p === 5 || p === 6) return 'log-info';
+    return 'log-debug';
   }
-</script>
 
-<svelte:window onclick={handleWindowClick} />
+  function escapeRegex(s: string) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function highlight(text: string, q: string): string {
+    if (!q || !text) return text || '';
+    try {
+      return text.replace(new RegExp(`(${escapeRegex(q)})`, 'gi'), '<mark class="hl">$1</mark>');
+    } catch { return text; }
+  }
+
+  interface LogItem {
+    PRIORITY: string | number;
+    __REALTIME_TIMESTAMP: string;
+    _SYSTEMD_UNIT?: string;
+    SYSLOG_IDENTIFIER?: string;
+    MESSAGE: string;
+    count?: number;
+  }
+
+  // Collapse consecutive duplicates
+  let collapsedLogs = $derived.by(() => {
+    const list: LogItem[] = [];
+    for (const log of logs) {
+      if (!log) continue;
+      const last = list[list.length - 1];
+      const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel';
+      const lastUnit = last ? (last._SYSTEMD_UNIT || last.SYSLOG_IDENTIFIER || 'kernel') : null;
+      if (last && unit === lastUnit && log.MESSAGE === last.MESSAGE) {
+        last.count = (last.count || 1) + 1;
+        last.__REALTIME_TIMESTAMP = log.__REALTIME_TIMESTAMP;
+      } else {
+        list.push({ ...log, count: 1 });
+      }
+    }
+    return list;
+  });
+
+  // Instant client-side filter — searches message + unit simultaneously
+  let filteredLogs = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return collapsedLogs;
+    return collapsedLogs.filter(log => {
+      const msg = (log.MESSAGE || '').toLowerCase();
+      const unit = (log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel').toLowerCase();
+      return msg.includes(q) || unit.includes(q);
+    });
+  });
+
+  let hasActiveSearch = $derived(searchQuery.trim().length > 0);
+</script>
 
 <div class="module-page">
   <PageHeader title="Journal Logs" subtitle="Systemd journal log viewer" icon={FileText}>
-    <div class="toolbar">
-      <div class="filter-group">
-        <Filter size={14} class="text-muted" />
-        <Input 
-          placeholder="Service (e.g. sshd)" 
-          bind:value={filterUnit} 
-          onkeydown={(e) => e.key === 'Enter' && fetchLogs()}
-          style="width: 160px; height: 32px; background: transparent; border: none; padding-left: 4px;"
-        />
-        <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 32px; background: transparent; border: none; border-left: 1px solid var(--color-border); border-right: 1px solid var(--color-border); border-radius: 0;">
-          <option value="all">All Levels</option>
-          <option value="3">Error & Above</option>
-          <option value="4">Warning & Above</option>
-          <option value="6">Info & Above</option>
-        </Select>
-        <div style="display:flex; align-items:center; padding-left: 8px; padding-right: 4px;">
-          <span class="text-muted" style="font-size:12px; margin-right:6px;">Since:</span>
-          <input 
-            type="date" 
-            bind:this={dateInputRef}
-            bind:value={filterDate}
-            onchange={handleDateTimeChange}
-            class="datetime-input"
-          />
-          <input 
-            type="time" 
-            bind:this={timeInputRef}
-            bind:value={filterTime}
-            onchange={handleDateTimeChange}
-            class="datetime-input"
-            style="margin-left:4px;"
-          />
-        </div>
-      </div>
+    <!-- Single unified toolbar strip -->
+    <div class="log-toolbar">
+      <!-- Search icon -->
+      <Search size={14} class="log-search-icon" />
 
-      <div class="actions-group">
-        <Button variant="ghost" onclick={fetchLogs} disabled={isLoading}>
-          <RefreshCw size={14} class={isLoading ? 'animate-spin-slow' : ''} /> Refresh
-        </Button>
-        <Button variant="ghost" class="text-error hover-bg-error-light" onclick={clearLogs} title="Clear View">
-          <Trash2 size={14} />
-        </Button>
-      </div>
+      <!-- Text input: live search -->
+      <input
+        bind:this={searchInputRef}
+        bind:value={searchQuery}
+        type="text"
+        class="log-search-input"
+        placeholder="Search by message or service…"
+        autocomplete="off"
+        spellcheck={false}
+      />
+
+      {#if hasActiveSearch}
+        <span class="log-count-badge">{filteredLogs.length}/{collapsedLogs.length}</span>
+        <button class="log-clear-btn" onclick={() => { searchQuery = ''; searchInputRef?.focus(); }} title="Clear">
+          <X size={12} />
+        </button>
+      {/if}
+
+      <span class="log-sep"></span>
+
+      <!-- Level -->
+      <select class="log-select" bind:value={filterPriority} onchange={fetchLogs}>
+        <option value="all">All Levels</option>
+        <option value="3">Error+</option>
+        <option value="4">Warning+</option>
+        <option value="6">Info+</option>
+      </select>
+
+      <span class="log-sep"></span>
+
+      <!-- Since date/time -->
+      <span class="log-label">Since:</span>
+      <input
+        type="date"
+        bind:this={dateInputRef}
+        value={filterDate}
+        onchange={(e) => { filterDate = e.currentTarget.value; handleDateTimeChange(e); }}
+        class="log-dt"
+      />
+      <input
+        type="time"
+        bind:this={timeInputRef}
+        value={filterTime}
+        onchange={(e) => { filterTime = e.currentTarget.value; handleDateTimeChange(e); }}
+        class="log-dt"
+      />
+
+      <span class="log-sep"></span>
+
+      <!-- Refresh -->
+      <button class="log-action-btn" onclick={fetchLogs} disabled={isLoading} title="Refresh">
+        <RefreshCw size={13} class={isLoading ? 'animate-spin-slow' : ''} />
+        <span>Refresh</span>
+      </button>
+
+      <!-- Clear view -->
+      <button class="log-action-btn log-action-danger" onclick={clearAll} title="Clear view">
+        <Trash2 size={13} />
+      </button>
     </div>
   </PageHeader>
 
   <div class="page-content log-viewer">
     <div class="log-container" bind:this={logContainer}>
-      {#if logs.length === 0}
+      {#if filteredLogs.length === 0}
         <div class="empty-state">
           {#if isLoading}
-            Fetching logs...
+            Fetching logs…
+          {:else if hasActiveSearch && collapsedLogs.length > 0}
+            No logs match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
           {:else}
             No logs found.
           {/if}
@@ -163,11 +231,19 @@
       {/if}
       <table class="log-table">
         <tbody>
-          {#each logs as log}
+          {#each filteredLogs as log}
+            {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
             <tr class="log-row {getPriorityClass(log.PRIORITY)}">
               <td class="col-time">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
-              <td class="col-unit">{log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}</td>
-              <td class="col-msg">{log.MESSAGE}</td>
+              <td class="col-unit" title={unit}>
+                {@html highlight(unit, searchQuery)}
+              </td>
+              <td class="col-msg">
+                {@html highlight(log.MESSAGE, searchQuery)}
+                {#if (log.count ?? 1) > 1}
+                  <span class="repeat-badge">×{log.count}</span>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -177,47 +253,159 @@
 </div>
 
 <style>
-  .toolbar {
-    display: flex;
-    gap: 16px;
-    align-items: center;
-  }
-
-  .filter-group {
+  /* ── Single unified toolbar strip ───────────────────── */
+  .log-toolbar {
     display: flex;
     align-items: center;
-    gap: 4px;
-    background: rgba(0, 0, 0, 0.2);
-    padding: 0 4px 0 12px;
+    gap: 8px;
+    height: 32px;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 8px;
-    border: 1px solid var(--color-border);
+    padding: 0 10px;
+    width: 100%;
+    box-sizing: border-box;
   }
 
-  .datetime-input {
+  /* Search icon */
+  .log-toolbar :global(.log-search-icon) {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  /* Text input */
+  .log-search-input {
+    flex: 1;
+    min-width: 120px;
+    height: 100%;
     background: transparent;
     border: none;
+    outline: none;
     color: var(--color-text-primary);
     font-size: 13px;
     font-family: var(--font-sans);
-    outline: none;
-    padding: 4px;
-    color-scheme: dark;
   }
-  
-  .datetime-input::-webkit-calendar-picker-indicator {
+  .log-search-input::placeholder {
+    color: var(--color-text-muted);
+  }
+
+  /* Match count badge */
+  .log-count-badge {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: #a29bfe;
+    background: rgba(108, 92, 231, 0.12);
+    padding: 1px 7px;
+    border-radius: 10px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Clear search button */
+  .log-clear-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .log-clear-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    color: var(--color-text-primary);
+  }
+
+  /* Separator */
+  .log-sep {
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+  }
+
+  /* Small label */
+  .log-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Level select */
+  .log-select {
+    height: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    flex-shrink: 0;
+  }
+  .log-select option { background: #1a1b26; color: var(--color-text-primary); }
+
+  /* Date / time inputs */
+  .log-dt {
+    height: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: var(--font-sans);
+    padding: 0;
+    color-scheme: dark;
+    flex-shrink: 0;
+  }
+  .log-dt::-webkit-calendar-picker-indicator {
     filter: invert(1);
-    opacity: 0.6;
+    opacity: 0.45;
     cursor: pointer;
   }
-  .datetime-input::-webkit-calendar-picker-indicator:hover {
-    opacity: 1;
-  }
+  .log-dt::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
 
-  .actions-group {
+  /* Refresh / trash action buttons */
+  .log-action-btn {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .log-action-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--color-text-primary);
+  }
+  .log-action-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .log-action-danger { padding: 0 6px; }
+  .log-action-danger:hover {
+    background: rgba(255, 118, 117, 0.12);
+    color: var(--color-error);
   }
 
+  /* ── Log viewer ──────────────────────────────────────── */
   .log-viewer {
     padding: 0;
     display: flex;
@@ -240,8 +428,8 @@
     align-items: center;
     height: 100%;
     color: var(--color-text-muted);
-    font-family: var(--font-primary);
-    font-size: 14px;
+    font-size: 13px;
+    font-family: var(--font-sans);
   }
 
   .log-table {
@@ -253,25 +441,21 @@
   .log-row {
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
   }
-
-  .log-row:hover {
-    background: rgba(255, 255, 255, 0.05);
-  }
+  .log-row:hover { background: rgba(255, 255, 255, 0.04); }
 
   .log-row td {
     padding: 4px 8px;
     vertical-align: top;
-    word-break: break-all;
   }
 
   .col-time {
-    width: 160px;
+    width: 155px;
     color: var(--color-text-muted);
     white-space: nowrap;
   }
 
   .col-unit {
-    width: 140px;
+    width: 145px;
     color: #8b949e;
     font-weight: 600;
     white-space: nowrap;
@@ -285,12 +469,32 @@
   }
 
   /* Priority Colors */
-  .log-error .col-msg { color: #ff7b72; font-weight: 500; }
+  .log-error .col-msg  { color: #ff7b72; font-weight: 500; }
   .log-error .col-unit { color: #ff7b72; }
-  
-  .log-warn .col-msg { color: #d29922; }
-  .log-warn .col-unit { color: #d29922; }
-  
-  .log-debug .col-msg { color: #484f58; }
+  .log-warn  .col-msg  { color: #d29922; }
+  .log-warn  .col-unit { color: #d29922; }
+  .log-info  .col-msg  { color: #58a6ff; }
+  .log-info  .col-unit { color: #58a6ff; }
+  .log-debug .col-msg  { color: #484f58; }
   .log-debug .col-unit { color: #484f58; }
+
+  .repeat-badge {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--color-text-secondary);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+    margin-left: 8px;
+    font-weight: bold;
+    display: inline-block;
+  }
+
+  /* Search highlight */
+  :global(.hl) {
+    background: rgba(253, 203, 110, 0.3);
+    color: #fdcb6e;
+    border-radius: 2px;
+    padding: 0 1px;
+    font-weight: 600;
+  }
 </style>

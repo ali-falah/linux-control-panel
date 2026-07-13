@@ -57,7 +57,7 @@ use commands::{
     },
     device_manager::{device_get_all},
     app_manager::{list_desktop_apps, get_app_meta, get_app_details, uninstall_app},
-    system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info},
+    system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_dashboard_resources, ping_interface_gateway, get_system_events, get_network_details, ping_gateway},
     journal_viewer::{get_journal_logs},
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
@@ -249,6 +249,13 @@ pub fn run() {
             get_network_traffic,
             get_smart_health,
             get_os_info,
+            get_disk_io_stats,
+            get_active_connections,
+            get_current_user,
+            get_dashboard_resources,
+            get_system_events,
+            get_network_details,
+            ping_gateway,
             // Privilege Manager
             set_sudo_password,
             clear_sudo_password,

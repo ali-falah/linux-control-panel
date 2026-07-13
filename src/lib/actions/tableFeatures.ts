@@ -79,11 +79,13 @@ export function tableFeatures(node: HTMLTableElement) {
             const valA = cellsA[index].textContent?.trim() || '';
             const valB = cellsB[index].textContent?.trim() || '';
             
-            // Try numeric sort first if both look like numbers
-            const numA = parseFloat(valA);
-            const numB = parseFloat(valB);
-            const isNumA = !isNaN(numA) && isFinite(numA) && String(numA) === valA;
-            const isNumB = !isNaN(numB) && isFinite(numB) && String(numB) === valB;
+            // Try numeric sort first if both look like numbers (ignoring units like %, MB, GB)
+            const cleanA = valA.replace(/[^\d.-]/g, '');
+            const cleanB = valB.replace(/[^\d.-]/g, '');
+            const numA = parseFloat(cleanA);
+            const numB = parseFloat(cleanB);
+            const isNumA = !isNaN(numA) && isFinite(numA) && cleanA !== '';
+            const isNumB = !isNaN(numB) && isFinite(numB) && cleanB !== '';
             
             if (isNumA && isNumB) {
                return (numA - numB) * dir;

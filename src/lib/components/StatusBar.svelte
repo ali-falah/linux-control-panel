@@ -145,72 +145,7 @@
     {/if}
   </div>
 
-  <!-- CENTER: IP pill with popover -->
-  <div class="status-center">
-    <div class="ip-anchor">
-      <button
-        class="ip-pill {primaryIface ? (primaryIface.is_up ? 'ip-connected' : 'ip-down') : 'ip-none'}"
-        onclick={(e) => { e.stopPropagation(); showIfacePopover = !showIfacePopover; }}
-        title="Click to view all network interfaces"
-      >
-        {#if primaryIface?.iface_type === 'wifi'}
-          <Wifi size={10} />
-        {:else}
-          <Network size={10} />
-        {/if}
-        <span class="ip-ifname">{primaryIface?.name ?? '—'}</span>
-        <span class="ip-sep">·</span>
-        <span class="ip-addr">{primaryIface?.ip4 ?? 'No IP'}</span>
-        <span class="ip-caret">▾</span>
-      </button>
 
-      <!-- Popover panel -->
-      {#if showIfacePopover}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="iface-popover animate-fade" onclick={(e) => e.stopPropagation()}>
-          <div class="popover-header">
-            <span class="popover-title">Network Interfaces</span>
-          </div>
-          <div class="popover-list">
-            {#each interfaces.filter(i => i.iface_type !== 'loopback') as iface (iface.name)}
-              <div class="iface-row">
-                <div class="iface-icon {iface.iface_type}">
-                  {#if iface.iface_type === 'wifi'}
-                    <Wifi size={12} />
-                  {:else}
-                    <Network size={12} />
-                  {/if}
-                </div>
-                <div class="iface-info">
-                  <span class="iface-name">{iface.name}</span>
-                  <span class="iface-ip">{iface.ip4 ?? (iface.is_up ? 'No IPv4' : 'Down')}</span>
-                </div>
-                <div class="iface-status-dot {iface.is_up && iface.ip4 ? 'dot-up' : 'dot-down'}"></div>
-                <button
-                  class="iface-open-btn"
-                  onclick={() => openInterface(iface.name)}
-                  title="Open in Network Manager"
-                >
-                  <ExternalLink size={11} />
-                </button>
-              </div>
-            {/each}
-            {#if interfaces.filter(i => i.iface_type !== 'loopback').length === 0}
-              <div class="popover-empty">No active interfaces found</div>
-            {/if}
-          </div>
-          {#if primaryIface?.ip4}
-            <div class="popover-footer">
-              <button class="copy-btn {copySuccess ? 'copy-ok' : ''}" onclick={copyPrimaryIp}>
-                <Copy size={10} />
-                {copySuccess ? 'Copied!' : 'Copy primary IP'}
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </div>
-  </div>
 
   <!-- RIGHT: Root toggle + exit code -->
   <div class="status-right">

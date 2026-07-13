@@ -1,10 +1,8 @@
 <script lang="ts">
-  import {
-    Package, History, LayoutGrid, Layers, Rocket, Settings2, Globe,
-    Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server,
-    ChevronLeft, ChevronRight, Database, Terminal, ChevronDown,
-    HardDrive, Wifi, Activity, Search, LayoutDashboard
-  } from '@lucide/svelte';
+  import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
+  import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
+  import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
+  import { HardDrive, Wifi, Activity, Search, LayoutDashboard } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { getVersion } from '@tauri-apps/api/app';
 
@@ -45,7 +43,8 @@
     {
       label: 'Overview',
       items: [
-        { id: 'system-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { id: 'system-dashboard', label: 'Dashboard',  icon: LayoutDashboard },
+        { id: 'system-monitor',   label: 'Monitoring', icon: Activity },
       ],
     },
     {
@@ -61,9 +60,8 @@
     {
       label: 'System',
       items: [
-        { id: 'system-monitor',  label: 'System Monitor',  icon: Activity },
         { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText },
-        { id: 'startup-manager', label: 'Startup Manager', icon: Rocket },
+
         { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive },
         { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu },
