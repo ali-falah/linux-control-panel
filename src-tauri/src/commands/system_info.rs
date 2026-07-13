@@ -756,6 +756,7 @@ pub struct ActiveConnection {
     pub remote_address: String,
     pub state: String,
     pub process_name: String,
+    pub pid: Option<u32>,
 }
 
 #[tauri::command]
@@ -785,11 +786,24 @@ pub async fn get_active_connections() -> Result<Vec<ActiveConnection>, String> {
             let remote_address = parts[5].to_string();
             
             let mut process_name = "N/A".to_string();
+            let mut pid = None;
             if parts.len() >= 7 {
                 let proc_part = parts[6..].join(" ");
                 if let Some(start) = proc_part.find("\"") {
                     if let Some(end) = proc_part[start+1..].find("\"") {
                         process_name = proc_part[start+1..start+1+end].to_string();
+                    }
+                }
+                if let Some(pid_start) = proc_part.find("pid=") {
+                    let pid_part = &proc_part[pid_start+4..];
+                    if let Some(pid_end) = pid_part.find(',') {
+                        if let Ok(p) = pid_part[..pid_end].parse::<u32>() {
+                            pid = Some(p);
+                        }
+                    } else if let Some(pid_end) = pid_part.find(')') {
+                        if let Ok(p) = pid_part[..pid_end].parse::<u32>() {
+                            pid = Some(p);
+                        }
                     }
                 }
             }
@@ -800,6 +814,7 @@ pub async fn get_active_connections() -> Result<Vec<ActiveConnection>, String> {
                 remote_address,
                 state,
                 process_name,
+                pid,
             });
         }
     }
@@ -1145,4 +1160,67 @@ pub async fn ping_gateway(ip: String) -> Result<String, String> {
         }
     }
     Err("timeout".to_string())
+}
+
+#[tauri::command]
+pub async fn get_cpu_temperature() -> Result<Option<f32>, String> {
+    let mut max_temp: Option<f32> = None;
+    if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
+            if name_str.starts_with("thermal_zone") {
+                let temp_path = entry.path().join("temp");
+                if let Ok(temp_str) = fs::read_to_string(temp_path) {
+                    if let Ok(temp_val) = temp_str.trim().parse::<f32>() {
+                        let temp_c = temp_val / 1000.0;
+                        if max_temp.is_none() || temp_c > max_temp.unwrap() {
+                            max_temp = Some(temp_c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(max_temp)
+}
+
+#[tauri::command]
+pub async fn get_last_system_update() -> Result<String, String> {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "rpm -q --last dnf | head -1"])
+        .output()
+        .map_err(|e| format!("Failed to run rpm command: {e}"))?;
+
+    if !output.status.success() {
+        return Ok("Unknown".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    if parts.len() > 1 {
+        let date_str = parts[1..].join(" ");
+        Ok(date_str)
+    } else {
+        Ok("Unknown".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_failed_services_count() -> Result<u32, String> {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "systemctl --failed --no-legend | wc -l"])
+        .output()
+        .map_err(|e| format!("Failed to run systemctl: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(0);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Ok(count) = stdout.parse::<u32>() {
+        Ok(count)
+    } else {
+        Ok(0)
+    }
 }

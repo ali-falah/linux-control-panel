@@ -10,11 +10,9 @@
   import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import {
-    History, RefreshCw, Undo2, Calendar, Package, Search,
-    Trash2, Info, ListTree, CheckCircle, Database, XCircle,
-    AlertTriangle, Lock, Ban
-  } from '@lucide/svelte';
+  import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
+  import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
 

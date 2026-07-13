@@ -20,6 +20,11 @@
   let gatewayPing = $state<string>('');
   // System Events State (Boot time, Err/Warn counts)
   let systemEvents = $state<any>(null);
+  
+  // New features state
+  let cpuTemp = $state<number | null>(null);
+  let lastSystemUpdate = $state<string>('');
+  let failedServicesCount = $state<number>(0);
 
   let pollInterval: any;
   let resourcesInterval: any;
@@ -40,7 +45,12 @@
 
   async function fetchResources() {
     try {
-      resources = await invoke('get_dashboard_resources');
+      const [res, cpuT] = await Promise.all([
+        invoke('get_dashboard_resources'),
+        invoke('get_cpu_temperature')
+      ]);
+      resources = res;
+      cpuTemp = cpuT as number | null;
     } catch (e) {
       console.error("Error fetching resources:", e);
     }
@@ -77,18 +87,22 @@
 
   async function fetchData() {
     try {
-      const [os, stats, disks, smart, ifaces] = await Promise.all([
+      const [os, stats, disks, smart, ifaces, lastUpdate, failedSvc] = await Promise.all([
         invoke('get_os_info'),
         invoke('get_system_stats'),
         invoke('get_disk_usage'),
         invoke('get_smart_health'),
-        invoke('get_network_interfaces')
+        invoke('get_network_interfaces'),
+        invoke('get_last_system_update'),
+        invoke('get_failed_services_count')
       ]);
       osInfo = os;
       systemStats = stats;
       diskUsage = disks as any[];
       smartHealth = smart as any[];
       networkInterfaces = ifaces as any[];
+      lastSystemUpdate = lastUpdate as string;
+      failedServicesCount = failedSvc as number;
       
       // Secondary updates
       fetchNetworkDetails();
@@ -135,6 +149,7 @@
             <div class="info-row"><span>OS Name:</span> <strong>{osInfo.name} {osInfo.os_version}</strong></div>
             <div class="info-row"><span>Kernel:</span> <strong>{osInfo.kernel_version}</strong></div>
             <div class="info-row"><span>Uptime:</span> <strong>{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong></div>
+            <div class="info-row"><span>Last Updated:</span> <strong>{lastSystemUpdate || '...'}</strong></div>
           {:else}
             <span class="text-muted">Loading OS information...</span>
           {/if}
@@ -145,9 +160,15 @@
       <div class="resource-strip-card" style="background: rgba(30, 30, 42, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px 16px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px;">
         {#if resources}
           <!-- CPU -->
-          <div style="display: flex; align-items: center; gap: 6px; flex: 1.2; min-width: 65px;">
-            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">CPU</span>
-            <strong style="font-size: 12px; font-family: var(--font-mono); color: var(--color-text-primary);">{resources.cpu_percent.toFixed(0)}%</strong>
+          <div style="display: flex; align-items: center; gap: 6px; flex: 1.5; min-width: 90px;">
+            <span style="font-size: 9px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">CPU</span>
+            <strong style="font-size: 11px; font-family: var(--font-mono); color: var(--color-text-primary); white-space: nowrap;">
+              {resources.cpu_percent.toFixed(0)}%
+              {#if cpuTemp !== null}
+                <span style="color: var(--color-text-muted); margin: 0 2px;">&middot;</span>
+                <span style="color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'};">{cpuTemp.toFixed(0)}&deg;C</span>
+              {/if}
+            </strong>
           </div>
           
           <!-- RAM -->
@@ -217,6 +238,20 @@
                 <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Warnings</span>
                 <Badge variant={systemEvents.warning_count > 0 ? 'warning' : 'muted'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
                   {systemEvents.warning_count}
+                </Badge>
+              </button>
+
+              <!-- Failed Services Button -->
+              <button 
+                onclick={() => {
+                  uiStore.setActiveTab('service-manager');
+                }}
+                style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                class="hover-bg-error-light"
+              >
+                <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase; text-align: center; line-height: 1;">Failed<br>Services</span>
+                <Badge variant={failedServicesCount > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
+                  {failedServicesCount}
                 </Badge>
               </button>
             </div>

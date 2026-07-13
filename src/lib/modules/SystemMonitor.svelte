@@ -1,10 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import {
-    Activity, Cpu, Database, HardDrive, TerminalSquare,
-    RefreshCw, PowerOff, Loader, Wifi
-  } from '@lucide/svelte';
+  import { Activity, Cpu, Database, HardDrive, TerminalSquare } from '@lucide/svelte';
+  import { RefreshCw, PowerOff, Loader, Wifi } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -402,14 +400,15 @@
               <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
                 <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections</h4>
                 <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2);">
-                  <table style="width:100%; border-collapse:collapse; font-size:11px; font-family:var(--font-mono);">
+                  <Table tableAction={tableFeatures}>
                     <thead>
-                      <tr style="border-bottom:1px solid var(--color-border); background:rgba(0,0,0,0.2); position:sticky; top:0; z-index:5;">
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Proto</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Local</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Remote</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">State</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary);">Process</th>
+                      <tr>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Proto</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Local</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Remote</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">State</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">PID</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Process</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -419,16 +418,17 @@
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.local_address}>{conn.local_address}</td>
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.remote_address}>{conn.remote_address}</td>
                           <td style="padding:6px; color:var(--color-success);">{conn.state}</td>
+                          <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono);">{conn.pid || '-'}</td>
                           <td style="padding:6px; color:var(--color-text-secondary);">{conn.process_name}</td>
                         </tr>
                       {/each}
                       {#if activeConnections.length === 0}
                         <tr>
-                          <td colspan="5" style="padding:16px; text-align:center; color:var(--color-text-muted);">No active connections</td>
+                          <td colspan="6" style="padding:16px; text-align:center; color:var(--color-text-muted);">No active connections</td>
                         </tr>
                       {/if}
                     </tbody>
-                  </table>
+                  </Table>
                 </div>
               </div>
             </div>

@@ -12,13 +12,11 @@
 
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
-  import {
-    Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield,
-    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle,
-    Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download,
-    ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save,
-    TerminalSquare, Filter, Search
-  } from '@lucide/svelte';
+  import { Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield } from '@lucide/svelte';
+  import { Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle } from '@lucide/svelte';
+  import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download } from '@lucide/svelte';
+  import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save } from '@lucide/svelte';
+  import { TerminalSquare, Filter, Search } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';

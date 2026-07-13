@@ -96,7 +96,7 @@
   aria-label="Module navigation"
 >
   <!-- Logo -->
-  <div class="sidebar-logo">
+  <button class="sidebar-logo" onclick={() => uiStore.toggleSidebar()} title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
     <div class="logo-icon">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="3" width="20" height="14" rx="2"/>
@@ -110,15 +110,18 @@
         <span class="logo-title">Control Panel</span>
         <span class="logo-version">{appVersion}</span>
       </div>
+      <div class="logo-chevron">
+        <ChevronLeft size={16} />
+      </div>
     {/if}
-  </div>
+  </button>
 
   <div class="sidebar-divider"></div>
 
   <!-- Search -->
   {#if !uiStore.sidebarCollapsed}
     <div class="sidebar-search">
-      <Search size={14} class="search-icon" />
+      <Search size={14} style="color: var(--color-text-muted); opacity: 0.7; flex-shrink: 0;" />
       <input type="text" placeholder="Search..." bind:value={searchQuery} />
     </div>
   {/if}
@@ -165,20 +168,6 @@
   </nav>
 
   <div class="sidebar-spacer"></div>
-
-  <!-- Collapse toggle -->
-  <button
-    class="collapse-btn"
-    onclick={() => uiStore.toggleSidebar()}
-    title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-  >
-    {#if uiStore.sidebarCollapsed}
-      <ChevronRight size={15} />
-    {:else}
-      <ChevronLeft size={15} />
-      <span>Collapse</span>
-    {/if}
-  </button>
 </aside>
 
 <style>
@@ -212,6 +201,28 @@
     overflow: hidden;
     white-space: nowrap;
     flex-shrink: 0;
+    width: 100%;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    outline: none;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+  }
+  .sidebar-logo:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .logo-chevron {
+    margin-left: auto;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s ease;
+  }
+  .sidebar-logo:hover .logo-chevron {
+    color: var(--color-text-primary);
   }
 
   .logo-icon {
@@ -261,6 +272,8 @@
     position: relative;
     display: flex;
     align-items: center;
+    gap: 8px;
+    padding: 0 10px;
     flex-shrink: 0;
     background: rgba(0, 0, 0, 0.2);
     border-radius: 8px;
@@ -272,23 +285,11 @@
     border-color: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
   }
-  .sidebar-search :global(.search-icon) {
-    position: absolute;
-    left: 10px;
-    color: var(--color-text-muted);
-    transition: color 0.2s ease;
-    pointer-events: none;
-    opacity: 0.7;
-  }
-  .sidebar-search:focus-within :global(.search-icon) {
-    color: var(--color-text-primary);
-    opacity: 1;
-  }
   .sidebar-search input {
     width: 100%;
     background: transparent;
     border: none;
-    padding: 8px 10px 8px 32px;
+    padding: 8px 0;
     color: var(--color-text-primary);
     font-size: 12px;
     font-weight: 500;
@@ -425,29 +426,5 @@
   /* ── Bottom ───────────────────────────────────────────────────────── */
   .sidebar-spacer { flex: 0; min-height: 8px; }
 
-  .collapse-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 7px 8px;
-    border-radius: 7px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: transparent;
-    color: var(--color-text-muted);
-    font-size: 12px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-    overflow: hidden;
-    flex-shrink: 0;
-    width: 100%;
-  }
 
-  .collapse-btn:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--color-text-primary);
-    border-color: rgba(255, 255, 255, 0.1);
-  }
 </style>

@@ -11,11 +11,9 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import {
-    Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2,
-    Save, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight,
-    FileCode, ArchiveRestore, GripVertical, Search, Folder
-  } from '@lucide/svelte';
+  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2 } from '@lucide/svelte';
+  import { Save, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight } from '@lucide/svelte';
+  import { FileCode, ArchiveRestore, GripVertical, Search, Folder } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
