@@ -280,20 +280,29 @@
     border: 1px solid rgba(255, 255, 255, 0.02);
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   }
+  .sidebar-search:hover {
+    background: rgba(0, 0, 0, 0.28);
+    border-color: rgba(255, 255, 255, 0.05);
+  }
   .sidebar-search:focus-within {
     background: rgba(0, 0, 0, 0.35);
     border-color: rgba(255, 255, 255, 0.08);
     box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
   }
-  .sidebar-search input {
+  .sidebar-search input,
+  .sidebar-search input:focus,
+  .sidebar-search input:hover {
     width: 100%;
-    background: transparent;
-    border: none;
-    padding: 8px 0;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    padding: 8px 0 !important;
     color: var(--color-text-primary);
     font-size: 12px;
     font-weight: 500;
-    outline: none;
+    outline: none !important;
   }
   .sidebar-search input::placeholder {
     color: var(--color-text-muted);

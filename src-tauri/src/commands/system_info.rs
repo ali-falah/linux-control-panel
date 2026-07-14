@@ -505,9 +505,9 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
         })
     }).collect();
 
-    // Sort by CPU% descending, take top 100
+    // Sort by CPU% descending, take top 1000
     processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
-    processes.truncate(100);
+    processes.truncate(1000);
 
     Ok(processes)
 }
@@ -1188,7 +1188,7 @@ pub async fn get_cpu_temperature() -> Result<Option<f32>, String> {
 #[tauri::command]
 pub async fn get_last_system_update() -> Result<String, String> {
     let output = std::process::Command::new("sh")
-        .args(["-c", "rpm -q --last dnf | head -1"])
+        .args(["-c", "for pkg in dnf5 dnf python3-dnf; do rpm -q --last $pkg 2>/dev/null && break; done | head -1"])
         .output()
         .map_err(|e| format!("Failed to run rpm command: {e}"))?;
 

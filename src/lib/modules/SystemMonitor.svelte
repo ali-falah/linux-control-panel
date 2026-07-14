@@ -2,7 +2,8 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { Activity, Cpu, Database, HardDrive, TerminalSquare } from '@lucide/svelte';
-  import { RefreshCw, PowerOff, Loader, Wifi } from '@lucide/svelte';
+  import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -36,6 +37,53 @@
   let processes = $state<any[]>([]);
   let processSearch = $state('');
   let isRefreshing = $state(false);
+  let isPaused = $state(false);
+
+  // Context Menu State for Active Connections
+  let contextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    conn: any | null;
+  }>({ x: 0, y: 0, show: false, conn: null });
+
+  // Side Drawer details State
+  let isDrawerOpen = $state(false);
+  let selectedConnection = $state<any | null>(null);
+  let detailedProcess = $state<any | null>(null);
+  let loadingProcessDetails = $state(false);
+
+  function closeContextMenu() {
+    contextMenu.show = false;
+  }
+
+  function handleConnectionContextMenu(e: MouseEvent, conn: any) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      show: true,
+      conn
+    };
+  }
+
+  async function openConnectionDetails(conn: any) {
+    selectedConnection = conn;
+    isDrawerOpen = true;
+    detailedProcess = null;
+    if (conn.pid) {
+      loadingProcessDetails = true;
+      try {
+        const list: any[] = await invoke('get_process_list');
+        detailedProcess = list.find(p => p.pid === conn.pid) || null;
+      } catch (err) {
+        console.error("Error loading process details:", err);
+      } finally {
+        loadingProcessDetails = false;
+      }
+    }
+  }
 
   // Timers
   let leftTimer: any;
@@ -138,6 +186,7 @@
 
   $effect(() => {
     clearTimers();
+    if (isPaused) return;
     if (currentTab === 'overview') {
       pollLeftAndCenter();
       pollRight();
@@ -235,7 +284,8 @@
     const list = processes.filter(p => 
       !search || 
       p.name.toLowerCase().includes(search) || 
-      p.pid.toString().includes(search)
+      p.pid.toString().includes(search) ||
+      (p.user && p.user.toLowerCase().includes(search))
     );
 
     const groups = new Map<string, GroupedProcess>();
@@ -284,10 +334,19 @@
       <button class:active={currentTab === 'overview'} onclick={() => currentTab = 'overview'}>Overview</button>
       <button class:active={currentTab === 'processes'} onclick={() => currentTab = 'processes'}>Processes</button>
     </div>
-    <Button onclick={forceRefresh} variant="secondary" disabled={isRefreshing}>
-      <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
-      Refresh
-    </Button>
+    <div style="display:flex; gap: 8px;">
+      <Button onclick={() => isPaused = !isPaused} variant={isPaused ? 'accent' : 'secondary'}>
+        {#if isPaused}
+          <Play size={14} style="margin-right: 4px;" /> Resume
+        {:else}
+          <Pause size={14} style="margin-right: 4px;" /> Pause
+        {/if}
+      </Button>
+      <Button onclick={forceRefresh} variant="secondary" disabled={isRefreshing}>
+        <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
+        Refresh
+      </Button>
+    </div>
   </PageHeader>
 
   <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 24px; overflow-y: auto;">
@@ -397,8 +456,8 @@
                   {/each}
                 </div>
               </div>
-              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
-                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections</h4>
+              <div style="display:flex; flex-direction:column; flex:1.8; min-height:380px;">
+                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections <span style="font-size:10px; color:var(--color-text-muted); font-weight:normal; margin-left:6px;">(Click for details, right-click for options)</span></h4>
                 <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2);">
                   <Table tableAction={tableFeatures}>
                     <thead>
@@ -413,7 +472,11 @@
                     </thead>
                     <tbody>
                       {#each activeConnections as conn}
-                        <tr style="border-bottom:1px solid rgba(255,255,255,0.02);">
+                        <tr 
+                          style="border-bottom:1px solid rgba(255,255,255,0.02); cursor: pointer;"
+                          onclick={() => openConnectionDetails(conn)}
+                          oncontextmenu={(e) => handleConnectionContextMenu(e, conn)}
+                        >
                           <td style="padding:6px; color:var(--color-text-primary);">{conn.protocol}</td>
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.local_address}>{conn.local_address}</td>
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.remote_address}>{conn.remote_address}</td>
@@ -444,7 +507,7 @@
       <div class="table-container" style="flex:1; min-height:0; display:flex; flex-direction:column;">
         <div class="table-toolbar">
           <div class="search-box">
-            <input type="text" placeholder="Search processes by name or PID..." bind:value={processSearch} />
+            <input type="text" placeholder="Search processes by name, PID, or user..." bind:value={processSearch} />
           </div>
           <div class="toolbar-stats">
             Showing {groupedProcesses.length} process groups
@@ -497,7 +560,7 @@
                   <td class="col-actions">
                     {#if p.pid > 100}
                       <button class="action-btn kill" onclick={() => killProcess(p.pid, p.name)} title="Kill Process (SIGTERM)">
-                        <PowerOff size={14} />
+                        <Skull size={14} />
                       </button>
                     {/if}
                   </td>
@@ -510,6 +573,132 @@
     {/if}
   </div>
 </div>
+
+<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
+
+{#if contextMenu.show && contextMenu.conn}
+  <div 
+    class="custom-context-menu" 
+    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <button 
+      onclick={() => {
+        if (contextMenu.conn && contextMenu.conn.pid) {
+          killProcess(contextMenu.conn.pid, contextMenu.conn.process_name);
+        }
+        closeContextMenu();
+      }}
+      disabled={!contextMenu.conn.pid}
+    >
+      <Skull size={13} style="margin-right: 8px; color: var(--color-error);" />
+      Kill Process
+    </button>
+    <button 
+      onclick={() => {
+        if (contextMenu.conn) {
+          openConnectionDetails(contextMenu.conn);
+        }
+        closeContextMenu();
+      }}
+    >
+      <TerminalSquare size={13} style="margin-right: 8px; color: var(--color-info);" />
+      Show Details
+    </button>
+  </div>
+{/if}
+
+<SideDrawer bind:isOpen={isDrawerOpen} title="Connection Details" width="450px">
+  {#if selectedConnection}
+    <div style="display:flex; flex-direction:column; gap: 20px;">
+      <!-- Port/Connection Section -->
+      <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
+        <h4 style="margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--color-info); display: flex; align-items: center; gap: 6px;">
+          <Wifi size={14} /> Network Port Details
+        </h4>
+        <div style="display:flex; flex-direction:column; gap: 8px; font-size: 12px;">
+          <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Protocol</span> <span style="font-weight:600; font-family:var(--font-mono);">{selectedConnection.protocol}</span></div>
+          <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">State</span> <span style="color:var(--color-success); font-weight:600;">{selectedConnection.state}</span></div>
+          <div style="display:flex; justify-content:space-between; flex-direction:column; gap:2px;">
+            <span style="color:var(--color-text-muted);">Local Address & Port</span>
+            <span style="font-family:var(--font-mono); background:rgba(0,0,0,0.2); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.local_address}</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; flex-direction:column; gap:2px;">
+            <span style="color:var(--color-text-muted);">Remote Address & Port</span>
+            <span style="font-family:var(--font-mono); background:rgba(0,0,0,0.2); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.remote_address}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Process Section -->
+      <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
+        <h4 style="margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--color-accent); display: flex; align-items: center; gap: 6px;">
+          <Activity size={14} /> Process Details
+        </h4>
+        {#if selectedConnection.pid}
+          {#if loadingProcessDetails}
+            <div style="display:flex; align-items:center; justify-content:center; gap:8px; padding: 16px; color:var(--color-text-muted); font-size:12px;">
+              <Loader size={16} class="animate-spin-slow" /> Fetching process info...
+            </div>
+          {:else}
+            {#if detailedProcess}
+              <div style="display:flex; flex-direction:column; gap: 8px; font-size: 12px;">
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Process Name</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.name}</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">PID</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.pid}</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">User</span> <span style="background:rgba(255,255,255,0.05); padding:1px 6px; border-radius:4px;">{detailedProcess.user}</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">CPU Usage</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.cpu_percent.toFixed(1)}%</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Memory Usage</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.mem_percent.toFixed(1)}% ({detailedProcess.mem_rss_mb.toFixed(1)} MB)</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">State</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.state}</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Threads</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.threads}</span></div>
+                <div style="display:flex; flex-direction:column; gap:4px; margin-top:4px;">
+                  <span style="color:var(--color-text-muted);">Full Command Line</span>
+                  <div style="font-family:var(--font-mono); background:rgba(0,0,0,0.3); padding: 8px; border-radius:4px; font-size:10px; max-height:100px; overflow-y:auto; word-break:break-all; border: 1px solid rgba(255,255,255,0.03);">
+                    {detailedProcess.cmdline || detailedProcess.name}
+                  </div>
+                </div>
+                
+                <div style="margin-top: 12px; display:flex; justify-content:flex-end;">
+                  <Button 
+                    variant="danger" 
+                    size="sm"
+                    onclick={() => {
+                      isDrawerOpen = false;
+                      killProcess(detailedProcess.pid, detailedProcess.name);
+                    }}
+                  >
+                    <Skull size={13} style="margin-right: 4px;" /> Kill Process
+                  </Button>
+                </div>
+              </div>
+            {:else}
+              <div style="color:var(--color-text-muted); font-size:12px; display:flex; flex-direction:column; gap:10px; padding:8px 0;">
+                <p style="margin:0; line-height:1.4;">Detailed process metrics are unavailable (the process may have terminated, or requires higher privileges to inspect).</p>
+                <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                    <span style="color:var(--color-text-secondary);">Application / Process:</span> 
+                    <strong style="font-family:var(--font-mono); color:var(--color-text-primary); text-align:right; word-break:break-all;">{selectedConnection.process_name}</strong>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                    <span style="color:var(--color-text-secondary);">Process PID:</span> 
+                    <strong style="font-family:var(--font-mono); color:var(--color-text-primary); text-align:right;">{selectedConnection.pid}</strong>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                    <span style="color:var(--color-text-secondary);">Local Port / Address:</span> 
+                    <strong style="font-family:var(--font-mono); color:var(--color-text-primary); text-align:right; word-break:break-all;">{selectedConnection.local_address}</strong>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          {/if}
+        {:else}
+          <div style="color:var(--color-text-muted); font-size:12px; text-align:center; padding:16px;">
+            No PID associated with this connection.
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+</SideDrawer>
 
 <style>
   /* Base Layout */
@@ -719,4 +908,40 @@
 
   .text-warn { color: var(--color-warning) !important; font-weight: 600; }
   .text-danger { color: var(--color-error) !important; font-weight: 700; }
+
+  /* Context Menu Styles */
+  .custom-context-menu {
+    background: rgba(20, 20, 30, 0.95);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+    padding: 6px;
+    min-width: 150px;
+    backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .custom-context-menu button {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    padding: 8px 12px;
+    font-size: 12px;
+    text-align: left;
+    border-radius: 6px;
+    cursor: pointer;
+    width: 100%;
+    transition: all 0.15s;
+  }
+  .custom-context-menu button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text-primary);
+  }
+  .custom-context-menu button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 </style>
