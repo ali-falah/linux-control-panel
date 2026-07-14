@@ -859,8 +859,7 @@
   
   .cpu-stroke { stroke: var(--color-info); }
   .cpu-fill { fill: var(--color-info); opacity: 0.15; }
-  .ram-stroke { stroke: var(--color-accent); }
-  .ram-fill { fill: var(--color-accent); opacity: 0.15; }
+  
   
   .progress-bg {
     height: 6px;
