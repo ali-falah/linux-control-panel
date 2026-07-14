@@ -14,26 +14,20 @@
 
   let searchQuery = $state('');
 
-  let expandedGroups = $state<Record<string, boolean>>({
-    'Overview': true,
-    'Packages': true,
-    'System': false,
-    'Network & Security': false,
-    'Users & Config': false
-  });
+  let expandedGroup = $state<string | null>('Overview');
 
   $effect(() => {
     if (uiStore.activeTab) {
       for (const group of groups) {
         if (group.items.some(i => i.id === uiStore.activeTab)) {
-          expandedGroups[group.label] = true;
+          expandedGroup = group.label;
         }
       }
     }
   });
 
   function toggleGroup(label: string) {
-    expandedGroups[label] = !expandedGroups[label];
+    expandedGroup = expandedGroup === label ? null : label;
   }
 
   const groups: {
@@ -54,7 +48,6 @@
         { id: 'repo-manager',  label: 'Repo Manager',   icon: Database },
         { id: 'dnf-history',   label: 'DNF Manager',    icon: Package },
         { id: 'copr-browser',  label: 'Copr Browser',   icon: LayoutGrid },
-        { id: 'flatpak-rpm',   label: 'Flatpak vs RPM', icon: Layers },
       ],
     },
     {
@@ -130,11 +123,16 @@
   <nav class="sidebar-nav">
     {#each groups as group}
       {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
+      {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
       {#if filteredItems.length > 0}
         {#if !uiStore.sidebarCollapsed && !searchQuery}
-          <button class="group-label-btn" onclick={() => toggleGroup(group.label)}>
+          <button 
+            class="group-label-btn" 
+            class:active-group={isGroupActive} 
+            onclick={() => toggleGroup(group.label)}
+          >
             <span class="group-label">{group.label}</span>
-            <span class="group-chevron" class:expanded={expandedGroups[group.label]}>
+            <span class="group-chevron" class:expanded={expandedGroup === group.label} class:active-chevron={isGroupActive}>
               <ChevronDown size={14} />
             </span>
           </button>
@@ -142,7 +140,7 @@
           <div class="group-sep"></div>
         {/if}
 
-        {#if uiStore.sidebarCollapsed || expandedGroups[group.label] || searchQuery}
+        <div class="group-items-wrapper" class:collapsed-anim={!uiStore.sidebarCollapsed && expandedGroup !== group.label && !searchQuery}>
           <div class="group-items">
             {#each filteredItems as item}
               {@const isActive = uiStore.activeTab === item.id}
@@ -162,7 +160,7 @@
               </button>
             {/each}
           </div>
-        {/if}
+        </div>
       {/if}
     {/each}
   </nav>
@@ -336,8 +334,23 @@
     cursor: pointer;
     text-align: left;
     color: var(--color-text-muted);
-    transition: color 0.15s ease;
+    transition: all 0.15s ease;
     flex-shrink: 0;
+  }
+
+  .group-label-btn.active-group {
+    color: var(--color-text-primary);
+  }
+
+  .group-label-btn.active-group .group-label {
+    font-weight: 800;
+    color: var(--color-text-primary);
+    text-shadow: 0 0 12px rgba(212, 228, 250, 0.15);
+  }
+
+  .group-label-btn.active-group .group-chevron {
+    color: var(--color-accent) !important;
+    opacity: 0.95 !important;
   }
 
   .group-label-btn:hover {
@@ -373,6 +386,14 @@
     transform: rotate(180deg);
   }
 
+  .group-items-wrapper {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .group-items-wrapper.collapsed-anim {
+    grid-template-rows: 0fr;
+  }
   .group-items {
     display: flex;
     flex-direction: column;
@@ -390,7 +411,7 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 7px 8px 7px 11px;
+    padding: 7px 8px 7px 18px; /* Slightly indented for layout hierarchy */
     border-radius: 6px;
     border: none;
     background: transparent;
@@ -401,11 +422,15 @@
     font-family: var(--font-sans);
     white-space: nowrap;
     overflow: hidden;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: background 0.15s ease, color 0.15s ease, padding 0.2s ease;
     text-align: left;
     position: relative;
     min-height: 34px;
     width: 100%;
+  }
+
+  .sidebar.collapsed .nav-item {
+    padding: 7px 8px 7px 11px; /* Centered padding for collapsed view */
   }
 
   /* Left pill indicator for active state */

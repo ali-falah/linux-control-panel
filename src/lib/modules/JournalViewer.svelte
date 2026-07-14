@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { FileText, RefreshCw, Search, X, Trash2 } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import Select from '../components/ui/Select.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 
@@ -175,12 +176,12 @@
       <span class="log-sep"></span>
 
       <!-- Level -->
-      <select class="log-select" bind:value={filterPriority} onchange={fetchLogs}>
+      <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 28px; width: 110px;">
         <option value="all">All Levels</option>
         <option value="3">Error+</option>
         <option value="4">Warning+</option>
         <option value="6">Info+</option>
-      </select>
+      </Select>
 
       <span class="log-sep"></span>
 

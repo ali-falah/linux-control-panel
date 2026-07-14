@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { Command } from '@tauri-apps/plugin-shell';
-  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2 } from '@lucide/svelte';
+  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2, AlertTriangle, CheckCircle } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -43,11 +43,35 @@
     files: string[];
   }
 
+  interface FlatpakApp {
+    name: string;
+    app_id: string;
+    version: string;
+    origin: string;
+    installation: string;
+  }
+
+  interface RpmPackage {
+    name: string;
+    version: string;
+    arch: string;
+    summary: string;
+  }
+
+  interface DuplicateEntry {
+    common_name: string;
+    flatpak: FlatpakApp | null;
+    rpm: RpmPackage | null;
+    recommendation: string;
+  }
+
   let apps = $state<DesktopApp[]>([]);
+  let duplicates = $state<DuplicateEntry[]>([]);
+  let loadingDuplicates = $state(false);
   let loading = $state(false);
   let filter = $state('');
 
-  type SourceFilter = 'All' | 'RPM' | 'Flatpak';
+  type SourceFilter = 'All' | 'RPM' | 'Flatpak' | 'Duplicates';
   let sourceFilter = $state<SourceFilter>('All');
 
   type SortOption = 'name' | 'size' | 'date' | 'source';
@@ -97,9 +121,15 @@
 
   async function loadApps() {
     loading = true;
+    loadingDuplicates = true;
     statusStore.setBusy('Scanning applications…');
     try {
-      apps = await invoke<DesktopApp[]>('list_desktop_apps');
+      const [appsResult, duplicatesResult] = await Promise.all([
+        invoke<DesktopApp[]>('list_desktop_apps'),
+        invoke<DuplicateEntry[]>('detect_duplicates').catch(() => [])
+      ]);
+      apps = appsResult;
+      duplicates = duplicatesResult;
       
       // Async size fetching
       for (let i = 0; i < apps.length; i++) {
@@ -116,6 +146,7 @@
       uiStore.addToast(`Failed to load apps: ${e}`, 'error');
     } finally {
       loading = false;
+      loadingDuplicates = false;
       statusStore.clearBusy();
     }
   }
@@ -201,6 +232,53 @@
     );
   }
 
+  function confirmRemoveFlatpak(app: FlatpakApp) {
+    uiStore.confirm(
+      'Remove Flatpak App',
+      `Remove "${app.name}" (${app.app_id})?\n\nInstallation: ${app.installation}`,
+      async () => {
+        statusStore.setBusy(`Removing Flatpak: ${app.name}...`);
+        try {
+          await invoke('remove_flatpak', {
+            appId: app.app_id,
+            systemWide: app.installation === 'system',
+          });
+          uiStore.addToast(`Removed Flatpak: ${app.name}`, 'success');
+          statusStore.setLastCommand(`flatpak uninstall -y ${app.app_id}`, 0, true);
+          await loadApps();
+        } catch (e) {
+          uiStore.addToast(`Failed to remove Flatpak: ${e}`, 'error');
+          statusStore.setLastCommand(`flatpak uninstall -y ${app.app_id}`, 1, false);
+        } finally {
+          statusStore.clearBusy();
+        }
+      },
+      true
+    );
+  }
+
+  function confirmRemoveRpm(pkg: RpmPackage) {
+    uiStore.confirm(
+      'Remove RPM Package',
+      `Remove "${pkg.name}" (${pkg.version})?\n\nThis may affect other packages that depend on it.`,
+      async () => {
+        statusStore.setBusy(`Removing RPM: ${pkg.name}...`);
+        try {
+          await invoke('remove_rpm', { name: pkg.name });
+          uiStore.addToast(`Removed RPM: ${pkg.name}`, 'success');
+          statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 0, true);
+          await loadApps();
+        } catch (e) {
+          uiStore.addToast(`Failed to remove RPM: ${e}`, 'error');
+          statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 1, false);
+        } finally {
+          statusStore.clearBusy();
+        }
+      },
+      true
+    );
+  }
+
   function onMouseEnter(e: MouseEvent, text: string) {
     clearTimeout(hoverTimer);
     const x = e.clientX;
@@ -231,6 +309,23 @@
     </Button>
   </PageHeader>
 
+  {#if duplicates.length > 0 && sourceFilter !== 'Duplicates'}
+    <div 
+      style="margin-bottom: 20px; border: 1px solid rgba(245, 158, 11, 0.25); background: rgba(245, 158, 11, 0.04); padding: 10px 14px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; font-size: 12px;"
+    >
+      <div style="display: flex; align-items: center; gap: 8px; color: var(--color-text-primary);">
+        <AlertTriangle size={15} style="color: var(--color-warning);" />
+        <span>Detected {duplicates.length} duplicate app installations (both RPM and Flatpak).</span>
+      </div>
+      <button 
+        onclick={() => sourceFilter = 'Duplicates'} 
+        style="background: transparent; border: none; color: var(--color-accent); font-weight: 700; cursor: pointer; text-decoration: underline; padding: 0; font-size: 12px;"
+      >
+        View and Clean Up
+      </button>
+    </div>
+  {/if}
+
   <div class="controls-row">
     <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
       <SearchBar bind:value={filter} placeholder="Search installed apps..." disabled={isUninstalling} style="flex: 1; max-width: 300px;" />
@@ -239,7 +334,8 @@
         tabs={[
           {id: 'All', label: 'All Sources'},
           {id: 'RPM', label: 'RPM'},
-          {id: 'Flatpak', label: 'Flatpak'}
+          {id: 'Flatpak', label: 'Flatpak'},
+          {id: 'Duplicates', label: `Duplicates (${duplicates.length})`}
         ]}
         bind:activeTab={sourceFilter}
         disabled={isUninstalling}
@@ -248,7 +344,7 @@
     
     <div style="display:flex;align-items:center;gap:16px;">
       <div style="display:flex; align-items:center; gap:8px;">
-        <span style="font-size: 12px; color: var(--color-text-muted);">Sort by:</span>
+        <span style="font-size: 12px; color: var(--color-text-muted);width:-webkit-fill-available;">Sort by:</span>
         <Select bind:value={sortBy} disabled={isUninstalling}>
           <option value="name">Name</option>
           <option value="size">Size</option>
@@ -282,24 +378,84 @@
         </div>
       </Card>
     {:else}
-      {#if loading && apps.length === 0}
-        <div class="empty-state">
-          <RefreshCw size={32} class="animate-spin-slow" style="color:var(--color-text-muted); margin-bottom: 16px;" />
-          <div>Scanning for applications...</div>
-        </div>
-      {:else if apps.length > 0 && filteredApps.length === 0}
-        <div class="empty-state">
-          <Search size={48} style="color:var(--color-text-muted); margin-bottom: 16px; opacity: 0.5;" />
-          <div style="font-size: 16px; font-weight: 500; color: var(--color-text-primary);">No apps found for '{filter}'</div>
-          <Button variant="outline" class="btn-sm" style="margin-top: 16px;" onclick={() => filter = ''}>Clear Search</Button>
-        </div>
-      {:else if apps.length === 0}
-        <div class="empty-state">
-          <AppWindow size={48} style="color:var(--color-text-muted); margin-bottom: 16px; opacity: 0.5;" />
-          <div>No applications found.</div>
-        </div>
+      {#if sourceFilter === 'Duplicates'}
+        {#if duplicates.length === 0}
+          <div class="empty-state" style="padding: 64px 32px; background: rgba(1, 15, 31, 0.4); border-radius: 8px; border: 1px solid var(--color-border); width: 100%;">
+            <div style="width:64px; height:64px; border-radius:50%; background:rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.15); display:flex; align-items:center; justify-content:center; margin:0 auto 16px; box-shadow: 0 0 12px rgba(16, 185, 129, 0.1);">
+              <CheckCircle size={32} style="color:var(--color-success); margin:0" />
+            </div>
+            <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+              No duplicate packages found
+            </span>
+            <span style="color:var(--color-text-muted); margin-top:8px; font-size:13px;">
+              Your Flatpak and RPM installs don't overlap.
+            </span>
+          </div>
+        {:else}
+          <div style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+            {#each duplicates as dup (dup.common_name)}
+              <Card 
+                style="display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid var(--color-border); border-radius: 8px;"
+              >
+                <div style="font-weight: 700; font-size: 14px; color: var(--color-accent);">{dup.common_name}</div>
+                <div style="font-size: 12px; color: var(--color-text-muted); margin-bottom: 6px;">{dup.recommendation}</div>
+                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                  {#if dup.flatpak}
+                    <div style="flex: 1; min-width: 240px; display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(0, 218, 243, 0.02); border: 1px solid rgba(0, 218, 243, 0.12); border-radius: 6px;">
+                      <div style="display: flex; flex-direction: column; gap: 2px;">
+                        <span style="font-size: 9px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase;">Flatpak</span>
+                        <span style="font-size: 12px; font-family: var(--font-mono); color: var(--color-text-primary);">{dup.flatpak.app_id} (v{dup.flatpak.version})</span>
+                      </div>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        style="padding: 4px 8px; font-size: 11px;"
+                        onclick={() => dup.flatpak && confirmRemoveFlatpak(dup.flatpak)}
+                      >
+                        <Trash2 size={11} style="margin-right: 4px;" /> Remove Flatpak
+                      </Button>
+                    </div>
+                  {/if}
+                  {#if dup.rpm}
+                    <div style="flex: 1; min-width: 240px; display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(188, 199, 222, 0.02); border: 1px solid rgba(188, 199, 222, 0.12); border-radius: 6px;">
+                      <div style="display: flex; flex-direction: column; gap: 2px;">
+                        <span style="font-size: 9px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase;">RPM</span>
+                        <span style="font-size: 12px; font-family: var(--font-mono); color: var(--color-text-primary);">{dup.rpm.name} (v{dup.rpm.version})</span>
+                      </div>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        style="padding: 4px 8px; font-size: 11px;"
+                        onclick={() => dup.rpm && confirmRemoveRpm(dup.rpm)}
+                      >
+                        <Trash2 size={11} style="margin-right: 4px;" /> Remove RPM
+                      </Button>
+                    </div>
+                  {/if}
+                </div>
+              </Card>
+            {/each}
+          </div>
+        {/if}
       {:else}
-        <div class="app-grid">
+        {#if loading && apps.length === 0}
+          <div class="empty-state">
+            <RefreshCw size={32} class="animate-spin-slow" style="color:var(--color-text-muted); margin-bottom: 16px;" />
+            <div>Scanning for applications...</div>
+          </div>
+        {:else if apps.length > 0 && filteredApps.length === 0}
+          <div class="empty-state">
+            <Search size={48} style="color:var(--color-text-muted); margin-bottom: 16px; opacity: 0.5;" />
+            <div style="font-size: 16px; font-weight: 500; color: var(--color-text-primary);">No apps found for '{filter}'</div>
+            <Button variant="outline" class="btn-sm" style="margin-top: 16px;" onclick={() => filter = ''}>Clear Search</Button>
+          </div>
+        {:else if apps.length === 0}
+          <div class="empty-state">
+            <AppWindow size={48} style="color:var(--color-text-muted); margin-bottom: 16px; opacity: 0.5;" />
+            <div>No applications found.</div>
+          </div>
+        {:else}
+          <div class="app-grid">
           {#each filteredApps as app}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -352,7 +508,8 @@
         </div>
       {/if}
     {/if}
-  </div>
+  {/if}
+</div>
 
   <!-- Side Panel -->
   {#if selectedAppForDetails}

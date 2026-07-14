@@ -9,7 +9,6 @@
   import RepoManager from './lib/modules/RepoManager.svelte';
   import DnfHistory from './lib/modules/DnfHistory.svelte';
   import CoprBrowser from './lib/modules/CoprBrowser.svelte';
-  import FlatpakRpm from './lib/modules/FlatpakRpm.svelte';
   import ServiceManager from './lib/modules/ServiceManager.svelte';
   import HostsManager from './lib/modules/HostsManager.svelte';
   import UserManager from './lib/modules/UserManager.svelte';
@@ -50,8 +49,6 @@
           <DnfHistory />
         {:else if uiStore.activeTab === 'copr-browser'}
           <CoprBrowser />
-        {:else if uiStore.activeTab === 'flatpak-rpm'}
-          <FlatpakRpm />
         {:else if uiStore.activeTab === 'service-manager'}
           <ServiceManager />
         {:else if uiStore.activeTab === 'hosts-manager'}
