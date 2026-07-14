@@ -8,6 +8,7 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
+  import Card from '../components/ui/Card.svelte';
   import Table from '../components/ui/Table.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
@@ -404,8 +405,7 @@
           <!-- COLUMN 1: Resource Usage & Disk I/O -->
           <div class="monitor-column-left">
             <!-- Core Resource Usage -->
-            <div class="monitor-panel">
-              <h3 class="panel-title"><Cpu size={16} class="text-primary" /> Core Resource Usage</h3>
+            <Card title="Core Resource Usage" icon={Cpu} class="monitor-panel">
               <div class="panel-scroll">
                 <!-- CPU -->
                 <div class="metric-block" style="display:flex; flex-direction:column; gap:8px;">
@@ -455,11 +455,10 @@
                   </div>
                 </div>
               </div>
-            </div>
+            </Card>
 
             <!-- Disk I/O -->
-            <div class="monitor-panel">
-              <h3 class="panel-title"><HardDrive size={16} class="text-info" /> Disk I/O</h3>
+            <Card title="Disk I/O" icon={HardDrive} class="monitor-panel">
               <div class="panel-scroll" style="gap:10px;">
                 {#if diskIoStats.length > 0}
                   {#each diskIoStats as disk}
@@ -496,13 +495,12 @@
                   <span class="text-muted">Loading disk I/O metrics...</span>
                 {/if}
               </div>
-            </div>
+            </Card>
           </div>
 
           <!-- COLUMN 2: Network & Connections -->
-          <div class="monitor-panel">
-            <h3 class="panel-title"><Wifi size={16} class="text-info" /> Network & Connections</h3>
-            <div class="panel-scroll" style="gap:16px;">
+          <Card title="Network & Connections" icon={Wifi} class="monitor-panel" style="display: flex; flex-direction: column; height: 100%; min-height: 0;">
+            <div style="display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0;">
               <div>
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
                 <div style="display:flex; gap: 12px; flex-wrap: wrap; width: 100%;">
@@ -533,9 +531,9 @@
                   {/if}
                 </div>
               </div>
-              <div style="display:flex; flex-direction:column; flex:1.8; min-height:380px;">
+              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
                 <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections <span style="font-size:10px; color:var(--color-text-muted); font-weight:normal; margin-left:6px;">(Click for details, right-click for options)</span></h4>
-                <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2);">
+                <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2); min-height: 0;">
                   <Table tableAction={tableFeatures}>
                     <thead>
                       <tr>
@@ -572,7 +570,7 @@
                 </div>
               </div>
             </div>
-          </div>
+          </Card>
         </div>
       {:else}
         <div class="loading-state">
@@ -835,29 +833,10 @@
   }
 
   .monitor-panel {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    padding: 20px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    overflow: hidden;
     height: 100%;
     min-height: 0;
-  }
-  .panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    border-bottom: 1px solid var(--color-border);
-    padding-bottom: 12px;
-    margin: 0;
-    flex-shrink: 0;
   }
   .panel-scroll {
     flex: 1;
@@ -894,8 +873,8 @@
     border-radius: 4px;
     transition: width 0.3s ease;
   }
-  .ram-fill { background: linear-gradient(90deg, #f59e0b, #ef4444); }
-  .swap-fill { background: linear-gradient(90deg, #ef4444, #b91c1c); }
+  .ram-fill { background: linear-gradient(90deg, var(--color-accent), var(--color-accent-soft)); }
+  .swap-fill { background: linear-gradient(90deg, var(--color-text-secondary), var(--color-border)); }
 
   /* PROCESSES TAB */
   .table-container {

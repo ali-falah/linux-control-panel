@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { Command } from '@tauri-apps/plugin-shell';
-  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive } from '@lucide/svelte';
+  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2 } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -21,6 +21,20 @@
     file_path: string;
     sizeBytes?: number;
     installDate?: number;
+  }
+
+  function getAppIcon(name: string) {
+    const lower = name.toLowerCase();
+    if (lower.includes('database') || lower.includes('beekeeper') || lower.includes('sql') || lower.includes('mongo') || lower.includes('redis') || lower.includes('postgres') || lower.includes('mysql')) {
+      return Database;
+    }
+    if (lower.includes('code') || lower.includes('visual studio') || lower.includes('developer') || lower.includes('editor') || lower.includes('sublime') || lower.includes('atom') || lower.includes('intellij') || lower.includes('neovim') || lower.includes('vim') || lower.includes('emacs')) {
+      return Code2;
+    }
+    if (lower.includes('terminal') || lower.includes('shell') || lower.includes('bash') || lower.includes('command') || lower.includes('console')) {
+      return Terminal;
+    }
+    return AppWindow; // default
   }
 
   interface AppDetails {
@@ -289,36 +303,51 @@
           {#each filteredApps as app}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="app-card" onclick={() => openDetails(app)}>
-              <div class="app-icon">
-                <AppWindow size={32} />
+            <Card 
+              class="app-card" 
+              onclick={() => openDetails(app)} 
+              style="display: flex; align-items: center; gap: 16px; padding: 16px; cursor: pointer; transition: all 0.2s ease;"
+            >
+              <div class="app-icon-wrapper" style="width: 48px; height: 48px; border-radius: 12px; background: rgba(1, 15, 31, 0.85); border: 1px solid rgba(255, 255, 255, 0.05); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                <svelte:component this={getAppIcon(app.name)} size={22} style="color: var(--color-accent);" />
               </div>
-              <div class="app-info">
+              <div class="app-info" style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">
                 <div 
                   class="app-name"
+                  style="font-size: 14px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
                   onmouseenter={(e) => { if (app.package_id) onMouseEnter(e, app.package_id); }}
                   onmouseleave={onMouseLeave}
                 >
                   {app.name}
                 </div>
-                <div class="app-meta">
-                  <span class="badge" class:flatpak={app.source === 'Flatpak'} class:rpm={app.source === 'RPM'}>
+                <div class="app-meta" style="display: flex; align-items: center; gap: 10px;">
+                  <span class="badge {app.source.toLowerCase()}">
                     {app.source}
                   </span>
                   
                   {#if app.sizeBytes === undefined}
                     <div class="skeleton-text" style="width: 60px; height: 12px;"></div>
                   {:else}
-                    <span class="size-text"><HardDrive size={12} style="display:inline; margin-right:4px;" />{formatBytes(app.sizeBytes)}</span>
+                    <span class="size-text" style="font-size: 11px; color: var(--color-text-muted); display: flex; align-items: center; gap: 4px;">
+                      <HardDrive size={12} style="opacity: 0.7;" />
+                      {formatBytes(app.sizeBytes)}
+                    </span>
                   {/if}
                 </div>
               </div>
               <div class="app-actions">
-                <Button variant="ghost" class="text-danger" disabled={!app.package_id} onclick={(e: any) => { e.stopPropagation(); confirmUninstall(app); }} title="Uninstall">
+                <Button 
+                  variant="ghost" 
+                  class="trash-action-btn" 
+                  style="color: var(--color-text-muted); padding: 6px;"
+                  disabled={!app.package_id} 
+                  onclick={(e: any) => { e.stopPropagation(); confirmUninstall(app); }} 
+                  title="Uninstall"
+                >
                   <Trash2 size={16} />
                 </Button>
               </div>
-            </div>
+            </Card>
           {/each}
         </div>
       {/if}
@@ -450,64 +479,10 @@
     gap: 16px;
   }
 
-  .app-card {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    background: var(--color-bg-base);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    padding: 16px;
-    transition: all 0.2s ease;
-    cursor: pointer;
-  }
-
   .app-card:hover {
-    border-color: rgba(255, 255, 255, 0.15);
+    border-color: var(--color-accent) !important;
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  }
-
-  .app-icon {
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.05);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-primary);
-    flex-shrink: 0;
-  }
-
-  .app-info {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .app-name {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .app-meta {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .size-text {
-    font-size: 11px;
-    color: var(--color-text-muted);
-    display: flex;
-    align-items: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   }
 
   .badge {
@@ -520,20 +495,31 @@
   }
 
   .badge.flatpak {
-    background: rgba(99, 102, 241, 0.15);
-    color: #818cf8;
-    border: 1px solid rgba(99, 102, 241, 0.25);
+    background: rgba(188, 199, 222, 0.1);
+    color: var(--color-text-secondary);
+    border: 1px solid rgba(188, 199, 222, 0.2);
   }
 
   .badge.rpm {
-    background: rgba(16, 185, 129, 0.15);
-    color: #34d399;
-    border: 1px solid rgba(16, 185, 129, 0.25);
+    background: rgba(0, 218, 243, 0.1);
+    color: var(--color-accent);
+    border: 1px solid rgba(0, 218, 243, 0.2);
   }
 
   .app-actions {
     display: flex;
     align-items: center;
+  }
+
+  :global(.trash-action-btn) {
+    border: none !important;
+    background: transparent !important;
+  }
+
+  :global(.trash-action-btn:hover) {
+    color: var(--color-error) !important;
+    background: rgba(255, 180, 171, 0.08) !important;
+    border: none !important;
   }
 
   .terminal-log {

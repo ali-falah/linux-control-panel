@@ -137,6 +137,20 @@ html, body, #app {
   border-color: rgba(0, 218, 243, 0.2);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
 }
+.card-title-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 16px 0;
+  line-height: 1.4;
+}
+.card-title-icon {
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
 .card-raised {
   background: var(--color-bg-raised);
   border: 1px solid var(--color-border);
@@ -765,14 +779,14 @@ pre {
   transition: all 0.15s ease;
   font-family: var(--font-sans);
 }
-.tab-btn:hover {
+.tab-btn:hover:not(.active) {
   color: var(--color-text-primary);
   background: rgba(0, 218, 243, 0.04);
 }
 .tab-btn.active {
-  background: rgba(0, 218, 243, 0.08);
-  border-color: rgba(0, 218, 243, 0.22);
-  color: var(--color-accent);
+  background: var(--color-accent);
+  color: #00363d;
+  font-weight: 600;
 }
 .tab-count {
   display: inline-flex;
