@@ -1112,16 +1112,18 @@
   .form-field.form-full { grid-column: 1 / -1; }
   .form-select {
     padding: 8px 12px;
-    background: rgba(0,0,0,0.2);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: rgba(1, 15, 31, 0.7);
+    border: 1px solid #3b494c;
+    border-radius: 4px;
     color: var(--color-text-primary);
     font-family: var(--font-mono);
     font-size: 12px;
     outline: none;
     color-scheme: dark;
+    transition: border-color 0.15s ease;
   }
-  .form-select option { background: #0f0f18; color: var(--color-text-primary); }
+  .form-select:focus { border-color: var(--color-accent); box-shadow: 0 0 0 2px rgba(0, 218, 243, 0.10); }
+  .form-select option { background: #0d1c2d; color: var(--color-text-primary); }
   .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .preview-line {
     padding: 8px 12px;

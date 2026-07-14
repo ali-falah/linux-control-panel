@@ -162,7 +162,7 @@
           <div style="display:flex; gap:24px">
             <div style="flex:1">
               <label for="grub-timeout" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Timeout (seconds)</label>
-              <input id="grub-timeout" type="number" class="w-full" bind:value={editedTimeout} min="-1" />
+              <input id="grub-timeout" type="number" class="input" bind:value={editedTimeout} min="-1" />
               <div style="font-size:11px; color:var(--color-text-muted); margin-top:4px">Time to wait before booting default entry (-1 means wait indefinitely).</div>
             </div>
             
@@ -193,7 +193,7 @@
 
         <div>
           <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Kernel Parameters (GRUB_CMDLINE_LINUX)</h3>
-          <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={editedCmdline} />
+          <input class="input" style="font-family:var(--font-mono); font-size:12px" bind:value={editedCmdline} />
           <div style="font-size:11px; color:var(--color-text-muted); margin-top:4px">
             These parameters are passed to the Linux kernel at boot time (e.g. <code>quiet</code>, <code>rhgb</code>, <code>nomodeset</code>).
           </div>
@@ -201,7 +201,7 @@
 
         <div>
           <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Default Boot Entry (GRUB_DEFAULT)</h3>
-          <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={editedDefault} />
+          <input class="input" style="font-family:var(--font-mono); font-size:12px" bind:value={editedDefault} />
           <div style="font-size:11px; color:var(--color-text-muted); margin-top:4px">
             Usually <code>saved</code> to remember the last booted OS, or an index like <code>0</code>.
           </div>

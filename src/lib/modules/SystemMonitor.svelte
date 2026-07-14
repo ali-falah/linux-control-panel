@@ -9,6 +9,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
 
   let currentTab = $state<'overview' | 'processes'>('overview');
@@ -23,12 +24,14 @@
   let lastDiskIoTime = $state<number>(0);
   let lastDiskIoData = $state<any[]>([]);
   let diskIoSpeeds = $state<Record<string, { readSpeed: number, writeSpeed: number }>>({});
+  let diskIoHistory = $state<Record<string, number[]>>({});
 
   // Network Live Traffic
   let networkTraffic = $state<any[]>([]);
   let lastNetworkTime = $state<number>(0);
   let lastNetworkData = $state<any[]>([]);
   let networkSpeeds = $state<Record<string, { rxSpeed: number, txSpeed: number }>>({});
+  let networkInterfaces = $state<any[]>([]);
 
   // Active Connections
   let activeConnections = $state<any[]>([]);
@@ -106,6 +109,9 @@
   }
 
   async function pollRight() {
+    try {
+      networkInterfaces = await invoke('get_network_interfaces');
+    } catch(e) {}
     await Promise.all([
       fetchNetworkTraffic(),
       fetchActiveConnections()
@@ -130,12 +136,15 @@
         for (const current of newDiskIo) {
           const prev = lastDiskIoData.find(d => d.device === current.device);
           if (prev) {
-            const readDiff = current.read_bytes - prev.read_bytes;
-            const writeDiff = current.write_bytes - prev.write_bytes;
-            speeds[current.device] = {
-              readSpeed: Math.max(0, readDiff / deltaSec),
-              writeSpeed: Math.max(0, writeDiff / deltaSec)
-            };
+            const readSpeed = Math.max(0, (current.read_bytes - prev.read_bytes) / deltaSec);
+            const writeSpeed = Math.max(0, (current.write_bytes - prev.write_bytes) / deltaSec);
+            speeds[current.device] = { readSpeed, writeSpeed };
+            
+            const combinedSpeed = readSpeed + writeSpeed;
+            if (!diskIoHistory[current.device]) {
+              diskIoHistory[current.device] = Array(40).fill(0);
+            }
+            diskIoHistory[current.device] = [...diskIoHistory[current.device].slice(1), combinedSpeed];
           }
         }
         diskIoSpeeds = speeds;
@@ -209,6 +218,41 @@
   onDestroy(() => {
     clearTimers();
   });
+
+  // Dynamic Sparkline generator helper for rates (e.g. disk speed)
+  function generateDynamicSparkline(data: number[], height: number, width: number): string {
+    if (data.length === 0) return '';
+    const maxVal = Math.max(...data, 1024); // scale to max rate, at least 1KB/s
+    const points = data.map((val, i) => {
+      const x = (i / (data.length - 1)) * width;
+      const y = height - (val / maxVal) * height;
+      return `${x},${y}`;
+    }).join(' ');
+    return `M 0,${height} L ${points} L ${width},${height} Z`;
+  }
+  
+  function generateDynamicSparklineStroke(data: number[], height: number, width: number): string {
+    if (data.length === 0) return '';
+    const maxVal = Math.max(...data, 1024);
+    return data.map((val, i) => {
+      const x = (i / (data.length - 1)) * width;
+      const y = height - (val / maxVal) * height;
+      return `${x},${y}`;
+    }).join(' ');
+  }
+
+  // Filter out unused network interfaces
+  const activeInterfaces = $derived(
+    networkTraffic.filter(iface => {
+      if (iface.interface === 'lo') return false;
+      const meta = networkInterfaces.find(ni => ni.name === iface.interface);
+      if (!meta) {
+        const speeds = networkSpeeds[iface.interface];
+        return speeds && (speeds.rxSpeed > 0 || speeds.txSpeed > 0);
+      }
+      return meta.is_up && (meta.ip4 || meta.ip6 || (networkSpeeds[iface.interface] && (networkSpeeds[iface.interface].rxSpeed > 0 || networkSpeeds[iface.interface].txSpeed > 0)));
+    })
+  );
 
   // Sparkline generator helper
   function generateSparkline(data: number[], height: number, width: number): string {
@@ -330,19 +374,23 @@
 
 <div class="module-page">
   <PageHeader title="Monitoring" subtitle="Real-time system health and process management." icon={Activity}>
-    <div class="tab-switcher">
-      <button class:active={currentTab === 'overview'} onclick={() => currentTab = 'overview'}>Overview</button>
-      <button class:active={currentTab === 'processes'} onclick={() => currentTab = 'processes'}>Processes</button>
-    </div>
+    <TabGroup
+      tabs={[
+        { id: 'overview', label: 'Overview' },
+        { id: 'processes', label: 'Processes' }
+      ]}
+      bind:activeTab={currentTab}
+      style="margin-right: 8px;"
+    />
     <div style="display:flex; gap: 8px;">
-      <Button onclick={() => isPaused = !isPaused} variant={isPaused ? 'accent' : 'secondary'}>
+      <Button onclick={() => isPaused = !isPaused} variant={isPaused ? 'primary' : 'ghost'}>
         {#if isPaused}
           <Play size={14} style="margin-right: 4px;" /> Resume
         {:else}
           <Pause size={14} style="margin-right: 4px;" /> Pause
         {/if}
       </Button>
-      <Button onclick={forceRefresh} variant="secondary" disabled={isRefreshing}>
+      <Button onclick={forceRefresh} variant="primary" disabled={isRefreshing}>
         <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
         Refresh
       </Button>
@@ -411,21 +459,36 @@
 
             <!-- Disk I/O -->
             <div class="monitor-panel">
-              <h3 class="panel-title"><HardDrive size={16} class="text-purple" /> Disk I/O</h3>
+              <h3 class="panel-title"><HardDrive size={16} class="text-info" /> Disk I/O</h3>
               <div class="panel-scroll" style="gap:10px;">
                 {#if diskIoStats.length > 0}
                   {#each diskIoStats as disk}
-                    <div style="background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
-                      <div style="font-weight: 600; font-family: var(--font-mono); font-size: 13px; color: var(--color-text-primary);">{disk.device}</div>
-                      <div style="display:flex; justify-content:space-between; font-size: 12px; font-family: var(--font-mono);">
-                        <div>
-                          <span style="color: var(--color-text-muted); font-size: 10px; margin-right: 4px;">READ</span>
-                          <strong class="text-info">{formatSpeed(diskIoSpeeds[disk.device]?.readSpeed || 0)}</strong>
+                    <div style="background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                      <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                          <div style="width:32px; height:32px; background: rgba(1, 15, 31, 0.85); border: 1px solid rgba(255,255,255,0.04); border-radius: 6px; display:flex; align-items:center; justify-content:center; color:var(--color-accent);">
+                            <HardDrive size={16} />
+                          </div>
+                          <span style="font-weight:600; font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary);">{disk.device}</span>
                         </div>
-                        <div>
-                          <span style="color: var(--color-text-muted); font-size: 10px; margin-right: 4px;">WRITE</span>
-                          <strong class="text-success">{formatSpeed(diskIoSpeeds[disk.device]?.writeSpeed || 0)}</strong>
+                        <div style="display:flex; gap:16px;">
+                          <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                            <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; letter-spacing:0.05em;">READ</span>
+                            <strong style="color:var(--color-text-primary); font-size:12px; font-family:var(--font-mono);">{formatSpeed(diskIoSpeeds[disk.device]?.readSpeed || 0)}</strong>
+                          </div>
+                          <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                            <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; letter-spacing:0.05em;">WRITE</span>
+                            <strong style="color:var(--color-accent); font-size:12px; font-family:var(--font-mono);">{formatSpeed(diskIoSpeeds[disk.device]?.writeSpeed || 0)}</strong>
+                          </div>
                         </div>
+                      </div>
+                      <div style="height:36px; width:100%; margin-top:4px; overflow:hidden;">
+                        <svg viewBox="0 0 300 36" preserveAspectRatio="none" style="width:100%; height:100%;">
+                          <polyline
+                            points={generateDynamicSparklineStroke(diskIoHistory[disk.device] || [], 36, 300)}
+                            style="stroke: var(--color-accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;"
+                          />
+                        </svg>
                       </div>
                     </div>
                   {/each}
@@ -441,19 +504,33 @@
             <h3 class="panel-title"><Wifi size={16} class="text-info" /> Network & Connections</h3>
             <div class="panel-scroll" style="gap:16px;">
               <div>
-                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Interface Speeds</h4>
-                <div style="display:flex; flex-direction:column; gap: 8px;">
-                  {#each networkTraffic as iface}
-                    {#if iface.interface !== 'lo'}
-                      <div style="background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px; display:flex; flex-direction:column; gap:4px;">
-                        <div style="font-weight:600; font-family:var(--font-mono); font-size:12px;">{iface.interface}</div>
-                        <div style="display:flex; justify-content:space-between; font-size:11px; font-family:var(--font-mono);">
-                          <div><span style="color:var(--color-text-muted); font-size:9px;">DL</span> <strong class="text-success">{formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</strong></div>
-                          <div><span style="color:var(--color-text-muted); font-size:9px;">UL</span> <strong class="text-warning">{formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</strong></div>
+                <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
+                <div style="display:flex; gap: 12px; flex-wrap: wrap; width: 100%;">
+                  {#each activeInterfaces as iface}
+                    <div style="flex: 1; min-width: 200px; max-width: calc(50% - 6px); background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                      <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                        <span style="font-weight:600; font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary);">{iface.interface}</span>
+                        <!-- Status check circle badge -->
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
+                          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke-linecap="round" stroke-linejoin="round"/>
+                          <polyline points="22 4 12 14.01 9 11.01" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                      </div>
+                      <div style="display:flex; justify-content:space-between; font-size:11px; font-family:var(--font-mono); width:100%;">
+                        <div>
+                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:4px;">DL</span>
+                          <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</strong>
+                        </div>
+                        <div>
+                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:4px;">UL</span>
+                          <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</strong>
                         </div>
                       </div>
-                    {/if}
+                    </div>
                   {/each}
+                  {#if activeInterfaces.length === 0}
+                    <span style="font-size:12px; color:var(--color-text-muted); font-style:italic;">No active network interfaces.</span>
+                  {/if}
                 </div>
               </div>
               <div style="display:flex; flex-direction:column; flex:1.8; min-height:380px;">
@@ -718,34 +795,7 @@
     gap: 24px;
   }
 
-  /* Tab Switcher */
-  .tab-switcher {
-    display: flex;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 8px;
-    padding: 3px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    margin-right: 8px;
-  }
-  .tab-switcher button {
-    background: transparent;
-    border: none;
-    padding: 6px 14px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    border-radius: 5px;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .tab-switcher button:hover {
-    color: var(--color-text-primary);
-  }
-  .tab-switcher button.active {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--color-text-primary);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  }
+
 
   /* Loading */
   .loading-state {

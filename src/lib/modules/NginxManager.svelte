@@ -1861,11 +1861,9 @@
   }
   .log-select {
     padding: 8px 14px;
-    background: rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 10px;
+    background: rgba(1, 15, 31, 0.7);
+    border: 1px solid #3b494c;
+    border-radius: 4px;
     color: var(--color-text-primary);
     font-size: 12px;
     font-family: var(--font-mono);
@@ -1879,13 +1877,13 @@
   }
   .log-select:focus {
     border-color: var(--color-accent);
-    box-shadow: 0 0 0 3px var(--color-accent-muted);
+    box-shadow: 0 0 0 2px rgba(0, 218, 243, 0.10), 0 0 8px rgba(0, 218, 243, 0.12);
   }
   .log-select option {
-    background: #0f0f18;
+    background: #0d1c2d;
     color: var(--color-text-primary);
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 12px;
     padding: 8px 12px;
   }
   .log-select option:hover,

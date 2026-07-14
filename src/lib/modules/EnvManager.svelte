@@ -125,11 +125,11 @@
             {#each vars as v, i}
               <tr>
                 <td>
-                  <input class="w-full" style="font-family:var(--font-mono); font-weight:600; font-size:13px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
+                  <input class="input" style="font-family:var(--font-mono); font-weight:600; font-size:12px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
                 </td>
                 <td>
                   <div style="display:flex; gap:8px">
-                    <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
+                    <input class="input" style="font-family:var(--font-mono); font-size:12px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
                     <Button class="btn btn-sm -outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
                       <FolderOpen size={14} />
                     </Button>

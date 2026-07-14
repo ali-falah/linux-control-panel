@@ -243,9 +243,9 @@
         </Select>
       </div>
       
-      <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:40px;box-sizing:border-box;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;">
-        <span style="font-size:14px;font-weight:700;color:var(--color-text-primary);line-height:1;">{apps.length}</span>
-        <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Apps</span>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;box-sizing:border-box;background:rgba(1,15,31,0.6);border:1px solid #3b494c;border-radius:4px;">
+        <span style="font-size:14px;font-weight:700;color:var(--color-accent);font-family:var(--font-mono);line-height:1;">{apps.length}</span>
+        <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.07em;font-weight:700;">Apps</span>
       </div>
     </div>
   </div>

@@ -37,14 +37,14 @@
   .header-wrapper {
     display: flex;
     flex-direction: column;
-    margin: -24px -24px 24px -24px;
+    margin: -24px -24px 20px -24px;
   }
 
   .page-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 12px 24px;
+    padding: 10px 24px;
     background: var(--color-bg-surface);
     border-bottom: 1px solid var(--color-border);
     border-radius: 0;
@@ -53,33 +53,43 @@
   .breadcrumb {
     display: flex;
     align-items: center;
-    gap: 12px;
-    font-size: 14px;
-    font-weight: 600;
+    gap: 8px;
+    font-size: 12px;
   }
 
   .crumb-text {
-    color: var(--color-text-primary);
+    color: var(--color-text-muted);
+    font-weight: 500;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.03em;
   }
 
   .crumb-text.active {
-    color: var(--color-text-muted);
+    color: var(--color-text-primary);
+    font-weight: 600;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    letter-spacing: 0;
   }
 
   .crumb-separator {
     color: var(--color-text-muted);
-    font-size: 16px;
-    opacity: 0.5;
+    font-size: 14px;
+    opacity: 0.4;
+    font-family: var(--font-mono);
   }
 
   .crumb-subtitle {
-    color: var(--color-text-secondary);
+    color: var(--color-text-muted);
     font-weight: 400;
+    font-size: 11px;
+    font-family: var(--font-sans);
   }
 
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
   }
 </style>

@@ -222,7 +222,7 @@
           <div>
             <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Allowed Services</h3>
             <div style="display:flex; gap:8px; margin-bottom:12px">
-              <input class="w-full" bind:value={newService} placeholder="e.g. http, https, ssh" onkeydown={(e) => e.key === 'Enter' && addRule('service')} />
+              <input class="input" bind:value={newService} placeholder="e.g. http, https, ssh" onkeydown={(e) => e.key === 'Enter' && addRule('service')} />
               <Button variant="outline" class="" onclick={() => addRule('service')} disabled={!newService.trim()}>
                 <Plus size={14} /> Add
               </Button>
@@ -249,7 +249,7 @@
           <div>
             <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
             <div style="display:flex; gap:8px; margin-bottom:12px">
-              <input class="w-full" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
+              <input class="input" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
               <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
                 <Plus size={14} /> Add
               </Button>

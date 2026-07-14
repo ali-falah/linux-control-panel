@@ -253,11 +253,11 @@
       <div style="display:flex; gap:12px; align-items:flex-end">
         <div style="flex:1">
           <label for="new-username" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Username</label>
-          <input id="new-username" class="w-full" bind:value={newUsername} placeholder="e.g. john" />
+          <input id="new-username" class="input" bind:value={newUsername} placeholder="e.g. john" />
         </div>
         <div style="flex:1">
           <label for="new-fullname" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Full Name (Optional)</label>
-          <input id="new-fullname" class="w-full" bind:value={newFullname} placeholder="e.g. John Doe" onkeydown={(e) => e.key === 'Enter' && addUser()} />
+          <input id="new-fullname" class="input" bind:value={newFullname} placeholder="e.g. John Doe" onkeydown={(e) => e.key === 'Enter' && addUser()} />
         </div>
         <Button variant="primary" class="" onclick={addUser} disabled={!newUsername.trim()}>Create Account</Button>
         <Button variant="outline" class="" onclick={() => showAddUser = false}>Cancel</Button>
@@ -271,7 +271,7 @@
       <div style="display:flex; gap:12px; align-items:flex-end">
         <div style="flex:1">
           <label for="group-name" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Group Name</label>
-          <input id="group-name" class="w-full" bind:value={newGroupname} placeholder="e.g. developers" onkeydown={(e) => e.key === 'Enter' && addGroup()} />
+          <input id="group-name" class="input" bind:value={newGroupname} placeholder="e.g. developers" onkeydown={(e) => e.key === 'Enter' && addGroup()} />
         </div>
         <Button variant="primary" class="" onclick={addGroup} disabled={!newGroupname.trim()}>Create Group</Button>
         <Button variant="outline" class="" onclick={() => showAddGroup = false}>Cancel</Button>

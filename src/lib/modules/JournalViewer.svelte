@@ -351,7 +351,7 @@
     -webkit-appearance: none;
     flex-shrink: 0;
   }
-  .log-select option { background: #1a1b26; color: var(--color-text-primary); }
+  .log-select option { background: #0d1c2d; color: var(--color-text-primary); }
 
   /* Date / time inputs */
   .log-dt {

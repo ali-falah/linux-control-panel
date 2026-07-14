@@ -494,50 +494,7 @@
     flex: 1;
   }
 
-  .tab-bar {
-    display: flex;
-    gap: 3px;
-    background: rgba(0,0,0,0.2);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: 3px;
-    flex-shrink: 0;
-  }
 
-  .tab-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 14px;
-    border: none;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--color-text-muted);
-    font-size: 13px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-    white-space: nowrap;
-  }
-  .tab-btn.active {
-    background: rgba(255,255,255,0.08);
-    color: var(--color-text-primary);
-  }
-
-  .tab-count {
-    background: rgba(255,255,255,0.08);
-    color: var(--color-text-muted);
-    border-radius: 8px;
-    padding: 0 6px;
-    font-size: 11px;
-    font-family: var(--font-mono);
-    min-width: 20px;
-    text-align: center;
-  }
-  .tab-btn.active .tab-count {
-    background: rgba(108,92,231,0.2);
-    color: #a29bfe;
-  }
 
   /* ── Stats ───────────────────────────────────────────────────────────── */
   .stats-row {
