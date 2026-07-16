@@ -802,6 +802,6 @@ pre {
   min-width: 16px;
 }
 .tab-count.active-count {
-  background: rgba(0, 218, 243, 0.15);
-  color: var(--color-accent);
+  background: rgba(0, 54, 61, 0.12);
+  color: #00363d;
 }

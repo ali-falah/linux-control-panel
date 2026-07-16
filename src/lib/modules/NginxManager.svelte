@@ -1031,7 +1031,7 @@
                       <td><span class="badge badge-muted">{site.source}</span></td>
                       <td>
                         <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}">
-                          {site.enabled ? '● Enabled' : '○ Disabled'}
+                          {site.enabled ? 'Enabled' : 'Disabled'}
                         </span>
                       </td>
                       <td><code class="path-code">{site.path}</code></td>
