@@ -15,14 +15,19 @@ use commands::{
     env_manager::{read_env_vars, write_env_vars},
     firewall_manager::{
         get_firewall_state, get_zone_rules, modify_firewall_rule, toggle_panic_mode,
+        firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
+        firewall_modify_rich_rule, firewall_change_interface_zone,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
     grub_manager::{read_grub_config, rebuild_grub, write_grub_config},
     hosts_manager::{read_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds},
-    selinux_manager::{get_selinux_denials, get_selinux_status, set_selinux_state},
+    selinux_manager::{
+        get_selinux_denials, get_selinux_status, set_selinux_state,
+        selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override,
+    },
     service_manager::{
-        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file,
+        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
     },
     startup_manager::{
         list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
@@ -53,9 +58,11 @@ use commands::{
         network_list_connections, network_get_connection,
         network_save_connection, network_delete_connection,
         network_up_connection, network_down_connection,
-        network_set_interface_state
+        network_set_interface_state,
+        network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
+        network_test_ping, network_test_download, network_test_upload,
     },
-    device_manager::{device_get_all},
+    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test},
     app_manager::{
         list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
@@ -153,6 +160,7 @@ pub fn run() {
             get_service_logs,
             read_unit_file,
             write_unit_file,
+            get_boot_blame,
             // Hosts Manager
             read_hosts,
             write_hosts,
@@ -171,6 +179,11 @@ pub fn run() {
             get_zone_rules,
             modify_firewall_rule,
             toggle_panic_mode,
+            firewall_get_rich_rules,
+            firewall_get_zone_interfaces,
+            firewall_get_all_interfaces,
+            firewall_modify_rich_rule,
+            firewall_change_interface_zone,
             // GRUB Configurator
             read_grub_config,
             write_grub_config,
@@ -179,6 +192,10 @@ pub fn run() {
             get_selinux_status,
             set_selinux_state,
             get_selinux_denials,
+            selinux_get_booleans,
+            selinux_set_boolean,
+            selinux_explain_denial,
+            selinux_apply_policy_override,
             // Cron Manager
             list_cron_jobs,
             add_cron_job,
@@ -239,8 +256,18 @@ pub fn run() {
             network_up_connection,
             network_down_connection,
             network_set_interface_state,
+            network_get_vpn_profiles,
+            network_import_vpn_profile,
+            network_create_vpn_profile,
+            network_test_ping,
+            network_test_download,
+            network_test_upload,
             // Device Manager
             device_get_all,
+            device_get_smart_drives,
+            device_get_smart_data,
+            device_get_topology,
+            device_trigger_self_test,
             // App Manager
             list_desktop_apps,
             get_app_meta,

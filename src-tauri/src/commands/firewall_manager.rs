@@ -170,3 +170,132 @@ pub async fn toggle_panic_mode(enable: bool) -> Result<String, String> {
         if enable { "ON" } else { "OFF" }
     ))
 }
+
+#[tauri::command]
+pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String> {
+    let output = Command::new("firewall-cmd")
+        .args(["--zone", &zone, "--list-rich-rules"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rules = stdout.lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(rules)
+}
+
+#[tauri::command]
+pub async fn firewall_get_zone_interfaces(zone: String) -> Result<Vec<String>, String> {
+    let output = Command::new("firewall-cmd")
+        .args(["--zone", &zone, "--list-interfaces"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let interfaces = stdout.trim()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(interfaces)
+}
+
+#[tauri::command]
+pub async fn firewall_get_all_interfaces() -> Result<Vec<String>, String> {
+    let output = Command::new("ip")
+        .args(["-o", "link", "show"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut interfaces = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let name = parts[1].trim_end_matches(':').to_string();
+            if name != "lo" {
+                interfaces.push(name);
+            }
+        }
+    }
+    Ok(interfaces)
+}
+
+#[tauri::command]
+pub async fn firewall_modify_rich_rule(
+    zone: String,
+    rule: String,
+    add: bool,
+) -> Result<String, String> {
+    let arg = format!("--{}-rich-rule={}", if add { "add" } else { "remove" }, rule);
+
+    let out1 = Command::new("pkexec")
+        .args(["/usr/bin/firewall-cmd", "--zone", &zone, &arg])
+        .output()
+        .await
+        .map_err(|e| format!("pkexec runtime failed: {e}"))?;
+
+    if !out1.status.success() {
+        return Err(String::from_utf8_lossy(&out1.stderr).to_string());
+    }
+
+    Command::new("pkexec")
+        .args(["/usr/bin/firewall-cmd", "--zone", &zone, &arg, "--permanent"])
+        .output()
+        .await
+        .map_err(|e| format!("pkexec permanent failed: {e}"))?;
+
+    Ok(format!(
+        "Successfully {}ed rich rule '{}'",
+        if add { "add" } else { "remov" },
+        rule
+    ))
+}
+
+#[tauri::command]
+pub async fn firewall_change_interface_zone(
+    zone: String,
+    interface: String,
+) -> Result<String, String> {
+    let out1 = Command::new("pkexec")
+        .args(["/usr/bin/firewall-cmd", "--zone", &zone, &format!("--change-interface={}", interface), "--permanent"])
+        .output()
+        .await
+        .map_err(|e| format!("pkexec permanent change failed: {e}"))?;
+
+    if !out1.status.success() {
+        return Err(String::from_utf8_lossy(&out1.stderr).to_string());
+    }
+
+    let out2 = Command::new("pkexec")
+        .args(["/usr/bin/firewall-cmd", "--zone", &zone, &format!("--change-interface={}", interface)])
+        .output()
+        .await
+        .map_err(|e| format!("pkexec runtime change failed: {e}"))?;
+
+    if !out2.status.success() {
+        return Err(String::from_utf8_lossy(&out2.stderr).to_string());
+    }
+
+    Ok(format!(
+        "Successfully bound interface {} to zone {}",
+        interface, zone
+    ))
+}

@@ -3,11 +3,12 @@
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
-    FileText, ShieldBan, ShieldCheck, Rocket
+    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -16,9 +17,10 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
+  import Card from '../components/ui/Card.svelte';
 
   // ─── Tab ──────────────────────────────────────────────────────────────────
-  type MainTab = 'services' | 'autostart';
+  type MainTab = 'services' | 'autostart' | 'boot_analyzer';
   let mainTab = $state<MainTab>('services');
 
   // ─── Service Manager state ─────────────────────────────────────────────────
@@ -46,6 +48,18 @@
   let actionInProgress = $state<string | null>(null);
   let editedContent = $state('');
   let saving = $state(false);
+
+  // System vs User scope
+  let userScope = $state(false);
+
+  // Boot Analyzer state
+  interface BlameEntry {
+    time_ms: number;
+    time_str: string;
+    name: string;
+  }
+  let blameEntries = $state<BlameEntry[]>([]);
+  let loadingBlame = $state(false);
 
   const filteredUnits = $derived(
     units.filter(u => {
@@ -77,13 +91,13 @@
 
   async function load() {
     loading = true;
-    statusStore.setBusy('Loading service units…');
+    statusStore.setBusy(`Loading ${userScope ? 'user' : 'system'} service units…`);
     try {
-      units = await invoke<ServiceUnit[]>('list_all_units', { filter: null });
-      statusStore.setLastCommand('systemctl list-units', 0, true);
+      units = await invoke<ServiceUnit[]>('list_all_units', { filter: null, userMode: userScope });
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} list-units`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load units: ${e}`, 'error');
-      statusStore.setLastCommand('systemctl list-units', 1, false);
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} list-units`, 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -91,7 +105,7 @@
   }
 
   function confirmDoAction(unit: ServiceUnit, action: ServiceAction) {
-    if (action === 'stop' || action === 'restart') {
+    if (!userScope && (action === 'stop' || action === 'restart')) {
       uiStore.confirm(
         `Confirm ${action === 'stop' ? 'Stop' : 'Restart'}`,
         `Are you sure you want to ${action} ${unit.name}?\n\nWARNING: Modifying critical system services can cause system instability or loss of network connectivity.`,
@@ -107,13 +121,13 @@
     actionInProgress = `${unit.name}-${action}`;
     statusStore.setBusy(`${action} ${unit.name}…`);
     try {
-      await invoke<string>('unit_action', { name: unit.name, action });
+      await invoke<string>('unit_action', { name: unit.name, action, userMode: userScope });
       uiStore.addToast(`${unit.name}: ${action} succeeded`, 'success');
-      statusStore.setLastCommand(`systemctl ${action} ${unit.name}`, 0, true);
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} ${action} ${unit.name}`, 0, true);
       await load();
     } catch (e) {
       uiStore.addToast(`${action} failed: ${e}`, 'error');
-      statusStore.setLastCommand(`systemctl ${action} ${unit.name}`, 1, false);
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} ${action} ${unit.name}`, 1, false);
     } finally {
       actionInProgress = null;
       statusStore.clearBusy();
@@ -127,11 +141,11 @@
     logsLoading = true;
     logs = '';
     try {
-      logs = await invoke<string>('get_service_logs', { name: unit.name, lines: 100 });
-      statusStore.setLastCommand(`journalctl -u ${unit.name} -n 100`, 0, true);
+      logs = await invoke<string>('get_service_logs', { name: unit.name, lines: 100, userMode: userScope });
+      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load logs: ${e}`, 'error');
-      statusStore.setLastCommand(`journalctl -u ${unit.name} -n 100`, 1, false);
+      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 1, false);
     } finally {
       logsLoading = false;
     }
@@ -144,13 +158,13 @@
     unitFileLoading = true;
     unitFileContent = '';
     try {
-      unitFileContent = await invoke<string>('read_unit_file', { name: unit.name });
+      unitFileContent = await invoke<string>('read_unit_file', { name: unit.name, userMode: userScope });
       editedContent = unitFileContent;
-      statusStore.setLastCommand(`systemctl cat ${unit.name}`, 0, true);
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} cat ${unit.name}`, 0, true);
     } catch (e) {
       unitFileContent = `# Error reading unit file: ${e}`;
       editedContent = unitFileContent;
-      statusStore.setLastCommand(`systemctl cat ${unit.name}`, 1, false);
+      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} cat ${unit.name}`, 1, false);
     } finally {
       unitFileLoading = false;
     }
@@ -159,7 +173,7 @@
   function confirmSaveUnitFile() {
     uiStore.confirm(
       'Confirm Save Unit File',
-      `Are you sure you want to save changes to ${selectedUnit?.name}?\n\nWARNING: An invalid systemd unit file can prevent your system from booting properly. Please ensure the syntax is correct.`,
+      `Are you sure you want to save changes to ${selectedUnit?.name}?\n\nWARNING: An invalid systemd unit file can prevent your services from starting properly. Please ensure the syntax is correct.`,
       () => saveUnitFile(),
       true
     );
@@ -169,15 +183,31 @@
     if (!selectedUnit) return;
     saving = true;
     try {
-      await invoke('write_unit_file', { name: selectedUnit.name, content: editedContent });
-      statusStore.setLastCommand(`echo "..." > /etc/systemd/system/${selectedUnit.name} && systemctl daemon-reload`, 0, true);
+      await invoke('write_unit_file', { name: selectedUnit.name, content: editedContent, userMode: userScope });
+      const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
+      statusStore.setLastCommand(`echo "..." > ${targetPath} && systemctl ${userScope ? '--user' : ''} daemon-reload`, 0, true);
       uiStore.addToast(`Unit file saved for ${selectedUnit.name}`, 'success');
       unitFileContent = editedContent;
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand(`echo "..." > /etc/systemd/system/${selectedUnit.name}`, 1, false);
+      const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
+      statusStore.setLastCommand(`echo "..." > ${targetPath}`, 1, false);
     } finally {
       saving = false;
+    }
+  }
+
+  async function loadBlame() {
+    loadingBlame = true;
+    try {
+      blameEntries = await invoke<BlameEntry[]>('get_boot_blame');
+      statusStore.setLastCommand('systemd-analyze blame', 0, true);
+    } catch (e) {
+      console.error(e);
+      uiStore.addToast(`Failed to load boot latency: ${e}`, 'error');
+      statusStore.setLastCommand('systemd-analyze blame', 1, false);
+    } finally {
+      loadingBlame = false;
     }
   }
 
@@ -257,30 +287,58 @@
   }
 
   // ─── Init ──────────────────────────────────────────────────────────────────
-  $effect(() => { load(); });
-  $effect(() => { loadAutostart(); });
+  $effect(() => {
+    if (mainTab === 'services') {
+      load();
+    } else if (mainTab === 'autostart') {
+      loadAutostart();
+    } else if (mainTab === 'boot_analyzer') {
+      loadBlame();
+    }
+  });
 </script>
 
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
-    <Button variant="ghost" onclick={() => mainTab === 'services' ? load() : loadAutostart()}
-      disabled={mainTab === 'services' ? loading : autostartLoading}>
-      <RefreshCw size={14} class={(mainTab === 'services' ? loading : autostartLoading) ? 'animate-spin-slow' : ''} /> Refresh
-    </Button>
+    <div style="display:flex; align-items:center; gap:16px;">
+      {#if mainTab === 'services'}
+        <!-- User Scope Toggle -->
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:12px; color:var(--color-text-muted); font-weight:600;">User Scope:</span>
+          <Toggle checked={userScope} onToggle={(checked) => { userScope = checked; load(); }} />
+        </div>
+      {/if}
+
+      <div class="tab-bar" style="margin: 0; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 2px;">
+        <button class="tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+          <Settings size={13} /> Services
+          <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{units.length}</span>
+        </button>
+        <button class="tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+          <Rocket size={13} /> XDG Autostart
+          <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{autostartEntries.length}</span>
+        </button>
+        <button class="tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+          <Rocket size={13} /> Boot Analyzer
+          {#if blameEntries.length > 0}
+            <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{blameEntries.length}</span>
+          {/if}
+        </button>
+      </div>
+
+      <Button variant="ghost" onclick={() => {
+        if (mainTab === 'services') load();
+        else if (mainTab === 'autostart') loadAutostart();
+        else loadBlame();
+      }}
+        disabled={mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame}>
+        <RefreshCw size={14} class={(mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame) ? 'animate-spin-slow' : ''} /> Refresh
+      </Button>
+    </div>
   </PageHeader>
 
-  <!-- Single header row: tabs | stats | search -->
+  <!-- Single header row: stats & search -->
   <div class="header-row">
-    <div class="tab-bar">
-      <button class="tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
-        <Settings size={14} /> Services
-        <span class="tab-count">{units.length}</span>
-      </button>
-      <button class="tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
-        <Rocket size={14} /> XDG Autostart
-        <span class="tab-count">{autostartEntries.length}</span>
-      </button>
-    </div>
 
     {#if mainTab === 'services'}
       <!-- Inline stat chips -->
@@ -299,9 +357,11 @@
 
       <div class="header-spacer"></div>
       <SearchBar bind:value={filter} placeholder="Filter services by name or description…" style="min-width:220px; max-width:320px; margin:0;" />
-    {:else}
+    {:else if mainTab === 'autostart'}
       <div class="header-spacer"></div>
       <SearchBar bind:value={autostartFilter} placeholder="Filter autostart entries…" style="min-width:220px; max-width:320px; margin:0;" />
+    {:else}
+      <div class="header-spacer"></div>
     {/if}
   </div>
 
@@ -475,6 +535,59 @@
             {/each}
           </tbody>
         </Table>
+      {/if}
+    </div>
+  {:else if mainTab === 'boot_analyzer'}
+    <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:16px;">
+      {#if loadingBlame}
+        <div class="card" style="display:flex;align-items:center;justify-content:center;padding:40px;color:var(--color-text-muted)">
+          <RefreshCw size={24} class="animate-spin-slow" />
+        </div>
+      {:else if blameEntries.length === 0}
+        <div class="card empty-state" style="padding: 64px 32px;">
+          <Rocket size={32} class="empty-state-icon" style="margin:0 0 16px;" />
+          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No boot latency data</span>
+          <span style="color:var(--color-text-muted); margin-top:8px;">Ensure systemd is running and supports analysis blame.</span>
+        </div>
+      {:else}
+        <Card title="System Boot Startup Latencies (systemd-analyze blame)" icon={Rocket}>
+          <div style="font-size:12px; color:var(--color-text-muted); margin-bottom:16px; line-height:1.5;">
+            Below is a ranked list of services causing boot latency, ordered from slowest to fastest. Services starting in more than 2 seconds are flagged for inspection.
+          </div>
+          
+          <div class="table-wrap" style="max-height: calc(100vh - 280px); overflow-y:auto; border:none; border-radius:0;">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:140px;">Startup Time</th>
+                  <th>Service Unit</th>
+                  <th style="width:120px; text-align:center;">Severity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each blameEntries as entry}
+                  <tr>
+                    <td>
+                      <code style="font-family:var(--font-mono); font-weight:700; color:var(--color-text-primary);">
+                        {entry.time_str}
+                      </code>
+                    </td>
+                    <td style="font-family:var(--font-mono); color:var(--color-text-secondary);">{entry.name}</td>
+                    <td style="text-align:center;">
+                      {#if entry.time_ms > 5000}
+                        <span class="badge badge-danger">CRITICAL</span>
+                      {:else if entry.time_ms > 2000}
+                        <span class="badge badge-warning">SLOW</span>
+                      {:else}
+                        <span class="badge badge-success">FAST</span>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </Card>
       {/if}
     </div>
   {/if}

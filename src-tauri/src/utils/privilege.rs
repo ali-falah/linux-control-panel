@@ -107,6 +107,8 @@ impl Command {
         let (mut cmd, pw_opt) = self.build_std()?;
         if let Some(pw) = pw_opt {
             cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
             let mut child = cmd.spawn()?;
             if let Some(mut stdin) = child.stdin.take() {
                 let mut p = pw.clone();
@@ -139,12 +141,14 @@ impl Command {
 pub mod tokio {
     use super::*;
     use ::tokio::process::Child as TokioChild;
+    use std::path::{Path, PathBuf};
 
     pub struct Command {
         program: String,
         args: Vec<String>,
         capture_stdout: bool,
         capture_stderr: bool,
+        current_dir: Option<PathBuf>,
     }
 
     impl Command {
@@ -154,6 +158,7 @@ pub mod tokio {
                 args: Vec::new(),
                 capture_stdout: false,
                 capture_stderr: false,
+                current_dir: None,
             }
         }
 
@@ -173,8 +178,12 @@ pub mod tokio {
             self
         }
 
+        pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
+            self.current_dir = Some(dir.as_ref().to_path_buf());
+            self
+        }
+
         pub fn stdin<T: Into<Stdio>>(&mut self, _cfg: T) -> &mut Self {
-            // We ignore cfg because we force Stdio::piped() if sudo is used
             self
         }
 
@@ -207,6 +216,9 @@ pub mod tokio {
 
             if let Some(pw) = pw_opt {
                 let mut cmd = ::tokio::process::Command::new("sudo");
+                if let Some(ref path) = self.current_dir {
+                    cmd.current_dir(path);
+                }
                 cmd.arg("-S").arg("--prompt=");
                 for arg in &self.args {
                     cmd.arg(arg);
@@ -224,6 +236,9 @@ pub mod tokio {
                 child.wait_with_output().await
             } else {
                 let mut cmd = ::tokio::process::Command::new(&self.program);
+                if let Some(ref path) = self.current_dir {
+                    cmd.current_dir(path);
+                }
                 cmd.args(&self.args);
                 if self.capture_stdout { cmd.stdout(Stdio::piped()); }
                 if self.capture_stderr { cmd.stderr(Stdio::piped()); }
@@ -250,6 +265,9 @@ pub mod tokio {
 
             if let Some(pw) = pw_opt {
                 let mut cmd = ::tokio::process::Command::new("sudo");
+                if let Some(ref path) = self.current_dir {
+                    cmd.current_dir(path);
+                }
                 cmd.arg("-S").arg("--prompt=");
                 for arg in &self.args {
                     cmd.arg(arg);
@@ -259,9 +277,6 @@ pub mod tokio {
                 if self.capture_stderr { cmd.stderr(Stdio::piped()); }
                 let mut child = cmd.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
-                    // We must spawn a background task to write the password, 
-                    // since we can't await here in a non-async function!
-                    // Wait, `spawn` is not async!
                     use ::tokio::io::AsyncWriteExt;
                     let mut p = pw.clone();
                     p.push('\n');
@@ -272,6 +287,9 @@ pub mod tokio {
                 Ok(child)
             } else {
                 let mut cmd = ::tokio::process::Command::new(&self.program);
+                if let Some(ref path) = self.current_dir {
+                    cmd.current_dir(path);
+                }
                 cmd.args(&self.args);
                 if self.capture_stdout { cmd.stdout(Stdio::piped()); }
                 if self.capture_stderr { cmd.stderr(Stdio::piped()); }

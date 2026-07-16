@@ -5,9 +5,10 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import Select from '../components/ui/Select.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus } from '@lucide/svelte';
+  import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus, Network } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -34,6 +35,47 @@
 
   let newPort = $state('');
   let newService = $state('');
+
+  // Phase 3 Firewall Rich Rules & Interfaces states
+  let activeSubTab = $state<'rules' | 'rich' | 'interfaces'>('rules');
+  let richRules = $state<string[]>([]);
+  let zoneInterfaces = $state<string[]>([]);
+  let allInterfaces = $state<string[]>([]);
+  
+  let loadingRich = $state(false);
+  let loadingInterfaces = $state(false);
+  
+  let ruleBuilder = $state({
+    family: 'ipv4',
+    source: '',
+    dest: '',
+    elemType: 'service', // 'service' | 'port' | 'protocol'
+    elemVal: '',
+    action: 'accept' // 'accept' | 'reject' | 'drop'
+  });
+
+  async function loadRichRules(zone: string) {
+    loadingRich = true;
+    try {
+      richRules = await invoke<string[]>('firewall_get_rich_rules', { zone });
+    } catch(e) {
+      console.error(e);
+    } finally {
+      loadingRich = false;
+    }
+  }
+
+  async function loadInterfaces(zone: string) {
+    loadingInterfaces = true;
+    try {
+      zoneInterfaces = await invoke<string[]>('firewall_get_zone_interfaces', { zone });
+      allInterfaces = await invoke<string[]>('firewall_get_all_interfaces');
+    } catch(e) {
+      console.error(e);
+    } finally {
+      loadingInterfaces = false;
+    }
+  }
 
   async function loadState() {
     loading = true;
@@ -62,6 +104,11 @@
     try {
       rules = await invoke<ZoneRules>('get_zone_rules', { zone });
       statusStore.setLastCommand(`firewall-cmd --zone=${zone} --list-all`, 0, true);
+      
+      await Promise.all([
+        loadRichRules(zone),
+        loadInterfaces(zone)
+      ]);
     } catch (e) {
       uiStore.addToast(`Failed to load rules for zone ${zone}: ${e}`, 'error');
       statusStore.setLastCommand(`firewall-cmd --zone=${zone} --list-all`, 1, false);
@@ -146,6 +193,85 @@
     }
   }
 
+  async function addRichRule() {
+    let rule = `rule family="${ruleBuilder.family}"`;
+    if (ruleBuilder.source.trim()) {
+      rule += ` source address="${ruleBuilder.source.trim()}"`;
+    }
+    if (ruleBuilder.dest.trim()) {
+      rule += ` destination address="${ruleBuilder.dest.trim()}"`;
+    }
+    
+    if (ruleBuilder.elemType === 'service') {
+      if (!ruleBuilder.elemVal.trim()) {
+        uiStore.addToast('Service name is required', 'warning');
+        return;
+      }
+      rule += ` service name="${ruleBuilder.elemVal.trim()}"`;
+    } else if (ruleBuilder.elemType === 'port') {
+      if (!ruleBuilder.elemVal.trim()) {
+        uiStore.addToast('Port is required', 'warning');
+        return;
+      }
+      let val = ruleBuilder.elemVal.trim();
+      if (val.match(/^\d+$/)) val += '/tcp';
+      const parts = val.split('/');
+      if (parts.length === 2) {
+        rule += ` port port="${parts[0]}" protocol="${parts[1]}"`;
+      } else {
+        rule += ` port port="${val}" protocol="tcp"`;
+      }
+    } else {
+      if (!ruleBuilder.elemVal.trim()) {
+        uiStore.addToast('Protocol is required', 'warning');
+        return;
+      }
+      rule += ` protocol value="${ruleBuilder.elemVal.trim()}"`;
+    }
+    
+    rule += ` ${ruleBuilder.action}`;
+    
+    statusStore.setBusy('Adding rich rule…');
+    try {
+      await invoke('firewall_modify_rich_rule', { zone: activeZone, rule, add: true });
+      uiStore.addToast('Rich rule added successfully', 'success');
+      ruleBuilder.elemVal = '';
+      ruleBuilder.source = '';
+      ruleBuilder.dest = '';
+      await loadRichRules(activeZone);
+    } catch(e) {
+      uiStore.addToast(`Failed to add rich rule: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function removeRichRule(rule: string) {
+    statusStore.setBusy('Removing rich rule…');
+    try {
+      await invoke('firewall_modify_rich_rule', { zone: activeZone, rule, add: false });
+      uiStore.addToast('Rich rule removed successfully', 'success');
+      await loadRichRules(activeZone);
+    } catch(e) {
+      uiStore.addToast(`Failed to remove rich rule: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function bindInterface(iface: string) {
+    statusStore.setBusy(`Binding interface ${iface}…`);
+    try {
+      await invoke('firewall_change_interface_zone', { zone: activeZone, interface: iface });
+      uiStore.addToast(`Interface ${iface} bound to ${activeZone}`, 'success');
+      await loadInterfaces(activeZone);
+    } catch(e) {
+      uiStore.addToast(`Failed to bind interface: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
   $effect(() => { loadState(); });
 </script>
 
@@ -213,63 +339,185 @@
       </div>
 
       <!-- Rules Content -->
-      <div class="card module-content-scroll" style="flex:1; display:flex; flex-direction:column; gap:24px">
+      <div class="card module-content-scroll" style="flex:1; display:flex; flex-direction:column; gap:20px">
         {#if loadingRules}
           <div style="display:flex; align-items:center; gap:8px; color:var(--color-text-muted)">
             <RefreshCw size={14} class="animate-spin" /> Loading rules…
           </div>
         {:else if rules}
-          <div>
-            <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Allowed Services</h3>
-            <div style="display:flex; gap:8px; margin-bottom:12px">
-              <input class="input" bind:value={newService} placeholder="e.g. http, https, ssh" onkeydown={(e) => e.key === 'Enter' && addRule('service')} />
-              <Button variant="outline" class="" onclick={() => addRule('service')} disabled={!newService.trim()}>
-                <Plus size={14} /> Add
-              </Button>
-            </div>
-            
-            {#if rules.services.length === 0}
-              <div style="font-size:13px; color:var(--color-text-muted); font-style:italic">No services allowed.</div>
-            {:else}
-              <div style="display:flex; flex-wrap:wrap; gap:8px">
-                {#each rules.services as svc}
-                  <div class="rule-chip">
-                    {svc}
-                    <button class="rule-chip-del" onclick={() => confirmRemoveRule('service', svc)}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
+          <!-- Sub-tabs bar -->
+          <div class="tab-bar" style="margin-bottom:8px; flex-shrink:0;">
+            <button class="tab-btn { activeSubTab === 'rules' ? 'active' : '' }" onclick={() => activeSubTab = 'rules'} style="padding: 6px 12px; font-size:12.5px;">
+              Basic Rules
+            </button>
+            <button class="tab-btn { activeSubTab === 'rich' ? 'active' : '' }" onclick={() => activeSubTab = 'rich'} style="padding: 6px 12px; font-size:12.5px;">
+              Rich Rules
+            </button>
+            <button class="tab-btn { activeSubTab === 'interfaces' ? 'active' : '' }" onclick={() => activeSubTab = 'interfaces'} style="padding: 6px 12px; font-size:12.5px;">
+              Interface Bindings
+            </button>
           </div>
 
-          <hr style="border:0; border-top:1px solid var(--color-border); margin:0" />
-
-          <div>
-            <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
-            <div style="display:flex; gap:8px; margin-bottom:12px">
-              <input class="input" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
-              <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
-                <Plus size={14} /> Add
-              </Button>
+          {#if activeSubTab === 'rules'}
+            <div>
+              <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Allowed Services</h3>
+              <div style="display:flex; gap:8px; margin-bottom:12px">
+                <input class="input" bind:value={newService} placeholder="e.g. http, https, ssh" onkeydown={(e) => e.key === 'Enter' && addRule('service')} />
+                <Button variant="outline" class="" onclick={() => addRule('service')} disabled={!newService.trim()}>
+                  <Plus size={14} /> Add
+                </Button>
+              </div>
+              
+              {#if rules.services.length === 0}
+                <div style="font-size:13px; color:var(--color-text-muted); font-style:italic">No services allowed.</div>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:8px">
+                  {#each rules.services as svc}
+                    <div class="rule-chip">
+                      {svc}
+                      <button class="rule-chip-del" onclick={() => confirmRemoveRule('service', svc)}>
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
 
-            {#if rules.ports.length === 0}
-              <div style="font-size:13px; color:var(--color-text-muted); font-style:italic">No specific ports opened.</div>
-            {:else}
-              <div style="display:flex; flex-wrap:wrap; gap:8px">
-                {#each rules.ports as port}
-                  <div class="rule-chip port-chip">
-                    {port}
-                    <button class="rule-chip-del" onclick={() => confirmRemoveRule('port', port)}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                {/each}
+            <hr style="border:0; border-top:1px solid var(--color-border); margin:12px 0" />
+
+            <div>
+              <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
+              <div style="display:flex; gap:8px; margin-bottom:12px">
+                <input class="input" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
+                <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
+                  <Plus size={14} /> Add
+                </Button>
               </div>
-            {/if}
-          </div>
+
+              {#if rules.ports.length === 0}
+                <div style="font-size:13px; color:var(--color-text-muted); font-style:italic">No specific ports opened.</div>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:8px">
+                  {#each rules.ports as port}
+                    <div class="rule-chip port-chip">
+                      {port}
+                      <button class="rule-chip-del" onclick={() => confirmRemoveRule('port', port)}>
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {:else if activeSubTab === 'rich'}
+            <div>
+              <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Rich Rules Builder</h3>
+              <div class="card" style="background:rgba(0,0,0,0.1); padding:16px; display:flex; flex-direction:column; gap:12px; margin-bottom:16px; border: 1px solid var(--color-border);">
+                <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px;">
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">IP Family</span>
+                    <Select bind:value={ruleBuilder.family}>
+                      <option value="ipv4">IPv4</option>
+                      <option value="ipv6">IPv6</option>
+                    </Select>
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">Source Address (Optional)</span>
+                    <input type="text" class="input" bind:value={ruleBuilder.source} placeholder="e.g. 192.168.1.0/24" />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">Destination (Optional)</span>
+                    <input type="text" class="input" bind:value={ruleBuilder.dest} placeholder="e.g. 10.0.0.5/32" />
+                  </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px;">
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">Rule Target Element</span>
+                    <Select bind:value={ruleBuilder.elemType}>
+                      <option value="service">Service Name</option>
+                      <option value="port">Port / Protocol</option>
+                      <option value="protocol">Protocol Name</option>
+                    </Select>
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">Element Value</span>
+                    <input type="text" class="input" bind:value={ruleBuilder.elemVal} placeholder={ruleBuilder.elemType === 'service' ? 'e.g. http' : (ruleBuilder.elemType === 'port' ? 'e.g. 8080/tcp' : 'e.g. icmp')} />
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:4px;">
+                    <span style="font-size:11.5px; color:var(--color-text-secondary);">Firewall Action</span>
+                    <Select bind:value={ruleBuilder.action}>
+                      <option value="accept">Accept</option>
+                      <option value="reject">Reject</option>
+                      <option value="drop">Drop</option>
+                    </Select>
+                  </div>
+                </div>
+
+                <div style="display:flex; justify-content:flex-end; margin-top:8px;">
+                  <Button variant="primary" onclick={addRichRule}>Add Rich Rule</Button>
+                </div>
+              </div>
+
+              <h4 style="margin: 16px 0 8px; color:var(--color-text-primary); font-size:14px;">Active Rich Rules</h4>
+              {#if richRules.length === 0}
+                <div style="font-size:13px; color:var(--color-text-muted); font-style:italic;">No rich rules active for this zone.</div>
+              {:else}
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                  {#each richRules as rule}
+                    <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.01); padding:10px; border-radius:6px; border:1px solid var(--color-border); gap:12px;">
+                      <code style="font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary); word-break:break-all;">{rule}</code>
+                      <Button variant="outline" style="color:var(--color-error); border-color:var(--color-error); padding: 4px 8px; font-size:11px; flex-shrink:0;" onclick={() => removeRichRule(rule)}>
+                        Remove
+                      </Button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {:else if activeSubTab === 'interfaces'}
+            <div>
+              <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Bound Network Interfaces</h3>
+              {#if zoneInterfaces.length === 0}
+                <div style="font-size:13px; color:var(--color-text-muted); font-style:italic; margin-bottom:16px;">No interfaces currently bound to this zone. Traffic is routed through the default zone.</div>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                  {#each zoneInterfaces as iface}
+                    <div class="rule-chip" style="background: rgba(0, 218, 243, 0.05); border-color: var(--color-accent);">
+                      <Network size={12} style="margin-right:6px; color:var(--color-accent);" /> {iface}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
+              <hr style="border:0; border-top:1px solid var(--color-border); margin:16px 0" />
+
+              <h4 style="margin:0 0 8px; color:var(--color-text-primary); font-size:14px;">Bind System Interface to {activeZone}</h4>
+              <p style="font-size:12.5px; color:var(--color-text-secondary); margin-bottom:12px; line-height:1.5;">
+                Select an available hardware/virtual device adapter on your system to bind it to this firewall zone. Any incoming and outgoing packets on this adapter will be evaluated by this zone's rules.
+              </p>
+              
+              <div style="display:flex; gap:12px; max-width:360px;">
+                <Select id="select-bind-iface" value="">
+                  <option value="" disabled>Select adapter...</option>
+                  {#each allInterfaces as iface}
+                    {#if !zoneInterfaces.includes(iface)}
+                      <option value={iface}>{iface}</option>
+                    {/if}
+                  {/each}
+                </Select>
+                <Button variant="primary" style="flex-shrink:0;" onclick={() => {
+                  const sel = document.getElementById('select-bind-iface') as HTMLSelectElement;
+                  if (sel && sel.value) {
+                    bindInterface(sel.value);
+                  }
+                }}>
+                  Bind Interface
+                </Button>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
     </div>

@@ -9,20 +9,57 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Activity, Wifi, Globe, RefreshCw, Server, Hash, Network, Plus, ArrowLeft, Save, Trash } from '@lucide/svelte';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { 
+    Activity, Wifi, Globe, RefreshCw, Server, Hash, Network, Plus, ArrowLeft, Save, Trash,
+    Play, Square, FileUp, ShieldCheck, ShieldAlert, Key, Link
+  } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
 
   let interfaces = $state<any[]>([]);
   let dnsInfo = $state<string>('');
   let connections = $state<any[]>([]);
+  let vpnProfiles = $state<any[]>([]);
   
   let loading = $state(true);
-  let activeTab = $state<'interfaces' | 'dns' | 'connections'>('interfaces');
+  let loadingVpn = $state(false);
+  let activeTab = $state<'interfaces' | 'dns' | 'connections' | 'vpn' | 'speedtest'>('interfaces');
   
   let selectedConnectionUuid = $state<string | null>(null);
   let editConnectionData = $state<any>(null);
   let isSaving = $state(false);
+
+  // Manual VPN form
+  let showVpnDrawer = $state(false);
+  let vpnForm = $state({
+    name: 'My VPN Connection',
+    type: 'openvpn', // 'openvpn' or 'wireguard'
+    gateway: '',
+    username: '',
+    password: ''
+  });
+  
+  // Speed Test States
+  let isTestingSpeed = $state(false);
+  let speedProgress = $state(''); // 'ping' | 'download' | 'upload' | 'done' | ''
+  let speedPing = $state<number | null>(null);
+  let speedDownload = $state<number | null>(null);
+  let speedUpload = $state<number | null>(null);
+  let speedTestError = $state('');
+
+  async function loadVpnProfiles() {
+    loadingVpn = true;
+    try {
+      vpnProfiles = await invoke<any[]>('network_get_vpn_profiles');
+    } catch(e) {
+      console.error("Failed to load VPN profiles", e);
+    } finally {
+      loadingVpn = false;
+    }
+  }
 
   async function loadData() {
     loading = true;
@@ -35,10 +72,6 @@
       
       const connsRaw: string = await invoke('network_list_connections');
       connections = connsRaw.split('\n').filter(l => l.trim()).map(line => {
-        // nmcli escapes colons with \:, but for UUID, NAME, TYPE, DEVICE, STATE it's usually fine
-        // Let's use a regex or simple split. Using regex to handle escaped colons is safer, 
-        // but since we asked nmcli -t, we'll assume basic split is okay for standard names.
-        // Actually, simple split by ':' might break if NAME has ':'. Let's do basic split.
         const parts = line.split(':');
         return {
           uuid: parts[0],
@@ -48,6 +81,8 @@
           state: parts[4]
         };
       });
+
+      await loadVpnProfiles();
       statusStore.setLastCommand('nmcli connection show', 0, true);
     } catch (e) {
       console.error(e);
@@ -229,6 +264,101 @@
     statusStore.clearBusy();
   }
 
+  async function importVpnFile() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: 'VPN Configuration (*.ovpn, *.conf)', extensions: ['ovpn', 'conf'] }
+        ]
+      });
+      
+      if (!selected || typeof selected !== 'string') return;
+      
+      statusStore.setBusy('Importing VPN profile…');
+      const res = await invoke<string>('network_import_vpn_profile', {
+        name: '',
+        filePath: selected
+      });
+      
+      uiStore.addToast(res, 'success');
+      await loadData();
+    } catch (e) {
+      console.error(e);
+      uiStore.addToast(`Import failed: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function handleCreateVpn() {
+    if (!vpnForm.gateway) {
+      uiStore.addToast('Gateway/Endpoint is required', 'warning');
+      return;
+    }
+    
+    statusStore.setBusy('Creating VPN profile…');
+    try {
+      const res = await invoke<string>('network_create_vpn_profile', {
+        name: vpnForm.name,
+        vpnType: vpnForm.type,
+        gateway: vpnForm.gateway,
+        username: vpnForm.type === 'openvpn' ? vpnForm.username : null,
+        password: vpnForm.type === 'openvpn' ? vpnForm.password : null
+      });
+      
+      uiStore.addToast(res, 'success');
+      showVpnDrawer = false;
+      await loadData();
+    } catch (e) {
+      console.error(e);
+      uiStore.addToast(`Creation failed: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function connectVpn(uuid: string) {
+    statusStore.setBusy('Connecting VPN…');
+    try {
+      await invoke('network_up_connection', { uuid });
+      uiStore.addToast('VPN Connected successfully', 'success');
+      await loadData();
+    } catch(e) {
+      uiStore.addToast(`VPN Connection failed: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function runSpeedTest() {
+    isTestingSpeed = true;
+    speedTestError = '';
+    speedPing = null;
+    speedDownload = null;
+    speedUpload = null;
+    
+    try {
+      speedProgress = 'ping';
+      speedPing = await invoke<number>('network_test_ping');
+      
+      speedProgress = 'download';
+      speedDownload = await invoke<number>('network_test_download');
+      
+      speedProgress = 'upload';
+      speedUpload = await invoke<number>('network_test_upload');
+      
+      speedProgress = 'done';
+    } catch (e) {
+      console.error(e);
+      speedTestError = String(e);
+      speedProgress = '';
+    } finally {
+      isTestingSpeed = false;
+    }
+  }
+
   $effect(() => {
     loadData();
   });
@@ -341,8 +471,14 @@
         <button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
           <Network size={14} style="margin-right:6px" /> Connections
         </button>
+        <button class="tab-btn { activeTab === 'vpn' ? 'active' : '' }" onclick={() => activeTab = 'vpn'}>
+          <Key size={14} style="margin-right:6px" /> VPN Profiles
+        </button>
         <button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
           <Globe size={14} style="margin-right:6px" /> Global DNS
+        </button>
+        <button class="tab-btn { activeTab === 'speedtest' ? 'active' : '' }" onclick={() => activeTab = 'speedtest'}>
+          <Wifi size={14} style="margin-right:6px" /> Speed Test
         </button>
       </div>
 
@@ -353,6 +489,13 @@
         {#if activeTab === 'connections'}
           <Button variant="primary" class="btn-sm" onclick={() => editConnection('')}>
             <Plus size={13}/> Add Connection
+          </Button>
+        {:else if activeTab === 'vpn'}
+          <Button variant="outline" class="btn-sm" onclick={importVpnFile}>
+            <FileUp size={13} style="margin-right:4px;" /> Import Profile
+          </Button>
+          <Button variant="primary" class="btn-sm" onclick={() => showVpnDrawer = true}>
+            <Plus size={13} style="margin-right:4px;" /> Create VPN
           </Button>
         {/if}
       </div>
@@ -413,8 +556,6 @@
           {/each}
         </div>
       {:else if activeTab === 'connections'}
-
-        
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
           {#each connections as conn}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -441,6 +582,126 @@
             </div>
           {/each}
         </div>
+      {:else if activeTab === 'vpn'}
+        <div style="display:flex; flex-direction:column; gap:16px;">
+          {#if loadingVpn}
+            <div class="card" style="display:flex;align-items:center;justify-content:center;padding:40px;color:var(--color-text-muted)">
+              <RefreshCw size={24} class="animate-spin-slow" />
+            </div>
+          {:else if vpnProfiles.length === 0}
+            <div class="card empty-state" style="padding: 64px 32px; text-align:center;">
+              <Key size={32} class="empty-state-icon" style="margin:0 0 16px; color:var(--color-text-muted);" />
+              <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No VPN Profiles</span>
+              <span style="color:var(--color-text-muted); margin-top:8px; display:block;">Import an OpenVPN (.ovpn) or WireGuard (.conf) file, or create one manually.</span>
+              <div style="display:flex; justify-content:center; gap:12px; margin-top:20px;">
+                <Button variant="outline" onclick={importVpnFile}>
+                  <FileUp size={14} style="margin-right:6px;" /> Import Profile
+                </Button>
+                <Button variant="primary" onclick={() => showVpnDrawer = true}>
+                  <Plus size={14} style="margin-right:6px;" /> Create VPN
+                </Button>
+              </div>
+            </div>
+          {:else}
+            <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
+              {#each vpnProfiles as vpn}
+                <div class="card" style="display:flex; flex-direction:column; gap:12px; border: 1px solid var(--color-border);">
+                  <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <Key size={16} style="color:var(--color-accent);" />
+                      <span style="font-weight:600; color:var(--color-text-primary); font-size:15px;">{vpn.name}</span>
+                    </div>
+                    <span class="badge {vpn.active ? 'badge-success' : 'badge-muted'}">{vpn.active ? 'active' : 'inactive'}</span>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--color-text-secondary);">
+                    <span>Protocol: {vpn.vpn_type === 'vpn' ? 'OpenVPN' : 'WireGuard'}</span>
+                  </div>
+                  <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px; border-top:1px solid rgba(255,255,255,0.03); padding-top:10px;">
+                    <Button variant="outline" style="padding: 4px 8px; font-size:12px; color:var(--color-error); border-color:var(--color-error);" onclick={() => deleteConnection(vpn.uuid)}>
+                      <Trash size={12} style="margin-right:4px;" /> Delete
+                    </Button>
+                    <Button variant={vpn.active ? 'outline' : 'primary'} style="padding: 4px 10px; font-size:12px;" onclick={() => vpn.active ? disconnectConnection(vpn.uuid) : connectVpn(vpn.uuid)}>
+                      {#if vpn.active}
+                        <Square size={12} style="margin-right:4px;" /> Disconnect
+                      {:else}
+                        <Play size={12} style="margin-right:4px;" /> Connect
+                      {/if}
+                    </Button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else if activeTab === 'speedtest'}
+        <div class="card" style="display:flex; flex-direction:column; align-items:center; gap:24px; padding:32px;">
+          <h3 style="margin:0; color:var(--color-text-primary); font-size:18px; text-align:center;">Network Speed Test</h3>
+          <p style="margin:0; font-size:13px; color:var(--color-text-secondary); text-align:center; max-width:480px;">
+            Measure your network connection latency, download speed, and upload speed using our fast CDN endpoint.
+          </p>
+          
+          {#if speedTestError}
+            <div style="color:var(--color-error); background:rgba(255,71,87,0.1); border:1px solid var(--color-error); padding:12px 16px; border-radius:6px; font-size:13px; text-align:center; width:100%; max-width:480px;">
+              Error: {speedTestError}
+            </div>
+          {/if}
+          
+          <div style="display:flex; justify-content:center; align-items:center; position:relative; width:220px; height:220px; border-radius:50%; background: radial-gradient(circle, var(--color-bg-raised) 60%, rgba(0,0,0,0.3) 100%); border:4px solid var(--color-border); margin:12px 0; box-shadow:0 10px 30px rgba(0,0,0,0.3);">
+            <div style="text-align:center; z-index:2; display:flex; flex-direction:column; align-items:center; gap:6px;">
+              {#if isTestingSpeed}
+                <RefreshCw size={36} class="animate-spin-slow" style="color:var(--color-accent); margin-bottom:8px;" />
+                <span style="font-size:12px; font-weight:700; text-transform:uppercase; color:var(--color-text-muted); letter-spacing:1px;">
+                  {#if speedProgress === 'ping'}
+                    Checking Latency
+                  {:else if speedProgress === 'download'}
+                    Testing Download
+                  {:else}
+                    Testing Upload
+                  {/if}
+                </span>
+              {:else if speedDownload !== null}
+                <span style="font-size:38px; font-weight:800; color:var(--color-text-primary); font-family:var(--font-mono); line-height:1;">
+                  {speedDownload.toFixed(1)}
+                </span>
+                <span style="font-size:11px; font-weight:700; color:var(--color-accent); letter-spacing:1px; text-transform:uppercase;">
+                  Mbps Download
+                </span>
+              {:else}
+                <Wifi size={36} style="color:var(--color-text-muted); margin-bottom:8px;" />
+                <span style="font-size:12px; font-weight:600; color:var(--color-text-secondary);">Ready</span>
+              {/if}
+            </div>
+            
+            {#if isTestingSpeed}
+              <div style="position:absolute; top:-4px; left:-4px; right:-4px; bottom:-4px; border-radius:50%; border:4px solid transparent; border-top-color:var(--color-accent); animation: spin 1.5s linear infinite;"></div>
+            {/if}
+          </div>
+          
+          <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; width:100%; max-width:540px; margin-top:8px;">
+            <div class="card" style="display:flex; flex-direction:column; align-items:center; padding:16px 12px; gap:6px; background:rgba(255,255,255,0.02); text-align:center;">
+              <span style="font-size:11px; font-weight:600; color:var(--color-text-muted); text-transform:uppercase;">Latency</span>
+              <strong style="font-size:18px; color:var(--color-text-primary); font-family:var(--font-mono);">
+                {speedPing !== null ? speedPing.toFixed(0) + ' ms' : '—'}
+              </strong>
+            </div>
+            <div class="card" style="display:flex; flex-direction:column; align-items:center; padding:16px 12px; gap:6px; background:rgba(255,255,255,0.02); text-align:center;">
+              <span style="font-size:11px; font-weight:600; color:var(--color-text-muted); text-transform:uppercase;">Download</span>
+              <strong style="font-size:18px; color:var(--color-text-primary); font-family:var(--font-mono);">
+                {speedDownload !== null ? speedDownload.toFixed(1) + ' Mbps' : '—'}
+              </strong>
+            </div>
+            <div class="card" style="display:flex; flex-direction:column; align-items:center; padding:16px 12px; gap:6px; background:rgba(255,255,255,0.02); text-align:center;">
+              <span style="font-size:11px; font-weight:600; color:var(--color-text-muted); text-transform:uppercase;">Upload</span>
+              <strong style="font-size:18px; color:var(--color-text-primary); font-family:var(--font-mono);">
+                {speedUpload !== null ? speedUpload.toFixed(1) + ' Mbps' : '—'}
+              </strong>
+            </div>
+          </div>
+          
+          <Button variant="primary" class="" style="width:100%; max-width:240px; margin-top:8px; display:flex; align-items:center; justify-content:center; gap:8px;" disabled={isTestingSpeed} onclick={runSpeedTest}>
+            <Play size={14} /> {isTestingSpeed ? 'Testing...' : 'Start Speed Test'}
+          </Button>
+        </div>
       {:else if activeTab === 'dns'}
         <div class="card" style="display:flex; flex-direction:column; height: 100%;">
           <h3 style="margin-top:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
@@ -456,6 +717,46 @@
       {/if}
     </div>
   {/if}
+
+  <SideDrawer bind:isOpen={showVpnDrawer} title="Create VPN Profile" width="480px">
+    <div style="display:flex; flex-direction:column; gap:16px; padding:8px 0;">
+      <div style="display:flex; flex-direction:column; gap:4px;">
+        <label for="vpn-name" style="font-size:12px; color:var(--color-text-secondary);">Profile Name</label>
+        <input id="vpn-name" type="text" class="input" bind:value={vpnForm.name} placeholder="e.g. Work VPN" />
+      </div>
+      
+      <div style="display:flex; flex-direction:column; gap:4px;">
+        <label for="vpn-type-select" style="font-size:12px; color:var(--color-text-secondary);">VPN Protocol</label>
+        <Select id="vpn-type-select" bind:value={vpnForm.type}>
+          <option value="openvpn">OpenVPN</option>
+          <option value="wireguard">WireGuard</option>
+        </Select>
+      </div>
+      
+      <div style="display:flex; flex-direction:column; gap:4px;">
+        <label for="vpn-gateway" style="font-size:12px; color:var(--color-text-secondary);">
+          {vpnForm.type === 'openvpn' ? 'Gateway Address' : 'Peer Endpoint (e.g. 198.51.100.1:51820)'}
+        </label>
+        <input id="vpn-gateway" type="text" class="input" bind:value={vpnForm.gateway} placeholder={vpnForm.type === 'openvpn' ? 'vpn.example.com' : '198.51.100.1:51820'} />
+      </div>
+      
+      {#if vpnForm.type === 'openvpn'}
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <label for="vpn-username" style="font-size:12px; color:var(--color-text-secondary);">Username (Optional)</label>
+          <input id="vpn-username" type="text" class="input" bind:value={vpnForm.username} placeholder="vpnuser" />
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <label for="vpn-password" style="font-size:12px; color:var(--color-text-secondary);">Password (Optional)</label>
+          <input id="vpn-password" type="password" class="input" bind:value={vpnForm.password} placeholder="••••••••" />
+        </div>
+      {/if}
+      
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+        <Button variant="outline" onclick={() => showVpnDrawer = false}>Cancel</Button>
+        <Button variant="primary" onclick={handleCreateVpn}>Create Profile</Button>
+      </div>
+    </div>
+  </SideDrawer>
 </div>
 
 <style>
