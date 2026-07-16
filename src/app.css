@@ -35,6 +35,8 @@
   --color-success-muted:      rgba(16, 185, 129, 0.12);
   --color-error:              #EF4444;
   --color-error-muted:        rgba(239, 68, 68, 0.12);
+  --color-danger:             var(--color-error);
+  --color-danger-muted:        var(--color-error-muted);
   --color-warning:            #F59E0B;
   --color-warning-muted:      rgba(245, 158, 11, 0.12);
   --color-info:               #00daf3;

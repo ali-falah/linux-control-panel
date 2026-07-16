@@ -25,6 +25,7 @@ export type TabId =
   | 'env-manager'
   | 'nginx-manager'
   | 'shell-env'
+  | 'security-auditor'
   | 'device-manager'
   | 'network-manager'
   | 'app-manager'

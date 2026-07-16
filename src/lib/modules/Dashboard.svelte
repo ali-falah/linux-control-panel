@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';

@@ -67,6 +67,7 @@
         { id: 'network-manager',  label: 'Advanced Network', icon: Wifi },
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield },
+        { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck },
         { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server },
       ],
     },

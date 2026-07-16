@@ -301,18 +301,18 @@
       {/if}
 
       <div class="tab-bar" style="margin: 0; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 2px;">
-        <button class="tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+        <button class="tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
           <Settings size={13} /> Services
-          <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{units.length}</span>
+          <span class="tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
         </button>
-        <button class="tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+        <button class="tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
           <Rocket size={13} /> XDG Autostart
-          <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{autostartEntries.length}</span>
+          <span class="tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
         </button>
-        <button class="tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'} style="padding: 6px 12px; font-size:12px; display:flex; align-items:center; gap:6px; border:none; background:transparent; color:var(--color-text-muted); cursor:pointer; border-radius:4px;">
+        <button class="tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
           <Rocket size={13} /> Boot Analyzer
           {#if blameEntries.length > 0}
-            <span class="tab-count" style="margin-left:4px; font-size:10px; padding:1px 5px; background:rgba(255,255,255,0.08); border-radius:3px; color:var(--color-text-secondary);">{blameEntries.length}</span>
+            <span class="tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
           {/if}
         </button>
       </div>

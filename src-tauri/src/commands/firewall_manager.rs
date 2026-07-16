@@ -22,11 +22,13 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
         return Err("firewall-cmd is not available".to_string());
     }
 
-    let state_out = Command::new("firewall-cmd")
-        .arg("--state")
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let state_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .arg("--state")
+            .output()
+    ).await.map_err(|_| "firewall-cmd --state timed out".to_string())?
+    .map_err(|e| e.to_string())?;
 
     let is_running = String::from_utf8_lossy(&state_out.stdout).trim() == "running";
 
@@ -39,31 +41,45 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
         });
     }
 
-    let panic_out = Command::new("firewall-cmd")
-        .arg("--query-panic")
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let panic_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .arg("--query-panic")
+            .output()
+    ).await.map_err(|_| "firewall-cmd --query-panic timed out".to_string())?
+    .map_err(|e| e.to_string())?;
     let is_panic = String::from_utf8_lossy(&panic_out.stdout).trim() == "yes";
 
-    let default_zone = Command::new("firewall-cmd")
-        .arg("--get-default-zone")
-        .output()
-        .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let default_zone_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .arg("--get-default-zone")
+            .output()
+    ).await;
+    let default_zone = match default_zone_out {
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    };
 
-    let active_zones_out = Command::new("firewall-cmd")
-        .arg("--get-active-zones")
-        .output()
-        .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+    let active_zones_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .arg("--get-active-zones")
+            .output()
+    ).await;
+    let active_zones_raw = match active_zones_out {
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => String::new(),
+    };
 
     let mut active_zones = Vec::new();
-    for line in active_zones_out.lines() {
+    for line in active_zones_raw.lines() {
         if !line.starts_with(' ') && !line.is_empty() {
-            active_zones.push(line.trim().to_string());
+            let mut zone = line.trim().to_string();
+            if zone.ends_with(" (default)") {
+                zone = zone.replace(" (default)", "");
+            }
+            active_zones.push(zone);
         }
     }
 
@@ -81,27 +97,37 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
 
 #[tauri::command]
 pub async fn get_zone_rules(zone: String) -> Result<ZoneRules, String> {
-    let services_out = Command::new("firewall-cmd")
-        .args(["--zone", &zone, "--list-services"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    let services: Vec<String> = String::from_utf8_lossy(&services_out.stdout)
-        .trim()
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let services_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .args(["--zone", &zone, "--list-services"])
+            .output()
+    ).await;
+    
+    let services: Vec<String> = match services_out {
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    };
 
-    let ports_out = Command::new("firewall-cmd")
-        .args(["--zone", &zone, "--list-ports"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    let ports: Vec<String> = String::from_utf8_lossy(&ports_out.stdout)
-        .trim()
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let ports_out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .args(["--zone", &zone, "--list-ports"])
+            .output()
+    ).await;
+    
+    let ports: Vec<String> = match ports_out {
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    };
 
     Ok(ZoneRules {
         zone,
@@ -173,11 +199,13 @@ pub async fn toggle_panic_mode(enable: bool) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String> {
-    let output = Command::new("firewall-cmd")
-        .args(["--zone", &zone, "--list-rich-rules"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .args(["--zone", &zone, "--list-rich-rules"])
+            .output()
+    ).await.map_err(|_| "firewall-cmd --list-rich-rules timed out".to_string())?
+    .map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
@@ -193,11 +221,13 @@ pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String
 
 #[tauri::command]
 pub async fn firewall_get_zone_interfaces(zone: String) -> Result<Vec<String>, String> {
-    let output = Command::new("firewall-cmd")
-        .args(["--zone", &zone, "--list-interfaces"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .args(["--zone", &zone, "--list-interfaces"])
+            .output()
+    ).await.map_err(|_| "firewall-cmd --list-interfaces timed out".to_string())?
+    .map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
@@ -214,11 +244,13 @@ pub async fn firewall_get_zone_interfaces(zone: String) -> Result<Vec<String>, S
 
 #[tauri::command]
 pub async fn firewall_get_all_interfaces() -> Result<Vec<String>, String> {
-    let output = Command::new("ip")
-        .args(["-o", "link", "show"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("ip")
+            .args(["-o", "link", "show"])
+            .output()
+    ).await.map_err(|_| "ip link show timed out".to_string())?
+    .map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());

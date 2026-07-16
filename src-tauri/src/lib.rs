@@ -74,6 +74,10 @@ use commands::{
     },
     system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_dashboard_resources, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution},
     journal_viewer::{get_journal_logs},
+    security_auditor::{
+        security_run_audit, security_fix_root_ssh, security_fix_password_policy,
+        security_fix_firewall, security_fix_selinux,
+    },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -104,12 +108,17 @@ pub fn log_to_file(level: &str, message: &str) {
 
 /// Check if a binary exists in PATH.
 pub async fn binary_exists(name: &str) -> bool {
-    crate::utils::privilege::tokio::Command::new("which")
-        .arg(name)
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let out = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        crate::utils::privilege::tokio::Command::new("which")
+            .arg(name)
+            .output()
+    ).await;
+    
+    match out {
+        Ok(Ok(o)) => o.status.success(),
+        _ => false,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -316,6 +325,12 @@ pub fn run() {
             check_sudo_status,
             // Journal Viewer
             get_journal_logs,
+            // Security Auditor
+            security_run_audit,
+            security_fix_root_ssh,
+            security_fix_password_policy,
+            security_fix_firewall,
+            security_fix_selinux,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
