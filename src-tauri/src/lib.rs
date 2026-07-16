@@ -19,7 +19,7 @@ use commands::{
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
     grub_manager::{read_grub_config, rebuild_grub, write_grub_config},
     hosts_manager::{read_hosts, write_hosts},
-    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo},
+    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds},
     selinux_manager::{get_selinux_denials, get_selinux_status, set_selinux_state},
     service_manager::{
         get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file,
@@ -56,7 +56,11 @@ use commands::{
         network_set_interface_state
     },
     device_manager::{device_get_all},
-    app_manager::{list_desktop_apps, get_app_meta, get_app_details, uninstall_app},
+    app_manager::{
+        list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
+        get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
+        scan_local_appimages, register_appimage
+    },
     system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_dashboard_resources, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution},
     journal_viewer::{get_journal_logs},
 };
@@ -110,6 +114,8 @@ pub fn run() {
             toggle_repo,
             add_repo,
             run_makecache,
+            save_repo_details,
+            test_repo_mirror_speeds,
             // DNF History
             list_dnf_history,
             undo_transaction,
@@ -240,6 +246,11 @@ pub fn run() {
             get_app_meta,
             get_app_details,
             uninstall_app,
+            get_flatpak_permissions,
+            set_flatpak_permission,
+            get_app_dependencies,
+            scan_local_appimages,
+            register_appimage,
             // System Info
             get_network_interfaces,
             get_system_stats,

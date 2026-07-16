@@ -336,3 +336,316 @@ Cleanup finished with code {}.", cleanup_status.code().unwrap_or(1)));
 
     Ok(())
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FlatpakPermissions {
+    pub network: bool,
+    pub ipc: bool,
+    pub fallback_x11: bool,
+    pub x11: bool,
+    pub wayland: bool,
+    pub pulseaudio: bool,
+    pub gpu: bool,
+    pub host_files: bool,
+    pub home_files: bool,
+}
+
+fn parse_flatpak_ini(content: &str, permissions: &mut FlatpakPermissions, _is_override: bool) {
+    let mut in_context = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_context = line.to_lowercase() == "[context]";
+        } else if in_context {
+            if let Some((key, val)) = line.split_once('=') {
+                let val = val.trim();
+                let items: Vec<&str> = val.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                
+                match key.trim().to_lowercase().as_str() {
+                    "shared" => {
+                        for item in items {
+                            let (negated, name) = if item.starts_with('!') { (true, &item[1..]) } else { (false, item) };
+                            if name == "network" {
+                                permissions.network = !negated;
+                            } else if name == "ipc" {
+                                permissions.ipc = !negated;
+                            }
+                        }
+                    }
+                    "sockets" => {
+                        for item in items {
+                            let (negated, name) = if item.starts_with('!') { (true, &item[1..]) } else { (false, item) };
+                            match name {
+                                "x11" => permissions.x11 = !negated,
+                                "wayland" => permissions.wayland = !negated,
+                                "fallback-x11" => permissions.fallback_x11 = !negated,
+                                "pulseaudio" => permissions.pulseaudio = !negated,
+                                _ => {}
+                            }
+                        }
+                    }
+                    "devices" => {
+                        for item in items {
+                            let (negated, name) = if item.starts_with('!') { (true, &item[1..]) } else { (false, item) };
+                            if name == "dri" {
+                                permissions.gpu = !negated;
+                            }
+                        }
+                    }
+                    "filesystems" => {
+                        for item in items {
+                            let (negated, name) = if item.starts_with('!') { (true, &item[1..]) } else { (false, item) };
+                            if name == "host" {
+                                permissions.host_files = !negated;
+                            } else if name == "home" {
+                                permissions.home_files = !negated;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_flatpak_permissions(app_id: String) -> Result<FlatpakPermissions, String> {
+    let mut perms = FlatpakPermissions {
+        network: false,
+        ipc: false,
+        fallback_x11: false,
+        x11: false,
+        wayland: false,
+        pulseaudio: false,
+        gpu: false,
+        host_files: false,
+        home_files: false,
+    };
+
+    let mut base_metadata = None;
+    let paths = vec![
+        format!("/var/lib/flatpak/app/{}/current/active/metadata", app_id),
+        format!("/var/lib/flatpak/app/{}/x86_64/stable/active/metadata", app_id),
+    ];
+
+    let mut found_path = None;
+    for p in paths {
+        let path = Path::new(&p);
+        if path.exists() {
+            found_path = Some(path.to_path_buf());
+            break;
+        }
+    }
+
+    if found_path.is_none() {
+        if let Some(home) = dirs::home_dir() {
+            let user_paths = vec![
+                home.join(format!(".local/share/flatpak/app/{}/current/active/metadata", app_id)),
+                home.join(format!(".local/share/flatpak/app/{}/x86_64/stable/active/metadata", app_id)),
+            ];
+            for p in user_paths {
+                if p.exists() {
+                    found_path = Some(p);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(path) = found_path {
+        if let Ok(content) = fs::read_to_string(path) {
+            base_metadata = Some(content);
+        }
+    }
+
+    if base_metadata.is_none() {
+        if let Ok(output) = Command::new("flatpak")
+            .args(["info", "--show-metadata", &app_id])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let content = String::from_utf8_lossy(&output.stdout).to_string();
+                base_metadata = Some(content);
+            }
+        }
+    }
+
+    if let Some(content) = base_metadata {
+        parse_flatpak_ini(&content, &mut perms, false);
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let override_path = home.join(format!(".local/share/flatpak/overrides/{}", app_id));
+        if override_path.exists() {
+            if let Ok(content) = fs::read_to_string(override_path) {
+                parse_flatpak_ini(&content, &mut perms, true);
+            }
+        }
+    }
+
+    Ok(perms)
+}
+
+#[tauri::command]
+pub async fn set_flatpak_permission(
+    app_id: String,
+    permission: String,
+    enable: bool,
+) -> Result<(), String> {
+    let mut args = vec!["override", "--user"];
+    
+    let opt = match permission.as_str() {
+        "network" => if enable { "--share=network" } else { "--unshare=network" },
+        "ipc" => if enable { "--share=ipc" } else { "--unshare=ipc" },
+        "x11" => if enable { "--socket=x11" } else { "--nosocket=x11" },
+        "wayland" => if enable { "--socket=wayland" } else { "--nosocket=wayland" },
+        "fallback_x11" => if enable { "--socket=fallback-x11" } else { "--nosocket=fallback-x11" },
+        "pulseaudio" => if enable { "--socket=pulseaudio" } else { "--nosocket=pulseaudio" },
+        "gpu" => if enable { "--device=dri" } else { "--nodevice=dri" },
+        "host_files" => if enable { "--filesystem=host" } else { "--nofilesystem=host" },
+        "home_files" => if enable { "--filesystem=home" } else { "--nofilesystem=home" },
+        _ => return Err(format!("Unknown permission type: {}", permission)),
+    };
+    
+    args.push(opt);
+    args.push(&app_id);
+
+    let output = Command::new("flatpak")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run flatpak override: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("flatpak override failed: {err}"));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_app_dependencies(package_id: String, source: String) -> Result<Vec<String>, String> {
+    let mut deps = Vec::new();
+    if source == "Flatpak" {
+        if let Ok(output) = Command::new("flatpak")
+            .arg("info")
+            .arg(&package_id)
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if line.starts_with("Runtime:") || line.starts_with("Sdk:") || line.starts_with("Ref:") {
+                        deps.push(line.to_string());
+                    }
+                }
+            }
+        }
+    } else {
+        if let Ok(output) = Command::new("rpm")
+            .arg("-q")
+            .arg("--requires")
+            .arg(&package_id)
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("rpmlib(") && !line.is_empty() {
+                        deps.push(line.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(deps)
+}
+
+#[tauri::command]
+pub async fn scan_local_appimages() -> Result<Vec<DesktopApp>, String> {
+    let mut apps = Vec::new();
+    let mut scan_dirs = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        let apps_dir = home.join("Applications");
+        if apps_dir.exists() {
+            scan_dirs.push(apps_dir);
+        }
+        let bin_dir = home.join(".local/bin");
+        if bin_dir.exists() {
+            scan_dirs.push(bin_dir);
+        }
+    }
+
+    for dir in scan_dirs {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let lower = filename.to_lowercase();
+                    if lower.ends_with(".appimage") {
+                        let path_str = path.to_string_lossy().to_string();
+                        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                        let desktop_filename = format!("appimage-{}.desktop", stem.replace(' ', "-").to_lowercase());
+                        
+                        let has_shortcut = dirs::home_dir()
+                            .map(|h| h.join(".local/share/applications").join(&desktop_filename).exists())
+                            .unwrap_or(false);
+
+                        apps.push(DesktopApp {
+                            name: stem,
+                            exec: path_str.clone(),
+                            source: "AppImage".to_string(),
+                            package_id: Some(if has_shortcut { desktop_filename } else { "".to_string() }),
+                            file_path: path_str,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(apps)
+}
+
+#[tauri::command]
+pub async fn register_appimage(
+    name: String,
+    exec_path: String,
+    icon: Option<String>,
+    create_shortcut: bool,
+) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not find home directory".to_string())?;
+    let desktop_dir = home.join(".local/share/applications");
+    let _ = fs::create_dir_all(&desktop_dir);
+
+    let stem = Path::new(&exec_path).file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let desktop_filename = format!("appimage-{}.desktop", stem.replace(' ', "-").to_lowercase());
+    let desktop_filepath = desktop_dir.join(&desktop_filename);
+
+    if create_shortcut {
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName={}\nExec=\"{}\"\nIcon={}\nCategories=Utility;Application;\nTerminal=false\nComment=AppImage Application\n",
+            name,
+            exec_path,
+            icon.unwrap_or_else(|| "system-run".to_string())
+        );
+        fs::write(&desktop_filepath, content)
+            .map_err(|e| format!("Failed to write desktop shortcut file: {e}"))?;
+    } else {
+        if desktop_filepath.exists() {
+            let _ = fs::remove_file(desktop_filepath);
+        }
+    }
+
+    Ok(())
+}
