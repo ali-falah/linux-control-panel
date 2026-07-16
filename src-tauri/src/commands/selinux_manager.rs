@@ -278,8 +278,8 @@ pub async fn selinux_apply_policy_override(name: String, raw_log: String) -> Res
 
     use tokio::io::AsyncWriteExt;
     
-    let mut child = Command::new("pkexec")
-        .args(["audit2allow", "-M", &module_name])
+    let mut child = Command::new("audit2allow")
+        .args(["-M", &module_name])
         .current_dir(&temp_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

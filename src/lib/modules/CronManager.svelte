@@ -23,7 +23,16 @@
     is_root: boolean;
   }
 
+  interface SystemdTimer {
+    unit: string;
+    activates: string;
+    status: string;
+    description: string;
+  }
+
+  let view = $state<'cron' | 'timers'>('cron');
   let jobs = $state<CronJob[]>([]);
+  let timers = $state<SystemdTimer[]>([]);
   let loading = $state(true);
 
   let showAdd = $state(false);
@@ -31,15 +40,20 @@
   let newSchedule = $state('* * * * *');
   let newCommand = $state('');
 
-  async function loadJobs() {
+  async function loadData() {
     loading = true;
-    statusStore.setBusy('Loading cron jobs…');
+    statusStore.setBusy('Loading scheduled tasks…');
     try {
-      jobs = await invoke<CronJob[]>('list_cron_jobs');
-      statusStore.setLastCommand('crontab -l', 0, true);
+      const [cj, st] = await Promise.all([
+        invoke<CronJob[]>('list_cron_jobs'),
+        invoke<SystemdTimer[]>('cron_list_timers')
+      ]);
+      jobs = cj;
+      timers = st;
+      statusStore.setLastCommand('crontab -l; systemctl list-timers', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load cron jobs: ${e}`, 'error');
-      statusStore.setLastCommand('crontab -l', 1, false);
+      uiStore.addToast(`Failed to load tasks: ${e}`, 'error');
+      statusStore.setLastCommand('crontab -l; systemctl list-timers', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -55,7 +69,7 @@
       uiStore.addToast('Cron job added', 'success');
       showAdd = false;
       newCommand = '';
-      await loadJobs();
+      await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to add cron job: ${e}`, 'error');
       statusStore.setLastCommand(`(crontab -l; echo "${newSchedule} ${newCommand}") | crontab -`, 1, false);
@@ -79,10 +93,27 @@
       await invoke('delete_cron_job', { raw: job.raw, isRoot: job.is_root });
       statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 0, true);
       uiStore.addToast('Cron job deleted', 'success');
-      await loadJobs();
+      await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to delete cron job: ${e}`, 'error');
       statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 1, false);
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  async function toggleTimer(timer: SystemdTimer) {
+    const isEnabled = timer.status.includes('active') && timer.status.includes('running') || timer.status.includes('waiting');
+    const enable = !isEnabled;
+    statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} timer ${timer.unit}…`);
+    try {
+      await invoke('cron_toggle_timer', { unit: timer.unit, enable });
+      uiStore.addToast(`Timer ${timer.unit} ${enable ? 'enabled' : 'disabled'}`, 'success');
+      statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} --now ${timer.unit}`, 0, true);
+      await loadData();
+    } catch (e) {
+      uiStore.addToast(`Failed to toggle timer: ${e}`, 'error');
+      statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} --now ${timer.unit}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -106,17 +137,23 @@
     }
   }
 
-  $effect(() => { loadJobs(); });
+  $effect(() => { loadData(); });
 </script>
 
 <div class="module-page">
-  <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs" icon={Clock}>
-    <Button variant="ghost" class="" onclick={loadJobs} disabled={loading}>
+  <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs, and systemd timers" icon={Clock}>
+    <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
+      <Button class="btn btn-sm {view === 'cron' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'cron'}>Cron Jobs</Button>
+      <Button class="btn btn-sm {view === 'timers' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'timers'}>Systemd Timers</Button>
+    </div>
+    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button variant="primary" class="" onclick={() => showAdd = true}>
-      <Plus size={14} /> Add Job
-    </Button>
+    {#if view === 'cron'}
+      <Button variant="primary" class="" onclick={() => showAdd = true}>
+        <Plus size={14} /> Add Job
+      </Button>
+    {/if}
   </PageHeader>
 
   <SideDrawer bind:isOpen={showAdd} title="Create Scheduled Task" width="500px">
@@ -171,71 +208,132 @@
   </SideDrawer>
 
   <div class="card module-content-scroll" style="padding:0">
-    <div class="table-wrap" style="border:none; border-radius:0">
-      <table use:tableFeatures>
-        <thead>
-          <tr>
-            <th style="width:140px">Schedule</th>
-            <th>Command</th>
-            <th style="width:100px">User</th>
-            <th style="text-align:right; width:80px">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#if loading}
+    {#if view === 'cron'}
+      <div class="table-wrap" style="border:none; border-radius:0">
+        <table use:tableFeatures>
+          <thead>
             <tr>
-              <td colspan="4">
-                <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
-                  <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
-                    <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
-                  </div>
-                  <span style="font-weight:500">Loading cron jobs…</span>
-                </div>
-              </td>
+              <th style="width:140px">Schedule</th>
+              <th>Command</th>
+              <th style="width:100px">User</th>
+              <th style="text-align:right; width:80px">Actions</th>
             </tr>
-          {:else if jobs.length === 0}
-            <tr>
-              <td colspan="4">
-                <div class="empty-state" style="padding: 64px 32px;">
-                  <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-                    <Clock size={32} class="empty-state-icon" style="margin:0" />
-                  </div>
-                  <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-                    No Scheduled Tasks
-                  </span>
-                  <span style="color:var(--color-text-muted); margin-top:8px;">
-                    You haven't added any cron jobs yet.
-                  </span>
-                  <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAdd = true}>
-                    <Plus size={14} /> Add First Job
-                  </Button>
-                </div>
-              </td>
-            </tr>
-          {:else}
-            {#each jobs as job}
+          </thead>
+          <tbody>
+            {#if loading}
               <tr>
-                <td><code style="font-size:12px">{job.schedule}</code></td>
-                <td><span style="font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary)">{job.command}</span></td>
-                <td>
-                  {#if job.is_root}
-                    <span class="badge badge-danger"><ShieldAlert size={10} style="margin-right:4px"/> Root</span>
-                  {:else}
-                    <span class="badge badge-info"><Shield size={10} style="margin-right:4px"/> User</span>
-                  {/if}
-                </td>
-                <td style="text-align:right">
-                  <KebabMenu>
-                    <button class="menu-item danger" onclick={() => confirmDelete(job)}>
-                      <Trash2 size={14} /> Delete Job
-                    </button>
-                  </KebabMenu>
+                <td colspan="4">
+                  <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+                    <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+                      <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+                    </div>
+                    <span style="font-weight:500">Loading cron jobs…</span>
+                  </div>
                 </td>
               </tr>
-            {/each}
-          {/if}
-        </tbody>
-      </table>
-    </div>
+            {:else if jobs.length === 0}
+              <tr>
+                <td colspan="4">
+                  <div class="empty-state" style="padding: 64px 32px;">
+                    <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+                      <Clock size={32} class="empty-state-icon" style="margin:0" />
+                    </div>
+                    <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+                      No Scheduled Tasks
+                    </span>
+                    <span style="color:var(--color-text-muted); margin-top:8px;">
+                      You haven't added any cron jobs yet.
+                    </span>
+                    <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAdd = true}>
+                      <Plus size={14} /> Add First Job
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            {:else}
+              {#each jobs as job}
+                <tr>
+                  <td><code style="font-size:12px">{job.schedule}</code></td>
+                  <td><span style="font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary)">{job.command}</span></td>
+                  <td>
+                    {#if job.is_root}
+                      <span class="badge badge-danger"><ShieldAlert size={10} style="margin-right:4px"/> Root</span>
+                    {:else}
+                      <span class="badge badge-info"><Shield size={10} style="margin-right:4px"/> User</span>
+                    {/if}
+                  </td>
+                  <td style="text-align:right">
+                    <KebabMenu>
+                      <button class="menu-item danger" onclick={() => confirmDelete(job)}>
+                        <Trash2 size={14} /> Delete Job
+                      </button>
+                    </KebabMenu>
+                  </td>
+                </tr>
+              {/each}
+            {/if}
+          </tbody>
+        </table>
+      </div>
+    {:else}
+      <div class="table-wrap" style="border:none; border-radius:0">
+        <table use:tableFeatures>
+          <thead>
+            <tr>
+              <th>Timer Unit</th>
+              <th>Activates</th>
+              <th>Status</th>
+              <th>Description</th>
+              <th style="text-align:right">Enable / Disable</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#if loading}
+              <tr>
+                <td colspan="5">
+                  <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+                    <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+                      <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+                    </div>
+                    <span style="font-weight:500">Loading timers…</span>
+                  </div>
+                </td>
+              </tr>
+            {:else if timers.length === 0}
+              <tr>
+                <td colspan="5">
+                  <div class="empty-state" style="padding: 64px 32px;">
+                    <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+                      No Systemd Timers Found
+                    </span>
+                  </div>
+                </td>
+              </tr>
+            {:else}
+              {#each timers as timer}
+                <tr>
+                  <td><code style="font-size:12px">{timer.unit}</code></td>
+                  <td>{timer.activates}</td>
+                  <td>
+                    {#if timer.status.includes('active')}
+                      <span class="badge badge-success">{timer.status}</span>
+                    {:else}
+                      <span class="badge badge-outline">{timer.status}</span>
+                    {/if}
+                  </td>
+                  <td><span style="font-size:12px; color:var(--color-text-secondary);">{timer.description || '—'}</span></td>
+                  <td style="text-align:right; display:flex; justify-content:flex-end;">
+                    <Toggle 
+                      checked={timer.status.includes('active') && (timer.status.includes('running') || timer.status.includes('waiting'))} 
+                      onToggle={() => toggleTimer(timer)} 
+                    />
+                  </td>
+                </tr>
+              {/each}
+            {/if}
+          </tbody>
+        </table>
+      </div>
+    {/if}
   </div>
 </div>

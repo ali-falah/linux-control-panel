@@ -15,11 +15,12 @@
   import { Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield } from '@lucide/svelte';
   import { Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle } from '@lucide/svelte';
   import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download } from '@lucide/svelte';
-  import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save } from '@lucide/svelte';
+  import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2 } from '@lucide/svelte';
   import { TerminalSquare, Filter, Search } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
 
   // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -36,13 +37,28 @@
     server_name: string; root_dir: string; port: number; is_proxy: boolean;
     proxy_url: string; index_file: string; enable_404: boolean; enable_50x: boolean;
   }
+  interface NginxLogAnalytics {
+    total_requests: number; unique_ips: number; status_2xx: number; status_3xx: number; status_4xx: number; status_5xx: number;
+    top_ips: [string, number][]; top_paths: [string, number][];
+  }
 
   // ─── State ────────────────────────────────────────────────────────────────
 
-  let activeTab = $state<'overview'|'sites'|'editor'|'www'|'logs'|'ssl'>('overview');
+  let activeTab = $state<'overview'|'sites'|'editor'|'www'|'logs'|'analytics'|'ssl'>('overview');
   let installInfo = $state<NginxInstallInfo | null>(null);
   let loading = $state(true);
   let hasCertbot = $state(false);
+
+  // Proxy Wizard
+  let showProxyWizard = $state(false);
+  let proxyConfig = $state({ domain: '', target_ip: '127.0.0.1', target_port: '8080', enable_websockets: false });
+  let proxyLoading = $state(false);
+
+  // Analytics
+  let analyticsData = $state<NginxLogAnalytics | null>(null);
+  let analyticsLoading = $state(false);
+  let analyticsLogFile = $state('/var/log/nginx/access.log');
+
 
   // Overview
   let serviceStatus = $state<NginxServiceStatus | null>(null);
@@ -686,14 +702,67 @@
     );
   }
 
+  async function loadAnalytics() {
+    analyticsLoading = true;
+    try {
+      analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', { path: analyticsLogFile });
+      statusStore.setLastCommand(`tail -n 10000 ${analyticsLogFile}`, 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to load analytics: ${e}`, 'error');
+      statusStore.setLastCommand(`tail -n 10000 ${analyticsLogFile}`, 1, false);
+    } finally {
+      analyticsLoading = false;
+    }
+  }
+
+  async function createProxy() {
+    if (!proxyConfig.domain.trim() || !proxyConfig.target_ip.trim() || !proxyConfig.target_port.trim()) {
+      uiStore.addToast('All proxy fields are required', 'warning');
+      return;
+    }
+    proxyLoading = true;
+    try {
+      const confStr = await invoke<string>('nginx_generate_reverse_proxy', {
+        domain: proxyConfig.domain,
+        targetIp: proxyConfig.target_ip,
+        targetPort: proxyConfig.target_port,
+        enableWebsockets: proxyConfig.enable_websockets
+      });
+      const path = `/etc/nginx/sites-available/${proxyConfig.domain}.conf`;
+      await invoke('nginx_write_config', { path, content: confStr });
+      uiStore.addToast(`Reverse Proxy created at ${path} ✓`, 'success');
+      showProxyWizard = false;
+      proxyConfig = { domain: '', target_ip: '127.0.0.1', target_port: '8080', enable_websockets: false };
+      await loadSites();
+      await loadStats();
+    } catch (e) {
+      uiStore.addToast(`Proxy creation failed: ${e}`, 'error');
+      showOutputModal = true;
+      outputModalTitle = 'Proxy Creation Failed';
+      outputModalContent = String(e);
+    } finally {
+      proxyLoading = false;
+    }
+  }
+
   const tabDefs = $derived([
     { id: 'overview', label: 'Overview', icon: Activity },
     { id: 'sites',    label: 'Sites',    icon: Globe },
     { id: 'editor',   label: 'Config Editor', icon: FileCode },
     { id: 'www',      label: 'WWW Files', icon: FolderOpen },
     { id: 'logs',     label: 'Logs',     icon: FileText },
+    { id: 'analytics',label: 'Analytics',icon: BarChart2 },
     ...(hasCertbot ? [{ id: 'ssl', label: 'SSL', icon: Lock }] : []),
   ] as { id: typeof activeTab; label: string; icon: any }[]);
+
+  $effect(() => {
+    if (activeTab === 'editor' && configs.length === 0) loadConfigs();
+    if (activeTab === 'sites' && sites.length === 0) loadSites();
+    if (activeTab === 'www' && wwwEntries.length === 0) loadWww();
+    if (activeTab === 'logs' && logFiles.length === 0) loadLogFiles();
+    if (activeTab === 'analytics' && !analyticsData) loadAnalytics();
+    if (activeTab === 'ssl' && sslCerts.length === 0 && hasCertbot) loadSslCerts();
+  });
 
   function hasChanges() {
     return editorContent !== savedContent;
@@ -762,6 +831,9 @@
           </Button>
           <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
             <Plus size={13} /> New Site
+          </Button>
+          <Button variant="primary" class="btn-sm" onclick={() => (showProxyWizard = true)} id="nginx-new-proxy">
+            <Globe size={13} /> New Proxy
           </Button>
         {:else if activeTab === 'editor'}
           <Button variant="outline" class="btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
@@ -1251,6 +1323,70 @@
           {/if}
         </div>
 
+      <!-- ══ ANALYTICS ══════════════════════════════════════════════════════════ -->
+      {:else if activeTab === 'analytics'}
+        <div class="tab-section" style="display:flex; flex-direction:column; gap:16px;">
+          {#if analyticsLoading}
+            <div class="center-state"><div class="spinner"></div></div>
+          {:else if analyticsData}
+            <div style="display:flex; gap:16px; flex-wrap:wrap;">
+              <!-- Summary Cards -->
+              <div class="card" style="flex:1; min-width:200px;">
+                <h4 style="margin:0 0 8px; color:var(--color-text-secondary); font-size:12px;">Total Requests</h4>
+                <div style="font-size:24px; font-weight:600;">{analyticsData.total_requests}</div>
+              </div>
+              <div class="card" style="flex:1; min-width:200px;">
+                <h4 style="margin:0 0 8px; color:var(--color-text-secondary); font-size:12px;">Unique IPs</h4>
+                <div style="font-size:24px; font-weight:600;">{analyticsData.unique_ips}</div>
+              </div>
+            </div>
+
+            <!-- HTTP Status Codes Bar Chart -->
+            <div class="card">
+              <h3 style="margin-top:0;">HTTP Status Codes</h3>
+              <div style="display:flex; height:24px; border-radius:4px; overflow:hidden; background:var(--color-bg-raised); margin-top:12px; margin-bottom:12px;">
+                {#if analyticsData.total_requests > 0}
+                  <div style="width:{(analyticsData.status_2xx / analyticsData.total_requests) * 100}%; background:var(--color-success);" title="2xx: {analyticsData.status_2xx}"></div>
+                  <div style="width:{(analyticsData.status_3xx / analyticsData.total_requests) * 100}%; background:var(--color-info);" title="3xx: {analyticsData.status_3xx}"></div>
+                  <div style="width:{(analyticsData.status_4xx / analyticsData.total_requests) * 100}%; background:var(--color-warning);" title="4xx: {analyticsData.status_4xx}"></div>
+                  <div style="width:{(analyticsData.status_5xx / analyticsData.total_requests) * 100}%; background:var(--color-danger);" title="5xx: {analyticsData.status_5xx}"></div>
+                {/if}
+              </div>
+              <div style="display:flex; gap:16px; font-size:12px; flex-wrap:wrap;">
+                <span style="color:var(--color-success)">● 2xx ({(analyticsData.status_2xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
+                <span style="color:var(--color-info)">● 3xx ({(analyticsData.status_3xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
+                <span style="color:var(--color-warning)">● 4xx ({(analyticsData.status_4xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
+                <span style="color:var(--color-danger)">● 5xx ({(analyticsData.status_5xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:16px;">
+              <div class="card" style="flex:1;">
+                <h3 style="margin-top:0;">Top IP Addresses</h3>
+                <table class="table" style="margin-top:12px;">
+                  <thead><tr><th>IP Address</th><th style="text-align:right">Hits</th></tr></thead>
+                  <tbody>
+                    {#each analyticsData.top_ips as [ip, count]}
+                      <tr><td>{ip}</td><td style="text-align:right">{count}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <div class="card" style="flex:1;">
+                <h3 style="margin-top:0;">Top Requested Paths</h3>
+                <table class="table" style="margin-top:12px;">
+                  <thead><tr><th>Path</th><th style="text-align:right">Hits</th></tr></thead>
+                  <tbody>
+                    {#each analyticsData.top_paths as [path, count]}
+                      <tr><td style="word-break:break-all;">{path}</td><td style="text-align:right">{count}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {/if}
+        </div>
+
       <!-- ══ SSL ════════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'ssl'}
         <div class="tab-section">
@@ -1419,6 +1555,52 @@
     </div>
   </div>
 {/if}
+
+<SideDrawer bind:isOpen={showProxyWizard} title="Reverse Proxy Wizard" width="460px">
+  <div style="display:flex; flex-direction:column; gap:16px; padding-top:8px;">
+    <div style="font-size:13px; color:var(--color-text-secondary); line-height:1.5;">
+      Quickly configure Nginx as a reverse proxy for another local or remote service. This generator creates a new site configuration routing all HTTP traffic for a specific domain to your target server.
+    </div>
+
+    <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
+      <label for="proxy-domain" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Domain Name</label>
+      <input id="proxy-domain" type="text" class="input" bind:value={proxyConfig.domain} placeholder="e.g. app.example.com" />
+    </div>
+
+    <div style="display:flex; gap:16px;">
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px; flex:2;">
+        <label for="proxy-target" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target IP / Host</label>
+        <input id="proxy-target" type="text" class="input" bind:value={proxyConfig.target_ip} placeholder="127.0.0.1" />
+      </div>
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px; flex:1;">
+        <label for="proxy-port" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target Port</label>
+        <input id="proxy-port" type="text" class="input" bind:value={proxyConfig.target_port} placeholder="8080" />
+      </div>
+    </div>
+
+    <div class="form-group" style="display:flex; align-items:center; justify-content:space-between; padding:12px; background:var(--color-bg-raised); border-radius:8px; border:1px solid var(--color-border);">
+      <div style="display:flex; flex-direction:column; gap:4px;">
+        <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Enable WebSockets</span>
+        <span style="font-size:11.5px; color:var(--color-text-secondary);">Add Upgrade and Connection headers</span>
+      </div>
+      <Toggle checked={proxyConfig.enable_websockets} onToggle={(val) => proxyConfig.enable_websockets = val} />
+    </div>
+
+    <div style="padding:12px; background:var(--color-bg-raised); border-left:3px solid var(--color-accent); border-radius:4px; margin-top:4px;">
+      <span style="font-size:12px; font-weight:600; color:var(--color-text-primary); display:block; margin-bottom:4px;">Note on SSL/HTTPS</span>
+      <span style="font-size:12px; color:var(--color-text-secondary); line-height:1.4; display:block;">
+        This wizard generates a standard HTTP (Port 80) configuration. To secure this proxy with HTTPS, use the <strong>SSL / Certbot</strong> tab to request a certificate after the site is created.
+      </span>
+    </div>
+
+    <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:8px;">
+      <Button variant="outline" onclick={() => showProxyWizard = false}>Cancel</Button>
+      <Button variant="primary" disabled={proxyLoading} onclick={createProxy}>
+        {proxyLoading ? 'Generating...' : 'Generate Proxy'}
+      </Button>
+    </div>
+  </div>
+</SideDrawer>
 
 <style>
   /* ─── Layout ─────────────────────────────────────────────────────────── */

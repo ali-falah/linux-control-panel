@@ -13,6 +13,7 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
 
   interface UserInfo {
     username: string;
@@ -31,9 +32,21 @@
     members: string[];
   }
 
-  let view = $state<'users' | 'groups'>('users');
+  interface ActiveSession {
+    session_id: string;
+    uid: string;
+    user: string;
+    seat: string;
+    tty: string;
+    state: string;
+    idle_since_hint: string;
+    is_current: boolean;
+  }
+
+  let view = $state<'users' | 'groups' | 'sessions'>('users');
   let users = $state<UserInfo[]>([]);
   let groupsList = $state<GroupInfo[]>([]);
+  let sessions = $state<ActiveSession[]>([]);
   let loading = $state(true);
   
   let showAddUser = $state(false);
@@ -48,20 +61,27 @@
   let selectedUser = $state<UserInfo | null>(null);
   let groupSearch = $state('');
 
+  // SSH keys modal
+  let showSshModal = $state(false);
+  let sshKeysContent = $state('');
+  let sshLoading = $state(false);
+
   async function loadData() {
     loading = true;
-    statusStore.setBusy('Loading users and groups…');
+    statusStore.setBusy('Loading users, groups, and sessions…');
     try {
-      const [u, g] = await Promise.all([
+      const [u, g, s] = await Promise.all([
         invoke<UserInfo[]>('list_users'),
-        invoke<GroupInfo[]>('list_groups')
+        invoke<GroupInfo[]>('list_groups'),
+        invoke<ActiveSession[]>('user_get_active_sessions')
       ]);
       users = u;
       groupsList = g;
-      statusStore.setLastCommand('cat /etc/passwd; cat /etc/group', 0, true);
+      sessions = s;
+      statusStore.setLastCommand('loginctl list-sessions', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load data: ${e}`, 'error');
-      statusStore.setLastCommand('cat /etc/passwd; cat /etc/group', 1, false);
+      statusStore.setLastCommand('loginctl list-sessions', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -224,6 +244,61 @@
     }
   }
 
+  async function openSshKeys(user: UserInfo) {
+    selectedUser = user;
+    sshLoading = true;
+    showSshModal = true;
+    try {
+      sshKeysContent = await invoke<string>('user_get_ssh_keys', { username: user.username });
+      statusStore.setLastCommand(`cat /home/${user.username}/.ssh/authorized_keys`, 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to read SSH keys: ${e}`, 'error');
+      sshKeysContent = '';
+    } finally {
+      sshLoading = false;
+    }
+  }
+
+  async function saveSshKeys() {
+    if (!selectedUser) return;
+    sshLoading = true;
+    try {
+      await invoke('user_save_ssh_keys', { username: selectedUser.username, keys: sshKeysContent });
+      uiStore.addToast('SSH keys saved', 'success');
+      showSshModal = false;
+      statusStore.setLastCommand(`echo ... > /home/${selectedUser.username}/.ssh/authorized_keys`, 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to save SSH keys: ${e}`, 'error');
+      statusStore.setLastCommand(`Save SSH keys for ${selectedUser.username}`, 1, false);
+    } finally {
+      sshLoading = false;
+    }
+  }
+
+  function confirmKillSession(session: ActiveSession) {
+    uiStore.confirm(
+      'Terminate Session',
+      `Are you sure you want to forcibly terminate session ${session.session_id} for user ${session.user}?\n\nWARNING: Forcible termination may lead to data loss or system instability if critical processes are running in this session.`,
+      () => doKillSession(session.session_id),
+      true
+    );
+  }
+
+  async function doKillSession(sessionId: string) {
+    statusStore.setBusy(`Terminating session ${sessionId}...`);
+    try {
+      await invoke('user_kill_session', { sessionId });
+      uiStore.addToast(`Session ${sessionId} terminated`, 'success');
+      statusStore.setLastCommand(`loginctl kill-session ${sessionId}`, 0, true);
+      await loadData();
+    } catch (e) {
+      uiStore.addToast(`Failed to terminate session: ${e}`, 'error');
+      statusStore.setLastCommand(`loginctl kill-session ${sessionId}`, 1, false);
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
   $effect(() => { loadData(); });
 </script>
 
@@ -232,6 +307,7 @@
     <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
       <Button class="btn btn-sm {view === 'users' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'users'}>Users</Button>
       <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>
+      <Button class="btn btn-sm {view === 'sessions' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'sessions'}>Sessions</Button>
     </div>
     <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
@@ -320,6 +396,9 @@
                     <button class="menu-item" onclick={() => {selectedUser = user; showGroupModal = true;}}>
                       <Layers size={14} /> Manage Groups
                     </button>
+                    <button class="menu-item" onclick={() => openSshKeys(user)}>
+                      <Key size={14} /> Edit SSH Keys
+                    </button>
                     <button class="menu-item" onclick={() => confirmToggleSudo(user)}>
                       {#if user.is_sudo}
                         <ShieldOff size={14} /> Revoke Sudo
@@ -340,7 +419,7 @@
           </tbody>
         </table>
       </div>
-    {:else}
+    {:else if view === 'groups'}
       <div class="table-wrap" style="border:none; border-radius:0">
         <table use:tableFeatures>
           <thead>
@@ -376,6 +455,56 @@
                 </td>
               </tr>
             {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else if view === 'sessions'}
+      <div class="table-wrap" style="border:none; border-radius:0">
+        <table use:tableFeatures>
+          <thead>
+            <tr>
+              <th>Session ID</th>
+              <th>User</th>
+              <th>Seat</th>
+              <th>TTY</th>
+              <th>State</th>
+              <th>Idle</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each sessions as session}
+              <tr>
+                <td>
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <code style="font-size:12px">{session.session_id}</code>
+                    {#if session.is_current}
+                      <span class="badge badge-info" style="font-size:10px; padding:2px 6px;">Current</span>
+                    {/if}
+                  </div>
+                </td>
+                <td>
+                  <div style="font-weight:600; color:var(--color-text-primary)">{session.user}</div>
+                  <div style="font-size:11px; color:var(--color-text-secondary)">UID: {session.uid}</div>
+                </td>
+                <td>{session.seat || '—'}</td>
+                <td>{session.tty || '—'}</td>
+                <td>
+                  <span class="badge {session.state === 'active' ? 'badge-success' : 'badge-outline'}">{session.state || 'unknown'}</span>
+                </td>
+                <td>{session.idle_since_hint || '—'}</td>
+                <td style="text-align:right">
+                  <KebabMenu>
+                    <button class="menu-item danger" onclick={() => confirmKillSession(session)} disabled={session.is_current} style={session.is_current ? 'opacity: 0.5; cursor: not-allowed;' : ''} title={session.is_current ? 'Cannot terminate current session' : ''}>
+                      <Trash2 size={14} /> Kill Session
+                    </button>
+                  </KebabMenu>
+                </td>
+              </tr>
+            {/each}
+            {#if sessions.length === 0}
+              <tr><td colspan="7" style="text-align:center; padding:24px; color:var(--color-text-muted)">No active sessions found</td></tr>
+            {/if}
           </tbody>
         </table>
       </div>
@@ -418,4 +547,29 @@
   </div>
 {/if}
 
+<SideDrawer bind:isOpen={showSshModal} title="SSH Authorized Keys" width="500px">
+  <div style="display:flex; flex-direction:column; gap:16px; padding-top:8px; height: 100%;">
+    <div style="font-size:13px; color:var(--color-text-secondary); line-height:1.5;">
+      Manage SSH keys for <strong>{selectedUser?.username}</strong>. Paste public keys below (one per line) to allow passwordless SSH login.
+    </div>
 
+    {#if sshLoading}
+      <div style="display:flex; justify-content:center; padding:24px;">
+        <div class="spinner"></div>
+      </div>
+    {:else}
+      <textarea 
+        bind:value={sshKeysContent} 
+        placeholder="ssh-rsa AAAAB3Nza... user@host"
+        style="flex:1; width:100%; min-height:300px; padding:12px; font-family:var(--font-mono); font-size:12px; background:var(--color-bg-base); border:1px solid var(--color-border); border-radius:8px; color:var(--color-text-primary); resize:vertical;"
+      ></textarea>
+    {/if}
+
+    <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:16px;">
+      <Button variant="outline" onclick={() => showSshModal = false}>Cancel</Button>
+      <Button variant="primary" disabled={sshLoading} onclick={saveSshKeys}>
+        Save Keys
+      </Button>
+    </div>
+  </div>
+</SideDrawer>

@@ -127,3 +127,70 @@ pub async fn delete_cron_job(raw: String, is_root: bool) -> Result<String, Strin
 
     Ok("Cron job deleted successfully".to_string())
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemdTimer {
+    pub unit: String,
+    pub activates: String,
+    pub status: String,
+    pub description: String,
+}
+
+#[tauri::command]
+pub async fn cron_list_timers() -> Result<Vec<SystemdTimer>, String> {
+    let output = Command::new("systemctl")
+        .args(["list-units", "--type=timer", "--all", "--no-legend", "--no-pager"])
+        .output()
+        .await
+        .map_err(|e| format!("systemctl list-units failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut timers = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let unit = parts[0].to_string();
+            let load = parts[1].to_string();
+            let active = parts[2].to_string();
+            let sub = parts[3].to_string();
+            let description = if parts.len() > 4 {
+                parts[4..].join(" ")
+            } else {
+                "".to_string()
+            };
+            
+            let status = format!("{} ({})", active, sub);
+            let activates = unit.replace(".timer", ".service");
+
+            timers.push(SystemdTimer {
+                unit,
+                activates,
+                status,
+                description,
+            });
+        }
+    }
+
+    Ok(timers)
+}
+
+#[tauri::command]
+pub async fn cron_toggle_timer(unit: String, enable: bool) -> Result<String, String> {
+    let action = if enable { "enable" } else { "disable" };
+    let output = Command::new("pkexec")
+        .args(["systemctl", action, "--now", &unit])
+        .output()
+        .await
+        .map_err(|e| format!("systemctl failed: {}", e))?;
+        
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    
+    Ok(format!("Timer {} successfully", if enable { "enabled and started" } else { "disabled and stopped" }))
+}

@@ -1117,3 +1117,134 @@ pub async fn nginx_renew_cert(domain: String) -> Result<String, String> {
     log_to_file("INFO", &format!("nginx_renew_cert {domain}"));
     Ok(combined)
 }
+
+#[tauri::command]
+pub fn nginx_generate_reverse_proxy(
+    domain: String,
+    target_ip: String,
+    target_port: String,
+    enable_websockets: bool,
+) -> Result<String, String> {
+    let ws_config = if enable_websockets {
+        "        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";"
+    } else {
+        ""
+    };
+
+    let conf = format!(r#"server {{
+    listen 80;
+    listen [::]:80;
+    server_name {};
+
+    location / {{
+        proxy_pass http://{}:{};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_addrs;
+        proxy_set_header X-Forwarded-Proto $scheme;
+{}
+    }}
+}}
+"#, domain, target_ip, target_port, ws_config);
+
+    Ok(conf)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NginxLogAnalytics {
+    pub total_requests: u32,
+    pub unique_ips: u32,
+    pub status_2xx: u32,
+    pub status_3xx: u32,
+    pub status_4xx: u32,
+    pub status_5xx: u32,
+    pub top_ips: Vec<(String, u32)>,
+    pub top_paths: Vec<(String, u32)>,
+}
+
+#[tauri::command]
+pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, String> {
+    let allowed_prefix = "/var/log/nginx/";
+    if !path.starts_with(allowed_prefix) {
+        return Err("Log path must be under /var/log/nginx/".to_string());
+    }
+
+    let out = Command::new("pkexec")
+        .args(["tail", "-n", "10000", &path])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to read log: {e}"))?;
+
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+
+    let content = String::from_utf8_lossy(&out.stdout);
+    let mut total_requests = 0;
+    let mut status_2xx = 0;
+    let mut status_3xx = 0;
+    let mut status_4xx = 0;
+    let mut status_5xx = 0;
+
+    let mut ip_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut path_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+
+    for line in content.lines() {
+        total_requests += 1;
+        // Parse IP
+        if let Some((ip, rest)) = line.split_once(" - ") {
+            *ip_counts.entry(ip.to_string()).or_insert(0) += 1;
+            
+            // Parse Request
+            if let Some(req_start) = rest.find('"') {
+                let rest_after_quote = &rest[req_start + 1..];
+                if let Some(req_end) = rest_after_quote.find('"') {
+                    let req_str = &rest_after_quote[..req_end];
+                    let req_parts: Vec<&str> = req_str.split_whitespace().collect();
+                    if req_parts.len() >= 2 {
+                        let path = req_parts[1].to_string();
+                        if path.len() < 100 {
+                            *path_counts.entry(path).or_insert(0) += 1;
+                        }
+                    }
+
+                    // Parse Status
+                    let after_req = &rest_after_quote[req_end + 1..];
+                    let status_parts: Vec<&str> = after_req.split_whitespace().collect();
+                    if !status_parts.is_empty() {
+                        if let Ok(code) = status_parts[0].parse::<u32>() {
+                            match code {
+                                200..=299 => status_2xx += 1,
+                                300..=399 => status_3xx += 1,
+                                400..=499 => status_4xx += 1,
+                                500..=599 => status_5xx += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let unique_ips = ip_counts.len() as u32;
+
+    let mut top_ips: Vec<_> = ip_counts.into_iter().collect();
+    top_ips.sort_by(|a, b| b.1.cmp(&a.1));
+    top_ips.truncate(10);
+
+    let mut top_paths: Vec<_> = path_counts.into_iter().collect();
+    top_paths.sort_by(|a, b| b.1.cmp(&a.1));
+    top_paths.truncate(10);
+
+    Ok(NginxLogAnalytics {
+        total_requests,
+        unique_ips,
+        status_2xx,
+        status_3xx,
+        status_4xx,
+        status_5xx,
+        top_ips,
+        top_paths,
+    })
+}

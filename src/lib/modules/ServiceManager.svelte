@@ -68,17 +68,12 @@
     })
   );
 
-  let visibleLimit = $state(50);
-  const visibleUnits = $derived(filteredUnits.slice(0, visibleLimit));
+  let currentPage = $state(1);
+  const itemsPerPage = 30;
+  const totalPages = $derived(Math.ceil(filteredUnits.length / itemsPerPage) || 1);
+  const paginatedUnits = $derived(filteredUnits.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage));
 
-  $effect(() => { filter; visibleLimit = 50; });
-
-  function handleScroll(e: Event) {
-    const target = e.target as HTMLElement;
-    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
-      if (visibleLimit < filteredUnits.length) visibleLimit += 50;
-    }
-  }
+  $effect(() => { filter; currentPage = 1; });
 
   function activeStateBadge(state: string): string {
     switch (state) {
@@ -243,16 +238,12 @@
       return !q || e.name.toLowerCase().includes(q) || e.exec.toLowerCase().includes(q);
     })
   );
-  const visibleAutostart = $derived(filteredAutostart.slice(0, autostartVisibleLimit));
+  let autostartCurrentPage = $state(1);
+  const autostartItemsPerPage = 30;
+  const autostartTotalPages = $derived(Math.ceil(filteredAutostart.length / autostartItemsPerPage) || 1);
+  const paginatedAutostart = $derived(filteredAutostart.slice((autostartCurrentPage - 1) * autostartItemsPerPage, autostartCurrentPage * autostartItemsPerPage));
 
-  $effect(() => { autostartFilter; autostartVisibleLimit = 50; });
-
-  function handleAutostartScroll(e: Event) {
-    const target = e.target as HTMLElement;
-    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
-      if (autostartVisibleLimit < filteredAutostart.length) autostartVisibleLimit += 50;
-    }
-  }
+  $effect(() => { autostartFilter; autostartCurrentPage = 1; });
 
   async function loadAutostart() {
     autostartLoading = true;
@@ -403,8 +394,9 @@
     </SideDrawer>
 
     <!-- Service List -->
-    <div class="card module-content-scroll" style="padding:0" onscroll={handleScroll}>
-      {#if loading}
+    <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0;">
+      <div style="flex:1; overflow-y:auto; min-height:0;">
+        {#if loading}
         <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
           <Skeleton height="42px" borderRadius="8px" />
           <Skeleton height="42px" borderRadius="8px" />
@@ -431,7 +423,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each visibleUnits as unit (unit.name)}
+            {#each paginatedUnits as unit (unit.name)}
               <tr class:selected-unit={selectedUnit?.name === unit.name}>
                 <td style="min-width:220px">
                   <div style="font-weight:500;color:var(--color-text-primary);font-family:var(--font-mono);font-size:12px">{unit.name}</div>
@@ -488,11 +480,20 @@
           </tbody>
         </Table>
       {/if}
+      </div>
+      {#if !loading && filteredUnits.length > 0 && totalPages > 1}
+        <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:12px; border-top:1px solid var(--color-border); flex-shrink:0;">
+          <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</Button>
+          <span style="font-size:12px; color:var(--color-text-secondary);">Page {currentPage} of {totalPages}</span>
+          <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={currentPage === totalPages} onclick={() => currentPage++}>Next</Button>
+        </div>
+      {/if}
     </div>
 
   <!-- ── XDG Autostart Tab ─────────────────────────────────────────────────── -->
-  {:else}
-    <div class="table-area">
+  {:else if mainTab === 'autostart'}
+    <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0;">
+      <div style="flex:1; overflow-y:auto; min-height:0;">
       {#if autostartLoading}
         <div class="loading-state">
           <RefreshCw size={14} class="animate-spin-slow" /> Loading…
@@ -500,7 +501,7 @@
       {:else if filteredAutostart.length === 0}
         <div class="empty-state">No XDG autostart entries in ~/.config/autostart/</div>
       {:else}
-        <Table tableAction={tableFeatures} onscroll={handleAutostartScroll}>
+        <Table tableAction={tableFeatures}>
           <thead>
             <tr>
               <th>Application</th>
@@ -510,7 +511,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each visibleAutostart as entry (entry.file_path)}
+            {#each paginatedAutostart as entry (entry.file_path)}
               <tr>
                 <td>
                   <div class="col-name">{entry.name}</div>
@@ -535,6 +536,14 @@
             {/each}
           </tbody>
         </Table>
+      {/if}
+      </div>
+      {#if !autostartLoading && filteredAutostart.length > 0 && autostartTotalPages > 1}
+        <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:12px; border-top:1px solid var(--color-border); flex-shrink:0;">
+          <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={autostartCurrentPage === 1} onclick={() => autostartCurrentPage--}>Previous</Button>
+          <span style="font-size:12px; color:var(--color-text-secondary);">Page {autostartCurrentPage} of {autostartTotalPages}</span>
+          <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={autostartCurrentPage === autostartTotalPages} onclick={() => autostartCurrentPage++}>Next</Button>
+        </div>
       {/if}
     </div>
   {:else if mainTab === 'boot_analyzer'}

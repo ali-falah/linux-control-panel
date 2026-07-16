@@ -261,3 +261,175 @@ pub async fn modify_user_group(
     }
     Ok("Membership updated".to_string())
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActiveSession {
+    pub session_id: String,
+    pub uid: String,
+    pub user: String,
+    pub seat: String,
+    pub tty: String,
+    pub state: String,
+    pub idle_since_hint: String,
+    pub is_current: bool,
+}
+
+#[tauri::command]
+pub async fn user_get_active_sessions() -> Result<Vec<ActiveSession>, String> {
+    let output = Command::new("loginctl")
+        .args(["list-sessions", "--no-legend"])
+        .output()
+        .await
+        .map_err(|e| format!("loginctl failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut sessions = Vec::new();
+    
+    let mut current_session_id = String::new();
+    if let Ok(status_out) = Command::new("loginctl").arg("session-status").output().await {
+        let status_str = String::from_utf8_lossy(&status_out.stdout);
+        if let Some(first_line) = status_str.lines().next() {
+            if let Some(id) = first_line.split_whitespace().next() {
+                current_session_id = id.to_string();
+            }
+        }
+    }
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let session_id = parts[0].to_string();
+            let uid = parts[1].to_string();
+            let user = parts[2].to_string();
+            let seat = if parts.len() > 3 { parts[3].to_string() } else { "".to_string() };
+            
+            let details_out = Command::new("loginctl")
+                .args(["show-session", &session_id, "-p", "TTY", "-p", "State", "-p", "IdleSinceHint", "-p", "Type", "-p", "Class"])
+                .output()
+                .await;
+            
+            let mut tty = "".to_string();
+            let mut state = "".to_string();
+            let mut idle = "".to_string();
+            let mut session_type = "".to_string();
+            let mut session_class = "".to_string();
+
+            if let Ok(details) = details_out {
+                let det_str = String::from_utf8_lossy(&details.stdout);
+                for d_line in det_str.lines() {
+                    if let Some((k, v)) = d_line.split_once('=') {
+                        match k {
+                            "TTY" => tty = v.to_string(),
+                            "State" => state = v.to_string(),
+                            "IdleSinceHint" => idle = v.to_string(),
+                            "Type" => session_type = v.to_string(),
+                            "Class" => session_class = v.to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Skip internal user-manager sessions
+            if session_class == "manager" || session_class == "user-manager" {
+                continue;
+            }
+
+            let mut is_current = session_id == current_session_id;
+            
+            // Fallback heuristic if loginctl session-status failed to identify a caller session
+            if current_session_id.is_empty() || !current_session_id.chars().all(char::is_numeric) {
+                if state == "active" && (session_type == "wayland" || session_type == "x11") {
+                    is_current = true;
+                }
+            }
+
+            sessions.push(ActiveSession {
+                session_id,
+                uid,
+                user,
+                seat,
+                tty,
+                state,
+                idle_since_hint: idle,
+                is_current,
+            });
+        }
+    }
+
+    Ok(sessions)
+}
+
+#[tauri::command]
+pub async fn user_kill_session(session_id: String) -> Result<String, String> {
+    let output = Command::new("pkexec")
+        .args(["loginctl", "kill-session", &session_id])
+        .output()
+        .await
+        .map_err(|e| format!("loginctl kill-session failed: {}", e))?;
+    
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    
+    Ok(format!("Session {} terminated.", session_id))
+}
+
+#[tauri::command]
+pub async fn user_get_ssh_keys(username: String) -> Result<String, String> {
+    let path = if username == "root" {
+        "/root/.ssh/authorized_keys".to_string()
+    } else {
+        format!("/home/{}/.ssh/authorized_keys", username)
+    };
+
+    let output = Command::new("pkexec")
+        .args(["cat", &path])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Ok("".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn user_save_ssh_keys(username: String, keys: String) -> Result<String, String> {
+    let (home_dir, owner) = if username == "root" {
+        ("/root".to_string(), "root:root".to_string())
+    } else {
+        (format!("/home/{}", username), format!("{}:{}", username, username))
+    };
+
+    let ssh_dir = format!("{}/.ssh", home_dir);
+    let keys_file = format!("{}/authorized_keys", ssh_dir);
+
+    let _ = Command::new("pkexec").args(["mkdir", "-p", &ssh_dir]).output().await;
+    let _ = Command::new("pkexec").args(["chmod", "700", &ssh_dir]).output().await;
+    let _ = Command::new("pkexec").args(["chown", &owner, &ssh_dir]).output().await;
+
+    let tmp_path = format!("/tmp/keys_{}", username);
+    let _ = tokio::fs::write(&tmp_path, keys).await.map_err(|e| e.to_string())?;
+
+    let mv_out = Command::new("pkexec")
+        .args(["mv", &tmp_path, &keys_file])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to move keys file: {}", e))?;
+
+    if !mv_out.status.success() {
+        return Err(String::from_utf8_lossy(&mv_out.stderr).to_string());
+    }
+
+    let _ = Command::new("pkexec").args(["chmod", "600", &keys_file]).output().await;
+    let _ = Command::new("pkexec").args(["chown", &owner, &keys_file]).output().await;
+
+    Ok("SSH keys saved successfully.".to_string())
+}

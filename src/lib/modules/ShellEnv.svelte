@@ -141,6 +141,7 @@
     statusStore.setBusy('Parsing profile files…');
     try {
       varGroups = await invoke<ShellVarGroup[]>('shell_parse_all_exports');
+      collapsedGroups = new Set(varGroups.map(g => g.source_path));
       statusStore.setLastCommand('grep -r "export" /etc/profile.d ~/.bashrc', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to parse profiles: ${e}`, 'error');
@@ -468,11 +469,11 @@
   <!-- Header -->
   <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal}>
     {#if activeTab === 'variables'}
-      <Button variant="outline" class="btn-sm" onclick={loadVarGroups} disabled={varsLoading}>
-        <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
+      <Button variant="outline" onclick={loadVarGroups} disabled={varsLoading}>
+        <RefreshCw size={14} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
       </Button>
-      <Button variant="primary" class="btn-sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
-        <Plus size={13} /> Add Variable
+      <Button variant="primary" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
+        <Plus size={14} /> Add Variable
       </Button>
     {/if}
   </PageHeader>
@@ -496,37 +497,37 @@
 
     <div class="tab-actions">
       {#if activeTab === 'variables'}
-        <SearchBar bind:value={filterVars} placeholder="Filter variables..." style="margin:0; width:200px" />
-        <Button variant="outline" class="btn-sm" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
-          <Eye size={13} /> Live values
+        <SearchBar bind:value={filterVars} placeholder="Filter variables..." style="margin:0; width:220px" />
+        <Button variant="outline" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
+          <Eye size={14} /> Live values
         </Button>
       {:else if activeTab === 'path'}
-        <Button variant="outline" class="btn-sm" onclick={loadPathEntries} id="shell-reload-path">
-          <RefreshCw size={13} /> Refresh
+        <Button variant="outline" onclick={loadPathEntries} id="shell-reload-path">
+          <RefreshCw size={14} /> Refresh
         </Button>
-        <Button variant="primary" class="btn-sm" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
-          <Plus size={13} /> Add Entry
+        <Button variant="primary" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
+          <Plus size={14} /> Add Entry
         </Button>
       {:else if activeTab === 'files'}
-        <Button variant="outline" class="btn-sm" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={13} /> Refresh</Button>
-        <Button variant="primary" class="btn-sm" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
-          <Plus size={13} /> New File
+        <Button variant="outline" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={14} /> Refresh</Button>
+        <Button variant="primary" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
+          <Plus size={14} /> New File
         </Button>
       {:else if activeTab === 'preview'}
         <div style="display:flex; align-items:center; gap:6px;">
           <span class="text-muted text-xs">Source:</span>
-          <Select bind:value={selectedSourceFile}  style="padding:4px 24px 4px 8px; font-size:12px; height:28px; width: 140px;">
+          <Select bind:value={selectedSourceFile} style="padding:4px 24px 4px 8px; font-size:13px; height:36px; width: 140px;">
             <option value="">Select file...</option>
             {#each profileFiles.filter(f => !f.is_system) as f}
               <option value={f.path}>{f.display_name}</option>
             {/each}
           </Select>
-          <Button variant="outline" class="btn-sm" disabled={!selectedSourceFile} onclick={() => { const f = profileFiles.find(pf => pf.path === selectedSourceFile); if(f) sourceFile(f); }}>
+          <Button variant="outline" disabled={!selectedSourceFile} onclick={() => { const f = profileFiles.find(pf => pf.path === selectedSourceFile); if(f) sourceFile(f); }}>
             Run
           </Button>
         </div>
-        <Button variant="primary" class="btn-sm" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
-          {#if previewLoading}<div class="spinner-sm"></div>{:else}<RefreshCw size={13} />{/if}
+        <Button variant="primary" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
+          {#if previewLoading}<div class="spinner-sm"></div>{:else}<RefreshCw size={14} />{/if}
           Preview env
         </Button>
       {/if}
@@ -638,7 +639,7 @@
                         {/if}
                         <div class="col-meta">
                           {#if editingVar?.v !== v}
-                            <span class="src-badge">src: {group.display_name}:{v.line_number}</span>
+                            <span class="src-badge" title="src: {group.display_name}:{v.line_number}">src: {group.display_name}:{v.line_number}</span>
                           {/if}
                         </div>
                         <div class="col-actions">
@@ -749,7 +750,7 @@
                     </td>
                     <td style="text-align:right">
                       {#if entry.source_path}
-                        <Button class="btn btn-sm -danger" onclick={() => confirmRemovePath(entry)} id={`shell-rm-path-${i}`}>
+                        <Button variant="danger" size="sm" onclick={() => confirmRemovePath(entry)} id={`shell-rm-path-${i}`}>
                           <Trash2 size={11} /> Remove
                         </Button>
                       {:else}
@@ -778,8 +779,8 @@
           {#if showNewFileForm}
             <div class="new-file-form">
               <input type="text" bind:value={newProfileDName} placeholder="custom-vars.sh" id="shell-new-file-name" />
-              <Button variant="primary" class=" btn-sm" onclick={createProfileDFile} id="shell-create-file">Create</Button>
-              <Button variant="ghost" class=" btn-sm" onclick={() => (showNewFileForm = false)}>✕</Button>
+              <Button variant="primary" size="sm" onclick={createProfileDFile} id="shell-create-file">Create</Button>
+              <Button variant="ghost" size="sm" onclick={() => (showNewFileForm = false)}>✕</Button>
             </div>
           {/if}
 
@@ -807,7 +808,7 @@
           {/if}
 
           <div class="files-sidebar-sep"></div>
-          <Button variant="outline" class=" btn-sm sidebar-backup-btn" onclick={() => { showBackupsFor = 'all'; loadBackups(); }} id="shell-show-backups">
+          <Button variant="outline" size="sm" class="sidebar-backup-btn" onclick={() => { showBackupsFor = 'all'; loadBackups(); }} id="shell-show-backups">
             <ArchiveRestore size={12} /> Backups
           </Button>
 
@@ -815,7 +816,7 @@
             <div class="backup-list">
               <div class="backup-list-header">
                 <span>Backups</span>
-                <Button variant="ghost" class=" btn-sm" onclick={() => (showBackupsFor = null)}>✕</Button>
+                <Button variant="ghost" size="sm" onclick={() => (showBackupsFor = null)}>✕</Button>
               </div>
               {#if backupsLoading}
                 <div class="center-state"><div class="spinner-sm"></div></div>
@@ -1493,33 +1494,40 @@
   .shell-groups-list {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 16px;
     padding-bottom: 32px;
   }
   .shell-group-card {
-    background: rgba(255,255,255,0.015);
-    border: 1px solid rgba(255,255,255,0.04);
-    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    border-radius: 10px;
     overflow: hidden;
     flex-shrink: 0;
+    transition: border-color 0.3s ease;
+  }
+  .shell-group-card:hover {
+    border-color: rgba(255, 255, 255, 0.15);
   }
   .sg-header {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 16px 20px;
+    padding: 14px 20px;
     cursor: pointer;
-    background: rgba(0, 0, 0, 0.4);
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    transition: background 0.2s;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid transparent;
+    transition: background 0.2s ease;
   }
   .sg-header:hover {
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(255, 255, 255, 0.06);
   }
   .sg-name {
     font-family: var(--font-mono);
     font-weight: 600;
     font-size: 14px;
+    letter-spacing: 0.3px;
     color: #fff;
   }
   .sg-badges {
@@ -1563,7 +1571,7 @@
   }
   .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: #e2e8f0; font-size: 13px; }
   .col-value { flex: 1; padding-right: 20px; min-width: 0; }
-  .col-meta { width: 160px; }
+  .col-meta { width: 160px; min-width: 0; }
   .col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }
 
   .sg-input {
@@ -1591,6 +1599,11 @@
     font-size: 11px;
     font-family: var(--font-mono);
     white-space: nowrap;
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
   }
   .icon-btn {
     background: rgba(255,255,255,0.03);

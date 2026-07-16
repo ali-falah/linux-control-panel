@@ -5,7 +5,10 @@ pub mod commands;
 
 use commands::{
     copr_browser::{disable_copr, enable_copr, search_copr},
-    cron_manager::{add_cron_job, delete_cron_job, list_cron_jobs},
+    cron_manager::{
+        list_cron_jobs, add_cron_job, delete_cron_job,
+        cron_list_timers, cron_toggle_timer,
+    },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
@@ -34,7 +37,7 @@ use commands::{
     },
     user_manager::{
         add_group, add_user, change_password, delete_group, delete_user, list_groups, list_users,
-        modify_user_group, toggle_sudo,
+        modify_user_group, toggle_sudo, user_get_active_sessions, user_kill_session, user_get_ssh_keys, user_save_ssh_keys,
     },
     nginx_manager::{
         nginx_check_installed, nginx_service_status, nginx_service_action, nginx_test_config,
@@ -44,6 +47,7 @@ use commands::{
         nginx_delete_www_entry, nginx_rename_www_entry, nginx_upload_www_file,
         nginx_read_log, nginx_clear_log, nginx_list_log_files,
         nginx_check_certbot, nginx_list_ssl_certs, nginx_renew_cert,
+        nginx_generate_reverse_proxy, nginx_get_log_analytics,
     },
     shell_env::{
         shell_list_profile_files, shell_read_profile_file, shell_parse_all_exports,
@@ -174,6 +178,10 @@ pub fn run() {
             add_group,
             delete_group,
             modify_user_group,
+            user_get_active_sessions,
+            user_kill_session,
+            user_get_ssh_keys,
+            user_save_ssh_keys,
             // Firewall Manager
             get_firewall_state,
             get_zone_rules,
@@ -200,6 +208,8 @@ pub fn run() {
             list_cron_jobs,
             add_cron_job,
             delete_cron_job,
+            cron_list_timers,
+            cron_toggle_timer,
             // Environment Manager
             read_env_vars,
             write_env_vars,
@@ -230,6 +240,8 @@ pub fn run() {
             nginx_check_certbot,
             nginx_list_ssl_certs,
             nginx_renew_cert,
+            nginx_generate_reverse_proxy,
+            nginx_get_log_analytics,
             // Shell Environment
             shell_list_profile_files,
             shell_read_profile_file,
