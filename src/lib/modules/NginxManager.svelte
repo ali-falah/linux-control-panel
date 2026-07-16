@@ -1350,6 +1350,8 @@
                   <div style="width:{(analyticsData.status_3xx / analyticsData.total_requests) * 100}%; background:var(--color-info);" title="3xx: {analyticsData.status_3xx}"></div>
                   <div style="width:{(analyticsData.status_4xx / analyticsData.total_requests) * 100}%; background:var(--color-warning);" title="4xx: {analyticsData.status_4xx}"></div>
                   <div style="width:{(analyticsData.status_5xx / analyticsData.total_requests) * 100}%; background:var(--color-danger);" title="5xx: {analyticsData.status_5xx}"></div>
+                {:else}
+                  <div style="width:100%; display:flex; align-items:center; justify-content:center; color:var(--color-text-muted); font-size:11px; background:rgba(255,255,255,0.02);">No data available</div>
                 {/if}
               </div>
               <div style="display:flex; gap:16px; font-size:12px; flex-wrap:wrap;">
@@ -1368,6 +1370,8 @@
                   <tbody>
                     {#each analyticsData.top_ips as [ip, count]}
                       <tr><td>{ip}</td><td style="text-align:right">{count}</td></tr>
+                    {:else}
+                      <tr><td colspan="2" style="text-align:center; padding:24px; color:var(--color-text-muted); font-size:13px;">No IP data available</td></tr>
                     {/each}
                   </tbody>
                 </table>
@@ -1379,6 +1383,8 @@
                   <tbody>
                     {#each analyticsData.top_paths as [path, count]}
                       <tr><td style="word-break:break-all;">{path}</td><td style="text-align:right">{count}</td></tr>
+                    {:else}
+                      <tr><td colspan="2" style="text-align:center; padding:24px; color:var(--color-text-muted); font-size:13px;">No path data available</td></tr>
                     {/each}
                   </tbody>
                 </table>

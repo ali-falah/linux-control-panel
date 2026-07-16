@@ -155,7 +155,7 @@ pub async fn cron_list_timers() -> Result<Vec<SystemdTimer>, String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 4 {
             let unit = parts[0].to_string();
-            let load = parts[1].to_string();
+            let _load = parts[1].to_string();
             let active = parts[2].to_string();
             let sub = parts[3].to_string();
             let description = if parts.len() > 4 {

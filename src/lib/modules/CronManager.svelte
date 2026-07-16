@@ -103,7 +103,7 @@
   }
 
   async function toggleTimer(timer: SystemdTimer) {
-    const isEnabled = timer.status.includes('active') && timer.status.includes('running') || timer.status.includes('waiting');
+    const isEnabled = timer.status.startsWith('active');
     const enable = !isEnabled;
     statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} timer ${timer.unit}…`);
     try {
@@ -146,11 +146,11 @@
       <Button class="btn btn-sm {view === 'cron' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'cron'}>Cron Jobs</Button>
       <Button class="btn btn-sm {view === 'timers' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'timers'}>Systemd Timers</Button>
     </div>
-    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
+    <Button variant="ghost" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
     {#if view === 'cron'}
-      <Button variant="primary" class="" onclick={() => showAdd = true}>
+      <Button variant="primary" onclick={() => showAdd = true}>
         <Plus size={14} /> Add Job
       </Button>
     {/if}
@@ -176,7 +176,7 @@
         <label for="cron-command" style="display:block; font-size:12px; margin-bottom:4px; font-weight:600; color:var(--color-text-secondary); text-transform:uppercase; letter-spacing:0.05em;">Command to Execute</label>
         <div style="display:flex; gap:8px">
           <input id="cron-command" class="input" style="width: 100%; font-family:var(--font-mono)" bind:value={newCommand} placeholder="/path/to/script.sh" />
-          <Button variant="outline" class="" onclick={browseFile} title="Browse for script file">
+          <Button variant="outline" onclick={browseFile} title="Browse for script file">
             <FolderOpen size={16} />
           </Button>
         </div>
@@ -184,25 +184,14 @@
 
       <div style="margin-top: 8px;">
         <label for="root-toggle" style="display:flex; align-items:center; gap:10px; font-size:14px; cursor:pointer; color:var(--color-text-primary)">
-          <button
-            id="root-toggle"
-            class="ui-toggle"
-            class:on={isRootJob}
-            onclick={() => isRootJob = !isRootJob}
-            type="button"
-            role="switch"
-            aria-checked={isRootJob}
-            aria-label="Toggle root privileges"
-          >
-            <span class="ui-toggle-thumb"></span>
-          </button>
+          <Toggle checked={isRootJob} onToggle={(val) => isRootJob = val} />
           Run as Root User (System-wide)
         </label>
       </div>
       
       <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:16px;">
-        <Button variant="ghost" class="" onclick={() => showAdd = false}>Cancel</Button>
-        <Button variant="primary" class="" onclick={addJob} disabled={!newCommand.trim()}>Save Job</Button>
+        <Button variant="ghost" onclick={() => showAdd = false}>Cancel</Button>
+        <Button variant="primary" onclick={addJob} disabled={!newCommand.trim()}>Save Job</Button>
       </div>
     </div>
   </SideDrawer>
@@ -244,7 +233,7 @@
                     <span style="color:var(--color-text-muted); margin-top:8px;">
                       You haven't added any cron jobs yet.
                     </span>
-                    <Button variant="outline" class="" style="margin-top:24px;" onclick={() => showAdd = true}>
+                    <Button variant="outline" style="margin-top:24px;" onclick={() => showAdd = true}>
                       <Plus size={14} /> Add First Job
                     </Button>
                   </div>

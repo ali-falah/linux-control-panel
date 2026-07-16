@@ -309,15 +309,15 @@
       <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>
       <Button class="btn btn-sm {view === 'sessions' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'sessions'}>Sessions</Button>
     </div>
-    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
+    <Button variant="ghost" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
     {#if view === 'users'}
-      <Button variant="primary" class="" onclick={() => showAddUser = !showAddUser}>
+      <Button variant="primary" onclick={() => showAddUser = !showAddUser}>
         <UserPlus size={14} /> Add User
       </Button>
     {:else}
-      <Button variant="primary" class="" onclick={() => showAddGroup = !showAddGroup}>
+      <Button variant="primary" onclick={() => showAddGroup = !showAddGroup}>
         <Layers size={14} /> Add Group
       </Button>
     {/if}
@@ -335,8 +335,8 @@
           <label for="new-fullname" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Full Name (Optional)</label>
           <input id="new-fullname" class="input" bind:value={newFullname} placeholder="e.g. John Doe" onkeydown={(e) => e.key === 'Enter' && addUser()} />
         </div>
-        <Button variant="primary" class="" onclick={addUser} disabled={!newUsername.trim()}>Create Account</Button>
-        <Button variant="outline" class="" onclick={() => showAddUser = false}>Cancel</Button>
+        <Button variant="primary" onclick={addUser} disabled={!newUsername.trim()}>Create Account</Button>
+        <Button variant="outline" onclick={() => showAddUser = false}>Cancel</Button>
       </div>
     </div>
   {/if}
@@ -349,8 +349,8 @@
           <label for="group-name" style="display:block; font-size:12px; margin-bottom:4px; color:var(--color-text-secondary)">Group Name</label>
           <input id="group-name" class="input" bind:value={newGroupname} placeholder="e.g. developers" onkeydown={(e) => e.key === 'Enter' && addGroup()} />
         </div>
-        <Button variant="primary" class="" onclick={addGroup} disabled={!newGroupname.trim()}>Create Group</Button>
-        <Button variant="outline" class="" onclick={() => showAddGroup = false}>Cancel</Button>
+        <Button variant="primary" onclick={addGroup} disabled={!newGroupname.trim()}>Create Group</Button>
+        <Button variant="outline" onclick={() => showAddGroup = false}>Cancel</Button>
       </div>
     </div>
   {/if}
@@ -541,7 +541,7 @@
       </div>
 
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px">
-        <Button variant="primary" class="" onclick={() => { showGroupModal = false; groupSearch = ''; }}>Done</Button>
+        <Button variant="primary" onclick={() => { showGroupModal = false; groupSearch = ''; }}>Done</Button>
       </div>
     </div>
   </div>
