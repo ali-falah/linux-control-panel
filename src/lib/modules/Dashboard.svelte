@@ -247,6 +247,7 @@
             <!-- Failed Services Button -->
             <button 
               onclick={() => {
+                uiStore.serviceFilter = 'failed';
                 uiStore.setActiveTab('service-manager');
               }}
               style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"

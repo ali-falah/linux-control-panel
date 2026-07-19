@@ -38,6 +38,15 @@
   let units = $state<ServiceUnit[]>([]);
   let loading = $state(false);
   let filter = $state('');
+  
+  // Read and consume deep-linked filter from Dashboard synchronously
+  let statusFilter = $state<'active' | 'failed' | 'all'>(
+    uiStore.serviceFilter === 'failed' ? 'failed' : 'all'
+  );
+  if (uiStore.serviceFilter === 'failed') {
+    uiStore.serviceFilter = null;
+  }
+
   let selectedUnit = $state<ServiceUnit | null>(null);
   let activePanel = $state<'logs' | 'editor' | null>(null);
   let panelOpen = $state(false);
@@ -63,6 +72,8 @@
 
   const filteredUnits = $derived(
     units.filter(u => {
+      if (statusFilter === 'active' && u.active_state !== 'active') return false;
+      if (statusFilter === 'failed' && u.active_state !== 'failed') return false;
       const q = filter.toLowerCase();
       return !q || u.name.toLowerCase().includes(q) || u.description.toLowerCase().includes(q);
     })
@@ -73,7 +84,7 @@
   const totalPages = $derived(Math.ceil(filteredUnits.length / itemsPerPage) || 1);
   const paginatedUnits = $derived(filteredUnits.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage));
 
-  $effect(() => { filter; currentPage = 1; });
+  $effect(() => { filter; statusFilter; currentPage = 1; });
 
   function activeStateBadge(state: string): string {
     switch (state) {
@@ -333,18 +344,30 @@
 
     {#if mainTab === 'services'}
       <!-- Inline stat chips -->
-      <div class="stat-chip">
+      <button 
+        onclick={() => statusFilter = statusFilter === 'active' ? 'all' : 'active'}
+        class="stat-chip"
+        class:active={statusFilter === 'active'}
+      >
         <span class="stat-num" style="color:var(--color-success)">{units.filter(u => u.active_state === 'active').length}</span>
         <span class="stat-label">Active</span>
-      </div>
-      <div class="stat-chip">
+      </button>
+      <button 
+        onclick={() => statusFilter = statusFilter === 'failed' ? 'all' : 'failed'}
+        class="stat-chip"
+        class:active={statusFilter === 'failed'}
+      >
         <span class="stat-num" style="color:var(--color-error)">{units.filter(u => u.active_state === 'failed').length}</span>
         <span class="stat-label">Failed</span>
-      </div>
-      <div class="stat-chip">
+      </button>
+      <button 
+        onclick={() => statusFilter = 'all'}
+        class="stat-chip"
+        class:active={statusFilter === 'all'}
+      >
         <span class="stat-num">{units.length}</span>
         <span class="stat-label">Total Units</span>
-      </div>
+      </button>
 
       <div class="header-spacer"></div>
       <SearchBar bind:value={filter} placeholder="Filter services by name or description…" style="min-width:220px; max-width:320px; margin:0;" />
@@ -636,6 +659,27 @@
     border-radius: 10px;
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+    color: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .stat-chip:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.15);
+  }
+
+  .stat-chip.active {
+    background: var(--color-accent) !important;
+    border-color: var(--color-accent) !important;
+    color: #00363d !important;
+  }
+
+  .stat-chip.active .stat-num,
+  .stat-chip.active .stat-label {
+    color: #00363d !important;
   }
 
   .stat-num {

@@ -36,6 +36,7 @@ class UIStore {
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
   preAppliedJournalPriority = $state<string>('all');
+  serviceFilter = $state<string | null>(null);
   /** Interface name to auto-select when network-manager opens (set by IP popover deep-link) */
   selectedInterface = $state<string | null>(null);
   confirmDialog = $state<{
