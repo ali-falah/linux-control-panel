@@ -18,6 +18,7 @@
 
   // Overview Stats
   let stats = $state<any>(null);
+  let cpuTemp = $state<number | null>(null);
   let cpuHistory = $state<number[]>(Array(40).fill(0));
 
   // Disk I/O
@@ -102,8 +103,12 @@
 
   async function pollLeftAndCenter() {
     try {
-      const sysStats = await invoke('get_system_stats');
+      const [sysStats, temp] = await Promise.all([
+        invoke('get_system_stats'),
+        invoke('get_cpu_temperature')
+      ]);
       stats = sysStats;
+      cpuTemp = temp as number | null;
       cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
     } catch(e) {}
     await fetchDiskIo();
@@ -409,9 +414,16 @@
               <div class="panel-scroll">
                 <!-- CPU -->
                 <div class="metric-block" style="display:flex; flex-direction:column; gap:8px;">
-                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
+                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600; align-items: center;">
                     <span>CPU Usage</span>
-                    <span>{stats.cpu_percent.toFixed(1)}%</span>
+                    <span style="display: flex; gap: 8px; align-items: center;">
+                      {#if cpuTemp !== null}
+                        <span style="font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: {cpuTemp >= 85 ? 'rgba(239, 68, 68, 0.15)' : cpuTemp >= 70 ? 'rgba(245, 158, 11, 0.15)' : 'rgba(255, 255, 255, 0.05)'}; color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'}; font-family: var(--font-mono);">
+                          {cpuTemp.toFixed(0)}&deg;C
+                        </span>
+                      {/if}
+                      <span>{stats.cpu_percent.toFixed(1)}%</span>
+                    </span>
                   </div>
                   <div style="height: 60px; background: rgba(0,0,0,0.2); border-radius: 8px; overflow:hidden; padding: 4px;">
                     <svg viewBox="0 0 200 60" preserveAspectRatio="none" style="width: 100%; height: 100%;">

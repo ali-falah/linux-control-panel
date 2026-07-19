@@ -72,11 +72,15 @@ use commands::{
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage
     },
-    system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_dashboard_resources, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution},
+    system_info::{get_network_interfaces, get_system_stats, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution},
     journal_viewer::{get_journal_logs},
     security_auditor::{
-        security_run_audit, security_fix_root_ssh, security_fix_password_policy,
-        security_fix_firewall, security_fix_selinux,
+        security_run_audit,
+        security_fix_root_ssh, security_fix_ssh_param,
+        security_fix_password_policy, security_fix_firewall, security_fix_selinux,
+        security_fix_kernel_param, security_fix_auditd, security_fix_time_sync,
+        security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
+        security_fix_usbguard,
     },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
@@ -311,7 +315,6 @@ pub fn run() {
             get_disk_io_stats,
             get_active_connections,
             get_current_user,
-            get_dashboard_resources,
             get_storage_distribution,
             get_system_events,
             get_network_details,
@@ -328,9 +331,17 @@ pub fn run() {
             // Security Auditor
             security_run_audit,
             security_fix_root_ssh,
+            security_fix_ssh_param,
             security_fix_password_policy,
             security_fix_firewall,
             security_fix_selinux,
+            security_fix_kernel_param,
+            security_fix_auditd,
+            security_fix_time_sync,
+            security_fix_tmp_sticky,
+            security_fix_passwd_perms,
+            security_fix_shadow_perms,
+            security_fix_usbguard,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

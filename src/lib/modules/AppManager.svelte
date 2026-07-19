@@ -72,7 +72,12 @@
   let filter = $state('');
 
   type SourceFilter = 'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates';
-  let sourceFilter = $state<SourceFilter>('All');
+  let sourceFilter = $state<SourceFilter>(
+    uiStore.appSourceFilter ? uiStore.appSourceFilter : 'All'
+  );
+  if (uiStore.appSourceFilter) {
+    uiStore.appSourceFilter = null;
+  }
 
   type SortOption = 'name' | 'size' | 'date' | 'source';
   let sortBy = $state<SortOption>('size');

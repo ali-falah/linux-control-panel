@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw } from '@lucide/svelte';
+  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -15,8 +15,6 @@
   let smartHealth = $state<any[]>([]);
   let networkInterfaces = $state<any[]>([]);
   
-  // Resource Strip State (CPU, RAM, Swap)
-  let resources = $state<any>(null);
   // Network details (gateway, dns)
   let networkDetails = $state<any>(null);
   let gatewayPing = $state<string>('');
@@ -24,12 +22,30 @@
   let systemEvents = $state<any>(null);
   
   // New features state
-  let cpuTemp = $state<number | null>(null);
   let lastSystemUpdate = $state<string>('');
   let failedServicesCount = $state<number>(0);
 
+  let securityReport = $state<any>(null);
+  let loadingSecurity = $state(false);
+  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved).length : 0);
+  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved).length : 0);
+  let securityPassedCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.is_resolved).length : 0);
+
+  function getScoreColor(score: number) {
+    if (score >= 80) return 'var(--color-success)';
+    if (score >= 50) return 'var(--color-warning)';
+    return 'var(--color-error)';
+  }
+
+  function getScoreLabel(score: number) {
+    if (score >= 90) return 'EXCELLENT';
+    if (score >= 80) return 'GOOD';
+    if (score >= 60) return 'FAIR';
+    if (score >= 40) return 'POOR';
+    return 'CRITICAL RISK';
+  }
+
   let pollInterval: any;
-  let resourcesInterval: any;
   let pingInterval: any;
 
   let isRefreshing = $state(false);
@@ -37,7 +53,7 @@
   async function handleManualRefresh() {
     isRefreshing = true;
     try {
-      await Promise.all([fetchData(), fetchResources()]);
+      await Promise.all([fetchData(), fetchSecurityReport()]);
     } catch (e) {
       console.error(e);
     } finally {
@@ -45,16 +61,14 @@
     }
   }
 
-  async function fetchResources() {
+  async function fetchSecurityReport() {
+    loadingSecurity = true;
     try {
-      const [res, cpuT] = await Promise.all([
-        invoke('get_dashboard_resources'),
-        invoke('get_cpu_temperature')
-      ]);
-      resources = res;
-      cpuTemp = cpuT as number | null;
+      securityReport = await invoke('security_run_audit');
     } catch (e) {
-      console.error("Error fetching resources:", e);
+      console.error("Error fetching security report:", e);
+    } finally {
+      loadingSecurity = false;
     }
   }
 
@@ -89,6 +103,7 @@
 
   let storageDist = $state<{ rpm_gb: number; flatpak_gb: number; system_gb: number } | null>(null);
   let storageDistTotal = $derived(storageDist ? storageDist.rpm_gb + storageDist.flatpak_gb + storageDist.system_gb : 0);
+  let storageDistSubTotal = $derived(storageDist ? storageDist.rpm_gb + storageDist.flatpak_gb : 0);
 
   async function fetchStorageDistribution() {
     try {
@@ -128,16 +143,14 @@
 
   onMount(() => {
     fetchData();
-    fetchResources();
     fetchNetworkDetails();
+    fetchSecurityReport();
     pollInterval = setInterval(fetchData, 30000);
-    resourcesInterval = setInterval(fetchResources, 5000);
     pingInterval = setInterval(updateGatewayPing, 10000);
   });
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
-    if (resourcesInterval) clearInterval(resourcesInterval);
     if (pingInterval) clearInterval(pingInterval);
   });
 </script>
@@ -164,46 +177,7 @@
         {/if}
       </Card>
 
-      <!-- Resource Utilization Strip -->
-      <Card class="resource-strip-card" style="padding: 12px 16px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px;">
-        {#if resources}
-          <!-- CPU -->
-          <div style="display: flex; align-items: center; gap: 6px; flex: 1.5; min-width: 90px;">
-            <span style="font-size: 9px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">CPU</span>
-            <strong style="font-size: 11px; font-family: var(--font-mono); color: var(--color-text-primary); white-space: nowrap;">
-              {resources.cpu_percent.toFixed(0)}%
-              {#if cpuTemp !== null}
-                <span style="color: var(--color-text-muted); margin: 0 2px;">&middot;</span>
-                <span style="color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'};">{cpuTemp.toFixed(0)}&deg;C</span>
-              {/if}
-            </strong>
-          </div>
-          
-          <!-- RAM -->
-          <div style="display: flex; align-items: center; gap: 6px; flex: 2; min-width: 110px;">
-            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">RAM</span>
-            <div class="progress-bg" style="flex: 1; height: 6px; background: rgba(0,0,0,0.3); border-radius: 3px; overflow: hidden;">
-              <div class="progress-fill ram-fill" style="width: {resources.ram_percent}%; height: 100%; transition: width 0.4s ease;"></div>
-            </div>
-            <span style="font-size: 10px; font-family: var(--font-mono); color: var(--color-text-muted); white-space: nowrap;">
-              {resources.ram_used_gb.toFixed(1)}/{resources.ram_total_gb.toFixed(0)}G
-            </span>
-          </div>
-          
-          <!-- Swap -->
-          <div style="display: flex; align-items: center; gap: 6px; flex: 2; min-width: 110px;">
-            <span style="font-size: 10px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase;">SWAP</span>
-            <div class="progress-bg" style="flex: 1; height: 6px; background: rgba(0,0,0,0.3); border-radius: 3px; overflow: hidden;">
-              <div class="progress-fill swap-fill" style="width: {resources.swap_percent}%; height: 100%; transition: width 0.4s ease;"></div>
-            </div>
-            <span style="font-size: 10px; font-family: var(--font-mono); color: var(--color-text-muted); white-space: nowrap;">
-              {resources.swap_used_gb.toFixed(1)}/{resources.swap_total_gb.toFixed(0)}G
-            </span>
-          </div>
-        {:else}
-          <span class="text-muted" style="font-size: 11px;">Loading resources...</span>
-        {/if}
-      </Card>
+
 
       <!-- System Events -->
       <Card title="System Events" icon={Activity} class="panel-events" style="display:flex; flex-direction:column; gap:12px;">
@@ -329,39 +303,87 @@
         {/if}
       </Card>
 
-      {#if storageDist}
-        <Card title="Storage Distribution">
-          <div style="display:flex; flex-direction:column; gap:16px;">
-            <!-- Stacked bar chart -->
-            <div style="height: 12px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; overflow: hidden; display: flex; width: 100%;">
-              <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-accent);" title="RPM"></div>
-              <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-text-secondary);" title="Flatpak"></div>
-              <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-border);" title="System"></div>
-            </div>
-            <!-- Legend and metrics -->
-            <div style="display: flex; gap: 20px; font-size: 11px; font-family: var(--font-mono); color: var(--color-text-secondary); flex-wrap: wrap;">
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent);"></span>
-                <span>RPM: {storageDist.rpm_gb.toFixed(1)} GB</span>
-              </div>
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-secondary);"></span>
-                <span>Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB</span>
-              </div>
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-border);"></span>
-                <span>System: {storageDist.system_gb.toFixed(1)} GB</span>
-              </div>
+      <!-- Security Auditor Card -->
+      <Card title="Security Auditor" icon={Shield} class="panel-security" style="display:flex; flex-direction:column; gap:12px;">
+        {#if loadingSecurity && !securityReport}
+          <!-- Loading skeleton -->
+          <div style="display:flex; flex-direction:column; gap:12px; align-items:center; padding: 8px 0;">
+            <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(255,255,255,0.03); border: 4px solid rgba(255,255,255,0.05);" class="animate-pulse"></div>
+            <div style="height: 14px; background: rgba(255,255,255,0.03); border-radius: 4px; width: 100px;" class="animate-pulse"></div>
+            <div style="display:flex; gap:8px; width: 100%; justify-content:center;">
+              <div style="height: 24px; background: rgba(255,255,255,0.03); border-radius: 6px; width: 70px;" class="animate-pulse"></div>
+              <div style="height: 24px; background: rgba(255,255,255,0.03); border-radius: 6px; width: 70px;" class="animate-pulse"></div>
+              <div style="height: 24px; background: rgba(255,255,255,0.03); border-radius: 6px; width: 70px;" class="animate-pulse"></div>
             </div>
           </div>
-        </Card>
-      {/if}
+        {:else if securityReport}
+          <div style="display:flex; flex-direction:column; gap:16px; align-items:center;">
+            <!-- Circular score indicator -->
+            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+              <div class="dashboard-score-gauge" style="--score-color: {getScoreColor(securityReport.score)}; position: relative; width: 72px; height: 72px; display: flex; align-items: center; justify-content: center;">
+                <svg viewBox="0 0 100 100" style="transform: rotate(-90deg); width: 100%; height: 100%;">
+                  <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="8"></circle>
+                  <circle cx="50" cy="50" r="40" fill="none" stroke="var(--score-color)" stroke-width="8"
+                    style="stroke-dasharray: {securityReport.score * 2.513} 251.3; transition: stroke-dasharray 0.8s ease; stroke-linecap: round;"></circle>
+                </svg>
+                <div style="position: absolute; font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--color-text-primary);">{securityReport.score}%</div>
+              </div>
+              <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: {getScoreColor(securityReport.score)}">{getScoreLabel(securityReport.score)}</span>
+            </div>
+
+            <!-- Clickable stats pills -->
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; width: 100%;">
+              <button
+                onclick={() => {
+                  uiStore.securitySeverityFilter = 'Critical';
+                  uiStore.setActiveTab('security-auditor');
+                }}
+                style="display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s ease; background: rgba(239,68,68,.12); color: var(--color-error); font-family: inherit;"
+                class="hover-scale-pill"
+                title="Filter by Critical Issues"
+              >
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--color-error);"></span>
+                {securityCriticalCount} Critical
+              </button>
+              <button
+                onclick={() => {
+                  uiStore.securitySeverityFilter = 'Warning';
+                  uiStore.setActiveTab('security-auditor');
+                }}
+                style="display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s ease; background: rgba(251,191,36,.12); color: var(--color-warning); font-family: inherit;"
+                class="hover-scale-pill"
+                title="Filter by Warning Issues"
+              >
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--color-warning);"></span>
+                {securityWarningCount} Warnings
+              </button>
+              <button
+                onclick={() => {
+                  uiStore.securitySeverityFilter = 'Good';
+                  uiStore.setActiveTab('security-auditor');
+                }}
+                style="display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s ease; background: rgba(34,197,94,.12); color: var(--color-success); font-family: inherit;"
+                class="hover-scale-pill"
+                title="Filter by Passed Checks"
+              >
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--color-success);"></span>
+                {securityPassedCount} Passed
+              </button>
+            </div>
+          </div>
+        {:else}
+          <div style="display:flex; justify-content:center; padding: 12px 0;">
+            <span class="text-muted" style="font-size:12px;">No security report loaded.</span>
+          </div>
+        {/if}
+      </Card>
+
     </div>
 
     <!-- Column 3: Storage & SMART Health & System Events -->
     <div class="dashboard-column">
       <Card title="Storage & SMART Health" icon={HardDrive} class="panel-storage" style="display:flex; flex-direction:column; gap:12px;">
-        <div class="storage-scroll" style="display:flex; flex-direction:column; gap:12px; overflow-y:auto; max-height: 380px;">
+        <div class="storage-scroll" style="display:flex; flex-direction:column; gap:12px;">
           {#if diskUsage.length > 0}
             <div class="disks-list">
               {#each diskUsage as disk}
@@ -401,6 +423,65 @@
               {/each}
             </div>
           {/if}
+          
+          <div class="storage-dist-section mt-4" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px; margin-top: 12px;">
+            <h4 class="text-sm font-semibold mb-2 flex items-center gap-2" style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">
+              <HardDrive size={14} color="var(--color-accent)" /> Storage Distribution
+            </h4>
+            {#if storageDist}
+              <div style="display:flex; flex-direction:column; gap:10px;">
+                <!-- Stacked bar chart (RPM, Flatpak, System) -->
+                {#if storageDistTotal > 0}
+                  <div style="height: 10px; background: rgba(0, 0, 0, 0.2); border-radius: 5px; overflow: hidden; display: flex; width: 100%;">
+                    <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-accent);" title="RPM"></div>
+                    <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-text-secondary);" title="Flatpak"></div>
+                    <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-border);" title="System"></div>
+                  </div>
+                {/if}
+                <!-- Legend and metrics (RPM and Flatpak clickable, System static) -->
+                <div style="display: flex; gap: 16px; font-size: 11px; font-family: var(--font-mono); color: var(--color-text-secondary); flex-wrap: wrap;">
+                  <button 
+                    onclick={() => {
+                      uiStore.appSourceFilter = 'RPM';
+                      uiStore.setActiveTab('app-manager');
+                    }}
+                    style="display: flex; align-items: center; gap: 6px; background: transparent; border: none; padding: 0; cursor: pointer; color: inherit; font-family: inherit;"
+                    class="legend-btn"
+                    title="Filter App Manager by RPM packages"
+                  >
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent);"></span>
+                    <span class="hover-underline">RPM: {storageDist.rpm_gb.toFixed(1)} GB</span>
+                  </button>
+                  <button 
+                    onclick={() => {
+                      uiStore.appSourceFilter = 'Flatpak';
+                      uiStore.setActiveTab('app-manager');
+                    }}
+                    style="display: flex; align-items: center; gap: 6px; background: transparent; border: none; padding: 0; cursor: pointer; color: inherit; font-family: inherit;"
+                    class="legend-btn"
+                    title="Filter App Manager by Flatpak packages"
+                  >
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-secondary);"></span>
+                    <span class="hover-underline">Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB</span>
+                  </button>
+                  <div style="display: flex; align-items: center; gap: 6px; color: var(--color-text-muted);">
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-border);"></span>
+                    <span>System: {storageDist.system_gb.toFixed(1)} GB</span>
+                  </div>
+                </div>
+              </div>
+            {:else}
+              <!-- Storage loader skeleton placeholder -->
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="height: 10px; background: rgba(255,255,255,0.03); border-radius: 5px; width: 100%;" class="animate-pulse"></div>
+                <div style="display:flex; gap:16px;">
+                  <div style="height: 12px; background: rgba(255,255,255,0.03); border-radius: 4px; width: 70px;" class="animate-pulse"></div>
+                  <div style="height: 12px; background: rgba(255,255,255,0.03); border-radius: 4px; width: 85px;" class="animate-pulse"></div>
+                  <div style="height: 12px; background: rgba(255,255,255,0.03); border-radius: 4px; width: 80px;" class="animate-pulse"></div>
+                </div>
+              </div>
+            {/if}
+          </div>
         </div>
       </Card>
     </div>
@@ -468,10 +549,7 @@
   .disk-stats { display: flex; align-items: center; gap: 8px; font-size: 11px; }
   .disk-pct { min-width: 120px; text-align: right; }
   
-  .storage-scroll {
-      overflow-y: auto;
-      max-height: 400px;
-  }
+
 
   .hover-bg-error-light:hover {
     background: rgba(239, 68, 68, 0.15) !important;
@@ -488,4 +566,17 @@
   .text-error { color: #ef4444; }
   .text-info { color: #06b6d4; }
   .text-purple { color: #a855f7; }
+
+  .legend-btn:hover .hover-underline {
+    text-decoration: underline;
+    color: var(--color-text-primary);
+  }
+
+  .hover-scale-pill {
+    transition: all 0.2s ease;
+  }
+  .hover-scale-pill:hover {
+    filter: brightness(1.25);
+    transform: translateY(-1px);
+  }
 </style>

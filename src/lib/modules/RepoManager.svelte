@@ -37,6 +37,7 @@
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);
   let filter = $state('');
+  let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'errors'>('all');
   let showAddDialog = $state(false);
   let addUrl = $state('');
   let addLoading = $state(false);
@@ -58,10 +59,14 @@
   let speedResults = $state<SpeedResult[]>([]);
 
   const filteredRepos = $derived(
-    repos.filter(r =>
-      r.name.toLowerCase().includes(filter.toLowerCase()) ||
-      r.id.toLowerCase().includes(filter.toLowerCase())
-    )
+    repos.filter(r => {
+      if (statusFilter === 'enabled' && !r.enabled) return false;
+      if (statusFilter === 'disabled' && r.enabled) return false;
+      if (statusFilter === 'errors' && (r.baseurl || r.metalink || r.mirrorlist)) return false;
+
+      const q = filter.toLowerCase();
+      return !q || r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q);
+    })
   );
 
   async function loadRepos() {
@@ -218,22 +223,38 @@
     <!-- Stats -->
     {#if repos.length > 0}
       <div class="stat-cards" style="margin: 0;">
-        <div class="stat-card">
+        <button
+          onclick={() => statusFilter = 'all'}
+          class="stat-card"
+          class:active={statusFilter === 'all'}
+        >
           <span class="stat-value">{repos.length}</span>
           <span class="stat-label">Total</span>
-        </div>
-        <div class="stat-card">
+        </button>
+        <button
+          onclick={() => statusFilter = statusFilter === 'enabled' ? 'all' : 'enabled'}
+          class="stat-card"
+          class:active={statusFilter === 'enabled'}
+        >
           <span class="stat-value enabled">{repos.filter(r => r.enabled).length}</span>
           <span class="stat-label">Enabled</span>
-        </div>
-        <div class="stat-card">
+        </button>
+        <button
+          onclick={() => statusFilter = statusFilter === 'disabled' ? 'all' : 'disabled'}
+          class="stat-card"
+          class:active={statusFilter === 'disabled'}
+        >
           <span class="stat-value disabled">{repos.filter(r => !r.enabled).length}</span>
           <span class="stat-label">Disabled</span>
-        </div>
-        <div class="stat-card">
+        </button>
+        <button
+          onclick={() => statusFilter = statusFilter === 'errors' ? 'all' : 'errors'}
+          class="stat-card"
+          class:active={statusFilter === 'errors'}
+        >
           <span class="stat-value errors">{repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}</span>
           <span class="stat-label">Errors</span>
-        </div>
+        </button>
       </div>
     {/if}
 
@@ -543,6 +564,23 @@
     border-radius: 10px;
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+    color: inherit;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .stat-card:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+  .stat-card.active {
+    background: var(--color-accent) !important;
+    border-color: var(--color-accent) !important;
+    color: #00363d !important;
+  }
+  .stat-card.active .stat-value,
+  .stat-card.active .stat-label {
+    color: #00363d !important;
   }
   .stat-value {
     font-size: 16px;
