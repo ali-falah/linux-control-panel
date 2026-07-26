@@ -4,6 +4,7 @@
   import { open } from '@tauri-apps/plugin-shell';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import {
@@ -565,29 +566,21 @@
 
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
 <div class="module-container">
-  <div class="header">
-    <div class="header-title">
-      <Shield size={24} color="var(--color-accent)" />
-      <h2>Security Auditor</h2>
-      {#if report}
-        <span class="header-score-pill" style="background: {getScoreColor(report.score)}20; color: {getScoreColor(report.score)}; border-color: {getScoreColor(report.score)}40">
-          {report.score}% — {getScoreLabel(report.score)}
-        </span>
-      {/if}
-    </div>
-    <div class="header-actions">
-      {#if report}
-        <Button variant="ghost" size="sm" onclick={exportReport} title="Export audit report as JSON">
-          <Download size={14} />
-          Export
-        </Button>
-      {/if}
-      <Button variant="outline" size="sm" onclick={runAudit} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'spin' : ''} />
-        {loading ? 'Scanning...' : 'Rescan System'}
+  <PageHeader title="Security Auditor" subtitle="System Hardening & CIS Benchmarks" icon={Shield}>
+    {#if report}
+      <span class="header-score-pill" style="background: {getScoreColor(report.score)}20; color: {getScoreColor(report.score)}; border-color: {getScoreColor(report.score)}40; margin-right: 8px;">
+        {report.score}% — {getScoreLabel(report.score)}
+      </span>
+      <Button variant="ghost" size="sm" onclick={exportReport} title="Export audit report as JSON">
+        <Download size={14} />
+        Export
       </Button>
-    </div>
-  </div>
+    {/if}
+    <Button variant="outline" size="sm" onclick={runAudit} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'spin' : ''} />
+      {loading ? 'Scanning...' : 'Rescan System'}
+    </Button>
+  </PageHeader>
 
   <div class="content-scroll">
     {#if loading && !report}
@@ -883,6 +876,11 @@
     flex-direction: column;
     height: 100%;
     overflow: hidden;
+  }
+
+  :global(.module-container .header-wrapper) {
+    margin: 0 0 16px 0 !important;
+    flex-shrink: 0;
   }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */

@@ -105,6 +105,97 @@
   let storageDistTotal = $derived(storageDist ? storageDist.rpm_gb + storageDist.flatpak_gb + storageDist.system_gb : 0);
   let storageDistSubTotal = $derived(storageDist ? storageDist.rpm_gb + storageDist.flatpak_gb : 0);
 
+  // Selected Storage Details Modal (Read-Only)
+  let selectedStorageDetail = $state<{
+    title: string;
+    device: string;
+    mount?: string;
+    fs_type?: string;
+    total_gb: number;
+    used_gb: number;
+    free_gb: number;
+    percent: number;
+    health_status?: string;
+    model?: string;
+    subvolumes?: any[];
+  } | null>(null);
+
+  function formatStorageBytes(gb: number) {
+    if (!gb || gb <= 0) return '0 B';
+    if (gb < 1.0) {
+      const mb = gb * 1024;
+      return `${mb.toFixed(0)} MB`;
+    }
+    return `${gb.toFixed(1)} GB`;
+  }
+
+  // Hierarchical storage derived computation
+  let storageHierarchy = $derived.by(() => {
+    if (!diskUsage || diskUsage.length === 0) return [];
+
+    const deviceMap = new Map<string, any[]>();
+    for (const d of diskUsage) {
+      if (!d.device || !d.device.startsWith('/dev/')) continue;
+      if (!deviceMap.has(d.device)) deviceMap.set(d.device, []);
+      deviceMap.get(d.device)!.push(d);
+    }
+
+    const physicalDrives = new Map<string, {
+      disk_path: string;
+      model: string;
+      health_status: string;
+      partitions: any[];
+      btrfsPools: any[];
+    }>();
+
+    for (const s of smartHealth) {
+      physicalDrives.set(s.disk_path, {
+        disk_path: s.disk_path,
+        model: s.model,
+        health_status: s.health_status,
+        partitions: [],
+        btrfsPools: []
+      });
+    }
+
+    for (const [device, mounts] of deviceMap.entries()) {
+      let parentDiskPath = Array.from(physicalDrives.keys()).find(p => device.startsWith(p));
+      if (!parentDiskPath) {
+        parentDiskPath = device.replace(/p?\d+$/, '');
+        if (!physicalDrives.has(parentDiskPath)) {
+          physicalDrives.set(parentDiskPath, {
+            disk_path: parentDiskPath,
+            model: 'Disk Drive',
+            health_status: 'OK',
+            partitions: [],
+            btrfsPools: []
+          });
+        }
+      }
+
+      const drive = physicalDrives.get(parentDiskPath)!;
+
+      if (mounts.length > 1 && mounts[0].fs_type === 'btrfs') {
+        const primary = mounts[0];
+        drive.btrfsPools.push({
+          device,
+          fs_type: primary.fs_type,
+          total_gb: primary.total_gb,
+          used_gb: primary.used_gb,
+          free_gb: primary.free_gb,
+          percent: primary.percent,
+          subvolumes: mounts
+        });
+      } else {
+        for (const m of mounts) {
+          drive.partitions.push(m);
+        }
+      }
+    }
+
+    return Array.from(physicalDrives.values()).filter(d => d.partitions.length > 0 || d.btrfsPools.length > 0);
+  });
+
   async function fetchStorageDistribution() {
     try {
       storageDist = await invoke('get_storage_distribution');
@@ -384,44 +475,130 @@
     <div class="dashboard-column">
       <Card title="Storage & SMART Health" icon={HardDrive} class="panel-storage" style="display:flex; flex-direction:column; gap:12px;">
         <div class="storage-scroll" style="display:flex; flex-direction:column; gap:12px;">
-          {#if diskUsage.length > 0}
-            <div class="disks-list">
-              {#each diskUsage as disk}
-                {#if disk.device.startsWith('/dev/')}
-                  <div class="disk-item">
-                    <div class="disk-header">
-                      <strong>{disk.mount}</strong>
-                      <span class="text-muted" style="font-size: 11px;">{disk.device} ({disk.fs_type})</span>
-                    </div>
-                    <div class="disk-stats">
-                      <div class="progress-bg" style="flex:1;">
-                        <div class="progress-fill storage-fill" style="width: {disk.percent}%"></div>
+          {#if storageHierarchy.length > 0}
+            <div class="disks-hierarchy" style="display:flex; flex-direction:column; gap:12px;">
+              {#each storageHierarchy as drive}
+                <!-- Drive Group Container -->
+                <div class="drive-group" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px; display:flex; flex-direction:column; gap:8px;">
+                  <!-- Physical Drive Header -->
+                  <div 
+                    class="drive-header" 
+                    style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;"
+                    onclick={() => {
+                      selectedStorageDetail = {
+                        title: `Physical Drive (${drive.disk_path})`,
+                        device: drive.disk_path,
+                        model: drive.model,
+                        health_status: drive.health_status,
+                        total_gb: drive.partitions.reduce((acc, p) => acc + p.total_gb, 0) + drive.btrfsPools.reduce((acc, b) => acc + b.total_gb, 0),
+                        used_gb: drive.partitions.reduce((acc, p) => acc + p.used_gb, 0) + drive.btrfsPools.reduce((acc, b) => acc + b.used_gb, 0),
+                        free_gb: drive.partitions.reduce((acc, p) => acc + p.free_gb, 0) + drive.btrfsPools.reduce((acc, b) => acc + b.free_gb, 0),
+                        percent: 0
+                      };
+                    }}
+                    title="Click to view detailed drive properties"
+                  >
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <HardDrive size={15} style="color:var(--color-accent);" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">{drive.disk_path}</div>
+                        <div style="font-size:10px; color:var(--color-text-muted);">{drive.model}</div>
                       </div>
-                      <span class="disk-pct">{disk.percent.toFixed(1)}% ({disk.used_gb.toFixed(1)}GB / {disk.total_gb.toFixed(1)}GB)</span>
                     </div>
+                    <Badge variant={drive.health_status === 'PASSED' || drive.health_status === 'OK' ? 'success' : (drive.health_status === 'UNKNOWN' ? 'warning' : 'error')}>
+                      {drive.health_status}
+                    </Badge>
                   </div>
-                {/if}
+
+                  <!-- Child Partitions & BTRFS Pools -->
+                  <div class="drive-children" style="display:flex; flex-direction:column; gap:8px; padding-left: 8px; border-left: 2px solid rgba(0, 218, 243, 0.15); margin-left: 4px;">
+                    <!-- Standalone Partitions -->
+                    {#each drive.partitions as partition}
+                      <div 
+                        class="partition-item"
+                        style="display:flex; flex-direction:column; gap:4px; padding: 6px 8px; background: rgba(255,255,255,0.02); border-radius: 6px; cursor:pointer;"
+                        onclick={() => {
+                          selectedStorageDetail = {
+                            title: `Partition (${partition.mount})`,
+                            device: partition.device,
+                            mount: partition.mount,
+                            fs_type: partition.fs_type,
+                            total_gb: partition.total_gb,
+                            used_gb: partition.used_gb,
+                            free_gb: partition.free_gb,
+                            percent: partition.percent
+                          };
+                        }}
+                        title="Click to view partition details"
+                      >
+                        <div class="disk-header">
+                          <strong style="color:var(--color-text-primary); font-size:12px;">{partition.mount}</strong>
+                          <span class="text-muted" style="font-size: 11px;">{partition.device} ({partition.fs_type})</span>
+                        </div>
+                        <div class="disk-stats">
+                          <div class="progress-bg" style="flex:1;">
+                            <div class="progress-fill storage-fill" style="width: {partition.percent}%"></div>
+                          </div>
+                          <span class="disk-pct" style="font-size:11px;">{partition.percent.toFixed(1)}% ({formatStorageBytes(partition.used_gb)} / {formatStorageBytes(partition.total_gb)})</span>
+                        </div>
+                      </div>
+                    {/each}
+
+                    <!-- BTRFS Pools (Shared Subvolumes) -->
+                    {#each drive.btrfsPools as pool}
+                      <div 
+                        class="btrfs-pool-item"
+                        style="display:flex; flex-direction:column; gap:6px; padding: 8px; background: rgba(0, 218, 243, 0.03); border: 1px solid rgba(0, 218, 243, 0.12); border-radius: 6px;"
+                      >
+                        <div class="disk-header" style="align-items:center;">
+                          <div style="display:flex; align-items:center; gap:6px;">
+                            <span style="font-size:10px; font-weight:700; background:rgba(0,218,243,0.15); color:var(--color-accent); padding:2px 5px; border-radius:4px; font-family:var(--font-mono);">BTRFS POOL</span>
+                            <span style="font-size:11px; color:var(--color-text-secondary); font-family:var(--font-mono);">{pool.device}</span>
+                          </div>
+                          <span class="text-muted" style="font-size: 11px;">Shared Pool ({formatStorageBytes(pool.total_gb)})</span>
+                        </div>
+
+                        <div class="disk-stats">
+                          <div class="progress-bg" style="flex:1;">
+                            <div class="progress-fill storage-fill" style="width: {pool.percent}%"></div>
+                          </div>
+                          <span class="disk-pct" style="font-size:11px;">{pool.percent.toFixed(1)}% Used</span>
+                        </div>
+
+                        <!-- Nested Subvolumes -->
+                        <div class="subvolumes-list" style="display:flex; flex-direction:column; gap:4px; margin-top:4px; padding-left:8px; border-left: 1px dashed rgba(0,218,243,0.2);">
+                          {#each pool.subvolumes as subvol}
+                            <div 
+                              class="subvol-row"
+                              style="display:flex; justify-content:space-between; align-items:center; font-size:11px; padding: 3px 6px; border-radius:4px; background:rgba(0,0,0,0.15); cursor:pointer;"
+                              onclick={() => {
+                                selectedStorageDetail = {
+                                  title: `BTRFS Subvolume (${subvol.mount})`,
+                                  device: subvol.device,
+                                  mount: subvol.mount,
+                                  fs_type: subvol.fs_type,
+                                  total_gb: subvol.total_gb,
+                                  used_gb: subvol.used_gb,
+                                  free_gb: subvol.free_gb,
+                                  percent: subvol.percent,
+                                  subvolumes: pool.subvolumes.map(s => s.mount)
+                                };
+                              }}
+                              title="Click for subvolume info"
+                            >
+                              <span style="font-weight:600; color:var(--color-text-primary);">{subvol.mount}</span>
+                              <span style="color:var(--color-text-muted); font-family:var(--font-mono);">{formatStorageBytes(subvol.used_gb)}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
               {/each}
             </div>
           {:else}
             <span class="text-muted">Loading storage data...</span>
-          {/if}
-          
-          {#if smartHealth.length > 0}
-            <div class="smart-health-section mt-4">
-              <h4 class="text-sm font-semibold mb-2 flex items-center gap-2" style="font-size: 13px; font-weight: 600;"><Heart size={14} class="text-error" /> SMART Status</h4>
-              {#each smartHealth as smart}
-                <div class="smart-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; margin-bottom: 8px;">
-                  <div>
-                    <div style="font-size: 12px; font-weight: 600;">{smart.disk_path}</div>
-                    <div style="font-size: 10px; color: var(--color-text-muted);">{smart.model}</div>
-                  </div>
-                  <Badge variant={smart.health_status === 'PASSED' || smart.health_status === 'OK' ? 'success' : (smart.health_status === 'UNKNOWN' ? 'warning' : 'error')}>
-                    {smart.health_status}
-                  </Badge>
-                </div>
-              {/each}
-            </div>
           {/if}
           
           <div class="storage-dist-section mt-4" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px; margin-top: 12px;">
@@ -430,15 +607,15 @@
             </h4>
             {#if storageDist}
               <div style="display:flex; flex-direction:column; gap:10px;">
-                <!-- Stacked bar chart (RPM, Flatpak, System) -->
+                <!-- Stacked bar chart (RPM cyan, Flatpak purple, System blue) -->
                 {#if storageDistTotal > 0}
-                  <div style="height: 10px; background: rgba(0, 0, 0, 0.2); border-radius: 5px; overflow: hidden; display: flex; width: 100%;">
-                    <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-accent);" title="RPM"></div>
-                    <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-text-secondary);" title="Flatpak"></div>
-                    <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-border);" title="System"></div>
+                  <div style="height: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 5px; overflow: hidden; display: flex; width: 100%;">
+                    <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: #00daf3;" title="RPM: {storageDist.rpm_gb.toFixed(1)} GB"></div>
+                    <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: #a855f7;" title="Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB"></div>
+                    <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: #3b82f6;" title="System: {storageDist.system_gb.toFixed(1)} GB"></div>
                   </div>
                 {/if}
-                <!-- Legend and metrics (RPM and Flatpak clickable, System static) -->
+                <!-- Legend and metrics -->
                 <div style="display: flex; gap: 16px; font-size: 11px; font-family: var(--font-mono); color: var(--color-text-secondary); flex-wrap: wrap;">
                   <button 
                     onclick={() => {
@@ -449,7 +626,7 @@
                     class="legend-btn"
                     title="Filter App Manager by RPM packages"
                   >
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent);"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #00daf3;"></span>
                     <span class="hover-underline">RPM: {storageDist.rpm_gb.toFixed(1)} GB</span>
                   </button>
                   <button 
@@ -461,11 +638,11 @@
                     class="legend-btn"
                     title="Filter App Manager by Flatpak packages"
                   >
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-secondary);"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #a855f7;"></span>
                     <span class="hover-underline">Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB</span>
                   </button>
                   <div style="display: flex; align-items: center; gap: 6px; color: var(--color-text-muted);">
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-border);"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #3b82f6;"></span>
                     <span>System: {storageDist.system_gb.toFixed(1)} GB</span>
                   </div>
                 </div>
@@ -487,6 +664,91 @@
     </div>
   </div>
 </div>
+
+<!-- Read-Only Storage Details Modal -->
+{#if selectedStorageDetail}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) selectedStorageDetail = null; }}>
+    <div class="modal" style="width: 440px; max-width: calc(100vw - 32px); position: relative; z-index: 101;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 style="margin:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px; font-size:15px;">
+          <HardDrive size={18} style="color:var(--color-accent)"/>
+          {selectedStorageDetail.title}
+        </h3>
+        <button type="button" class="btn btn-outline" style="padding: 2px 8px;" onclick={() => selectedStorageDetail = null}>&times;</button>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:10px; font-size:12px; margin-bottom:18px;">
+        <div class="info-row">
+          <span>Device Node</span>
+          <strong style="color:var(--color-accent); font-family:var(--font-mono);">{selectedStorageDetail.device}</strong>
+        </div>
+
+        {#if selectedStorageDetail.mount}
+          <div class="info-row">
+            <span>Mount Target</span>
+            <strong style="color:var(--color-text-primary); font-family:var(--font-mono);">{selectedStorageDetail.mount}</strong>
+          </div>
+        {/if}
+
+        {#if selectedStorageDetail.fs_type}
+          <div class="info-row">
+            <span>File System</span>
+            <span style="font-family:var(--font-mono); text-transform:uppercase;">{selectedStorageDetail.fs_type}</span>
+          </div>
+        {/if}
+
+        {#if selectedStorageDetail.model}
+          <div class="info-row">
+            <span>Model / Hardware</span>
+            <span style="color:var(--color-text-secondary);">{selectedStorageDetail.model}</span>
+          </div>
+        {/if}
+
+        {#if selectedStorageDetail.health_status}
+          <div class="info-row">
+            <span>SMART Health</span>
+            <Badge variant={selectedStorageDetail.health_status === 'PASSED' || selectedStorageDetail.health_status === 'OK' ? 'success' : 'warning'}>
+              {selectedStorageDetail.health_status}
+            </Badge>
+          </div>
+        {/if}
+
+        <div class="info-row">
+          <span>Total Space</span>
+          <strong style="font-family:var(--font-mono);">{formatStorageBytes(selectedStorageDetail.total_gb)}</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Used Space</span>
+          <strong style="color:var(--color-text-primary); font-family:var(--font-mono);">{formatStorageBytes(selectedStorageDetail.used_gb)} ({selectedStorageDetail.percent.toFixed(1)}%)</strong>
+        </div>
+
+        <div class="info-row">
+          <span>Available Free</span>
+          <strong style="color:var(--color-success); font-family:var(--font-mono);">{formatStorageBytes(selectedStorageDetail.free_gb)}</strong>
+        </div>
+
+        {#if selectedStorageDetail.subvolumes && selectedStorageDetail.subvolumes.length > 0}
+          <div style="margin-top:8px; background:rgba(0,218,243,0.05); border:1px solid rgba(0,218,243,0.15); border-radius:6px; padding:10px;">
+            <div style="font-size:11px; font-weight:700; color:var(--color-accent); margin-bottom:6px; text-transform:uppercase;">Shared BTRFS Subvolumes:</div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              {#each selectedStorageDetail.subvolumes as sub}
+                <span style="background:rgba(255,255,255,0.08); padding:2px 8px; border-radius:4px; font-family:var(--font-mono); font-size:11px;">{sub}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:6px;">
+        <span style="font-size:11px; color:var(--color-text-muted);">🛡️ Read-Only System Information</span>
+        <button type="button" class="btn btn-primary" onclick={() => selectedStorageDetail = null}>Close</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .dashboard-grid {
@@ -544,6 +806,54 @@
   .iface-name { font-weight: 600; font-size: 13px; font-family: var(--font-mono); }
   
   .disks-list { display: flex; flex-direction: column; gap: 12px; }
+  .disks-hierarchy {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 420px; /* Increased container height by ~15% */
+    overflow-y: auto;
+    padding-right: 6px;
+  }
+  .disks-hierarchy::-webkit-scrollbar {
+    width: 5px;
+  }
+  .disks-hierarchy::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+  }
+  .disks-hierarchy::-webkit-scrollbar-thumb {
+    background: rgba(0, 218, 243, 0.25);
+    border-radius: 4px;
+  }
+  .disks-hierarchy::-webkit-scrollbar-thumb:hover {
+    background: var(--color-accent);
+  }
+
+  .drive-header {
+    transition: background 0.15s ease;
+    padding: 4px 6px;
+    border-radius: 6px;
+  }
+  .drive-header:hover {
+    background: rgba(0, 218, 243, 0.05);
+  }
+
+  .partition-item {
+    transition: all 0.15s ease;
+  }
+  .partition-item:hover {
+    background: rgba(0, 218, 243, 0.08) !important;
+    transform: translateX(2px);
+  }
+
+  .subvol-row {
+    transition: all 0.15s ease;
+  }
+  .subvol-row:hover {
+    background: rgba(0, 218, 243, 0.12) !important;
+    color: var(--color-accent);
+  }
+
   .disk-item { display: flex; flex-direction: column; gap: 6px; }
   .disk-header { display: flex; justify-content: space-between; font-size: 13px; }
   .disk-stats { display: flex; align-items: center; gap: 8px; font-size: 11px; }
