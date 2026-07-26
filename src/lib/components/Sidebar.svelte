@@ -13,6 +13,30 @@
   });
 
   let searchQuery = $state('');
+  let firstResultEl = $state<HTMLButtonElement | null>(null);
+
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'Tab' && searchQuery.trim()) {
+      if (firstResultEl) {
+        e.preventDefault();
+        firstResultEl.focus();
+      }
+    }
+  }
+
+  // Svelte action to conditionally capture a ref for the first search result
+  function captureFirstResult(node: HTMLButtonElement, isFirst: boolean) {
+    if (isFirst) firstResultEl = node;
+    return {
+      update(newIsFirst: boolean) {
+        if (newIsFirst) firstResultEl = node;
+        else if (firstResultEl === node) firstResultEl = null;
+      },
+      destroy() {
+        if (firstResultEl === node) firstResultEl = null;
+      }
+    };
+  }
 
   let expandedGroup = $state<string | null>('Overview');
 
@@ -116,7 +140,12 @@
   {#if !uiStore.sidebarCollapsed}
     <div class="sidebar-search">
       <Search size={14} style="color: var(--color-text-muted); opacity: 0.7; flex-shrink: 0;" />
-      <input type="text" placeholder="Search..." bind:value={searchQuery} />
+      <input
+        type="text"
+        placeholder="Search..."
+        bind:value={searchQuery}
+        onkeydown={handleSearchKeydown}
+      />
     </div>
   {/if}
 
@@ -143,14 +172,16 @@
 
         <div class="group-items-wrapper" class:collapsed-anim={!uiStore.sidebarCollapsed && expandedGroup !== group.label && !searchQuery}>
           <div class="group-items">
-            {#each filteredItems as item}
+            {#each filteredItems as item, itemIdx}
               {@const isActive = uiStore.activeTab === item.id}
+              {@const isFirstResult = searchQuery.trim() && itemIdx === 0}
               <button
                 class="nav-item"
                 class:active={isActive}
                 onclick={() => { uiStore.setActiveTab(item.id); searchQuery = ''; }}
                 title={uiStore.sidebarCollapsed ? item.label : ''}
                 aria-current={isActive ? 'page' : undefined}
+                use:captureFirstResult={isFirstResult}
               >
                 <span class="nav-icon" class:active={isActive}>
                   <item.icon size={16} />
@@ -452,8 +483,20 @@
   }
 
   .nav-item:hover {
-    background: rgba(0, 218, 243, 0.04);
+    background: rgba(0, 218, 243, 0.06);
     color: var(--color-text-secondary);
+  }
+
+  /* Keyboard focus — shown after Tab from search input */
+  .nav-item:focus-visible {
+    outline: none;
+    background: rgba(0, 218, 243, 0.1);
+    color: var(--color-accent);
+    box-shadow: inset 0 0 0 1.5px rgba(0, 218, 243, 0.45);
+  }
+
+  .nav-item:focus-visible .nav-icon {
+    color: var(--color-accent);
   }
 
   .nav-item.active {

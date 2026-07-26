@@ -33,6 +33,8 @@ export type TabId =
 
 class UIStore {
   activeTab = $state<TabId>('system-dashboard');
+  /** Navigation history stack — used by PageHeader back button */
+  private navHistory = $state<TabId[]>([]);
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
   preAppliedJournalPriority = $state<string>('all');
@@ -58,11 +60,29 @@ class UIStore {
   });
 
   setActiveTab(tab: TabId) {
+    if (tab !== this.activeTab) {
+      this.navHistory = [...this.navHistory, this.activeTab];
+    }
     this.activeTab = tab;
+  }
+
+  goBack() {
+    if (this.navHistory.length > 0) {
+      const prev = this.navHistory[this.navHistory.length - 1];
+      this.navHistory = this.navHistory.slice(0, -1);
+      this.activeTab = prev;
+    }
+  }
+
+  get canGoBack() {
+    return this.navHistory.length > 0;
   }
 
   /** Navigate to a tab and pre-select a network interface (used by IP popover deep-link). */
   setActiveTabWithInterface(tab: TabId, ifaceName: string) {
+    if (tab !== this.activeTab) {
+      this.navHistory = [...this.navHistory, this.activeTab];
+    }
     this.selectedInterface = ifaceName;
     this.activeTab = tab;
   }

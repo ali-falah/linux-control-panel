@@ -13,6 +13,11 @@
   let sudoError = $state('');
   let isTestingSudo = $state(false);
 
+  // Svelte action: focus the element as soon as it's mounted in the DOM
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
+  }
+
   async function checkSudoStatus() {
     try { hasRoot = await invoke('check_sudo_status'); } catch(e) {}
   }
@@ -483,6 +488,7 @@
       {/if}
       <form onsubmit={(e) => { e.preventDefault(); submitSudo(); }}>
         <input
+          use:focusOnMount
           type="password"
           bind:value={sudoPassword}
           class="input"

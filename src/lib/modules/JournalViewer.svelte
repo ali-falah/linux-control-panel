@@ -8,6 +8,7 @@
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
+  import DatePicker from '../components/ui/DatePicker.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 
@@ -493,34 +494,22 @@
         {#if timeRange === 'custom' && showCustomPopover}
           <div bind:this={popoverContainer} class="custom-range-popover">
             <div class="popover-row">
-              <span class="popover-label">From:</span>
-              <div class="popover-inputs">
-                <input
-                  type="date"
-                  bind:value={customStartDate}
-                  class="log-dt"
-                />
-                <input
-                  type="time"
-                  bind:value={customStartTime}
-                  class="log-dt"
-                />
-              </div>
+              <span class="popover-label">From</span>
+              <DatePicker bind:value={customStartDate} placeholder="Start date" />
+              <input
+                type="time"
+                bind:value={customStartTime}
+                class="log-dt"
+              />
             </div>
             <div class="popover-row" style="margin-top: 10px;">
-              <span class="popover-label">To:</span>
-              <div class="popover-inputs">
-                <input
-                  type="date"
-                  bind:value={customEndDate}
-                  class="log-dt"
-                />
-                <input
-                  type="time"
-                  bind:value={customEndTime}
-                  class="log-dt"
-                />
-              </div>
+              <span class="popover-label">To</span>
+              <DatePicker bind:value={customEndDate} placeholder="End date" />
+              <input
+                type="time"
+                bind:value={customEndTime}
+                class="log-dt"
+              />
             </div>
             <div class="popover-actions">
               <button
@@ -987,13 +976,13 @@
   .custom-range-popover {
     position: absolute;
     top: calc(100% + 6px);
-    left: 0;
+    right: 0;
     z-index: 100;
-    width: 280px;
+    width: 310px;
     background: #0f1c2e;
     border: 1px solid rgba(0, 218, 243, 0.2);
     border-radius: 8px;
-    padding: 12px;
+    padding: 14px;
     box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
   }
 
@@ -1004,21 +993,17 @@
   }
 
   .popover-label {
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
     color: var(--color-text-muted);
     letter-spacing: 0.5px;
   }
 
-  .popover-inputs {
-    display: flex;
-    gap: 8px;
-  }
-
-  .popover-inputs .log-dt {
-    flex: 1;
-    width: 50%;
+  /* Time input sits below the DatePicker trigger inside a popover row */
+  .popover-row .log-dt {
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .popover-actions {
