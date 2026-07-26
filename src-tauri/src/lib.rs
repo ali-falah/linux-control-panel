@@ -82,6 +82,10 @@ use commands::{
         security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
         security_fix_usbguard,
     },
+    audit_log::{
+        get_auth_events, check_auditd_status, setup_auditd_rules,
+        get_command_audit_logs, get_runtime_threats
+    },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -342,6 +346,12 @@ pub fn run() {
             security_fix_passwd_perms,
             security_fix_shadow_perms,
             security_fix_usbguard,
+            // Audit Log & Threat Detection
+            get_auth_events,
+            check_auditd_status,
+            setup_auditd_rules,
+            get_command_audit_logs,
+            get_runtime_threats,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

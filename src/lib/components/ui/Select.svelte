@@ -52,6 +52,17 @@
     return () => document.removeEventListener('click', handleDocumentClick);
   });
 
+  // Close dropdown on Escape key
+  $effect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        isOpen = false;
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  });
+
   let activeLabel = $derived.by(() => {
     const activeOpt = options.find(o => o.value === value);
     return activeOpt ? activeOpt.label : (options[0]?.label || 'Select...');

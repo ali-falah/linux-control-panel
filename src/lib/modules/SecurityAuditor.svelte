@@ -24,6 +24,7 @@
     has_auto_fix: boolean;
     is_resolved: boolean;
     reference?: string | null;
+    tamper_flag?: string | null;
   }
 
   interface CategoryScore {
@@ -43,12 +44,17 @@
   let report = $state<SecurityReport | null>(null);
   let loading = $state(false);
   let fixingId = $state<string | null>(null);
-  let activeCategory = $state('all');
+  let activeCategory = $state(
+    uiStore.securityCategoryFilter ? uiStore.securityCategoryFilter : 'all'
+  );
   let activeSeverity = $state<'Critical' | 'Warning' | 'Good' | 'all'>(
     uiStore.securitySeverityFilter ? uiStore.securitySeverityFilter : 'all'
   );
   if (uiStore.securitySeverityFilter) {
     uiStore.securitySeverityFilter = null;
+  }
+  if (uiStore.securityCategoryFilter) {
+    uiStore.securityCategoryFilter = null;
   }
   let scoreHistory = $state<number[]>([]);
   let expandedId = $state<string | null>(null);
@@ -62,6 +68,7 @@
     { id: 'Filesystem',        label: 'Filesystem' },
     { id: 'Network & Services',label: 'Network' },
     { id: 'System Hygiene',    label: 'System' },
+    { id: 'Runtime Threats',   label: 'Runtime Threats' },
   ];
 
   const CAT_ICONS: Record<string, any> = {
@@ -71,6 +78,7 @@
     'Filesystem':         FolderLock,
     'Network & Services': Network,
     'System Hygiene':     Settings,
+    'Runtime Threats':    ShieldAlert,
   };
 
   // ── Computed ───────────────────────────────────────────────────────────────
@@ -670,10 +678,11 @@
         <div class="category-grid">
           {#each report.category_scores as cs}
             {@const CatIcon = getCategoryIcon(cs.category)}
+            {@const isRuntime = cs.category === 'Runtime Threats'}
             <button
-              class="cat-card glass-panel {activeCategory === cs.category ? 'cat-active' : ''}"
+              class="cat-card glass-panel {activeCategory === cs.category ? 'cat-active' : ''} {isRuntime && cs.issues > 0 ? 'cat-threat' : ''}"
               onclick={() => activeCategory = activeCategory === cs.category ? 'all' : cs.category}
-              style="--cat-color: {getScoreColor(cs.score)}"
+              style="--cat-color: {isRuntime ? (cs.issues > 0 ? 'var(--color-error)' : 'var(--color-success)') : getScoreColor(cs.score)}"
             >
               <div class="cat-header">
                 <CatIcon size={16} />
@@ -682,12 +691,23 @@
                   <span class="cat-badge">{cs.issues}</span>
                 {/if}
               </div>
-              <div class="cat-bar-wrap">
-                <div class="cat-bar">
-                  <div class="cat-bar-fill" style="width: {cs.score}%; background: {getScoreColor(cs.score)}"></div>
+              {#if isRuntime}
+                <!-- Runtime Threats: show clean/threat indicator instead of % bar -->
+                <div class="cat-bar-wrap">
+                  {#if cs.issues === 0}
+                    <span style="font-size: 11px; color: var(--color-success); font-weight: 600;">✓ Clean</span>
+                  {:else}
+                    <span style="font-size: 11px; color: var(--color-error); font-weight: 600;">{cs.issues} active threat{cs.issues !== 1 ? 's' : ''}</span>
+                  {/if}
                 </div>
-                <span class="cat-score">{cs.score}%</span>
-              </div>
+              {:else}
+                <div class="cat-bar-wrap">
+                  <div class="cat-bar">
+                    <div class="cat-bar-fill" style="width: {cs.score}%; background: {getScoreColor(cs.score)}"></div>
+                  </div>
+                  <span class="cat-score">{cs.score}%</span>
+                </div>
+              {/if}
             </button>
           {/each}
         </div>
@@ -730,6 +750,12 @@
                         {finding.severity}
                       </span>
                       <span class="cat-tag">{finding.category}</span>
+                      {#if finding.tamper_flag}
+                        <span class="sev-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.3); display: flex; align-items: center; gap: 4px;">
+                          <AlertTriangle size={10} />
+                          {finding.tamper_flag}
+                        </span>
+                      {/if}
                     </div>
                   </div>
                   <div class="finding-desc">{finding.description}</div>
@@ -749,6 +775,42 @@
                     <div>
                       <div class="cm-label">Countermeasure</div>
                       <div class="cm-text">{finding.countermeasure}</div>
+                      {#if finding.category === 'Runtime Threats'}
+                        <!-- Deep-link buttons: navigate directly to the relevant log tabs -->
+                        <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;">
+                          <button
+                            type="button"
+                            class="cm-nav-btn"
+                            onclick={() => {
+                              uiStore.preAppliedJournalPriority = 'all';
+                              uiStore.setActiveTab('journal-logs');
+                              // Signal Auth Events tab — store the target tab in a transient flag
+                              setTimeout(() => {
+                                const event = new CustomEvent('journal-tab-select', { detail: 'auth' });
+                                window.dispatchEvent(event);
+                              }, 100);
+                            }}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                            View Auth Events
+                          </button>
+                          <button
+                            type="button"
+                            class="cm-nav-btn"
+                            onclick={() => {
+                              uiStore.preAppliedJournalPriority = 'all';
+                              uiStore.setActiveTab('journal-logs');
+                              setTimeout(() => {
+                                const event = new CustomEvent('journal-tab-select', { detail: 'audit' });
+                                window.dispatchEvent(event);
+                              }, 100);
+                            }}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            View Command Audit
+                          </button>
+                        </div>
+                      {/if}
                     </div>
                   </div>
 
@@ -1114,6 +1176,20 @@
     border-color: var(--cat-color);
   }
 
+  .cat-card.cat-threat {
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(239, 68, 68, 0.05);
+    animation: threat-pulse 2.5s ease-in-out infinite;
+  }
+  .cat-card.cat-threat:hover {
+    border-color: rgba(239, 68, 68, 0.7);
+    background: rgba(239, 68, 68, 0.1);
+  }
+  @keyframes threat-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    50% { box-shadow: 0 0 8px 2px rgba(239, 68, 68, 0.15); }
+  }
+
   .cat-header {
     display: flex;
     align-items: center;
@@ -1356,6 +1432,26 @@
     font-size: 13px;
     color: var(--color-text-secondary);
     line-height: 1.5;
+  }
+
+  .cm-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(0, 218, 243, 0.3);
+    background: rgba(0, 218, 243, 0.08);
+    color: var(--color-accent);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .cm-nav-btn:hover {
+    background: rgba(0, 218, 243, 0.18);
+    border-color: rgba(0, 218, 243, 0.6);
   }
 
   .reference-row {

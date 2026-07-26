@@ -19,3 +19,4 @@ pub mod app_manager;
 pub mod system_info;
 pub mod journal_viewer;
 pub mod security_auditor;
+pub mod audit_log;

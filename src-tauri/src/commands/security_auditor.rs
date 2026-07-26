@@ -1,5 +1,32 @@
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
+use std::sync::Mutex;
+use std::time::SystemTime;
+
+pub static LAST_SYSCTL_FIX_TIME: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+async fn check_sysctl_tampered() -> bool {
+    let fix_time = match LAST_SYSCTL_FIX_TIME.lock() {
+        Ok(guard) => match *guard {
+            Some(t) => t,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+
+    if let Ok(entries) = std::fs::read_dir("/etc/sysctl.d") {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if modified > fix_time + std::time::Duration::from_secs(2) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
 // ─── Data Structures ──────────────────────────────────────────────────────────
 
@@ -16,6 +43,7 @@ pub struct SecurityFinding {
     pub is_resolved: bool,
     /// Optional CVE or reference link
     pub reference: Option<String>,
+    pub tamper_flag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +117,7 @@ fn good(id: &str, title: &str, desc: &str, countermeasure: &str, category: &str,
         severity: "Good".to_string(), countermeasure: countermeasure.to_string(),
         category: category.to_string(), has_auto_fix: true, is_resolved: true,
         reference: reference.map(|s| s.to_string()),
+        tamper_flag: None,
     }
 }
 
@@ -98,6 +127,7 @@ fn warn(id: &str, title: &str, desc: &str, countermeasure: &str, category: &str,
         severity: "Warning".to_string(), countermeasure: countermeasure.to_string(),
         category: category.to_string(), has_auto_fix: has_fix, is_resolved: false,
         reference: reference.map(|s| s.to_string()),
+        tamper_flag: None,
     }
 }
 
@@ -107,6 +137,7 @@ fn crit(id: &str, title: &str, desc: &str, countermeasure: &str, category: &str,
         severity: "Critical".to_string(), countermeasure: countermeasure.to_string(),
         category: category.to_string(), has_auto_fix: has_fix, is_resolved: false,
         reference: reference.map(|s| s.to_string()),
+        tamper_flag: None,
     }
 }
 
@@ -116,6 +147,7 @@ fn info_finding(id: &str, title: &str, desc: &str, countermeasure: &str, categor
         severity: "Info".to_string(), countermeasure: countermeasure.to_string(),
         category: category.to_string(), has_auto_fix: has_fix, is_resolved: false,
         reference: None,
+        tamper_flag: None,
     }
 }
 
@@ -832,6 +864,36 @@ pub async fn security_run_audit() -> Result<SecurityReport, String> {
 
         crate::log_to_file("INFO", "security_run_audit: System hygiene checks done");
 
+        // ── Sysctl Tamper Check ────────────────────────────────────────────────
+        let sysctl_tampered = check_sysctl_tampered().await;
+        if sysctl_tampered {
+            for f in &mut findings {
+                if f.is_resolved && (f.id == "aslr" || f.id == "syncookies" || f.id == "ipfwd" || f.id == "kptr" || f.id == "dmesg_r" || f.id == "coredump" || f.id == "bogus_icmp" || f.id == "martians" || f.id == "src_route") {
+                    f.tamper_flag = Some("modified after fix — rescan required.".to_string());
+                }
+            }
+        }
+
+        // ── Load and inject Runtime Threats ─────────────────────────────────────
+        let mut threat_issues = 0;
+        if let Ok(threats) = crate::commands::audit_log::get_runtime_threats(None, None, None).await {
+            for t in threats {
+                threat_issues += 1;
+                findings.push(SecurityFinding {
+                    id: t.id,
+                    title: t.title,
+                    description: t.description,
+                    severity: t.severity,
+                    countermeasure: "Investigate log events in Command Audit or Auth Events.".to_string(),
+                    category: "Runtime Threats".to_string(),
+                    has_auto_fix: false,
+                    is_resolved: false,
+                    reference: None,
+                    tamper_flag: None,
+                });
+            }
+        }
+
         // ── Build category scores ─────────────────────────────────────────────
         let cat_score = |cur: u32, max: u32| if max > 0 { cur * 100 / max } else { 100 };
 
@@ -871,6 +933,12 @@ pub async fn security_run_audit() -> Result<SecurityReport, String> {
                 score: cat_score(system_cur, system_max),
                 max_score: system_max,
                 issues: findings.iter().filter(|f| f.category == cat_sys && !f.is_resolved).count() as u32,
+            },
+            CategoryScore {
+                category: "Runtime Threats".to_string(),
+                score: if threat_issues == 0 { 100 } else { 0 },
+                max_score: 0,
+                issues: threat_issues,
             },
         ];
 
@@ -1008,6 +1076,9 @@ pub async fn security_fix_kernel_param(key: String, value: String, revert_value:
         .output().await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
+        if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
+            *guard = Some(SystemTime::now());
+        }
         Ok(format!(
             "{} = {} — written to {} and applied immediately",
             key, target, conf_file

@@ -39,6 +39,8 @@ class UIStore {
   serviceFilter = $state<string | null>(null);
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);
+  /** Category to pre-select in SecurityAuditor (set by deep-links from other modules) */
+  securityCategoryFilter = $state<string | null>(null);
   /** Interface name to auto-select when network-manager opens (set by IP popover deep-link) */
   selectedInterface = $state<string | null>(null);
   confirmDialog = $state<{

@@ -7,10 +7,15 @@ pub async fn get_journal_logs(
     unit_filter: Option<String>,
     priority: Option<u8>,
     since_filter: Option<String>,
+    until_filter: Option<String>,
 ) -> Result<Vec<String>, String> {
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
 
-    cmd.arg("-n").arg("100"); // Last 100 lines
+    if since_filter.is_some() || until_filter.is_some() {
+        cmd.arg("-n").arg("2000");
+    } else {
+        cmd.arg("-n").arg("100");
+    }
     cmd.arg("-o").arg("json"); // JSON output
     cmd.arg("--no-pager");
 
@@ -27,6 +32,12 @@ pub async fn get_journal_logs(
     if let Some(since) = since_filter {
         if !since.is_empty() {
             cmd.arg("--since").arg(since);
+        }
+    }
+
+    if let Some(until) = until_filter {
+        if !until.is_empty() {
+            cmd.arg("--until").arg(until);
         }
     }
 
