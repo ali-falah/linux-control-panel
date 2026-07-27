@@ -4,7 +4,8 @@
     XCircle,
     AlertTriangle,
     Info,
-    X
+    X,
+    FolderOpen
   } from '@lucide/svelte';
   import type { Toast } from '../stores/ui.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -46,7 +47,22 @@
     {:else}<Info size={16} />
     {/if}
   </div>
-  <span class="toast-message">{toast.message}</span>
+  <div style="display:flex; flex-direction:column; gap:6px; flex:1;">
+    <span class="toast-message">{toast.message}</span>
+    {#if toast.actionLabel && toast.onAction}
+      <button
+        type="button"
+        class="toast-action-btn"
+        onclick={() => {
+          toast.onAction?.();
+          dismiss();
+        }}
+      >
+        <FolderOpen size={13} />
+        <span>{toast.actionLabel}</span>
+      </button>
+    {/if}
+  </div>
   <button class="toast-close" onclick={dismiss} aria-label="Dismiss notification">
     <X size={14} />
   </button>
@@ -121,5 +137,28 @@
 
   .toast-close:hover {
     color: var(--color-text-primary);
+  }
+
+  .toast-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    margin-top: 2px;
+    background: rgba(0, 218, 243, 0.12);
+    border: 1px solid rgba(0, 218, 243, 0.3);
+    border-radius: 5px;
+    color: var(--color-accent);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    align-self: flex-start;
+    transition: all 0.15s ease;
+  }
+  .toast-action-btn:hover {
+    background: rgba(0, 218, 243, 0.22);
+    border-color: var(--color-accent);
+    transform: translateY(-1px);
   }
 </style>

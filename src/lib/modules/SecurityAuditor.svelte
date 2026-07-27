@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-shell';
+  import { downloadDir } from '@tauri-apps/api/path';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -11,7 +12,7 @@
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
     Server, Cpu, User, FolderLock, Network, Settings,
-    ExternalLink, RotateCcw
+    ExternalLink, RotateCcw, FolderOpen
   } from '@lucide/svelte';
 
   // ── Types ──────────────────────────────────────────────────────────────────
@@ -82,6 +83,69 @@
     'Runtime Threats':    ShieldAlert,
   };
 
+  // ── Compliance Standards Mapping ──────────────────────────────────────────
+  const STANDARDS_MAP: Record<string, string[]> = {
+    ssh_root: ['CIS Level 1', 'STIG'],
+    ssh_pass_auth: ['CIS Level 1', 'NIST 800-53'],
+    ssh_max_auth: ['CIS Level 1'],
+    ssh_port: ['CIS Level 2'],
+    kernel_aslr: ['CIS Level 1', 'STIG'],
+    kernel_syncookies: ['CIS Level 1', 'NIST 800-53'],
+    kernel_ipforward: ['CIS Level 1'],
+    kernel_kptr: ['CIS Level 2'],
+    kernel_dmesg: ['CIS Level 2'],
+    kernel_icmp_redirect: ['CIS Level 1'],
+    pass_policy: ['CIS Level 1', 'STIG', 'NIST 800-53'],
+    sudo_nopasswd: ['CIS Level 1', 'STIG'],
+    uid0: ['CIS Level 1', 'STIG'],
+    sys_shell: ['CIS Level 1', 'NIST 800-53'],
+    fs_passwd: ['CIS Level 1'],
+    fs_shadow: ['CIS Level 1', 'STIG'],
+    fs_gshadow: ['CIS Level 1'],
+    fs_group: ['CIS Level 1'],
+    firewall: ['CIS Level 1', 'NIST 800-53'],
+    net_src_route: ['CIS Level 1'],
+    net_bogus_icmp: ['CIS Level 2'],
+    net_martians: ['CIS Level 2'],
+    selinux: ['CIS Level 1', 'STIG'],
+    auditd: ['CIS Level 1', 'NIST 800-53'],
+    time_sync: ['CIS Level 1', 'NIST 800-53'],
+    usbguard: ['CIS Level 2', 'STIG']
+  };
+
+  let activeStandard = $state<string>('all'); // 'all' | 'CIS Level 1' | 'CIS Level 2' | 'STIG' | 'NIST 800-53'
+
+  // ── Muted / Ignored Findings State ─────────────────────────────────────────
+  const MUTED_KEY = 'security_audit_muted_ids_v1';
+  let mutedIds = $state<string[]>([]);
+
+  function loadMuted() {
+    try {
+      const raw = localStorage.getItem(MUTED_KEY);
+      if (raw) mutedIds = JSON.parse(raw);
+    } catch { mutedIds = []; }
+  }
+
+  function toggleMute(id: string) {
+    if (mutedIds.includes(id)) {
+      mutedIds = mutedIds.filter(i => i !== id);
+      uiStore.addToast(`Finding restored to active checks.`, 'info');
+    } else {
+      mutedIds = [...mutedIds, id];
+      uiStore.addToast(`Finding muted and excluded from penalty score.`, 'success');
+    }
+    try { localStorage.setItem(MUTED_KEY, JSON.stringify(mutedIds)); } catch {}
+  }
+
+  // Effective score excluding muted items
+  let effectiveScore = $derived.by(() => {
+    if (!report) return 0;
+    const activeFindings = report.findings.filter(f => !mutedIds.includes(f.id));
+    if (activeFindings.length === 0) return 100;
+    const resolvedCount = activeFindings.filter(f => f.is_resolved).length;
+    return Math.round((resolvedCount / activeFindings.length) * 100);
+  });
+
   // ── Computed ───────────────────────────────────────────────────────────────
   let filteredFindings = $derived.by(() => {
     if (!report) return [];
@@ -101,6 +165,13 @@
         items = items.filter(f => f.severity === activeSeverity && !f.is_resolved);
       }
     }
+    if (activeStandard !== 'all') {
+      if (activeStandard === 'Muted') {
+        items = items.filter(f => mutedIds.includes(f.id));
+      } else {
+        items = items.filter(f => (STANDARDS_MAP[f.id] || []).includes(activeStandard));
+      }
+    }
     return items;
   });
 
@@ -108,14 +179,14 @@
     if (!report) return CATEGORIES.map(c => ({ id: c.id, label: c.label, count: undefined }));
     return CATEGORIES.map(c => {
       const issues = c.id === 'all'
-        ? report!.findings.filter(f => !f.is_resolved).length
-        : report!.findings.filter(f => f.category === c.id && !f.is_resolved).length;
+        ? report!.findings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length
+        : report!.findings.filter(f => f.category === c.id && !f.is_resolved && !mutedIds.includes(f.id)).length;
       return { id: c.id, label: c.label, count: issues > 0 ? issues : undefined };
     });
   });
 
-  let totalIssues = $derived(report ? report.findings.filter(f => !f.is_resolved).length : 0);
-  let criticalCount = $derived(report ? report.findings.filter(f => f.severity === 'Critical' && !f.is_resolved).length : 0);
+  let totalIssues = $derived(report ? report.findings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
+  let criticalCount = $derived(report ? report.findings.filter(f => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
 
   // ── Score history (localStorage) ──────────────────────────────────────────
   const HISTORY_KEY = 'security_score_history';
@@ -138,7 +209,7 @@
     loading = true;
     try {
       report = await invoke<SecurityReport>('security_run_audit');
-      saveHistory(report.score);
+      saveHistory(effectiveScore);
       statusStore.setLastCommand('security_audit_executed', 0, true);
     } catch (e) {
       uiStore.addToast(`Audit failed: ${e}`, 'error');
@@ -150,6 +221,7 @@
 
   onMount(() => {
     loadHistory();
+    loadMuted();
     runAudit();
   });
 
@@ -536,9 +608,10 @@
     if (!report) return;
     const data = {
       generated: new Date().toISOString(),
-      score: report.score,
+      score: effectiveScore,
       category_scores: report.category_scores,
       findings: report.findings,
+      muted_findings: mutedIds
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -547,6 +620,85 @@
     a.download = `security-audit-${new Date().toISOString().slice(0,10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    uiStore.addToast('JSON audit data exported successfully.', 'success', 6000, 'Open Folder', openDownloadsFolder);
+  }
+
+  // Open Downloads Folder in file manager
+  async function openDownloadsFolder() {
+    try {
+      const dir = await downloadDir();
+      await invoke('open_folder', { path: dir });
+      uiStore.addToast('Opened Downloads folder.', 'info');
+    } catch (e) {
+      try {
+        const user = await invoke<string>('get_current_user');
+        await invoke('open_folder', { path: `/home/${user}/Downloads` });
+        uiStore.addToast('Opened Downloads folder.', 'info');
+      } catch (err) {
+        uiStore.addToast(`Could not open folder: ${err}`, 'error');
+      }
+    }
+  }
+
+  // Export report as styled HTML
+  function exportHtmlReport() {
+    if (!report) return;
+    const dateStr = new Date().toLocaleString();
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Linux Security Audit Report - ${dateStr}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
+    .container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }
+    .score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: rgba(0, 218, 243, 0.15); color: #00daf3; border: 1px solid #00daf3; }
+    .finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }
+    .finding-card.Critical { border-left-color: #ef4444; }
+    .finding-card.Warning { border-left-color: #f59e0b; }
+    .finding-card.Good { border-left-color: #10b981; }
+    .title { font-weight: bold; font-size: 16px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; font-weight: bold; }
+    .badge.Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+    .badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+    .badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+    .desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }
+    .remediation { background: rgba(0, 218, 243, 0.05); border-radius: 6px; padding: 10px; font-size: 12px; color: #38bdf8; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1 style="margin:0; font-size: 24px;">🛡️ Linux Security Audit Report</h1>
+        <p style="margin: 4px 0 0 0; color: #94a3b8; font-size: 13px;">Generated on ${dateStr}</p>
+      </div>
+      <div class="score-badge">${effectiveScore}% — ${getScoreLabel(effectiveScore)}</div>
+    </div>
+    <h2 style="font-size: 18px; border-bottom: 1px solid #334155; padding-bottom: 8px;">Audit Findings (${report.findings.length} total)</h2>
+    ${report.findings.map(f => `
+      <div class="finding-card ${f.severity}">
+        <div class="title">
+          <span>${f.title} <small style="color:#94a3b8; font-weight:normal;">(${f.category})</small></span>
+          <span class="badge ${f.severity}">${f.is_resolved ? 'PASSED' : f.severity}</span>
+        </div>
+        <div class="desc">${f.description}</div>
+        <div class="remediation">💡 <strong>Remediation:</strong> ${f.countermeasure}</div>
+      </div>
+    `).join('')}
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `security-audit-report-${new Date().toISOString().slice(0,10)}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+    uiStore.addToast('Formatted HTML compliance report exported.', 'success', 6000, 'Open Folder', openDownloadsFolder);
   }
 
   async function openReference(ref: string, title: string) {
@@ -568,12 +720,16 @@
 <div class="module-container">
   <PageHeader title="Security Auditor" subtitle="System Hardening & CIS Benchmarks" icon={Shield}>
     {#if report}
-      <span class="header-score-pill" style="background: {getScoreColor(report.score)}20; color: {getScoreColor(report.score)}; border-color: {getScoreColor(report.score)}40; margin-right: 8px;">
-        {report.score}% — {getScoreLabel(report.score)}
+      <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
+        {effectiveScore}% — {getScoreLabel(effectiveScore)}
       </span>
-      <Button variant="ghost" size="sm" onclick={exportReport} title="Export audit report as JSON">
+      <Button variant="ghost" size="sm" onclick={exportReport} title="Export JSON audit data">
         <Download size={14} />
-        Export
+        JSON
+      </Button>
+      <Button variant="ghost" size="sm" onclick={exportHtmlReport} title="Export formatted HTML report">
+        <Download size={14} />
+        HTML Report
       </Button>
     {/if}
     <Button variant="outline" size="sm" onclick={runAudit} disabled={loading}>
@@ -601,15 +757,15 @@
         <!-- Main Score Card -->
         <div class="score-card glass-panel">
           <h3>Security Score</h3>
-          <div class="score-gauge" style="--score-color: {getScoreColor(report.score)}">
+          <div class="score-gauge" style="--score-color: {getScoreColor(effectiveScore)}">
             <svg viewBox="0 0 100 100" class="gauge-svg">
               <circle class="gauge-bg" cx="50" cy="50" r="40"></circle>
               <circle class="gauge-fill" cx="50" cy="50" r="40"
-                style="stroke-dasharray: {report.score * 2.513} 251.3;"></circle>
+                style="stroke-dasharray: {effectiveScore * 2.513} 251.3;"></circle>
             </svg>
-            <div class="score-text">{report.score}<span class="pct">%</span></div>
+            <div class="score-text">{effectiveScore}<span class="pct">%</span></div>
           </div>
-          <div class="score-label">{getScoreLabel(report.score)}</div>
+          <div class="score-label">{getScoreLabel(effectiveScore)}</div>
 
           {#if criticalCount > 0}
             <div class="critical-alert">
@@ -711,9 +867,23 @@
         <div class="findings-header">
           <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
           <span class="issue-badge" class:has-issues={totalIssues > 0}>
-            {filteredFindings.filter(f => !f.is_resolved).length} issue{filteredFindings.filter(f => !f.is_resolved).length !== 1 ? 's' : ''}
+            {filteredFindings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length} issue{filteredFindings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length !== 1 ? 's' : ''}
             {activeCategory !== 'all' ? `in ${activeCategory}` : 'total'}
           </span>
+        </div>
+
+        <!-- Compliance Standards Filter Bar -->
+        <div class="standards-bar" style="display:flex; gap:6px; margin: 10px 0 14px; flex-wrap:wrap; align-items:center;">
+          <span style="font-size:11px; font-weight:700; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin-right:4px;">Filter Standard:</span>
+          {#each ['all', 'CIS Level 1', 'CIS Level 2', 'STIG', 'NIST 800-53', 'Muted'] as std}
+            <button
+              class="std-pill"
+              class:active={activeStandard === std}
+              onclick={() => activeStandard = std}
+            >
+              {std === 'all' ? 'All Standards' : (std === 'Muted' ? `Muted (${mutedIds.length})` : std)}
+            </button>
+          {/each}
         </div>
 
         <div class="findings-list">
@@ -721,6 +891,7 @@
             <div
               class="finding-card"
               class:resolved={finding.is_resolved}
+              class:muted={mutedIds.includes(finding.id)}
               class:expanded={expandedId === finding.id}
               style="--sev-color: {getSeverityColor(finding.severity)}"
             >
@@ -739,10 +910,18 @@
                   <div class="finding-title-row">
                     <span class="finding-title">{finding.title}</span>
                     <div class="finding-badges">
+                      {#if mutedIds.includes(finding.id)}
+                        <span class="sev-badge" style="background:rgba(255,255,255,0.1); color:var(--color-text-muted); border: 1px solid rgba(255,255,255,0.2);">
+                          MUTED
+                        </span>
+                      {/if}
                       <span class="sev-badge" style="background:{getSeverityColor(finding.severity)}20;color:{getSeverityColor(finding.severity)}">
                         {finding.severity}
                       </span>
                       <span class="cat-tag">{finding.category}</span>
+                      {#each (STANDARDS_MAP[finding.id] || []) as stdTag}
+                        <span class="std-tag">{stdTag}</span>
+                      {/each}
                       {#if finding.tamper_flag}
                         <span class="sev-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.3); display: flex; align-items: center; gap: 4px;">
                           <AlertTriangle size={10} />
@@ -1296,6 +1475,48 @@
 
   .finding-card.resolved {
     opacity: 0.65;
+  }
+
+  .finding-card.muted {
+    opacity: 0.45;
+    border-left-color: var(--color-text-muted) !important;
+  }
+
+  /* ── Compliance Standards Filter Pills & Tags ─────────────────────────────── */
+  .std-pill {
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .std-pill:hover {
+    background: rgba(0, 218, 243, 0.08);
+    border-color: rgba(0, 218, 243, 0.25);
+    color: var(--color-text-primary);
+  }
+  .std-pill.active {
+    background: rgba(0, 218, 243, 0.15);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    font-weight: 600;
+  }
+
+  .std-tag {
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    white-space: nowrap;
   }
 
   .finding-card.expanded {

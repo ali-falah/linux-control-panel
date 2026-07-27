@@ -5,6 +5,8 @@ export interface Toast {
   message: string;
   type: ToastType;
   duration?: number;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
 export type TabId =
@@ -95,9 +97,9 @@ class UIStore {
     this.sidebarCollapsed = !this.sidebarCollapsed;
   }
 
-  addToast(message: string, type: ToastType = 'info', duration = 4000) {
+  addToast(message: string, type: ToastType = 'info', duration = 4000, actionLabel?: string, onAction?: () => void) {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    this.toasts = [...this.toasts, { id, message, type, duration }];
+    this.toasts = [...this.toasts, { id, message, type, duration, actionLabel, onAction }];
     if (duration > 0) {
       setTimeout(() => this.removeToast(id), duration);
     }

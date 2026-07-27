@@ -1217,3 +1217,14 @@ pub async fn get_storage_distribution() -> Result<StorageDistribution, String> {
         system_gb,
     })
 }
+
+/// Opens a local directory or file in the default desktop file manager (via xdg-open).
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to open directory '{path}': {e}"))?;
+    Ok(())
+}
+
