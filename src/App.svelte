@@ -17,9 +17,6 @@
   import SelinuxManager from './lib/modules/SelinuxManager.svelte';
   import CronManager from './lib/modules/CronManager.svelte';
   import EnvManager from './lib/modules/EnvManager.svelte';
-  import NginxManager from './lib/modules/NginxManager.svelte';
-  import ShellEnv from './lib/modules/ShellEnv.svelte';
-  import SecurityAuditor from './lib/modules/SecurityAuditor.svelte';
   import NetworkManager from './lib/modules/NetworkManager.svelte';
   import DeviceManager from './lib/modules/DeviceManager.svelte';
   import AppManager from './lib/modules/AppManager.svelte';
@@ -67,11 +64,23 @@
         {:else if uiStore.activeTab === 'env-manager'}
           <EnvManager />
         {:else if uiStore.activeTab === 'nginx-manager'}
-          <NginxManager />
+          {#await import('./lib/modules/NginxManager.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Nginx Manager...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'shell-env'}
-          <ShellEnv />
+          {#await import('./lib/modules/ShellEnv.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Shell Environment...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'security-auditor'}
-          <SecurityAuditor />
+          {#await import('./lib/modules/SecurityAuditor.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Security Auditor...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'network-manager'}
           <NetworkManager />
         {:else if uiStore.activeTab === 'device-manager'}

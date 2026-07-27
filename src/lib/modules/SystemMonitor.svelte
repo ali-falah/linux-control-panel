@@ -267,6 +267,18 @@
   onMount(async () => {
     try {
       currentUser = await invoke('get_current_user');
+      const history: any[] = await invoke('get_system_stats_history');
+      if (history && history.length > 0) {
+        const cPcts = history.map(h => h.cpu_percent);
+        const rPcts = history.map(h => h.ram_percent);
+        if (cPcts.length < 40) {
+          cpuHistory = [...Array(40 - cPcts.length).fill(0), ...cPcts];
+          ramHistory = [...Array(40 - rPcts.length).fill(0), ...rPcts];
+        } else {
+          cpuHistory = cPcts.slice(-40);
+          ramHistory = rPcts.slice(-40);
+        }
+      }
     } catch(e) {
       console.error(e);
     }

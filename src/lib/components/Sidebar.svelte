@@ -105,6 +105,14 @@
       ],
     },
   ];
+
+  function getItemByTabId(id: TabId) {
+    for (const g of groups) {
+      const match = g.items.find(i => i.id === id);
+      if (match) return match;
+    }
+    return null;
+  }
 </script>
 
 <aside
@@ -136,13 +144,13 @@
 
   <div class="sidebar-divider"></div>
 
-  <!-- Search -->
+  <!-- Search Input -->
   {#if !uiStore.sidebarCollapsed}
     <div class="sidebar-search">
-      <Search size={14} style="color: var(--color-text-muted); opacity: 0.7; flex-shrink: 0;" />
+      <Search size={14} class="search-icon" />
       <input
         type="text"
-        placeholder="Search..."
+        placeholder="Filter modules…"
         bind:value={searchQuery}
         onkeydown={handleSearchKeydown}
       />

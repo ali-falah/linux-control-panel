@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+static TELEMETRY_HISTORY: Mutex<Option<VecDeque<SystemStats>>> = Mutex::new(None);
+const MAX_TELEMETRY_SAMPLES: usize = 60;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -306,7 +311,7 @@ pub async fn get_system_stats() -> Result<SystemStats, String> {
     let load_5  = loads.get(1).copied().unwrap_or(0.0);
     let load_15 = loads.get(2).copied().unwrap_or(0.0);
 
-    Ok(SystemStats {
+    let stats = SystemStats {
         cpu_percent,
         cpu_per_core,
         cpu_cores,
@@ -320,7 +325,27 @@ pub async fn get_system_stats() -> Result<SystemStats, String> {
         load_1,
         load_5,
         load_15,
-    })
+    };
+
+    if let Ok(mut history_lock) = TELEMETRY_HISTORY.lock() {
+        let history = history_lock.get_or_insert_with(|| VecDeque::with_capacity(MAX_TELEMETRY_SAMPLES));
+        if history.len() >= MAX_TELEMETRY_SAMPLES {
+            history.pop_front();
+        }
+        history.push_back(stats.clone());
+    }
+
+    Ok(stats)
+}
+
+#[tauri::command]
+pub async fn get_system_stats_history() -> Result<Vec<SystemStats>, String> {
+    if let Ok(history_lock) = TELEMETRY_HISTORY.lock() {
+        if let Some(ref history) = *history_lock {
+            return Ok(history.iter().cloned().collect());
+        }
+    }
+    Ok(Vec::new())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

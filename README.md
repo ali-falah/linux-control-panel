@@ -2,58 +2,98 @@
 
 # 🖥️ Linux Control Panel
 
-**A modern, powerful Linux system management desktop application**
+**A modern, enterprise-grade system management desktop application for Fedora, RHEL, and Linux distributions.**
 
-[![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8?style=for-the-badge&logo=tauri&logoColor=white)](https://tauri.app)
-[![Svelte](https://img.shields.io/badge/Svelte-v5-FF3E00?style=for-the-badge&logo=svelte&logoColor=white)](https://svelte.dev)
-[![TailwindCSS](https://img.shields.io/badge/TailwindCSS-v4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![Tauri](https://img.shields.io/badge/Tauri-v2.x-24C8D8?style=for-the-badge&logo=tauri&logoColor=white)](https://tauri.app)
+[![Svelte](https://img.shields.io/badge/Svelte-v5.x-FF3E00?style=for-the-badge&logo=svelte&logoColor=white)](https://svelte.dev)
 [![Rust](https://img.shields.io/badge/Rust-1.77+-CE422B?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Fedora](https://img.shields.io/badge/Fedora-40%2B-294172?style=for-the-badge&logo=fedora&logoColor=white)](https://fedoraproject.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-> A blazing-fast, native desktop app for Fedora/RHEL users to manage packages, services, startup entries, repositories, and system files — all from one elegant UI. Built with Tauri v2 (Rust backend) + Svelte 5 frontend.
+> A blazing-fast, native desktop application engineered to manage system telemetry, security hardening, systemd services, packages, firewall, network connections, Nginx server blocks, SELinux, and system configurations — all from a stunning modern UI.
 
 </div>
 
 ---
 
-## ✨ Features
+## 🌟 Highlights & Architecture
 
-| Module | Description |
-|--------|-------------|
-| 📦 **Repo Manager** | List, toggle, and add DNF repositories from `/etc/yum.repos.d/` |
-| 📜 **DNF History** | Browse transaction history and rollback with `dnf history undo` |
-| 🔍 **Copr Browser** | Search and enable/disable Fedora Copr repositories |
-| ⚖️ **Flatpak vs RPM** | Detect duplicate packages, compare versions, remove either |
-| 🚀 **Startup Manager** | Manage systemd services and XDG autostart entries |
-| ⚙️ **Service Manager** | Browse units, start/stop/restart, view logs, and edit unit files |
-| 🌐 **Hosts Manager** | Edit `/etc/hosts` with category grouping and inline editing |
+- ⚡ **Tauri v2 & Svelte 5**: Native Rust performance with ultra-fast Svelte 5 fine-grained reactivity (`$state`, `$derived`, `$effect`).
+- 🚀 **Selective Dynamic Loading**: Heavy modules (`NginxManager`, `SecurityAuditor`, `ShellEnv`) are lazy-loaded on demand, keeping initial bundle size (~900KB) and RAM footprint minimal.
+- 🕒 **Split Back Button & History Dropdown (`< Back ▾ 🕒`)**: Native browser-like navigation with a unified split Back button and floating dropdown menu for recently visited pages, eliminating sidebar layout shifting.
+- 📈 **Persistent Telemetry History**: Thread-safe 60-second rolling history buffer in Rust memory (`TELEMETRY_HISTORY`) ensuring CPU, RAM, and network telemetry graphs hydrate instantly across navigation.
+- 🔐 **PolicyKit Privilege Escalation**: Seamless graphical authentication via `pkexec` with structured PolicyKit error handling — **no `sudo` required**.
+- 🛠️ **Strongly-Typed Rust Backend**: Centralized `AppError` enum using `thiserror` for clean, reliable IPC error handling.
+
+---
+
+## 🧰 20 Comprehensive Functional Modules
+
+### 📊 Overview & Telemetry
+| Module | Description & Capabilities |
+| :--- | :--- |
+| 📊 **System Dashboard** | Real-time Hardware & OS specifications (kernel, CPU, GPU, host), active network interfaces summary with type badges, interactive **BTRFS Storage Distribution & Subvolume Trees** (`├─`, `└─`), security audit quick rescan, and event button tooltips. |
+| 📈 **System Monitor** | Live CPU utilization sparklines with **Expandable Per-Core Grid (`C0`..`C7`)**, RAM/Swap utilization progress bars, persistent 60s telemetry buffer, **Top Resource Consumers Mini-Panel** (Top 3 CPU & Top 3 RAM processes), **Active Connections Inspector** (filter by `All`, `Listen`, `Estab`, `External` with live search & inline process termination), and process tree manager. |
+
+### 🛡️ Security & Logs
+| Module | Description & Capabilities |
+| :--- | :--- |
+| 🛡️ **Security Auditor** | Automated system hardening audit based on CIS/Fedora benchmarks. Calculates compliance score (% score), categorizes findings (Kernel, Network, User Privileges, System Integrity, Firewall), provides interactive fix guides and 1-click remediation. Exports audit reports in **PDF**, **Styled HTML**, and **JSON** with **Open Downloads Folder** integration. |
+| 📜 **Journal Logs & Threats** | Real-time `journalctl` log stream with log level priority filtering (`Error`, `Warning`, `Info`, `Debug`), **Auth Events Tab** (SSH logins, sudo escalations, failed password attempts), **Command Audit Tab** (terminal command auditing), **Threat Detection Tab** (brute-force & unauthorized access analysis), and custom Date/Time range picker. |
+| 🛡️ **SELinux Manager** | SELinux Mode Switcher (`Enforcing`, `Permissive`, `Disabled`) with configuration persistence (`/etc/selinux/config`), SELinux Booleans Manager (search, view descriptions, toggle booleans with `setsebool -P`), and audit log denial parser (`ausearch`/`sealert`). |
+
+### 🌐 Server & Web
+| Module | Description & Capabilities |
+| :--- | :--- |
+| 🌐 **Nginx Manager** | Nginx virtual host scanner & server block inspector (domains, ports, SSL, document roots), integrated CodeMirror configuration editor, syntax testing (`nginx -t`), live reload (`nginx -s reload`), `access.log` & `error.log` live tail viewers, and Certbot SSL helper. |
+| 🌐 **Advanced Network** | NetworkManager connection inspector (Wi-Fi, Ethernet, VPN, Bridge, Loopback), IP v4/v6, MAC Address, MTU, Gateway, DNS configuration, **Wi-Fi Access Point Scanner** (SSID, Signal Strength dBm/%, WPA2/WPA3 security, connection wizard), and Gateway Ping Latency Tester. |
+| 🔥 **Firewall Manager** | Firewalld zone manager (`public`, `work`, `home`, `internal`, `trusted`), TCP/UDP port rule management, service toggles (`http`, `https`, `ssh`, `dns`, `ftp`, `wireguard`), Rich Rules editor, Interface-to-Zone mapping, and **Panic Mode Emergency Toggle** (instantly block all network traffic). |
+
+### 📦 Package & Application Management
+| Module | Description & Capabilities |
+| :--- | :--- |
+| 📦 **App Manager** | Unified package management across **RPM**, **DNF**, **Flatpak**, and **AppImage**. Category filtering, package search, update checks, package dependency tree inspector, duplicate package detector (Flatpak vs RPM instances), and local AppImage scanner & desktop registration. |
+| 🗄️ **Repo Manager** | DNF Repository configuration inspector (`/etc/yum.repos.d/*.repo`), 1-click enable/disable toggles, add custom DNF repositories (`baseurl`, `gpgkey`), GPG key verification, and repository cache refreshing (`dnf makecache`). |
+| 📜 **DNF History** | Complete DNF package manager transaction history log (`dnf history`), detailed package modification inspector (packages installed, upgraded, or removed), and 1-Click Transaction Rollback (`dnf history undo`). |
+| 🔍 **Copr Browser** | Search community COPR repositories on Fedora COPR, view package listings & author information, and enable/disable COPR repositories (`dnf copr enable`). |
+
+### ⚙️ System & Administration
+| Module | Description & Capabilities |
+| :--- | :--- |
+| ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), unit file inspector, and inline `journalctl -u` log stream. |
+| 🔌 **Device Manager** | PCI & USB Device Explorer (`lspci`, `lsusb`), Block Storage Devices (`lsblk`) with filesystem types & mount points, CPU/GPU hardware specs, Thermal Sensors inspector (core temps, fan speeds), and **SMART Disk Health & Self-Test Inspector** (`smartctl`). |
+| 🚀 **GRUB Bootloader** | GRUB configuration manager (`/etc/default/grub`), Kernel Command Line Arguments editor (`GRUB_CMDLINE_LINUX`), default boot entry selector, boot timeout adjustment, and GRUB config rebuild trigger (`grub2-mkconfig`). |
+| 👥 **User Manager** | System Users & Groups manager (`/etc/passwd`, `/etc/group`), user creation & deletion, password management, UID/GID config, default shell selector (`bash`, `zsh`, `fish`), **Sudoers Privilege Rule Builder** (`/etc/sudoers.d/`), and SSH Authorized Keys manager (`~/.ssh/authorized_keys`). |
+| 💻 **Shell Environment** | Graphical editor for shell environment files (`.bashrc`, `.zshrc`, `.bash_profile`), **Shell Aliases Manager** (create, edit, toggle, delete command aliases), **PATH Variable Visual Manager** (add, reorder, or remove directory paths), and shell config backup helper. |
+| 🌐 **Hosts Manager** | Graphical `/etc/hosts` domain mapping editor, IP-to-Domain entry management with status toggles (enable/disable without deletion), pre-configured adware/malware blocklist integration, and domain ping verification tool. |
+| ⏱️ **Cron Manager** | User Crontab & System Cron jobs inspector (`/etc/crontab`, `/etc/cron.*`), Visual Cron Expression Builder (Minute, Hour, Day, Month, Day of Week), syntax helper, job enable/disable toggle, and execution log stream. |
+| ⚙️ **Env Manager** | Global system environment variables manager (`/etc/environment`), PAM environment inspector (`~/.pam_environment`), create, edit, and remove system-wide environment variables. |
 
 ---
 
 ## 🛠️ Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| **Frontend** | Svelte 5 (Runes), TailwindCSS v4 |
-| **Backend** | Rust, Tauri v2 |
+|:---|:---|
+| **Backend** | Rust, Tauri v2, Tokio Async Process Management |
+| **Frontend** | Svelte 5 (Runes `$state`/`$derived`), Vanilla CSS Design System |
 | **Editor** | CodeMirror 6 |
 | **Icons** | Lucide Svelte |
+| **Privilege Escalation** | PolicyKit (`pkexec`) |
 | **Packaging** | RPM, AppImage |
-| **Auth** | PolicyKit (`pkexec`) |
 
 ---
 
 ## 📋 Prerequisites
 
-### System dependencies (Fedora 40+ / RHEL 9+)
+### System Dependencies (Fedora 40+ / RHEL 9+)
 
 ```bash
-# Rust toolchain
+# Rust Toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
-# Tauri system dependencies
+# Tauri & WebKit System Dependencies
 sudo dnf install -y \
   webkit2gtk4.1-devel \
   openssl-devel \
@@ -65,15 +105,6 @@ sudo dnf install -y \
 
 # Node.js (v20+)
 sudo dnf install -y nodejs npm
-```
-
-### Verify installations
-
-```bash
-rustc --version     # >= 1.77
-cargo --version
-node --version      # >= 20
-npm --version
 ```
 
 ---
@@ -88,18 +119,18 @@ cd linux-control-panel
 # Install frontend dependencies
 npm install
 
-# Development mode (hot reload)
+# Run in Development Mode (Hot Reload)
 npm run tauri:dev
 
-# Production build (generates .rpm and .AppImage)
+# Production Build (generates RPM & AppImage bundles)
 npm run tauri:build
 ```
 
-Build artifacts will be placed in `src-tauri/target/release/bundle/`:
+Build outputs will be generated in `src-tauri/target/release/bundle/`:
 - `rpm/linux-control-panel-*.x86_64.rpm`
 - `appimage/linux-control-panel_*.AppImage`
 
-### Install from RPM
+### Install RPM Package
 
 ```bash
 sudo dnf install ./src-tauri/target/release/bundle/rpm/linux-control-panel-*.x86_64.rpm
@@ -107,11 +138,11 @@ sudo dnf install ./src-tauri/target/release/bundle/rpm/linux-control-panel-*.x86
 
 ---
 
-## 🔐 Polkit Policy
+## 🔐 PolicyKit Configuration
 
-The app uses PolicyKit for privilege escalation — **no `sudo` required**.
+The application uses PolicyKit for graphical privilege escalation — **no `sudo` required**.
 
-Install the polkit policy to allow privileged operations with a graphical authentication prompt:
+To allow privileged operations (modifying system files, managing services, package management), install the Polkit policy:
 
 ```bash
 sudo install -m 644 \
@@ -119,117 +150,20 @@ sudo install -m 644 \
   /usr/share/polkit-1/actions/
 ```
 
-This allows the Control Panel to perform privileged operations (package management, service control, writing system files) via `pkexec`.
-
 ---
 
-## 🏗️ Architecture
-
-```
-linux-control-panel/
-├── src-tauri/              # Rust backend (Tauri v2)
-│   ├── src/
-│   │   ├── lib.rs          # App setup, command registration
-│   │   └── commands/       # One file per module
-│   │       ├── repo_manager.rs
-│   │       ├── dnf_history.rs
-│   │       ├── copr_browser.rs
-│   │       ├── flatpak_rpm.rs
-│   │       ├── startup_manager.rs
-│   │       ├── service_manager.rs
-│   │       └── hosts_manager.rs
-│   ├── capabilities/       # Tauri v2 permissions
-│   ├── polkit/             # PolicyKit policy file
-│   └── tauri.conf.json
-├── src/                    # Svelte 5 frontend
-│   ├── App.svelte          # Root layout
-│   ├── app.css             # TailwindCSS v4 + design system
-│   ├── lib/
-│   │   ├── stores/         # Svelte 5 rune-based stores
-│   │   ├── components/     # Shared UI (Sidebar, Toast, etc.)
-│   │   └── modules/        # One component per module
-│   └── main.ts
-└── package.json
-```
-
----
-
-## 🔒 Security
-
-- **No `sudo`** — all privileged operations use `pkexec` exclusively
-- **Polkit authentication** — users authenticate via polkit for each privileged operation class
-- **No hardcoded paths** — all binaries are detected at runtime via `which`
-- **Async operations** — all shell commands run asynchronously; the UI never blocks
-- **Error logging** — all errors are logged to `~/.config/control-panel/logs/control-panel.log`
-
----
-
-## ⚙️ Config & Logs
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/control-panel/` | App configuration root |
-| `~/.config/control-panel/logs/control-panel.log` | Error/info log file |
-
----
-
-## 🧑‍💻 Development
+## 🧑‍💻 Development & Quality Assurance
 
 ```bash
-# Frontend only (browser preview)
-npm run dev
-
-# Full Tauri dev mode
-npm run tauri:dev
-
-# Check Rust compilation without building
+# Check Rust backend compilation
 cd src-tauri && cargo check
 
-# Run Rust tests
+# Run Rust unit tests
 cd src-tauri && cargo test
+
+# Build frontend production bundle
+npm run build
 ```
-
----
-
-## 🐛 Troubleshooting
-
-<details>
-<summary><strong>webkit2gtk not found</strong></summary>
-
-```bash
-sudo dnf install webkit2gtk4.1-devel
-```
-</details>
-
-<details>
-<summary><strong>pkexec authentication fails</strong></summary>
-
-Make sure the polkit policy is installed:
-```bash
-ls /usr/share/polkit-1/actions/com.controlpanel.pkexec.policy
-```
-</details>
-
-<details>
-<summary><strong>dnf commands fail</strong></summary>
-
-Ensure you're running on Fedora/RHEL with dnf available:
-```bash
-which dnf
-```
-</details>
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please open an issue first to discuss what you would like to change.
-
-1. Fork the repository
-2. Create your feature branch: `git checkout -b feature/my-feature`
-3. Commit your changes: `git commit -m 'feat: add my feature'`
-4. Push to the branch: `git push origin feature/my-feature`
-5. Open a Pull Request
 
 ---
 
@@ -241,6 +175,5 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-Made with ❤️ for the Linux community
 
 </div>

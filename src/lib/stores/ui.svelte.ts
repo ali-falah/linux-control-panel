@@ -35,6 +35,8 @@ export type TabId =
 
 class UIStore {
   activeTab = $state<TabId>('system-dashboard');
+  /** Recently visited tabs history for sidebar submenu */
+  recentTabs = $state<TabId[]>([]);
   /** Navigation history stack — used by PageHeader back button */
   private navHistory = $state<TabId[]>([]);
   sidebarCollapsed = $state(false);
@@ -64,8 +66,38 @@ class UIStore {
   setActiveTab(tab: TabId) {
     if (tab !== this.activeTab) {
       this.navHistory = [...this.navHistory, this.activeTab];
+      if (tab !== 'system-dashboard') {
+        const filtered = this.recentTabs.filter(t => t !== tab);
+        this.recentTabs = [tab, ...filtered].slice(0, 5);
+      }
     }
     this.activeTab = tab;
+  }
+
+  /** Centralized error handler detecting PolicyKit / sudo authorization cancellations */
+  handleError(err: unknown, defaultMessage = 'An unexpected error occurred.') {
+    let msg = defaultMessage;
+    if (typeof err === 'string') {
+      msg = err;
+    } else if (err && typeof err === 'object') {
+      if ('message' in err) msg = String((err as any).message);
+      else if ('kind' in err && 'message' in (err as any)) msg = String((err as any).message);
+      else msg = JSON.stringify(err);
+    }
+
+    const lower = msg.toLowerCase();
+    if (
+      lower.includes('polkit') ||
+      lower.includes('not authorized') ||
+      lower.includes('canceled') ||
+      lower.includes('cancelled') ||
+      lower.includes('dismissed') ||
+      lower.includes('authentication failed')
+    ) {
+      this.addToast('Administrative Privileges Required: PolicyKit authorization was canceled or denied.', 'warning', 7000);
+    } else {
+      this.addToast(msg, 'error', 6000);
+    }
   }
 
   goBack() {
