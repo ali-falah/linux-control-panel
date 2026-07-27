@@ -101,14 +101,65 @@
     clearInterval(processesTimer);
   }
 
+  // Enhanced monitoring state
+  let showCores = $state(false);
+  let showTopConsumers = $state(false);
+  let connFilter = $state<'all' | 'listen' | 'estab' | 'external'>('all');
+  let connSearch = $state('');
+
+  // Top Consumers Derived
+  let topCpuProcesses = $derived.by(() => {
+    if (!processes || processes.length === 0) return [];
+    return [...processes].sort((a, b) => b.cpu_percent - a.cpu_percent).slice(0, 3);
+  });
+
+  let topMemProcesses = $derived.by(() => {
+    if (!processes || processes.length === 0) return [];
+    return [...processes].sort((a, b) => b.mem_rss_mb - a.mem_rss_mb).slice(0, 3);
+  });
+
+  // Filtered Connections Derived
+  let filteredConnections = $derived.by(() => {
+    if (!activeConnections) return [];
+    let list = activeConnections;
+
+    if (connFilter === 'listen') {
+      list = list.filter(c => c.state && c.state.toLowerCase().includes('listen'));
+    } else if (connFilter === 'estab') {
+      list = list.filter(c => c.state && (c.state.toLowerCase().includes('estab') || c.state.toLowerCase().includes('connected')));
+    } else if (connFilter === 'external') {
+      list = list.filter(c => {
+        const remote = c.remote_address || '';
+        return remote && !remote.startsWith('127.0.0.1') && !remote.startsWith('::1') && !remote.startsWith('0.0.0.0') && !remote.startsWith('*');
+      });
+    }
+
+    if (connSearch.trim()) {
+      const q = connSearch.toLowerCase();
+      list = list.filter(c => 
+        (c.local_address && c.local_address.toLowerCase().includes(q)) ||
+        (c.remote_address && c.remote_address.toLowerCase().includes(q)) ||
+        (c.process_name && c.process_name.toLowerCase().includes(q)) ||
+        (c.pid && c.pid.toString().includes(q)) ||
+        (c.protocol && c.protocol.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  });
+
+  let connListenCount = $derived(activeConnections.filter(c => c.state && c.state.toLowerCase().includes('listen')).length);
+  let connEstabCount = $derived(activeConnections.filter(c => c.state && (c.state.toLowerCase().includes('estab') || c.state.toLowerCase().includes('connected'))).length);
+
   async function pollLeftAndCenter() {
     try {
-      const [sysStats, temp] = await Promise.all([
+      const [sysStats, temp, procList] = await Promise.all([
         invoke('get_system_stats'),
-        invoke('get_cpu_temperature')
+        invoke('get_cpu_temperature'),
+        invoke('get_process_list')
       ]);
       stats = sysStats;
       cpuTemp = temp as number | null;
+      processes = procList as any[];
       cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
     } catch(e) {}
     await fetchDiskIo();
@@ -432,10 +483,32 @@
                     </svg>
                   </div>
                   <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
-                    <span>{stats.cpu_cores} Cores</span>
+                    <button
+                      onclick={() => showCores = !showCores}
+                      style="background: transparent; border: none; padding: 0; color: var(--color-accent); cursor: pointer; font-size: 11px; text-decoration: underline; font-family: inherit;"
+                    >
+                      {stats.cpu_cores} Cores {showCores ? '▲' : '▼'}
+                    </button>
                     <span>Load: {stats.load_1.toFixed(2)}, {stats.load_5.toFixed(2)}</span>
                   </div>
                 </div>
+
+                <!-- CPU Cores Expandable Grid -->
+                {#if showCores && stats.cpu_per_core && stats.cpu_per_core.length > 0}
+                  <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 6px; padding: 8px; background: rgba(0,0,0,0.25); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+                    {#each stats.cpu_per_core as corePct, idx}
+                      <div style="display:flex; flex-direction:column; gap:2px; font-size:10px; font-family:var(--font-mono);">
+                        <div style="display:flex; justify-content:space-between; color:var(--color-text-muted);">
+                          <span>C{idx}</span>
+                          <span>{corePct.toFixed(0)}%</span>
+                        </div>
+                        <div class="progress-bg" style="height: 4px; background: rgba(255,255,255,0.05);">
+                          <div class="progress-fill" style="width: {corePct}%; height: 100%; background: {corePct > 70 ? 'var(--color-error)' : corePct > 40 ? 'var(--color-warning)' : 'var(--color-accent)'};"></div>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
                 
                 <!-- Memory -->
                 <div class="metric-block" style="display:flex; flex-direction:column; gap:6px;">
@@ -466,6 +539,54 @@
                     <span>Total: {formatBytes(stats.swap_total_mb)}</span>
                   </div>
                 </div>
+
+                <!-- Top Resource Consumers Section -->
+                {#if topCpuProcesses.length > 0}
+                  <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 10px; margin-top: 4px; display:flex; flex-direction:column; gap:8px;">
+                    <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; display:flex; justify-content:space-between; align-items:center;">
+                      <button
+                        onclick={() => showTopConsumers = !showTopConsumers}
+                        style="background: transparent; border: none; padding: 0; color: var(--color-accent); font-size: 11px; font-weight: 700; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; font-family: inherit;"
+                      >
+                        Top Consumers {showTopConsumers ? '▲' : '▼'}
+                      </button>
+                      {#if showTopConsumers}
+                        <button 
+                          onclick={() => currentTab = 'processes'}
+                          style="background: transparent; border: none; padding: 0; color: var(--color-accent); font-size: 10px; cursor: pointer;"
+                        >
+                          View All &rarr;
+                        </button>
+                      {/if}
+                    </div>
+
+                    {#if showTopConsumers}
+                      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <!-- Top CPU -->
+                        <div style="background: rgba(0,0,0,0.2); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
+                          <span style="font-size: 9px; font-weight:700; color: var(--color-info); text-transform: uppercase;">Top CPU</span>
+                          {#each topCpuProcesses as p}
+                            <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
+                              <span style="color:var(--color-text-primary); text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:85px;" title={p.name}>{p.name}</span>
+                              <span style="color:var(--color-info); font-weight:600;">{p.cpu_percent.toFixed(1)}%</span>
+                            </div>
+                          {/each}
+                        </div>
+
+                        <!-- Top RAM -->
+                        <div style="background: rgba(0,0,0,0.2); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
+                          <span style="font-size: 9px; font-weight:700; color: var(--color-accent); text-transform: uppercase;">Top RAM</span>
+                          {#each topMemProcesses as p}
+                            <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
+                              <span style="color:var(--color-text-primary); text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:85px;" title={p.name}>{p.name}</span>
+                              <span style="color:var(--color-accent); font-weight:600;">{p.mem_rss_mb > 1024 ? (p.mem_rss_mb/1024).toFixed(1) + 'GB' : p.mem_rss_mb.toFixed(0) + 'MB'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
               </div>
             </Card>
 
@@ -515,36 +636,78 @@
             <div style="display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0;">
               <div>
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
-                <div style="display:flex; gap: 12px; flex-wrap: wrap; width: 100%;">
+                <div style="display:flex; gap: 8px; flex-wrap: wrap; width: 100%;">
                   {#each activeInterfaces as iface}
-                    <div style="flex: 1; min-width: 200px; max-width: calc(50% - 6px); background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
-                      <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
-                        <span style="font-weight:600; font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary);">{iface.interface}</span>
-                        <!-- Status check circle badge -->
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
+                    <div style="flex: 1; min-width: 180px; background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 6px; padding: 6px 10px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                      <div style="display:flex; align-items:center; gap:6px;">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
                           <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke-linecap="round" stroke-linejoin="round"/>
                           <polyline points="22 4 12 14.01 9 11.01" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
+                        <span style="font-weight:600; font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary);">{iface.interface}</span>
                       </div>
-                      <div style="display:flex; justify-content:space-between; font-size:11px; font-family:var(--font-mono); width:100%;">
+                      <div style="display:flex; align-items:center; gap:10px; font-size:10px; font-family:var(--font-mono);">
                         <div>
-                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:4px;">DL</span>
+                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:2px;">DL</span>
                           <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</strong>
                         </div>
                         <div>
-                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:4px;">UL</span>
+                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:2px;">UL</span>
                           <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</strong>
                         </div>
                       </div>
                     </div>
                   {/each}
                   {#if activeInterfaces.length === 0}
-                    <span style="font-size:12px; color:var(--color-text-muted); font-style:italic;">No active network interfaces.</span>
+                    <span style="font-size:11px; color:var(--color-text-muted); font-style:italic;">No active network interfaces.</span>
                   {/if}
                 </div>
               </div>
-              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
-                <h4 style="margin: 0 0 8px; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">Active Connections <span style="font-size:10px; color:var(--color-text-muted); font-weight:normal; margin-left:6px;">(Click for details, right-click for options)</span></h4>
+              <div style="display:flex; flex-direction:column; flex:1; min-height:0; gap:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                  <h4 style="margin: 0; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">
+                    Active Connections <span style="font-size:10px; color:var(--color-text-muted); font-weight:normal; margin-left:4px;">({filteredConnections.length})</span>
+                  </h4>
+
+                  <!-- Connection Filter Pills -->
+                  <div style="display:flex; gap:4px; font-size:10px;">
+                    <button
+                      onclick={() => connFilter = 'all'}
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'all' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                    >
+                      All ({activeConnections.length})
+                    </button>
+                    <button
+                      onclick={() => connFilter = 'listen'}
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'listen' ? '#f59e0b' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'listen' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                    >
+                      Listen ({connListenCount})
+                    </button>
+                    <button
+                      onclick={() => connFilter = 'estab'}
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'estab' ? '#10b981' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'estab' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                    >
+                      Estab ({connEstabCount})
+                    </button>
+                    <button
+                      onclick={() => connFilter = 'external'}
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'external' ? '#3b82f6' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'external' ? '#fff' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                    >
+                      External
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Connection Search Box -->
+                <div style="width: 100%;">
+                  <input
+                    type="text"
+                    placeholder="Search connection address, port, PID, or process..."
+                    bind:value={connSearch}
+                    style="width: 100%; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); padding: 5px 10px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
+                  />
+                </div>
+
                 <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2); min-height: 0;">
                   <Table tableAction={tableFeatures}>
                     <thead>
@@ -555,26 +718,50 @@
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">State</th>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">PID</th>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Process</th>
+                        <th style="padding:6px; text-align:right; color:var(--color-text-secondary);">Action</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {#each activeConnections as conn}
+                      {#each filteredConnections as conn}
+                        {@const isListen = conn.state && conn.state.toLowerCase().includes('listen')}
                         <tr 
-                          style="border-bottom:1px solid rgba(255,255,255,0.02); cursor: pointer;"
+                          style="border-bottom:1px solid rgba(255,255,255,0.02); cursor: pointer; background: {isListen ? 'rgba(245, 158, 11, 0.04)' : 'transparent'};"
                           onclick={() => openConnectionDetails(conn)}
                           oncontextmenu={(e) => handleConnectionContextMenu(e, conn)}
                         >
-                          <td style="padding:6px; color:var(--color-text-primary);">{conn.protocol}</td>
-                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.local_address}>{conn.local_address}</td>
-                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all;" title={conn.remote_address}>{conn.remote_address}</td>
-                          <td style="padding:6px; color:var(--color-success);">{conn.state}</td>
-                          <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono);">{conn.pid || '-'}</td>
-                          <td style="padding:6px; color:var(--color-text-secondary);">{conn.process_name}</td>
+                          <td style="padding:6px; color:var(--color-text-primary); font-family:var(--font-mono); font-size:11px;">{conn.protocol}</td>
+                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.local_address}>
+                            {conn.local_address}
+                          </td>
+                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.remote_address}>
+                            {conn.remote_address}
+                          </td>
+                          <td style="padding:6px;">
+                            <span style="font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:var(--font-mono); background:{isListen ? 'rgba(245,158,11,0.15)' : 'rgba(34,197,94,0.15)'}; color:{isListen ? '#f59e0b' : '#22c55e'};">
+                              {conn.state}
+                            </span>
+                          </td>
+                          <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono); font-size:11px;">{conn.pid || '-'}</td>
+                          <td style="padding:6px; color:var(--color-text-secondary); font-size:11px;">{conn.process_name}</td>
+                          <td style="padding:6px; text-align:right;" onclick={(e) => e.stopPropagation()}>
+                            {#if conn.pid}
+                              <button
+                                onclick={() => killProcess(conn.pid, conn.process_name)}
+                                style="background:transparent; border:none; color:var(--color-text-muted); cursor:pointer; padding:2px 4px; border-radius:4px; transition:all 0.15s;"
+                                class="hover-text-error"
+                                title="Kill Process ({conn.process_name} PID {conn.pid})"
+                              >
+                                <Skull size={13} />
+                              </button>
+                            {/if}
+                          </td>
                         </tr>
                       {/each}
-                      {#if activeConnections.length === 0}
+                      {#if filteredConnections.length === 0}
                         <tr>
-                          <td colspan="6" style="padding:16px; text-align:center; color:var(--color-text-muted);">No active connections</td>
+                          <td colspan="7" style="padding:16px; text-align:center; color:var(--color-text-muted); font-size:12px;">
+                            No connections match the selected filter.
+                          </td>
                         </tr>
                       {/if}
                     </tbody>
@@ -983,5 +1170,8 @@
   .custom-context-menu button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+  .hover-text-error:hover {
+    color: var(--color-error) !important;
   }
 </style>

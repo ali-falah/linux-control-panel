@@ -369,8 +369,8 @@
                 {@const meta = getIfaceMeta(iface.name)}
                 <div class="network-item" style="display:flex; justify-content:space-between; align-items:center; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid rgba(255,255,255,0.04);">
                   <div style="display:flex; align-items:center; gap:10px;">
-                    <div style="width: 30px; height: 30px; border-radius: 6px; background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                      <meta.icon size={15} style="color: {meta.color};" />
+                    <div style="width: 22px; height: 22px; border-radius: 5px; background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                      <meta.icon size={12} style="color: {meta.color};" />
                     </div>
                     <div style="display:flex; flex-direction:column; gap:2px;">
                       <div style="display:flex; align-items:center; gap:6px;">
