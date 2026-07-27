@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield } from '@lucide/svelte';
+  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield, Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Layers } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -14,6 +14,14 @@
   let diskUsage = $state<any[]>([]);
   let smartHealth = $state<any[]>([]);
   let networkInterfaces = $state<any[]>([]);
+
+  function getIfaceMeta(name: string) {
+    if (name.startsWith('wl')) return { label: 'Wi-Fi Interface', icon: Wifi, color: 'var(--color-accent)' };
+    if (name.startsWith('en') || name.startsWith('eth')) return { label: 'Ethernet Adapter', icon: Cable, color: '#3b82f6' };
+    if (name.startsWith('virbr') || name.startsWith('docker') || name.startsWith('veth') || name.startsWith('br-')) return { label: 'Virtual Bridge', icon: Network, color: '#a855f7' };
+    if (name.startsWith('tun') || name.startsWith('wg') || name.startsWith('vpn')) return { label: 'VPN / Tunnel', icon: Lock, color: '#f59e0b' };
+    return { label: 'Network Adapter', icon: Network, color: 'var(--color-text-secondary)' };
+  }
   
   // Network details (gateway, dns)
   let networkDetails = $state<any>(null);
@@ -258,11 +266,29 @@
     <div class="dashboard-column">
       <Card title="System Overview" icon={Server} class="panel-overview" style="display:flex; flex-direction:column; gap:12px;">
         {#if osInfo}
-          <div class="info-row"><span>Hostname:</span> <strong>{osInfo.hostname}</strong></div>
-          <div class="info-row"><span>OS Name:</span> <strong>{osInfo.name} {osInfo.os_version}</strong></div>
-          <div class="info-row"><span>Kernel:</span> <strong>{osInfo.kernel_version}</strong></div>
-          <div class="info-row"><span>Uptime:</span> <strong>{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong></div>
-          <div class="info-row"><span>Last Updated:</span> <strong>{lastSystemUpdate || '...'}</strong></div>
+          <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="display:flex; align-items:center; gap:6px;"><Laptop size={14} style="color:var(--color-accent);" /> Hostname:</span>
+            <strong style="font-family:var(--font-mono);">{osInfo.hostname}</strong>
+          </div>
+          <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="display:flex; align-items:center; gap:6px;"><Disc size={14} style="color:#3b82f6;" /> OS Name:</span>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <Badge variant="primary" style="font-size:10px; padding:1px 6px;">{osInfo.name}</Badge>
+              <strong style="font-size:12px;">{osInfo.os_version}</strong>
+            </div>
+          </div>
+          <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="display:flex; align-items:center; gap:6px;"><Cpu size={14} style="color:#a855f7;" /> Kernel:</span>
+            <strong style="font-family:var(--font-mono); font-size:12px;">{osInfo.kernel_version}</strong>
+          </div>
+          <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="display:flex; align-items:center; gap:6px;"><Clock size={14} style="color:#10b981;" /> Uptime:</span>
+            <strong style="color:var(--color-success); font-family:var(--font-mono);">{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong>
+          </div>
+          <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="display:flex; align-items:center; gap:6px;"><Calendar size={14} style="color:#f59e0b;" /> Last Updated:</span>
+            <strong style="font-size:11px; color:var(--color-text-secondary);">{lastSystemUpdate || '...'}</strong>
+          </div>
         {:else}
           <span class="text-muted">Loading OS information...</span>
         {/if}
@@ -287,6 +313,7 @@
               }}
               style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
               class="hover-bg-error-light"
+              title="Click to view Error log entries in Journal Viewer"
             >
               <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Errors</span>
               <Badge variant={systemEvents.error_count > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
@@ -302,6 +329,7 @@
               }}
               style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
               class="hover-bg-warn-light"
+              title="Click to view Warning log entries in Journal Viewer"
             >
               <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Warnings</span>
               <Badge variant={systemEvents.warning_count > 0 ? 'warning' : 'muted'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
@@ -317,6 +345,7 @@
               }}
               style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
               class="hover-bg-error-light"
+              title="Click to inspect failed systemd units in Service Manager"
             >
               <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase; text-align: center; line-height: 1;">Failed Services</span>
               <Badge variant={failedServicesCount > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
@@ -337,10 +366,19 @@
           <div class="network-list">
             {#each networkInterfaces as iface}
               {#if iface.name !== 'lo'}
-                <div class="network-item" style="display:flex; justify-content:space-between; align-items:center; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: 8px; margin-bottom: 8px;">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <span class="iface-name" style="font-weight:600; font-size:13px; font-family:var(--font-mono); color: var(--color-text-primary);">{iface.name}</span>
-                    <Badge variant={iface.is_up ? 'success' : 'muted'} style="font-size: 9px; padding: 2px 6px;">{iface.is_up ? 'UP' : 'DOWN'}</Badge>
+                {@const meta = getIfaceMeta(iface.name)}
+                <div class="network-item" style="display:flex; justify-content:space-between; align-items:center; background: rgba(0,0,0,0.2); padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid rgba(255,255,255,0.04);">
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <div style="width: 30px; height: 30px; border-radius: 6px; background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                      <meta.icon size={15} style="color: {meta.color};" />
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:2px;">
+                      <div style="display:flex; align-items:center; gap:6px;">
+                        <span class="iface-name" style="font-weight:600; font-size:13px; font-family:var(--font-mono); color: var(--color-text-primary);">{iface.name}</span>
+                        <Badge variant={iface.is_up ? 'success' : 'muted'} style="font-size: 9px; padding: 1px 6px;">{iface.is_up ? 'UP' : 'DOWN'}</Badge>
+                      </div>
+                      <span style="font-size: 10px; color: var(--color-text-muted);">{meta.label}</span>
+                    </div>
                   </div>
                   <div style="font-family:var(--font-mono); font-size:12px; color:var(--color-text-secondary); display: flex; align-items: center; gap: 4px;">
                     {iface.ip4 || 'No IP'}
@@ -419,7 +457,17 @@
                 </svg>
                 <div style="position: absolute; font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--color-text-primary);">{securityReport.score}%</div>
               </div>
-              <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: {getScoreColor(securityReport.score)}">{getScoreLabel(securityReport.score)}</span>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: {getScoreColor(securityReport.score)}">{getScoreLabel(securityReport.score)}</span>
+                <button
+                  onclick={fetchSecurityReport}
+                  disabled={loadingSecurity}
+                  style="background: transparent; border: none; padding: 2px 4px; cursor: pointer; color: var(--color-text-muted); display: flex; align-items: center;"
+                  title="Re-run Security Audit"
+                >
+                  <RefreshCw size={11} class={loadingSecurity ? 'animate-spin-slow' : ''} />
+                </button>
+              </div>
             </div>
 
             <!-- Clickable stats pills -->
@@ -565,12 +613,12 @@
                           <span class="disk-pct" style="font-size:11px;">{pool.percent.toFixed(1)}% Used</span>
                         </div>
 
-                        <!-- Nested Subvolumes -->
-                        <div class="subvolumes-list" style="display:flex; flex-direction:column; gap:4px; margin-top:4px; padding-left:8px; border-left: 1px dashed rgba(0,218,243,0.2);">
-                          {#each pool.subvolumes as subvol}
+                        <!-- Nested Subvolumes with visual tree connectors -->
+                        <div class="subvolumes-list" style="display:flex; flex-direction:column; gap:4px; margin-top:4px; padding-left:6px; border-left: 2px solid rgba(0,218,243,0.25);">
+                          {#each pool.subvolumes as subvol, i}
                             <div 
                               class="subvol-row"
-                              style="display:flex; justify-content:space-between; align-items:center; font-size:11px; padding: 3px 6px; border-radius:4px; background:rgba(0,0,0,0.15); cursor:pointer;"
+                              style="display:flex; justify-content:space-between; align-items:center; font-size:11px; padding: 4px 8px; border-radius:4px; background:rgba(0,0,0,0.2); cursor:pointer;"
                               onclick={() => {
                                 selectedStorageDetail = {
                                   title: `BTRFS Subvolume (${subvol.mount})`,
@@ -584,10 +632,16 @@
                                   subvolumes: pool.subvolumes.map(s => s.mount)
                                 };
                               }}
-                              title="Click for subvolume info"
+                              title="Subvolume dynamically shares pool space. Click for info."
                             >
-                              <span style="font-weight:600; color:var(--color-text-primary);">{subvol.mount}</span>
-                              <span style="color:var(--color-text-muted); font-family:var(--font-mono);">{formatStorageBytes(subvol.used_gb)}</span>
+                              <div style="display:flex; align-items:center; gap:6px;">
+                                <span style="color:var(--color-accent); opacity:0.7; font-family:var(--font-mono); font-weight:bold;">
+                                  {i === pool.subvolumes.length - 1 ? '└─' : '├─'}
+                                </span>
+                                <span style="font-weight:600; color:var(--color-text-primary);">{subvol.mount}</span>
+                                <span style="font-size:9px; color:var(--color-text-muted); background:rgba(255,255,255,0.05); padding:1px 4px; border-radius:3px;">subvol</span>
+                              </div>
+                              <span style="color:var(--color-text-secondary); font-family:var(--font-mono);">{formatStorageBytes(subvol.used_gb)}</span>
                             </div>
                           {/each}
                         </div>
