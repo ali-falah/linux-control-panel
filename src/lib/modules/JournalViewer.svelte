@@ -289,6 +289,8 @@
     // Stable document listeners for popover close-on-outside-click and Escape
     function handleOutsideClick(e: MouseEvent) {
       if (!showCustomPopover) return;
+      // If target was unmounted/detached during click handling (e.g. DatePicker calendar cell unmounted on select), ignore
+      if (e.target && !document.body.contains(e.target as Node)) return;
       if (popoverContainer && popoverContainer.contains(e.target as Node)) return;
       // Also ignore clicks within the custom-range-container (the Select trigger area)
       const rangeContainer = document.querySelector('.custom-range-container');

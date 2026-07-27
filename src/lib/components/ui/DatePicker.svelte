@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { ChevronLeft, ChevronRight, Calendar } from '@lucide/svelte';
 
   interface Props {
@@ -16,6 +17,18 @@
   let showCalendar = $state(false);
   let viewYear  = $state(new Date().getFullYear());
   let viewMonth = $state(new Date().getMonth()); // 0-indexed
+  let containerRef = $state<HTMLDivElement | null>(null);
+
+  onMount(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (!showCalendar) return;
+      if (e.target && !document.body.contains(e.target as Node)) return;
+      if (containerRef && containerRef.contains(e.target as Node)) return;
+      showCalendar = false;
+    }
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  });
 
   // Sync view when value changes externally
   $effect(() => {
@@ -99,7 +112,7 @@
   }
 </script>
 
-<div class="dp-wrap">
+<div bind:this={containerRef} class="dp-wrap">
   {#if label}
     <span class="dp-label">{label}</span>
   {/if}
