@@ -292,7 +292,7 @@
           async () => {
             fixingId = finding.id;
             try {
-              const msg = await invoke<string>('security_fix_ssh_root', { enable });
+              const msg = await invoke<string>('security_fix_root_ssh', { enable });
               uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
@@ -311,7 +311,9 @@
           async () => {
             fixingId = finding.id;
             try {
-              const msg = await invoke<string>('security_fix_ssh_pass_auth', { enable });
+              const msg = await invoke<string>('security_fix_ssh_param', {
+                param: 'PasswordAuthentication', value: 'no', revertValue: 'yes', enable
+              });
               uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
@@ -330,7 +332,9 @@
           async () => {
             fixingId = finding.id;
             try {
-              const msg = await invoke<string>('security_fix_ssh_max_auth', { enable });
+              const msg = await invoke<string>('security_fix_ssh_param', {
+                param: 'MaxAuthTries', value: '4', revertValue: '6', enable
+              });
               uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
@@ -349,7 +353,9 @@
           async () => {
             fixingId = finding.id;
             try {
-              const msg = await invoke<string>('security_fix_ssh_grace', { enable });
+              const msg = await invoke<string>('security_fix_ssh_param', {
+                param: 'LoginGraceTime', value: '60', revertValue: '120', enable
+              });
               uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
@@ -386,20 +392,18 @@
 
       // ── User & Auth ──────────────────────────────────────────────────────
       case 'pass_policy': {
-        const enable = !finding.is_resolved;
         uiStore.confirm(
-          enable ? 'Enforce Password Quality Rules' : 'Revert Password Quality Rules',
-          enable ? 'Installs/configures pam_pwquality (min length 12, min classes 3) in /etc/security/pwquality.conf.'
-                 : 'Removes hardening settings from /etc/security/pwquality.conf.',
+          'Enforce Password Aging Policy',
+          'Sets PASS_MAX_DAYS=90 and PASS_MIN_LEN=12 in /etc/login.defs.',
           async () => {
             fixingId = finding.id;
             try {
-              const msg = await invoke<string>('security_fix_pass_policy', { enable });
+              const msg = await invoke<string>('security_fix_password_policy');
               uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
-          }, !enable
+          }, false
         );
         break;
       }
@@ -425,21 +429,7 @@
       }
 
       case 'fs_coredump': {
-        const enable = !finding.is_resolved;
-        uiStore.confirm(
-          enable ? 'Disable Core Dumps' : 'Enable Core Dumps',
-          enable ? 'Sets * hard core 0 in /etc/security/limits.d/99-disable-coredumps.conf and fs.suid_dumpable=0.'
-                 : 'Removes core dump restrictions.',
-          async () => {
-            fixingId = finding.id;
-            try {
-              const msg = await invoke<string>('security_fix_coredump', { enable });
-              uiStore.addToast(msg, 'success');
-              await runAudit();
-            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
-            finally { fixingId = null; }
-          }, !enable
-        );
+        await fixKernelParam(finding, 'fs.suid_dumpable', '0', '1');
         break;
       }
 

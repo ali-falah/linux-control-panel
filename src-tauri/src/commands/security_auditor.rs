@@ -88,10 +88,28 @@ async fn read_cmd(args: &[&str]) -> String {
     }
 }
 
-/// Read a file. Tries direct read first. Never prompts pkexec during read-only background audits.
+/// Read a file. Tries direct read first, then elevated read if available.
 async fn read_privileged_file(path: &str) -> String {
     if let Ok(content) = tokio::fs::read_to_string(path).await {
-        return content;
+        if !content.trim().is_empty() {
+            return content;
+        }
+    }
+    if crate::utils::privilege::check_sudo_status() {
+        let mut cmd = Command::new("pkexec");
+        cmd.args(["cat", path]);
+        if let Ok(out) = cmd.output().await {
+            if out.status.success() {
+                let content = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !content.trim().is_empty() {
+                    return content;
+                }
+            }
+        }
+    }
+    let out = read_cmd(&["sudo", "-n", "cat", path]).await;
+    if !out.trim().is_empty() {
+        return out;
     }
     String::new()
 }
@@ -187,10 +205,43 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // CATEGORY 1: SSH HARDENING
         // ═══════════════════════════════════════════════════════════════════════
         let cat_ssh = "SSH Hardening";
-        let ssh_cfg = read_privileged_file("/etc/ssh/sshd_config").await;
-        // Also try any include files (sshd_config.d)
-        let ssh_cfg_d = read_cmd(&["bash", "-c", "cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await;
-        let ssh_full = format!("{}\n{}", ssh_cfg, ssh_cfg_d);
+        // Use `sshd -T` to dump effective parsed config. Try privilege first if authenticated, else sudo -n / local binaries.
+        let sshd_t = if crate::utils::privilege::check_sudo_status() {
+            let mut cmd = Command::new("pkexec");
+            cmd.args(["sshd", "-T"]);
+            if let Ok(out) = cmd.output().await {
+                if out.status.success() {
+                    String::from_utf8_lossy(&out.stdout).into_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            read_cmd(&["bash", "-c",
+                "sudo -n sshd -T 2>/dev/null || \
+                 sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || \
+                 sshd -T 2>/dev/null || \
+                 /usr/sbin/sshd -T 2>/dev/null || true"]).await
+        };
+        let ssh_full = if !sshd_t.trim().is_empty() {
+            sshd_t
+        } else {
+            let ssh_cfg = read_privileged_file("/etc/ssh/sshd_config").await;
+            let ssh_cfg_d = if crate::utils::privilege::check_sudo_status() {
+                let mut cmd = Command::new("pkexec");
+                cmd.args(["bash", "-c", "cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]);
+                if let Ok(out) = cmd.output().await {
+                    String::from_utf8_lossy(&out.stdout).into_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                read_cmd(&["bash", "-c", "sudo -n cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await
+            };
+            format!("{}\n{}", ssh_cfg, ssh_cfg_d)
+        };
 
         fn ssh_val(cfg: &str, key: &str) -> Option<String> {
             // Find the last active (non-commented) occurrence of key
@@ -988,21 +1039,12 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 /// Fix/revert SSH Root Login.
 #[tauri::command]
 pub async fn security_fix_root_ssh(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin prohibit-password/g' /etc/ssh/sshd_config"
-    } else {
-        "sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &format!("{} && (systemctl is-active --quiet sshd && systemctl reload sshd || systemctl is-active --quiet ssh && systemctl reload ssh || true)", script)])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        Ok(if enable { "SSH root login set to prohibit-password." } else { "SSH root login re-enabled." }.to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).to_string())
-    }
+    security_fix_ssh_param(
+        "PermitRootLogin".to_string(),
+        "prohibit-password".to_string(),
+        "yes".to_string(),
+        enable,
+    ).await
 }
 
 /// Harden multiple SSH parameters at once. Set `enable=true` to apply hardening, `false` to revert

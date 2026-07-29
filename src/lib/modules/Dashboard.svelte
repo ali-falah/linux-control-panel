@@ -330,58 +330,82 @@
       <!-- System Events -->
       <Card title="System Events" icon={Activity} class="panel-events" style="display:flex; flex-direction:column; gap:12px;">
         {#if systemEvents}
-          <div class="info-row" style="display:flex; justify-content:space-between; margin-bottom:4px; font-size: 13px; border-bottom: 1px dashed rgba(255,255,255,0.05); padding-bottom: 6px;">
-            <span>Last Boot Time:</span> 
-            <strong>{systemEvents.last_boot_time}</strong>
+          <div class="system-events-boot-row">
+            <span class="boot-label">Last Boot Time:</span> 
+            <span class="boot-value">{systemEvents.last_boot_time}</span>
           </div>
           
-          <div style="display: flex; gap: 12px; margin-top: 4px;">
-            <!-- Errors Button -->
+          <div class="system-events-metrics-row">
+            <!-- Errors Ring Button -->
             <button 
               onclick={() => {
                 uiStore.preAppliedJournalPriority = '3'; // Error & Above
                 uiStore.setActiveTab('journal-logs');
               }}
-              style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
-              class="hover-bg-error-light"
+              class="system-event-metric-btn"
               title="Click to view Error log entries in Journal Viewer"
             >
-              <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Errors</span>
-              <Badge variant={systemEvents.error_count > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
-                {systemEvents.error_count}
-              </Badge>
+              <div class="ring-gauge-container">
+                <svg viewBox="0 0 100 100" class="ring-gauge-svg">
+                  <circle cx="50" cy="50" r="41" fill="none" stroke="rgba(239, 68, 68, 0.12)" stroke-width="7" />
+                  <circle 
+                    cx="50" cy="50" r="41" fill="none" stroke="#ef4444" stroke-width="7"
+                    stroke-dasharray="257.6" stroke-dashoffset="35" stroke-linecap="round"
+                    style="transform: rotate(-90deg); transform-origin: 50% 50%; filter: drop-shadow(0 0 6px rgba(239,68,68,0.4));"
+                  />
+                </svg>
+                <div class="ring-gauge-text error-text">{systemEvents.error_count}</div>
+              </div>
+              <span class="metric-label">Errors</span>
             </button>
             
-            <!-- Warnings Button -->
+            <!-- Warnings Ring Button -->
             <button 
               onclick={() => {
                 uiStore.preAppliedJournalPriority = '4'; // Warning & Above
                 uiStore.setActiveTab('journal-logs');
               }}
-              style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
-              class="hover-bg-warn-light"
+              class="system-event-metric-btn"
               title="Click to view Warning log entries in Journal Viewer"
             >
-              <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase;">Warnings</span>
-              <Badge variant={systemEvents.warning_count > 0 ? 'warning' : 'muted'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
-                {systemEvents.warning_count}
-              </Badge>
+              <div class="ring-gauge-container">
+                <svg viewBox="0 0 100 100" class="ring-gauge-svg">
+                  <circle cx="50" cy="50" r="41" fill="none" stroke="rgba(245, 158, 11, 0.12)" stroke-width="7" />
+                  <circle 
+                    cx="50" cy="50" r="41" fill="none" stroke="#f59e0b" stroke-width="7"
+                    stroke-dasharray="257.6" stroke-dashoffset="35" stroke-linecap="round"
+                    style="transform: rotate(-90deg); transform-origin: 50% 50%; filter: drop-shadow(0 0 6px rgba(245,158,11,0.4));"
+                  />
+                </svg>
+                <div class="ring-gauge-text warn-text">{systemEvents.warning_count}</div>
+              </div>
+              <span class="metric-label">Warnings</span>
             </button>
 
-            <!-- Failed Services Button -->
+            <!-- Failed Services Ring Button -->
             <button 
               onclick={() => {
                 uiStore.serviceFilter = 'failed';
                 uiStore.setActiveTab('service-manager');
               }}
-              style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); padding: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
-              class="hover-bg-error-light"
+              class="system-event-metric-btn"
               title="Click to inspect failed systemd units in Service Manager"
             >
-              <span style="font-size: 10px; color: var(--color-text-secondary); font-weight:600; text-transform: uppercase; text-align: center; line-height: 1;">Failed Services</span>
-              <Badge variant={failedServicesCount > 0 ? 'error' : 'success'} style="font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 20px;">
-                {failedServicesCount}
-              </Badge>
+              <div class="ring-gauge-container">
+                <svg viewBox="0 0 100 100" class="ring-gauge-svg">
+                  <circle cx="50" cy="50" r="41" fill="none" stroke="rgba(239, 68, 68, 0.12)" stroke-width="7" />
+                  <circle 
+                    cx="50" cy="50" r="41" fill="none" stroke="#ef4444" stroke-width="7"
+                    stroke-dasharray="257.6" stroke-dashoffset="35" stroke-linecap="round"
+                    style="transform: rotate(-90deg); transform-origin: 50% 50%; filter: drop-shadow(0 0 6px rgba(239,68,68,0.4));"
+                  />
+                </svg>
+                <div class="ring-gauge-text error-text" style="display:flex; align-items:center; gap:3px;">
+                  <span class="red-dot"></span>
+                  {failedServicesCount}
+                </div>
+              </div>
+              <span class="metric-label">Failed Services</span>
             </button>
           </div>
         {:else}
@@ -973,5 +997,88 @@
   .hover-scale-pill:hover {
     filter: brightness(1.25);
     transform: translateY(-1px);
+  }
+
+  /* ── System Events Ring Gauge Styling ── */
+  .system-events-boot-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    border-bottom: 1px dotted rgba(255, 255, 255, 0.18);
+    padding-bottom: 8px;
+    margin-bottom: 8px;
+  }
+  .boot-label {
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .boot-value {
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+  .system-events-metrics-row {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0 2px;
+  }
+  .system-event-metric-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 6px 4px;
+    border-radius: 10px;
+    transition: background 0.18s ease, transform 0.18s ease;
+  }
+  .system-event-metric-btn:hover {
+    background: rgba(255, 255, 255, 0.03);
+    transform: translateY(-2px);
+  }
+  .ring-gauge-container {
+    position: relative;
+    width: 78px;
+    height: 78px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .ring-gauge-svg {
+    width: 100%;
+    height: 100%;
+  }
+  .ring-gauge-text {
+    position: absolute;
+    font-size: 16px;
+    font-weight: 800;
+    font-family: var(--font-mono);
+  }
+  .error-text {
+    color: #f87171;
+  }
+  .warn-text {
+    color: #fbbf24;
+  }
+  .red-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ef4444;
+    display: inline-block;
+    box-shadow: 0 0 6px #ef4444;
+  }
+  .metric-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-align: center;
+    line-height: 1.2;
   }
 </style>
