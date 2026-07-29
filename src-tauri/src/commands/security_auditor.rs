@@ -46,14 +46,14 @@ pub struct SecurityFinding {
     pub tamper_flag: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SecurityReport {
     pub score: u32,
     pub findings: Vec<SecurityFinding>,
     pub category_scores: Vec<CategoryScore>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CategoryScore {
     pub category: String,
     pub score: u32,
@@ -61,9 +61,17 @@ pub struct CategoryScore {
     pub issues: u32,
 }
 
+pub static LAST_REPORT: Mutex<Option<(SecurityReport, SystemTime)>> = Mutex::new(None);
+
+pub fn invalidate_audit_cache() {
+    if let Ok(mut guard) = LAST_REPORT.lock() {
+        *guard = None;
+    }
+}
+
 // ─── Helper macros ────────────────────────────────────────────────────────────
 
-/// Run a command with a timeout (5 s). Returns stdout string or empty on error.
+/// Run a command with a timeout (2 s). Returns stdout string or empty on error.
 async fn read_cmd(args: &[&str]) -> String {
     if args.is_empty() { return String::new(); }
     let mut cmd = Command::new(args[0]);
@@ -71,7 +79,7 @@ async fn read_cmd(args: &[&str]) -> String {
     cmd.stdout(std::process::Stdio::piped())
        .stderr(std::process::Stdio::piped());
     let out = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
+        tokio::time::Duration::from_secs(2),
         cmd.output(),
     ).await;
     match out {
@@ -80,20 +88,12 @@ async fn read_cmd(args: &[&str]) -> String {
     }
 }
 
-/// Read a file using pkexec (root-read). Falls back silently.
+/// Read a file. Tries direct read first. Never prompts pkexec during read-only background audits.
 async fn read_privileged_file(path: &str) -> String {
-    let mut cmd = Command::new("pkexec");
-    cmd.args(["cat", path])
-       .stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped());
-    let out = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        cmd.output(),
-    ).await;
-    match out {
-        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => String::new(),
+    if let Ok(content) = tokio::fs::read_to_string(path).await {
+        return content;
     }
+    String::new()
 }
 
 /// Read a world-readable file directly.
@@ -154,7 +154,19 @@ fn info_finding(id: &str, title: &str, desc: &str, countermeasure: &str, categor
 // ─── Main Audit Command ───────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn security_run_audit() -> Result<SecurityReport, String> {
+pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityReport, String> {
+    if !force_refresh.unwrap_or(false) {
+        if let Ok(guard) = LAST_REPORT.lock() {
+            if let Some((ref report, ref time)) = *guard {
+                if let Ok(elapsed) = time.elapsed() {
+                    if elapsed < std::time::Duration::from_secs(30) {
+                        return Ok(report.clone());
+                    }
+                }
+            }
+        }
+    }
+
     use std::panic::AssertUnwindSafe;
     use futures::FutureExt;
 
@@ -798,8 +810,8 @@ pub async fn security_run_audit() -> Result<SecurityReport, String> {
         system_max += 5;
         if crate::binary_exists("dnf").await {
             let sec_updates = tokio::time::timeout(
-                tokio::time::Duration::from_secs(30),
-                Command::new("dnf").args(["check-update", "--security", "-q"]).output()
+                tokio::time::Duration::from_secs(3),
+                Command::new("dnf").args(["check-update", "--security", "-q", "-C"]).output()
             ).await;
             match sec_updates {
                 Ok(Ok(o)) => {
@@ -826,12 +838,12 @@ pub async fn security_run_audit() -> Result<SecurityReport, String> {
                 _ => {
                     system_cur += 3;
                     findings.push(info_finding("sec_updates", "Security Update Check Unavailable",
-                        "Could not check for security updates (timed out or dnf unavailable). Manually verify patch status.",
+                        "Could not check for security updates (cache check timed out). Manually verify patch status.",
                         "Run: dnf check-update --security", cat_sys, false));
                 }
             }
         } else if crate::binary_exists("apt").await {
-            let apt_out = tokio::time::timeout(tokio::time::Duration::from_secs(30),
+            let apt_out = tokio::time::timeout(tokio::time::Duration::from_secs(3),
                 Command::new("apt").args(["list", "--upgradable", "2>/dev/null"]).output()).await;
             match apt_out {
                 Ok(Ok(o)) => {
@@ -951,8 +963,12 @@ pub async fn security_run_audit() -> Result<SecurityReport, String> {
         let raw_score = if total_max > 0 { total_cur * 100 / total_max } else { 100 };
         let score = if has_critical { raw_score.min(60) } else { raw_score };
 
+        let report = SecurityReport { score, findings, category_scores };
+        if let Ok(mut guard) = LAST_REPORT.lock() {
+            *guard = Some((report.clone(), SystemTime::now()));
+        }
         crate::log_to_file("INFO", &format!("security_run_audit: completed score={}", score));
-        Ok(SecurityReport { score, findings, category_scores })
+        Ok(report)
 
     }).catch_unwind().await;
 

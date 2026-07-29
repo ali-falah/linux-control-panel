@@ -35,8 +35,38 @@
 
   let securityReport = $state<any>(null);
   let loadingSecurity = $state(false);
-  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved).length : 0);
-  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved).length : 0);
+  let mutedIds = $state<string[]>([]);
+  
+  $effect(() => {
+    try {
+      const raw = localStorage.getItem('security_muted_findings');
+      if (raw) mutedIds = JSON.parse(raw);
+    } catch {}
+  });
+
+  let effectiveDashboardScore = $derived.by(() => {
+    if (!securityReport) return 0;
+    if (!mutedIds || mutedIds.length === 0) return securityReport.score;
+    const activeFindings = securityReport.findings.filter((f: any) => !mutedIds.includes(f.id));
+    if (activeFindings.length === 0) return 100;
+    const hasUnmutedCritical = activeFindings.some((f: any) => f.severity === 'Critical' && !f.is_resolved);
+    let totalCur = 0;
+    let totalMax = 0;
+    for (const cs of securityReport.category_scores) {
+      const catFindings = activeFindings.filter((f: any) => f.category === cs.category);
+      const catPassed = catFindings.filter((f: any) => f.is_resolved).length;
+      if (catFindings.length > 0) {
+        const catPct = Math.round((catPassed / catFindings.length) * 100);
+        totalCur += (catPct * cs.max_score) / 100;
+        totalMax += cs.max_score;
+      }
+    }
+    const rawScore = totalMax > 0 ? Math.round((totalCur / totalMax) * 100) : 100;
+    return hasUnmutedCritical ? Math.min(rawScore, 60) : rawScore;
+  });
+
+  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
+  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
   let securityPassedCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.is_resolved).length : 0);
 
   function getScoreColor(score: number) {
@@ -69,10 +99,11 @@
     }
   }
 
-  async function fetchSecurityReport() {
+  async function fetchSecurityReport(forceRefresh: boolean | MouseEvent = false) {
     loadingSecurity = true;
+    const shouldForce = typeof forceRefresh === 'boolean' ? forceRefresh : false;
     try {
-      securityReport = await invoke('security_run_audit');
+      securityReport = await invoke('security_run_audit', { forceRefresh: shouldForce });
     } catch (e) {
       console.error("Error fetching security report:", e);
     } finally {
@@ -449,18 +480,18 @@
           <div style="display:flex; flex-direction:column; gap:16px; align-items:center;">
             <!-- Circular score indicator -->
             <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
-              <div class="dashboard-score-gauge" style="--score-color: {getScoreColor(securityReport.score)}; position: relative; width: 72px; height: 72px; display: flex; align-items: center; justify-content: center;">
+              <div class="dashboard-score-gauge" style="--score-color: {getScoreColor(effectiveDashboardScore)}; position: relative; width: 72px; height: 72px; display: flex; align-items: center; justify-content: center;">
                 <svg viewBox="0 0 100 100" style="transform: rotate(-90deg); width: 100%; height: 100%;">
                   <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="8"></circle>
                   <circle cx="50" cy="50" r="40" fill="none" stroke="var(--score-color)" stroke-width="8"
-                    style="stroke-dasharray: {securityReport.score * 2.513} 251.3; transition: stroke-dasharray 0.8s ease; stroke-linecap: round;"></circle>
+                    style="stroke-dasharray: {effectiveDashboardScore * 2.513} 251.3; transition: stroke-dasharray 0.8s ease; stroke-linecap: round;"></circle>
                 </svg>
-                <div style="position: absolute; font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--color-text-primary);">{securityReport.score}%</div>
+                <div style="position: absolute; font-size: 16px; font-weight: 800; font-family: var(--font-mono); color: var(--color-text-primary);">{effectiveDashboardScore}%</div>
               </div>
               <div style="display:flex; align-items:center; gap:6px;">
-                <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: {getScoreColor(securityReport.score)}">{getScoreLabel(securityReport.score)}</span>
+                <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: {getScoreColor(effectiveDashboardScore)}">{getScoreLabel(effectiveDashboardScore)}</span>
                 <button
-                  onclick={fetchSecurityReport}
+                  onclick={() => fetchSecurityReport(true)}
                   disabled={loadingSecurity}
                   style="background: transparent; border: none; padding: 2px 4px; cursor: pointer; color: var(--color-text-muted); display: flex; align-items: center;"
                   title="Re-run Security Audit"

@@ -8,11 +8,12 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
+  import Select from '../components/ui/Select.svelte';
   import {
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
     Server, Cpu, User, FolderLock, Network, Settings,
-    ExternalLink, RotateCcw, FolderOpen
+    ExternalLink, RotateCcw, FolderOpen, ChevronDown
   } from '@lucide/svelte';
 
   // ── Types ──────────────────────────────────────────────────────────────────
@@ -60,6 +61,19 @@
   }
   let scoreHistory = $state<number[]>([]);
   let expandedId = $state<string | null>(null);
+  let showExportDropdown = $state(false);
+  let exportDropdownRef = $state<HTMLDivElement | null>(null);
+
+  // Close export dropdown when clicking outside
+  $effect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (!showExportDropdown) return;
+      if (exportDropdownRef && exportDropdownRef.contains(e.target as Node)) return;
+      showExportDropdown = false;
+    }
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  });
 
   // ── Category config ────────────────────────────────────────────────────────
   const CATEGORIES = [
@@ -137,13 +151,29 @@
     try { localStorage.setItem(MUTED_KEY, JSON.stringify(mutedIds)); } catch {}
   }
 
-  // Effective score excluding muted items
+  // Effective score taking weighted category scores and muted items into account
   let effectiveScore = $derived.by(() => {
     if (!report) return 0;
+    if (mutedIds.length === 0) {
+      return report.score;
+    }
     const activeFindings = report.findings.filter(f => !mutedIds.includes(f.id));
     if (activeFindings.length === 0) return 100;
-    const resolvedCount = activeFindings.filter(f => f.is_resolved).length;
-    return Math.round((resolvedCount / activeFindings.length) * 100);
+
+    const hasUnmutedCritical = activeFindings.some(f => f.severity === 'Critical' && !f.is_resolved);
+    let totalCur = 0;
+    let totalMax = 0;
+    for (const cs of report.category_scores) {
+      const catFindings = activeFindings.filter(f => f.category === cs.category);
+      const catPassed = catFindings.filter(f => f.is_resolved).length;
+      if (catFindings.length > 0) {
+        const catPct = Math.round((catPassed / catFindings.length) * 100);
+        totalCur += (catPct * cs.max_score) / 100;
+        totalMax += cs.max_score;
+      }
+    }
+    const rawScore = totalMax > 0 ? Math.round((totalCur / totalMax) * 100) : 100;
+    return hasUnmutedCritical ? Math.min(rawScore, 60) : rawScore;
   });
 
   // ── Computed ───────────────────────────────────────────────────────────────
@@ -205,10 +235,11 @@
   }
 
   // ── Audit ──────────────────────────────────────────────────────────────────
-  async function runAudit() {
+  async function runAudit(forceRefresh: boolean | MouseEvent = true) {
     loading = true;
+    const shouldForce = typeof forceRefresh === 'boolean' ? forceRefresh : true;
     try {
-      report = await invoke<SecurityReport>('security_run_audit');
+      report = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
       saveHistory(effectiveScore);
       statusStore.setLastCommand('security_audit_executed', 0, true);
     } catch (e) {
@@ -249,44 +280,20 @@
     }, !enable);
   }
 
-  /** Generic SSH param fix/revert helper */
-  async function fixSshParam(finding: SecurityFinding, param: string, secureValue: string, defaultValue: string) {
-    const enable = !finding.is_resolved;
-    const action = enable ? `Harden SSH: ${param}` : `Revert SSH: ${param}`;
-    const risk = enable
-      ? `This will set ${param}=${secureValue} in sshd_config and reload SSH.`
-      : `This will revert ${param} to ${defaultValue}. SSH will be less restricted.`;
-
-    uiStore.confirm(action, risk, async () => {
-      fixingId = finding.id;
-      try {
-        const msg = await invoke<string>('security_fix_ssh_param', {
-          param, value: secureValue, revertValue: defaultValue, enable,
-        });
-        uiStore.addToast(msg, 'success');
-        await runAudit();
-      } catch (e) {
-        uiStore.addToast(`Failed: ${e}`, 'error');
-      } finally { fixingId = null; }
-    }, !enable);
-  }
-
   async function handleFix(finding: SecurityFinding) {
     switch (finding.id) {
-
-      // ── SSH ──────────────────────────────────────────────────────────────
+      // ── SSH Hardening ────────────────────────────────────────────────────
       case 'ssh_root': {
         const enable = !finding.is_resolved;
         uiStore.confirm(
-          enable ? 'Secure SSH Root Login' : 'Enable Root SSH (Insecure)',
-          enable
-            ? 'This will set PermitRootLogin to prohibit-password. Root will only be accessible via SSH key.'
-            : 'Warning: Enabling root SSH exposes the most privileged account to brute-force attacks.',
+          enable ? 'Disable SSH Root Login' : 'Enable SSH Root Login',
+          enable ? 'PermitRootLogin will be set to no in sshd_config. Root login via SSH will be blocked.'
+                 : 'PermitRootLogin will be set to yes. Root can log in directly via SSH. NOT RECOMMENDED.',
           async () => {
             fixingId = finding.id;
             try {
-              await invoke('security_fix_root_ssh', { enable });
-              uiStore.addToast('Root SSH login configured.', 'success');
+              const msg = await invoke<string>('security_fix_ssh_root', { enable });
+              uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -295,21 +302,66 @@
         break;
       }
 
-      case 'ssh_pass_auth':
-        await fixSshParam(finding, 'PasswordAuthentication', 'no', 'yes');
+      case 'ssh_pass_auth': {
+        const enable = !finding.is_resolved;
+        uiStore.confirm(
+          enable ? 'Disable Password Authentication' : 'Enable Password Authentication',
+          enable ? 'PasswordAuthentication will be set to no. Only SSH keys will be allowed. Make sure your SSH key is added!'
+                 : 'PasswordAuthentication will be set to yes.',
+          async () => {
+            fixingId = finding.id;
+            try {
+              const msg = await invoke<string>('security_fix_ssh_pass_auth', { enable });
+              uiStore.addToast(msg, 'success');
+              await runAudit();
+            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
+            finally { fixingId = null; }
+          }, !enable
+        );
         break;
+      }
 
-      case 'ssh_max_auth':
-        await fixSshParam(finding, 'MaxAuthTries', '4', '6');
+      case 'ssh_max_auth': {
+        const enable = !finding.is_resolved;
+        uiStore.confirm(
+          enable ? 'Set MaxAuthTries to 4' : 'Revert MaxAuthTries',
+          enable ? 'MaxAuthTries will be set to 4 in sshd_config to limit brute force attempts.'
+                 : 'MaxAuthTries setting will be removed.',
+          async () => {
+            fixingId = finding.id;
+            try {
+              const msg = await invoke<string>('security_fix_ssh_max_auth', { enable });
+              uiStore.addToast(msg, 'success');
+              await runAudit();
+            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
+            finally { fixingId = null; }
+          }, !enable
+        );
         break;
+      }
 
-      case 'ssh_grace':
-        await fixSshParam(finding, 'LoginGraceTime', '60', '120');
+      case 'ssh_grace': {
+        const enable = !finding.is_resolved;
+        uiStore.confirm(
+          enable ? 'Set LoginGraceTime to 60s' : 'Revert LoginGraceTime',
+          enable ? 'LoginGraceTime will be set to 60 in sshd_config to disconnect unauthenticated clients quickly.'
+                 : 'LoginGraceTime setting will be removed.',
+          async () => {
+            fixingId = finding.id;
+            try {
+              const msg = await invoke<string>('security_fix_ssh_grace', { enable });
+              uiStore.addToast(msg, 'success');
+              await runAudit();
+            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
+            finally { fixingId = null; }
+          }, !enable
+        );
         break;
+      }
 
-      // ── Kernel ───────────────────────────────────────────────────────────
+      // ── Kernel Hardening ─────────────────────────────────────────────────
       case 'kernel_aslr':
-        await fixKernelParam(finding, 'kernel.randomize_va_space', '2', '1');
+        await fixKernelParam(finding, 'kernel.randomize_va_space', '2', '0');
         break;
 
       case 'kernel_syncookies':
@@ -321,49 +373,29 @@
         break;
 
       case 'kernel_kptr':
-        await fixKernelParam(finding, 'kernel.kptr_restrict', '1', '0');
+        await fixKernelParam(finding, 'kernel.kptr_restrict', '2', '0');
         break;
 
       case 'kernel_dmesg':
         await fixKernelParam(finding, 'kernel.dmesg_restrict', '1', '0');
         break;
 
-      case 'kernel_icmp_redirect': {
-        const enable = !finding.is_resolved;
-        const action = enable ? 'Disable ICMP Redirects' : 'Re-enable ICMP Redirects';
-        uiStore.confirm(action,
-          enable ? 'This will set accept_redirects=0 for both IPv4 and IPv6 and persist the setting.'
-                 : 'This will re-enable ICMP redirect acceptance. Only do this if your network requires it.',
-          async () => {
-            fixingId = finding.id;
-            try {
-              const v = enable ? '0' : '1';
-              await invoke('security_fix_kernel_param', {
-                key: 'net.ipv4.conf.all.accept_redirects', value: '0', revertValue: '1', enable,
-              });
-              await invoke('security_fix_kernel_param', {
-                key: 'net.ipv6.conf.all.accept_redirects', value: v, revertValue: '1', enable,
-              });
-              uiStore.addToast('ICMP redirect settings applied.', 'success');
-              await runAudit();
-            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
-            finally { fixingId = null; }
-          }, !enable);
+      case 'kernel_icmp_redirect':
+        await fixKernelParam(finding, 'net.ipv4.conf.all.accept_redirects', '0', '1');
         break;
-      }
 
       // ── User & Auth ──────────────────────────────────────────────────────
       case 'pass_policy': {
         const enable = !finding.is_resolved;
         uiStore.confirm(
-          enable ? 'Enforce Password Policy' : 'Revert Password Policy',
-          enable ? 'Sets PASS_MAX_DAYS=90 and PASS_MIN_LEN=12 in /etc/login.defs. Applies to new password changes only.'
-                 : 'Reverts password policy to less restrictive defaults.',
+          enable ? 'Enforce Password Quality Rules' : 'Revert Password Quality Rules',
+          enable ? 'Installs/configures pam_pwquality (min length 12, min classes 3) in /etc/security/pwquality.conf.'
+                 : 'Removes hardening settings from /etc/security/pwquality.conf.',
           async () => {
             fixingId = finding.id;
             try {
-              await invoke('security_fix_password_policy');
-              uiStore.addToast('Password policy updated.', 'success');
+              const msg = await invoke<string>('security_fix_pass_policy', { enable });
+              uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -376,14 +408,14 @@
       case 'fs_tmp_sticky': {
         const enable = !finding.is_resolved;
         uiStore.confirm(
-          enable ? 'Set /tmp Sticky Bit' : 'Remove /tmp Sticky Bit',
-          enable ? 'This sets /tmp permissions to 1777 (sticky). Users can only delete their own files.'
-                 : 'Removes the sticky bit from /tmp. Users can delete each other\'s temporary files.',
+          enable ? 'Set Sticky Bit on /tmp and /var/tmp' : 'Remove Sticky Bit',
+          enable ? 'Executes chmod +t on /tmp and /var/tmp to prevent users from deleting others\' files.'
+                 : 'Executes chmod -t on /tmp and /var/tmp.',
           async () => {
             fixingId = finding.id;
             try {
-              await invoke('security_fix_tmp_sticky', { enable });
-              uiStore.addToast(`/tmp sticky bit ${enable ? 'set' : 'removed'}.`, 'success');
+              const msg = await invoke<string>('security_fix_tmp_sticky', { enable });
+              uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -392,60 +424,17 @@
         break;
       }
 
-      case 'fs_coredump':
-        await fixKernelParam(finding, 'fs.suid_dumpable', '0', '1');
-        break;
-
-      case 'fs_passwd_perms': {
-        fixingId = finding.id;
-        try {
-          await invoke('security_fix_passwd_perms');
-          uiStore.addToast('/etc/passwd permissions fixed.', 'success');
-          await runAudit();
-        } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
-        finally { fixingId = null; }
-        break;
-      }
-
-      case 'fs_shadow_perms': {
-        uiStore.confirm('Secure /etc/shadow', 'This sets /etc/shadow to permissions 000 (no access for anyone except root via capabilities). This is the standard secure configuration.',
-          async () => {
-            fixingId = finding.id;
-            try {
-              await invoke('security_fix_shadow_perms');
-              uiStore.addToast('/etc/shadow permissions secured.', 'success');
-              await runAudit();
-            } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
-            finally { fixingId = null; }
-          }, false
-        );
-        break;
-      }
-
-      // ── Network ──────────────────────────────────────────────────────────
-      case 'firewall': {
-        fixingId = finding.id;
-        try {
-          await invoke('security_fix_firewall');
-          uiStore.addToast('Firewall enabled with secure defaults.', 'success');
-          await runAudit();
-        } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
-        finally { fixingId = null; }
-        break;
-      }
-
-      case 'net_src_route': {
+      case 'fs_coredump': {
         const enable = !finding.is_resolved;
         uiStore.confirm(
-          enable ? 'Disable Source Routing' : 'Re-enable Source Routing',
-          enable ? 'Disables IPv4/IPv6 source routing. This prevents route-based MITM attacks.'
-                 : 'Re-enables source routing. Only do this if your network infrastructure explicitly requires it.',
+          enable ? 'Disable Core Dumps' : 'Enable Core Dumps',
+          enable ? 'Sets * hard core 0 in /etc/security/limits.d/99-disable-coredumps.conf and fs.suid_dumpable=0.'
+                 : 'Removes core dump restrictions.',
           async () => {
             fixingId = finding.id;
             try {
-              await invoke('security_fix_kernel_param', { key: 'net.ipv4.conf.all.accept_source_route', value: '0', revertValue: '1', enable });
-              await invoke('security_fix_kernel_param', { key: 'net.ipv6.conf.all.accept_source_route', value: '0', revertValue: '1', enable });
-              uiStore.addToast('Source routing settings applied.', 'success');
+              const msg = await invoke<string>('security_fix_coredump', { enable });
+              uiStore.addToast(msg, 'success');
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -453,6 +442,11 @@
         );
         break;
       }
+
+      // ── Network & Services ───────────────────────────────────────────────
+      case 'net_src_route':
+        await fixKernelParam(finding, 'net.ipv4.conf.all.accept_source_route', '0', '1');
+        break;
 
       case 'net_bogus_icmp':
         await fixKernelParam(finding, 'net.ipv4.icmp_ignore_bogus_error_responses', '1', '0');
@@ -581,7 +575,7 @@
   // Sparkline SVG path from score history
   function sparklinePath(history: number[]): string {
     if (history.length < 2) return '';
-    const w = 120, h = 32, pad = 2;
+    const w = 110, h = 26, pad = 2;
     const minV = Math.min(...history);
     const maxV = Math.max(...history);
     const range = Math.max(maxV - minV, 10);
@@ -594,7 +588,6 @@
   }
 
   function isRevertable(finding: SecurityFinding): boolean {
-    // These checks have explicit revert logic
     return ['ssh_root','ssh_pass_auth','ssh_max_auth','ssh_grace',
             'kernel_aslr','kernel_syncookies','kernel_ipforward','kernel_kptr',
             'kernel_dmesg','kernel_icmp_redirect',
@@ -723,16 +716,28 @@
       <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
         {effectiveScore}% — {getScoreLabel(effectiveScore)}
       </span>
-      <Button variant="ghost" size="sm" onclick={exportReport} title="Export JSON audit data">
-        <Download size={14} />
-        JSON
-      </Button>
-      <Button variant="ghost" size="sm" onclick={exportHtmlReport} title="Export formatted HTML report">
-        <Download size={14} />
-        HTML Report
-      </Button>
+      <!-- Single Export Dropdown Button -->
+      <div bind:this={exportDropdownRef} class="export-dropdown-wrap">
+        <Button variant="outline" size="sm" onclick={() => showExportDropdown = !showExportDropdown} title="Export Audit Report Options">
+          <Download size={14} />
+          Export Report
+          <ChevronDown size={12} />
+        </Button>
+        {#if showExportDropdown}
+          <div class="export-dropdown-menu" role="menu">
+            <button class="export-menu-item" onclick={() => { exportHtmlReport(); showExportDropdown = false; }}>
+              <Download size={13} style="color:var(--color-accent);" />
+              <span>Export HTML Report</span>
+            </button>
+            <button class="export-menu-item" onclick={() => { exportReport(); showExportDropdown = false; }}>
+              <Download size={13} style="color:var(--color-info);" />
+              <span>Export JSON Data</span>
+            </button>
+          </div>
+        {/if}
+      </div>
     {/if}
-    <Button variant="outline" size="sm" onclick={runAudit} disabled={loading}>
+    <Button variant="outline" size="sm" onclick={() => runAudit(true)} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'spin' : ''} />
       {loading ? 'Scanning...' : 'Rescan System'}
     </Button>
@@ -754,52 +759,66 @@
       <!-- ── Top Row: Score + Category Breakdown ── -->
       <div class="top-row">
 
-        <!-- Main Score Card -->
+        <!-- Compact Redesigned Score Card -->
         <div class="score-card glass-panel">
-          <h3>Security Score</h3>
-          <div class="score-gauge" style="--score-color: {getScoreColor(effectiveScore)}">
-            <svg viewBox="0 0 100 100" class="gauge-svg">
-              <circle class="gauge-bg" cx="50" cy="50" r="40"></circle>
-              <circle class="gauge-fill" cx="50" cy="50" r="40"
-                style="stroke-dasharray: {effectiveScore * 2.513} 251.3;"></circle>
-            </svg>
-            <div class="score-text">{effectiveScore}<span class="pct">%</span></div>
+          <div class="score-card-header">
+            <h3>Security Score</h3>
+            <span class="verdict-tag" style="background: {getScoreColor(effectiveScore)}18; color: {getScoreColor(effectiveScore)}; border: 1px solid {getScoreColor(effectiveScore)}40;">
+              {getScoreLabel(effectiveScore)}
+            </span>
           </div>
-          <div class="score-label">{getScoreLabel(effectiveScore)}</div>
 
-          {#if criticalCount > 0}
-            <div class="critical-alert">
-              <ShieldAlert size={14} />
-              {criticalCount} Critical issue{criticalCount > 1 ? 's' : ''} detected
-            </div>
-          {/if}
-
-          <!-- Sparkline history -->
-          {#if scoreHistory.length >= 2}
-            <div class="sparkline-wrap">
-              <div class="sparkline-label">Score History</div>
-              <svg class="sparkline" viewBox="0 0 120 32" preserveAspectRatio="none">
-                <path d={sparklinePath(scoreHistory)} class="sparkline-path" />
-                <!-- last point dot -->
-                {#if scoreHistory.length > 0}
-                  {@const lastX = 2 + ((scoreHistory.length - 1) / (scoreHistory.length - 1)) * 116}
-                  {@const minV = Math.min(...scoreHistory)}
-                  {@const range = Math.max(Math.max(...scoreHistory) - minV, 10)}
-                  {@const lastY = 32 - 2 - ((scoreHistory[scoreHistory.length - 1] - minV) / range) * 28}
-                  <circle cx={lastX} cy={lastY} r="2.5" fill={getScoreColor(report.score)} />
-                {/if}
+          <div class="score-card-body">
+            <!-- Compact Ring Gauge -->
+            <div class="score-gauge-compact" style="--score-color: {getScoreColor(effectiveScore)}">
+              <svg viewBox="0 0 100 100" class="gauge-svg">
+                <circle class="gauge-bg" cx="50" cy="50" r="40"></circle>
+                <circle class="gauge-fill" cx="50" cy="50" r="40"
+                  style="stroke-dasharray: {effectiveScore * 2.513} 251.3;"></circle>
               </svg>
+              <div class="score-text-compact">{effectiveScore}<span class="pct">%</span></div>
             </div>
-          {/if}
 
-          <div class="issue-stats">
+            <div class="score-info-wrap">
+              {#if criticalCount > 0}
+                <div class="critical-alert-compact">
+                  <ShieldAlert size={13} />
+                  <span>{criticalCount} Critical issue{criticalCount > 1 ? 's' : ''}</span>
+                </div>
+              {:else}
+                <div class="clean-alert-compact">
+                  <ShieldCheck size={13} />
+                  <span>No Critical Vulnerabilities</span>
+                </div>
+              {/if}
+
+              <!-- Sparkline history -->
+              {#if scoreHistory.length >= 2}
+                <div class="sparkline-wrap-compact">
+                  <span class="sparkline-label">History</span>
+                  <svg class="sparkline" viewBox="0 0 110 26" preserveAspectRatio="none">
+                    <path d={sparklinePath(scoreHistory)} class="sparkline-path" />
+                    {#if scoreHistory.length > 0}
+                      {@const lastX = 2 + ((scoreHistory.length - 1) / (scoreHistory.length - 1)) * 106}
+                      {@const minV = Math.min(...scoreHistory)}
+                      {@const range = Math.max(Math.max(...scoreHistory) - minV, 10)}
+                      {@const lastY = 26 - 2 - ((scoreHistory[scoreHistory.length - 1] - minV) / range) * 22}
+                      <circle cx={lastX} cy={lastY} r="2" fill={getScoreColor(report.score)} />
+                    {/if}
+                  </svg>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <div class="issue-stats-compact">
             <button
               type="button"
               onclick={() => activeSeverity = activeSeverity === 'Critical' ? 'all' : 'Critical'}
               class="stat-pill critical clickable"
               class:active={activeSeverity === 'Critical'}
             >
-              <XCircle size={12} />
+              <XCircle size={11} />
               {report.findings.filter(f => f.severity === 'Critical' && !f.is_resolved).length} Critical
             </button>
             <button
@@ -808,7 +827,7 @@
               class="stat-pill warning clickable"
               class:active={activeSeverity === 'Warning'}
             >
-              <AlertTriangle size={12} />
+              <AlertTriangle size={11} />
               {report.findings.filter(f => f.severity === 'Warning' && !f.is_resolved).length} Warnings
             </button>
             <button
@@ -817,48 +836,49 @@
               class="stat-pill good clickable"
               class:active={activeSeverity === 'Good'}
             >
-              <CheckCircle2 size={12} />
+              <CheckCircle2 size={11} />
               {report.findings.filter(f => f.is_resolved).length} Passed
             </button>
           </div>
         </div>
 
-        <!-- Category Breakdown -->
-        <div class="category-grid">
-          {#each report.category_scores as cs}
-            {@const CatIcon = getCategoryIcon(cs.category)}
-            {@const isRuntime = cs.category === 'Runtime Threats'}
-            <button
-              class="cat-card glass-panel {activeCategory === cs.category ? 'cat-active' : ''} {isRuntime && cs.issues > 0 ? 'cat-threat' : ''}"
-              onclick={() => activeCategory = activeCategory === cs.category ? 'all' : cs.category}
-              style="--cat-color: {isRuntime ? (cs.issues > 0 ? 'var(--color-error)' : 'var(--color-success)') : getScoreColor(cs.score)}"
-            >
-              <div class="cat-header">
-                <CatIcon size={16} />
-                <span class="cat-name">{cs.category.replace(' & ', ' &\u200B')}</span>
-                {#if cs.issues > 0}
-                  <span class="cat-badge">{cs.issues}</span>
-                {/if}
-              </div>
-              {#if isRuntime}
-                <!-- Runtime Threats: show clean/threat indicator instead of % bar -->
-                <div class="cat-bar-wrap">
-                  {#if cs.issues === 0}
-                    <span style="font-size: 11px; color: var(--color-success); font-weight: 600;">✓ Clean</span>
-                  {:else}
-                    <span style="font-size: 11px; color: var(--color-error); font-weight: 600;">{cs.issues} active threat{cs.issues !== 1 ? 's' : ''}</span>
+        <!-- Category Breakdown (Reduced width by 10%) -->
+        <div class="category-grid-wrap">
+          <div class="category-grid">
+            {#each report.category_scores as cs}
+              {@const CatIcon = getCategoryIcon(cs.category)}
+              {@const isRuntime = cs.category === 'Runtime Threats'}
+              <button
+                class="cat-card glass-panel {activeCategory === cs.category ? 'cat-active' : ''} {isRuntime && cs.issues > 0 ? 'cat-threat' : ''}"
+                onclick={() => activeCategory = activeCategory === cs.category ? 'all' : cs.category}
+                style="--cat-color: {isRuntime ? (cs.issues > 0 ? 'var(--color-error)' : 'var(--color-success)') : getScoreColor(cs.score)}"
+              >
+                <div class="cat-header">
+                  <CatIcon size={15} />
+                  <span class="cat-name">{cs.category.replace(' & ', ' &\u200B')}</span>
+                  {#if cs.issues > 0}
+                    <span class="cat-badge">{cs.issues}</span>
                   {/if}
                 </div>
-              {:else}
-                <div class="cat-bar-wrap">
-                  <div class="cat-bar">
-                    <div class="cat-bar-fill" style="width: {cs.score}%; background: {getScoreColor(cs.score)}"></div>
+                {#if isRuntime}
+                  <div class="cat-bar-wrap">
+                    {#if cs.issues === 0}
+                      <span style="font-size: 11px; color: var(--color-success); font-weight: 600;">✓ Clean</span>
+                    {:else}
+                      <span style="font-size: 11px; color: var(--color-error); font-weight: 600;">{cs.issues} active threat{cs.issues !== 1 ? 's' : ''}</span>
+                    {/if}
                   </div>
-                  <span class="cat-score">{cs.score}%</span>
-                </div>
-              {/if}
-            </button>
-          {/each}
+                {:else}
+                  <div class="cat-bar-wrap">
+                    <div class="cat-bar">
+                      <div class="cat-bar-fill" style="width: {cs.score}%; background: {getScoreColor(cs.score)}"></div>
+                    </div>
+                    <span class="cat-score">{cs.score}%</span>
+                  </div>
+                {/if}
+              </button>
+            {/each}
+          </div>
         </div>
       </div>
 
@@ -866,24 +886,32 @@
       <div class="findings-section">
         <div class="findings-header">
           <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
-          <span class="issue-badge" class:has-issues={totalIssues > 0}>
-            {filteredFindings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length} issue{filteredFindings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length !== 1 ? 's' : ''}
-            {activeCategory !== 'all' ? `in ${activeCategory}` : 'total'}
-          </span>
-        </div>
+          
+          <div class="findings-header-right">
+            <!-- Inline Compliance Standard Filter Dropdown -->
+            <div class="std-select-wrap">
+              <span class="std-select-label">Standard:</span>
+              <Select
+                bind:value={activeStandard}
+                style="height: 28px; font-size: 11px; padding: 0 8px; border-radius: 6px; background: rgba(1, 15, 31, 0.7); border-color: rgba(255, 255, 255, 0.12);"
+              >
+                <option value="all">All Standards</option>
+                <option value="CIS Level 1">CIS Level 1</option>
+                <option value="CIS Level 2">CIS Level 2</option>
+                <option value="STIG">STIG</option>
+                <option value="NIST 800-53">NIST 800-53</option>
+                <option value="Muted">Muted ({mutedIds.length})</option>
+              </Select>
+            </div>
 
-        <!-- Compliance Standards Filter Bar -->
-        <div class="standards-bar" style="display:flex; gap:6px; margin: 10px 0 14px; flex-wrap:wrap; align-items:center;">
-          <span style="font-size:11px; font-weight:700; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin-right:4px;">Filter Standard:</span>
-          {#each ['all', 'CIS Level 1', 'CIS Level 2', 'STIG', 'NIST 800-53', 'Muted'] as std}
-            <button
-              class="std-pill"
-              class:active={activeStandard === std}
-              onclick={() => activeStandard = std}
-            >
-              {std === 'all' ? 'All Standards' : (std === 'Muted' ? `Muted (${mutedIds.length})` : std)}
-            </button>
-          {/each}
+            <span class="issue-badge" class:has-issues={totalIssues > 0}>
+              {#if activeSeverity !== 'all' || activeStandard !== 'all' || activeCategory !== 'all'}
+                {filteredFindings.length} showing ({totalIssues} unresolved total)
+              {:else}
+                {totalIssues} issue{totalIssues !== 1 ? 's' : ''} total
+              {/if}
+            </span>
+          </div>
         </div>
 
         <div class="findings-list">
@@ -1158,11 +1186,61 @@
     color: var(--color-text-muted);
   }
 
+  /* ── Export Report Dropdown ────────────────────────────────────────────── */
+  .export-dropdown-wrap {
+    position: relative;
+    display: inline-block;
+  }
+
+  .export-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 100;
+    min-width: 175px;
+    background: var(--color-bg-card, #0b1726);
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: menu-fade 0.15s ease;
+  }
+
+  .export-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.12s ease;
+  }
+
+  .export-menu-item:hover {
+    background: rgba(0, 218, 243, 0.1);
+    color: var(--color-text-primary);
+  }
+
+  @keyframes menu-fade {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
   /* ── Top Row ──────────────────────────────────────────────────────────────── */
   .top-row {
     display: grid;
-    grid-template-columns: 260px 1fr;
-    gap: 16px;
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 14px;
     align-items: start;
   }
 
@@ -1171,30 +1249,51 @@
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 12px;
-    padding: 20px;
+    padding: 16px;
   }
 
-  /* ── Score Card ──────────────────────────────────────────────────────────── */
+  /* ── Compact Score Card ─────────────────────────────────────────────────── */
   .score-card {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 12px;
+    gap: 10px;
+    padding: 14px 16px;
   }
 
-  .score-card h3 {
+  .score-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .score-card-header h3 {
     margin: 0;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 12px;
+    font-weight: 600;
     color: var(--color-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
-  .score-gauge {
+  .verdict-tag {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  .score-card-body {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .score-gauge-compact {
     position: relative;
-    width: 112px;
-    height: 112px;
+    width: 72px;
+    height: 72px;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1204,7 +1303,7 @@
     transform: rotate(-90deg);
     width: 100%;
     height: 100%;
-    filter: drop-shadow(0 0 8px var(--score-color));
+    filter: drop-shadow(0 0 6px var(--score-color));
   }
 
   .gauge-bg {
@@ -1221,58 +1320,70 @@
     transition: stroke-dasharray 1.2s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  .score-text {
+  .score-text-compact {
     position: absolute;
-    font-size: 30px;
+    font-size: 20px;
     font-weight: 700;
     color: var(--score-color);
-    letter-spacing: -1px;
+    letter-spacing: -0.5px;
   }
 
-  .score-text .pct {
-    font-size: 13px;
+  .score-text-compact .pct {
+    font-size: 10px;
     opacity: 0.7;
     font-weight: 400;
   }
 
-  .score-label {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    margin-top: -4px;
+  .score-info-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
   }
 
-  .critical-alert {
+  .critical-alert-compact {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    color: var(--color-error);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+
+  .clean-alert-compact {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.25);
+    color: var(--color-success);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+
+  .sparkline-wrap-compact {
     display: flex;
     align-items: center;
     gap: 6px;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    color: var(--color-error);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 6px 12px;
-    border-radius: 8px;
-    width: 100%;
-    justify-content: center;
   }
 
-  /* ── Sparkline ───────────────────────────────────────────────────────────── */
-  .sparkline-wrap {
-    width: 100%;
-  }
-
-  .sparkline-label {
-    font-size: 10px;
+  .sparkline-wrap-compact .sparkline-label {
+    font-size: 9px;
     color: var(--color-text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
+    letter-spacing: 0.05em;
   }
 
   .sparkline {
-    width: 100%;
-    height: 32px;
+    flex: 1;
+    height: 26px;
     overflow: visible;
   }
 
@@ -1284,23 +1395,22 @@
     stroke-linecap: round;
   }
 
-  /* ── Issue Stats ─────────────────────────────────────────────────────────── */
-  .issue-stats {
+  .issue-stats-compact {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     flex-wrap: wrap;
-    justify-content: center;
+    justify-content: space-between;
     width: 100%;
   }
 
   .stat-pill {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
+    gap: 3px;
+    font-size: 10.5px;
     font-weight: 600;
-    padding: 3px 8px;
-    border-radius: 6px;
+    padding: 3px 6px;
+    border-radius: 5px;
   }
 
   .stat-pill.clickable {
@@ -1322,11 +1432,15 @@
   .stat-pill.warning  { background: rgba(251,191,36,.12); color: var(--color-warning); }
   .stat-pill.good     { background: rgba(34,197,94,.12); color: var(--color-success); }
 
-  /* ── Category Grid ───────────────────────────────────────────────────────── */
+  /* ── Category Grid (Reduced width by 10%) ──────────────────────────────── */
+  .category-grid-wrap {
+    max-width: 90%;
+  }
+
   .category-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
+    gap: 8px;
     align-content: start;
   }
 
@@ -1334,13 +1448,13 @@
     background: rgba(255, 255, 255, 0.025);
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 10px;
-    padding: 12px 14px;
+    padding: 9px 11px;
     cursor: pointer;
     transition: all 0.18s ease;
     text-align: left;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
 
   .cat-card:hover {
@@ -1372,7 +1486,7 @@
     align-items: center;
     gap: 6px;
     color: var(--cat-color);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
   }
 
@@ -1387,14 +1501,14 @@
     color: var(--color-error);
     font-size: 10px;
     font-weight: 700;
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 10px;
   }
 
   .cat-bar-wrap {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
   }
 
   .cat-bar {
@@ -1412,10 +1526,10 @@
   }
 
   .cat-score {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 700;
     color: var(--cat-color);
-    width: 32px;
+    width: 30px;
     text-align: right;
   }
 
@@ -1434,10 +1548,32 @@
     gap: 8px;
   }
 
+  .findings-header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .std-select-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 210px;
+  }
+
+  .std-select-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
   .issue-badge {
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
-    padding: 3px 12px;
+    padding: 3px 10px;
     border-radius: 20px;
     background: rgba(255, 255, 255, 0.06);
     color: var(--color-text-secondary);

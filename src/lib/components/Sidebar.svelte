@@ -54,54 +54,83 @@
     expandedGroup = expandedGroup === label ? null : label;
   }
 
+  let hoveredGroup = $state<string | null>(null);
+  let hoverTimeout: any = null;
+
+  function handleGroupMouseEnter(groupLabel: string) {
+    if (!uiStore.sidebarCollapsed) return;
+    if (hoverTimeout) clearTimeout(hoverTimeout);
+    hoveredGroup = groupLabel;
+  }
+
+  function handleGroupMouseLeave() {
+    if (!uiStore.sidebarCollapsed) return;
+    hoverTimeout = setTimeout(() => {
+      hoveredGroup = null;
+    }, 180);
+  }
+
+  function handleFlyoutMouseEnter() {
+    if (hoverTimeout) clearTimeout(hoverTimeout);
+  }
+
+  function handleFlyoutMouseLeave() {
+    handleGroupMouseLeave();
+  }
+
   const groups: {
     label: string;
-    items: { id: TabId; label: string; icon: any }[];
+    icon: any;
+    items: { id: TabId; label: string; icon: any; desc?: string }[];
   }[] = [
     {
       label: 'Overview',
+      icon: LayoutDashboard,
       items: [
-        { id: 'system-dashboard', label: 'Dashboard',  icon: LayoutDashboard },
-        { id: 'system-monitor',   label: 'Monitoring', icon: Activity },
+        { id: 'system-dashboard', label: 'Dashboard',  icon: LayoutDashboard, desc: 'System analytics overview' },
+        { id: 'system-monitor',   label: 'Monitoring', icon: Activity, desc: 'Metrics & telemetry graphs' },
       ],
     },
     {
       label: 'Packages',
+      icon: Package,
       items: [
-        { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid },
-        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database },
-        { id: 'dnf-history',   label: 'DNF Manager',    icon: Package },
-        { id: 'copr-browser',  label: 'Copr Browser',   icon: LayoutGrid },
+        { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid, desc: 'Flatpak & RPM applications' },
+        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database, desc: 'Software repositories' },
+        { id: 'dnf-history',   label: 'DNF Manager',    icon: Package, desc: 'Package history & updates' },
+        { id: 'copr-browser',  label: 'Copr Browser',   icon: Layers, desc: 'Fedora Copr repositories' },
       ],
     },
     {
       label: 'System',
+      icon: Server,
       items: [
-        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText },
-
-        { id: 'service-manager', label: 'Service Manager', icon: Settings2 },
-        { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive },
-        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu },
-        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck },
+        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
+        { id: 'service-manager', label: 'Service Manager', icon: Settings2, desc: 'System units & daemons' },
+        { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
+        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
+        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck, desc: 'Security policies & contexts' },
       ],
     },
     {
       label: 'Network & Security',
+      icon: Wifi,
       items: [
-        { id: 'network-manager',  label: 'Advanced Network', icon: Wifi },
-        { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe },
-        { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield },
-        { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck },
-        { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server },
+        { id: 'network-manager',  label: 'Advanced Network', icon: Wifi, desc: 'Interfaces, IP & DNS' },
+        { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
+        { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
+        { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
+        { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & vhosts' },
       ],
     },
     {
       label: 'Users & Config',
+      icon: Users,
       items: [
-        { id: 'user-manager', label: 'Users & Groups',    icon: Users },
-        { id: 'env-manager',  label: 'Environment',       icon: FileText },
-        { id: 'shell-env',    label: 'Shell Environment', icon: Terminal },
-        { id: 'cron-manager', label: 'Scheduled Tasks',   icon: Clock },
+        { id: 'user-manager', label: 'Users & Groups',    icon: Users, desc: 'User accounts & privileges' },
+        { id: 'env-manager',  label: 'Environment',       icon: FileText, desc: 'System environment vars' },
+        { id: 'shell-env',    label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
+        { id: 'cron-manager', label: 'Scheduled Tasks',   icon: Clock, desc: 'Crontab jobs & timers' },
       ],
     },
   ];
@@ -159,50 +188,114 @@
 
   <!-- Grouped Navigation -->
   <nav class="sidebar-nav">
-    {#each groups as group}
-      {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
-      {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
-      {#if filteredItems.length > 0}
-        {#if !uiStore.sidebarCollapsed && !searchQuery}
-          <button 
-            class="group-label-btn" 
-            class:active-group={isGroupActive} 
-            onclick={() => toggleGroup(group.label)}
+    {#if uiStore.sidebarCollapsed}
+      <!-- Collapsed Mode: Category Icons with Nested Flyout Menu -->
+      <div class="collapsed-categories-list">
+        {#each groups as group}
+          {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
+          <div
+            class="collapsed-cat-wrapper"
+            onmouseenter={() => handleGroupMouseEnter(group.label)}
+            onmouseleave={handleGroupMouseLeave}
           >
-            <span class="group-label">{group.label}</span>
-            <span class="group-chevron" class:expanded={expandedGroup === group.label} class:active-chevron={isGroupActive}>
-              <ChevronDown size={14} />
-            </span>
-          </button>
-        {:else if !searchQuery}
-          <div class="group-sep"></div>
-        {/if}
+            <button
+              class="collapsed-cat-btn"
+              class:active={isGroupActive}
+              onclick={() => {
+                uiStore.setActiveTab(group.items[0].id);
+              }}
+              aria-label={group.label}
+            >
+              <span class="collapsed-cat-icon" class:active={isGroupActive}>
+                <group.icon size={18} />
+              </span>
+            </button>
 
-        <div class="group-items-wrapper" class:collapsed-anim={!uiStore.sidebarCollapsed && expandedGroup !== group.label && !searchQuery}>
-          <div class="group-items">
-            {#each filteredItems as item, itemIdx}
-              {@const isActive = uiStore.activeTab === item.id}
-              {@const isFirstResult = searchQuery.trim() && itemIdx === 0}
-              <button
-                class="nav-item"
-                class:active={isActive}
-                onclick={() => { uiStore.setActiveTab(item.id); searchQuery = ''; }}
-                title={uiStore.sidebarCollapsed ? item.label : ''}
-                aria-current={isActive ? 'page' : undefined}
-                use:captureFirstResult={isFirstResult}
+            <!-- Nested Flyout Menu Panel -->
+            {#if hoveredGroup === group.label}
+              <div
+                class="flyout-menu-panel"
+                onmouseenter={handleFlyoutMouseEnter}
+                onmouseleave={handleFlyoutMouseLeave}
+                role="menu"
               >
-                <span class="nav-icon" class:active={isActive}>
-                  <item.icon size={16} />
-                </span>
-                {#if !uiStore.sidebarCollapsed}
-                  <span class="nav-label">{item.label}</span>
-                {/if}
-              </button>
-            {/each}
+                <div class="flyout-arrow"></div>
+                <div class="flyout-header">
+                  <span class="flyout-title">{group.label} Modules</span>
+                </div>
+                <div class="flyout-items">
+                  {#each group.items as item}
+                    {@const isItemActive = uiStore.activeTab === item.id}
+                    <button
+                      class="flyout-item"
+                      class:active={isItemActive}
+                      onclick={() => {
+                        uiStore.setActiveTab(item.id);
+                        hoveredGroup = null;
+                      }}
+                      role="menuitem"
+                    >
+                      <span class="flyout-item-icon" class:active={isItemActive}>
+                        <item.icon size={15} />
+                      </span>
+                      <div class="flyout-item-text">
+                        <span class="flyout-item-label">{item.label}</span>
+                        {#if item.desc}
+                          <span class="flyout-item-desc">{item.desc}</span>
+                        {/if}
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
           </div>
-        </div>
-      {/if}
-    {/each}
+        {/each}
+      </div>
+    {:else}
+      <!-- Expanded Mode -->
+      {#each groups as group}
+        {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
+        {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
+        {#if filteredItems.length > 0}
+          {#if !searchQuery}
+            <button 
+              class="group-label-btn" 
+              class:active-group={isGroupActive} 
+              onclick={() => toggleGroup(group.label)}
+            >
+              <span class="group-label">{group.label}</span>
+              <span class="group-chevron" class:expanded={expandedGroup === group.label} class:active-chevron={isGroupActive}>
+                <ChevronDown size={14} />
+              </span>
+            </button>
+          {:else}
+            <div class="group-sep"></div>
+          {/if}
+
+          <div class="group-items-wrapper" class:collapsed-anim={expandedGroup !== group.label && !searchQuery}>
+            <div class="group-items">
+              {#each filteredItems as item, itemIdx}
+                {@const isActive = uiStore.activeTab === item.id}
+                {@const isFirstResult = searchQuery.trim() && itemIdx === 0}
+                <button
+                  class="nav-item"
+                  class:active={isActive}
+                  onclick={() => { uiStore.setActiveTab(item.id); searchQuery = ''; }}
+                  aria-current={isActive ? 'page' : undefined}
+                  use:captureFirstResult={isFirstResult}
+                >
+                  <span class="nav-icon" class:active={isActive}>
+                    <item.icon size={16} />
+                  </span>
+                  <span class="nav-label">{item.label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      {/each}
+    {/if}
   </nav>
 
   <div class="sidebar-spacer"></div>
@@ -228,6 +321,199 @@
     width: 52px;
     min-width: 52px;
     padding: 12px 6px;
+    overflow: visible;
+  }
+
+  .sidebar.collapsed .sidebar-nav {
+    overflow: visible;
+  }
+
+  /* ── Collapsed Category List ───────────────────────────────────────── */
+  .collapsed-categories-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 6px;
+    align-items: center;
+    width: 100%;
+  }
+
+  .collapsed-cat-wrapper {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+
+  .collapsed-cat-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    position: relative;
+    transition: all 0.18s ease;
+  }
+
+  .collapsed-cat-btn:hover {
+    background: rgba(0, 218, 243, 0.08);
+    color: var(--color-text-primary);
+  }
+
+  .collapsed-cat-btn.active {
+    background: rgba(0, 218, 243, 0.12);
+    color: var(--color-accent);
+  }
+
+  /* Left vertical blue pill indicator for active group */
+  .collapsed-cat-btn.active::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3.5px;
+    height: 20px;
+    border-radius: 0 4px 4px 0;
+    background: var(--color-accent);
+    box-shadow: 0 0 8px var(--color-accent);
+  }
+
+  .collapsed-cat-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+    transition: color 0.15s ease, transform 0.15s ease;
+  }
+
+  .collapsed-cat-btn:hover .collapsed-cat-icon,
+  .collapsed-cat-icon.active {
+    color: var(--color-accent);
+    transform: scale(1.05);
+  }
+
+  /* ── Nested Flyout Menu Panel ─────────────────────────────────────── */
+  .flyout-menu-panel {
+    position: absolute;
+    left: calc(100% + 10px);
+    top: -4px;
+    z-index: 1000;
+    min-width: 210px;
+    background: #071626;
+    border: 1px solid rgba(0, 218, 243, 0.35);
+    border-radius: 10px;
+    padding: 6px;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.65), 0 0 12px rgba(0, 218, 243, 0.08);
+    backdrop-filter: blur(12px);
+    animation: flyout-appear 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @keyframes flyout-appear {
+    from { opacity: 0; transform: translateX(-6px) scale(0.97); }
+    to   { opacity: 1; transform: translateX(0) scale(1); }
+  }
+
+  .flyout-arrow {
+    position: absolute;
+    left: -6px;
+    top: 14px;
+    width: 10px;
+    height: 10px;
+    background: #071626;
+    border-left: 1px solid rgba(0, 218, 243, 0.35);
+    border-bottom: 1px solid rgba(0, 218, 243, 0.35);
+    transform: rotate(45deg);
+  }
+
+  .flyout-header {
+    padding: 6px 10px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    margin-bottom: 4px;
+  }
+
+  .flyout-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-family: var(--font-sans);
+  }
+
+  .flyout-items {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .flyout-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    transition: all 0.12s ease;
+    font-family: var(--font-sans);
+  }
+
+  .flyout-item:hover {
+    background: rgba(0, 218, 243, 0.08);
+    color: var(--color-text-primary);
+  }
+
+  .flyout-item.active {
+    background: rgba(0, 218, 243, 0.14);
+    color: var(--color-accent);
+    font-weight: 600;
+  }
+
+  .flyout-item-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+    transition: color 0.12s ease;
+    flex-shrink: 0;
+  }
+
+  .flyout-item:hover .flyout-item-icon,
+  .flyout-item-icon.active {
+    color: var(--color-accent);
+  }
+
+  .flyout-item-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow: hidden;
+  }
+
+  .flyout-item-label {
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .flyout-item-desc {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* ── Logo ─────────────────────────────────────────────────────────── */
