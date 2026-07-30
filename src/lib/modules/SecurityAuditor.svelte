@@ -1435,8 +1435,8 @@
   }
 
   .cat-card {
-    background: rgba(255, 255, 255, 0.025);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
     border-radius: 10px;
     padding: 9px 11px;
     cursor: pointer;
@@ -1585,9 +1585,9 @@
 
   /* ── Finding Card ────────────────────────────────────────────────────────── */
   .finding-card {
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-left: 3px solid var(--sev-color);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-left: 4px solid var(--sev-color);
     border-radius: 10px;
     overflow: hidden;
     transition: all 0.18s ease;
@@ -1860,83 +1860,83 @@
   }
 
   /* ── Light Mode Category Summary Grid Cards ── */
-  html.light-mode .cat-card {
+  :global(html.light-mode) .cat-card {
     background: #FFFFFF !important;
     border: 1px solid #E5E7EB !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
   }
-  html.light-mode .cat-card:hover {
+  :global(html.light-mode) .cat-card:hover {
     background: #F9FAFB !important;
     border-color: #D1D5DB !important;
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
   }
-  html.light-mode .cat-card.cat-active {
+  :global(html.light-mode) .cat-card.cat-active {
     background: rgba(37, 99, 235, 0.08) !important;
     border-color: #2563EB !important;
     box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15) !important;
   }
-  html.light-mode .cat-name {
+  :global(html.light-mode) .cat-name {
     color: #111827 !important;
   }
-  html.light-mode .cat-bar {
+  :global(html.light-mode) .cat-bar {
     background: #E5E7EB !important;
   }
 
   /* ── Light Mode Accordion & Finding Card Overrides ── */
-  html.light-mode .finding-card {
+  :global(html.light-mode) .finding-card {
     background: #FFFFFF !important;
     border: 1px solid #E5E7EB !important;
     border-left: 4px solid var(--sev-color) !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
   }
-  html.light-mode .finding-card:hover,
-  html.light-mode .finding-card.expanded {
+  :global(html.light-mode) .finding-card:hover,
+  :global(html.light-mode) .finding-card.expanded {
     border-color: #D1D5DB !important;
     border-left: 4px solid var(--sev-color) !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08) !important;
     background: #FFFFFF !important;
   }
-  html.light-mode .finding-row {
+  :global(html.light-mode) .finding-row {
     background: #FFFFFF !important;
     color: #111827 !important;
   }
-  html.light-mode .finding-row:hover {
+  :global(html.light-mode) .finding-row:hover {
     background: #F9FAFB !important;
   }
-  html.light-mode .finding-title {
+  :global(html.light-mode) .finding-title {
     color: #111827 !important;
   }
-  html.light-mode .finding-desc {
+  :global(html.light-mode) .finding-desc {
     color: #4B5563 !important;
   }
-  html.light-mode .finding-detail {
+  :global(html.light-mode) .finding-detail {
     background: #FAFAFA !important;
     border-top: 1px solid #E5E7EB !important;
   }
-  html.light-mode .countermeasure-box {
+  :global(html.light-mode) .countermeasure-box {
     background: rgba(37, 99, 235, 0.06) !important;
     border: 1px solid rgba(37, 99, 235, 0.2) !important;
     color: #111827 !important;
   }
-  html.light-mode .cm-text {
+  :global(html.light-mode) .cm-text {
     color: #374151 !important;
   }
-  html.light-mode .cat-tag {
+  :global(html.light-mode) .cat-tag {
     background: #F3F4F6 !important;
     color: #374151 !important;
     border: 1px solid #E5E7EB !important;
   }
-  html.light-mode .std-tag {
+  :global(html.light-mode) .std-tag {
     background: rgba(37, 99, 235, 0.08) !important;
     color: #1D4ED8 !important;
     border: 1px solid rgba(37, 99, 235, 0.20) !important;
   }
-  html.light-mode .issue-badge {
+  :global(html.light-mode) .issue-badge {
     background: #F3F4F6 !important;
     color: #374151 !important;
     border: 1px solid #E5E7EB !important;
   }
-  html.light-mode .issue-badge.has-issues {
+  :global(html.light-mode) .issue-badge.has-issues {
     background: rgba(239, 68, 68, 0.1) !important;
     color: #DC2626 !important;
     border-color: rgba(239, 68, 68, 0.25) !important;
