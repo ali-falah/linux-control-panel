@@ -7,6 +7,17 @@
       uiStore.closeSettingsModal();
     }
   }
+
+  // Lock background body scroll when settings modal is active
+  $effect(() => {
+    if (uiStore.settingsModalOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -15,11 +26,13 @@
   <div 
     class="modal-backdrop" 
     onclick={() => uiStore.closeSettingsModal()} 
+    onwheel={(e) => e.stopPropagation()}
     role="presentation"
   >
     <div 
       class="settings-modal" 
       onclick={(e) => e.stopPropagation()} 
+      onwheel={(e) => e.stopPropagation()}
       role="dialog" 
       aria-modal="true" 
       aria-labelledby="settings-modal-title"
@@ -119,8 +132,8 @@
                 <div class="theme-card-info">
                   <Sun size={16} class="theme-type-icon sun" />
                   <div>
-                    <span class="theme-card-name">Developer Eye-Comfort</span>
-                    <span class="theme-card-desc">Soft off-white `#F5F3ED` reduced-glare</span>
+                    <span class="theme-card-name">Modern Light System</span>
+                    <span class="theme-card-desc">Clean Slate-50 canvas & Royal Blue accent</span>
                   </div>
                 </div>
                 <div class="select-indicator" class:active={uiStore.theme === 'light'}>
@@ -129,29 +142,6 @@
                   {/if}
                 </div>
               </div>
-            </button>
-          </div>
-        </div>
-
-        <!-- Sidebar Layout Preferences -->
-        <div class="settings-section">
-          <div class="section-title-row">
-            <Monitor size={16} class="section-icon" />
-            <h3 class="section-title">Sidebar & Navigation</h3>
-          </div>
-
-          <div class="pref-row">
-            <div>
-              <span class="pref-name">Compact Collapsed Sidebar</span>
-              <span class="pref-desc">Collapse the navigation sidebar into a narrow icon strip with hover flyout sub-menus.</span>
-            </div>
-            <button 
-              class="toggle-switch"
-              class:active={uiStore.sidebarCollapsed}
-              onclick={() => uiStore.toggleSidebar()}
-              aria-label="Toggle compact sidebar"
-            >
-              <div class="toggle-knob"></div>
             </button>
           </div>
         </div>

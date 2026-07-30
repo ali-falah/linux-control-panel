@@ -258,21 +258,22 @@
     border: none;
     font-family: inherit;
   }
-  .pill-ok   { background: var(--color-success-muted); color: #10B981; cursor: default; border: 1px solid rgba(16,185,129,0.18); }
-  .pill-fail { background: var(--color-error-muted); color: #EF4444; cursor: default; border: 1px solid rgba(239,68,68,0.18); }
-  .pill-root-on  { background: rgba(16, 185, 129, 0.12); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.25); }
-  .pill-root-off { background: rgba(132, 147, 150, 0.08); color: var(--color-text-muted); border: 1px solid rgba(59,73,76,0.4); }
+  .pill-ok   { background: var(--color-success-muted); color: var(--color-success); cursor: default; border: 1px solid rgba(16,185,129,0.18); }
+  .pill-fail { background: var(--color-error-muted); color: var(--color-error); cursor: default; border: 1px solid rgba(239,68,68,0.18); }
+  .pill-root-on  { background: var(--color-success-muted); color: var(--color-success); border: 1px solid rgba(16, 185, 129, 0.25); }
+  .pill-root-off { background: var(--color-bg-raised); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
   .pill-root-on:hover  { background: rgba(16, 185, 129, 0.2); }
-  .pill-root-off:hover { background: rgba(0, 218, 243, 0.06); color: var(--color-text-primary); border-color: rgba(0,218,243,0.2); }
+  .pill-root-off:hover { background: var(--color-bg-hover); color: var(--color-text-primary); border-color: var(--color-border-hover); }
 
   .ts-pill {
-    padding: 2px 7px;
-    border-radius: 4px;
-    background: rgba(1, 15, 31, 0.5);
-    color: var(--color-text-muted);
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--color-bg-raised);
+    color: var(--color-text-secondary);
     font-size: 10px;
+    font-weight: 500;
     white-space: nowrap;
-    border: 1px solid rgba(59, 73, 76, 0.3);
+    border: 1px solid var(--color-border);
   }
   .ts-pill.muted { color: var(--color-text-muted); }
 

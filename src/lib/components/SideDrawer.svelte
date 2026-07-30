@@ -21,17 +21,33 @@
   function close() {
     isOpen = false;
   }
+
+  $effect(() => {
+    if (isOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  });
 </script>
 
 {#if isOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="drawer-backdrop" transition:fade={{ duration: 200 }} onclick={close}></div>
+  <div 
+    class="drawer-backdrop" 
+    transition:fade={{ duration: 200 }} 
+    onclick={close}
+    onwheel={(e) => e.stopPropagation()}
+  ></div>
   
   <div 
     class="drawer" 
     style="width: {width}; max-width: 100vw;"
     transition:fly={{ x: 500, duration: 300, easing: cubicOut }}
+    onwheel={(e) => e.stopPropagation()}
   >
     <div class="drawer-header">
       <h2 class="drawer-title">{title}</h2>
