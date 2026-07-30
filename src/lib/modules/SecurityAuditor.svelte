@@ -636,7 +636,7 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
     .container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }
-    .score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: rgba(0, 218, 243, 0.15); color: #00daf3; border: 1px solid #00daf3; }
+    .score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: var(--color-accent-muted); color: var(--color-accent); border: 1px solid var(--color-accent); }
     .finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }
     .finding-card.Critical { border-left-color: #ef4444; }
     .finding-card.Warning { border-left-color: #f59e0b; }
@@ -647,7 +647,7 @@
     .badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
     .badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
     .desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }
-    .remediation { background: rgba(0, 218, 243, 0.05); border-radius: 6px; padding: 10px; font-size: 12px; color: #38bdf8; font-family: monospace; }
+    .remediation { background: var(--color-accent-muted); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--color-accent); font-family: monospace; }
   </style>
 </head>
 <body>

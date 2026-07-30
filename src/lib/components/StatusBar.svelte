@@ -323,14 +323,13 @@
     bottom: calc(100% + 8px);
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(13, 28, 45, 0.92);
+    background: var(--color-bg-popover, var(--color-bg-card));
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border: 1px solid var(--color-border);
-    border-top: 1px solid rgba(0, 218, 243, 0.08);
     border-radius: 8px;
     min-width: 280px;
-    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 218, 243, 0.04);
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.25);
     z-index: 2000;
     overflow: hidden;
   }

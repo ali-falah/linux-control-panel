@@ -3,6 +3,7 @@
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
+  import SettingsModal from './lib/components/SettingsModal.svelte';
   import Dashboard from './lib/modules/Dashboard.svelte';
   import SystemMonitor from './lib/modules/SystemMonitor.svelte';
   import JournalViewer from './lib/modules/JournalViewer.svelte';
@@ -21,7 +22,12 @@
   import DeviceManager from './lib/modules/DeviceManager.svelte';
   import AppManager from './lib/modules/AppManager.svelte';
 
+  import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
+
+  onMount(() => {
+    uiStore.initTheme();
+  });
 </script>
 
 <svelte:head>
@@ -96,6 +102,7 @@
 
 <ToastContainer />
 <ConfirmDialog />
+<SettingsModal />
 
 <style>
   .app-shell {

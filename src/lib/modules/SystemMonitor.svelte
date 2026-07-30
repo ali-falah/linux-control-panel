@@ -607,10 +607,10 @@
               <div class="panel-scroll" style="gap:10px;">
                 {#if diskIoStats.length > 0}
                   {#each diskIoStats as disk}
-                    <div style="background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                    <div style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
                       <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
                         <div style="display:flex; align-items:center; gap:10px;">
-                          <div style="width:32px; height:32px; background: rgba(1, 15, 31, 0.85); border: 1px solid rgba(255,255,255,0.04); border-radius: 6px; display:flex; align-items:center; justify-content:center; color:var(--color-accent);">
+                          <div style="width:32px; height:32px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-border); border-radius: 6px; display:flex; align-items:center; justify-content:center; color:var(--color-accent);">
                             <HardDrive size={16} />
                           </div>
                           <span style="font-weight:600; font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary);">{disk.device}</span>
@@ -650,7 +650,7 @@
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
                 <div style="display:flex; gap: 8px; flex-wrap: wrap; width: 100%;">
                   {#each activeInterfaces as iface}
-                    <div style="flex: 1; min-width: 180px; background: rgba(1, 15, 31, 0.6); border: 1px solid var(--color-border); border-radius: 6px; padding: 6px 10px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                    <div style="flex: 1; min-width: 180px; background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 6px; padding: 6px 10px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
                       <div style="display:flex; align-items:center; gap:6px;">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
                           <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke-linecap="round" stroke-linejoin="round"/>

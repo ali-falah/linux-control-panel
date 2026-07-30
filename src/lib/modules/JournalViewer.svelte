@@ -854,8 +854,8 @@
     align-items: center;
     gap: 8px;
     height: 32px;
-    background: rgba(0, 0, 0, 0.22);
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 0 10px;
     width: 100%;
@@ -888,8 +888,8 @@
   .log-count-badge {
     font-size: 11px;
     font-family: var(--font-mono);
-    color: #a29bfe;
-    background: rgba(108, 92, 231, 0.12);
+    color: var(--color-accent);
+    background: var(--color-accent-muted);
     padding: 1px 7px;
     border-radius: 10px;
     white-space: nowrap;
@@ -906,13 +906,13 @@
     flex-shrink: 0;
     border: none;
     border-radius: 4px;
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--color-bg-hover);
     color: var(--color-text-muted);
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
   .log-clear-btn:hover {
-    background: rgba(255, 255, 255, 0.14);
+    background: var(--color-active-bg);
     color: var(--color-text-primary);
   }
 
@@ -920,7 +920,7 @@
   .log-sep {
     width: 1px;
     height: 16px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-border-subtle);
     flex-shrink: 0;
   }
 
@@ -946,19 +946,18 @@
     -webkit-appearance: none;
     flex-shrink: 0;
   }
-  .log-select option { background: #0d1c2d; color: var(--color-text-primary); }
+  .log-select option { background: var(--color-bg-card); color: var(--color-text-primary); }
 
   /* Date / time inputs */
   .log-dt {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
     border-radius: 6px;
     outline: none;
     color: var(--color-text-secondary);
     font-size: 12px;
     font-family: var(--font-sans);
     padding: 4px 8px;
-    color-scheme: dark;
     height: 28px;
     box-sizing: border-box;
   }
@@ -981,11 +980,11 @@
     right: 0;
     z-index: 100;
     width: 310px;
-    background: #0f1c2e;
-    border: 1px solid rgba(0, 218, 243, 0.2);
+    background: var(--color-bg-popover, var(--color-bg-card));
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 14px;
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
   }
 
   .popover-row {

@@ -476,7 +476,7 @@
         </Select>
       </div>
       
-      <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;box-sizing:border-box;background:rgba(1,15,31,0.6);border:1px solid #3b494c;border-radius:4px;">
+      <div style="display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;box-sizing:border-box;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:6px;">
         <span style="font-size:14px;font-weight:700;color:var(--color-accent);font-family:var(--font-mono);line-height:1;">{apps.length}</span>
         <span style="font-size:10px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:0.07em;font-weight:700;">Apps</span>
       </div>
@@ -503,7 +503,7 @@
     {:else}
       {#if sourceFilter === 'Duplicates'}
         {#if duplicates.length === 0}
-          <div class="empty-state" style="padding: 64px 32px; background: rgba(1, 15, 31, 0.4); border-radius: 8px; border: 1px solid var(--color-border); width: 100%;">
+          <div class="empty-state" style="padding: 64px 32px; background: var(--color-bg-card); border-radius: 8px; border: 1px solid var(--color-border); width: 100%;">
             <div style="width:64px; height:64px; border-radius:50%; background:rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.15); display:flex; align-items:center; justify-content:center; margin:0 auto 16px; box-shadow: 0 0 12px rgba(16, 185, 129, 0.1);">
               <CheckCircle size={32} style="color:var(--color-success); margin:0" />
             </div>
@@ -588,7 +588,7 @@
               onclick={() => openDetails(app)} 
               style="display: flex; align-items: center; gap: 16px; padding: 16px; cursor: pointer; transition: all 0.2s ease;"
             >
-              <div class="app-icon-wrapper" style="width: 48px; height: 48px; border-radius: 12px; background: rgba(1, 15, 31, 0.85); border: 1px solid rgba(255, 255, 255, 0.05); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+              <div class="app-icon-wrapper" style="width: 48px; height: 48px; border-radius: 12px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-module-icon-border, var(--color-border)); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
                 <AppIcon size={22} style="color: var(--color-accent);" />
               </div>
               <div class="app-info" style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">

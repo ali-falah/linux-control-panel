@@ -857,7 +857,7 @@
     padding: 16px;
     border-radius: 10px;
     border: 1px solid var(--color-border);
-    background: var(--color-bg-base);
+    background: var(--color-bg-card);
     transition: border-color 0.15s ease;
   }
   .maint-card-neutral { border-color: var(--color-border); }

@@ -3,17 +3,37 @@
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
   import { HardDrive, Wifi, Activity, Search, LayoutDashboard } from '@lucide/svelte';
+  import { Sun, Moon, Settings } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
+  import { invoke } from '@tauri-apps/api/core';
   import { getVersion } from '@tauri-apps/api/app';
 
   let appVersion = $state('...');
+  let currentUsername = $state('user');
+  let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
   
   $effect(() => {
     getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
+    invoke<string>('get_current_user')
+      .then(u => { if (u) currentUsername = u; })
+      .catch(() => {});
   });
 
   let searchQuery = $state('');
   let firstResultEl = $state<HTMLButtonElement | null>(null);
+  let showSettingsPopover = $state(false);
+  let settingsPopoverRef = $state<HTMLDivElement | null>(null);
+
+  // Watch for click outside settings popover menu
+  $effect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (showSettingsPopover && settingsPopoverRef && !settingsPopoverRef.contains(e.target as Node)) {
+        showSettingsPopover = false;
+      }
+    }
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  });
 
   function handleSearchKeydown(e: KeyboardEvent) {
     if (e.key === 'Tab' && searchQuery.trim()) {
@@ -230,7 +250,11 @@
                       class="flyout-item"
                       class:active={isItemActive}
                       onclick={() => {
-                        uiStore.setActiveTab(item.id);
+                        if (item.id === ('theme-settings' as any)) {
+                          uiStore.toggleTheme();
+                        } else {
+                          uiStore.setActiveTab(item.id);
+                        }
                         hoveredGroup = null;
                       }}
                       role="menuitem"
@@ -251,6 +275,22 @@
             {/if}
           </div>
         {/each}
+
+        <!-- Collapsed Settings Gear Button -->
+        <div class="collapsed-cat-divider"></div>
+        <div class="collapsed-cat-wrapper">
+          <button
+            class="collapsed-cat-btn gear-btn"
+            class:active={showSettingsPopover}
+            onclick={() => showSettingsPopover = !showSettingsPopover}
+            aria-label="Settings"
+            title="Settings & Preferences"
+          >
+            <span class="collapsed-cat-icon">
+              <Settings size={18} />
+            </span>
+          </button>
+        </div>
       </div>
     {:else}
       <!-- Expanded Mode -->
@@ -298,7 +338,94 @@
     {/if}
   </nav>
 
-  <div class="sidebar-spacer"></div>
+  <!-- Bottom Profile & Gear Button Row with Floating Popover Menu (Gemini Style) -->
+  <div class="sidebar-settings-anchor" bind:this={settingsPopoverRef}>
+    {#if !uiStore.sidebarCollapsed}
+      <div 
+        class="profile-settings-row"
+        onclick={() => showSettingsPopover = !showSettingsPopover}
+        role="button"
+        tabindex="0"
+        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') showSettingsPopover = !showSettingsPopover; }}
+      >
+        <div class="profile-info">
+          <div class="avatar-circle">{userInitial}</div>
+          <div class="profile-text">
+            <span class="profile-name">{currentUsername}</span>
+            <span class="profile-role">System Admin</span>
+          </div>
+        </div>
+        <button 
+          class="gear-btn" 
+          class:active={showSettingsPopover}
+          onclick={(e) => { e.stopPropagation(); showSettingsPopover = !showSettingsPopover; }}
+          title="Settings & Preferences"
+          aria-label="Settings"
+        >
+          <Settings size={18} />
+        </button>
+      </div>
+    {/if}
+
+    <!-- Floating Popover Menu -->
+    {#if showSettingsPopover}
+      <div class="settings-popover-menu" role="menu">
+        <div class="popover-header">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="avatar-circle small">{userInitial}</div>
+            <div style="display:flex; flex-direction:column;">
+              <span class="popover-user-name">{currentUsername}</span>
+              <span class="popover-user-sub">Active Session</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="popover-section">
+          <button
+            class="popover-menu-item"
+            onclick={() => uiStore.toggleTheme()}
+            role="menuitem"
+          >
+            <span class="popover-item-icon">
+              {#if uiStore.theme === 'dark'}
+                <Moon size={15} />
+              {:else}
+                <Sun size={15} class="sun-icon" />
+              {/if}
+            </span>
+            <div class="popover-item-text">
+              <span class="popover-item-label">
+                Theme: {uiStore.theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
+              </span>
+              <span class="popover-item-desc">
+                {uiStore.theme === 'dark' ? 'Obsidian Terminal' : 'Eye-Comfort Cream'}
+              </span>
+            </div>
+            <div class="theme-pill-dot" class:light={uiStore.theme === 'light'}></div>
+          </button>
+        </div>
+
+        <div class="popover-divider"></div>
+
+        <button
+          class="popover-menu-item"
+          onclick={() => {
+            showSettingsPopover = false;
+            uiStore.openSettingsModal();
+          }}
+          role="menuitem"
+        >
+          <span class="popover-item-icon">
+            <Settings size={15} />
+          </span>
+          <div class="popover-item-text">
+            <span class="popover-item-label">All Settings Dialog...</span>
+            <span class="popover-item-desc">Preferences & options</span>
+          </div>
+        </button>
+      </div>
+    {/if}
+  </div>
 </aside>
 
 <style>
@@ -405,11 +532,11 @@
     top: -4px;
     z-index: 1000;
     min-width: 210px;
-    background: #071626;
-    border: 1px solid rgba(0, 218, 243, 0.35);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-active-border);
     border-radius: 10px;
     padding: 6px;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.65), 0 0 12px rgba(0, 218, 243, 0.08);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 0 12px var(--color-accent-glow);
     backdrop-filter: blur(12px);
     animation: flyout-appear 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   }
@@ -425,9 +552,9 @@
     top: 14px;
     width: 10px;
     height: 10px;
-    background: #071626;
-    border-left: 1px solid rgba(0, 218, 243, 0.35);
-    border-bottom: 1px solid rgba(0, 218, 243, 0.35);
+    background: var(--color-bg-card);
+    border-left: 1px solid var(--color-active-border);
+    border-bottom: 1px solid var(--color-active-border);
     transform: rotate(45deg);
   }
 
@@ -824,7 +951,134 @@
     text-overflow: ellipsis;
   }
 
-  /* ── Bottom ───────────────────────────────────────────────────────── */
-  .sidebar-spacer { flex: 0; min-height: 8px; }
+  /* ── Bottom Settings Profile & Gear Popover ───────────────────────── */
+  .sidebar-settings-anchor {
+    position: relative;
+    width: 100%;
+    margin-top: auto;
+    padding: 8px 4px 4px;
+    border-top: 1px solid var(--color-sidebar-border);
+    background: var(--color-sidebar-bg);
+    flex-shrink: 0;
+    z-index: 200;
+  }
 
+  .profile-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+  }
+
+  .profile-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .avatar-circle.small {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+  }
+
+  .popover-header {
+    padding: 6px 8px 8px;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+
+  .popover-user-name {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    line-height: 1.2;
+  }
+
+  .popover-user-sub {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .popover-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: 4px;
+  }
+
+  .popover-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-primary);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s ease;
+  }
+
+  .popover-menu-item:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
+  }
+
+  .popover-item-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+  }
+
+  .popover-item-icon.sun-icon {
+    color: #CB854F;
+  }
+
+  .popover-item-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .popover-item-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .popover-item-desc {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .theme-pill-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-accent);
+  }
+
+  .theme-pill-dot.light {
+    background: #CB854F;
+  }
+
+  .popover-divider {
+    height: 1px;
+    background: var(--color-border-subtle);
+    margin: 4px 0;
+  }
+
+  .collapsed-cat-divider {
+    width: 24px;
+    height: 1px;
+    background: var(--color-sidebar-border);
+    margin: 6px 0;
+  }
 </style>

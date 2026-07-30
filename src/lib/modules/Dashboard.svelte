@@ -979,11 +979,11 @@
     border-color: rgba(245, 158, 11, 0.3) !important;
   }
 
-  .text-primary { color: #3b82f6; }
-  .text-success { color: #10b981; }
-  .text-warning { color: #f59e0b; }
-  .text-error { color: #ef4444; }
-  .text-info { color: #06b6d4; }
+  .text-primary { color: var(--color-accent); }
+  .text-success { color: var(--color-success); }
+  .text-warning { color: var(--color-warning); }
+  .text-error { color: var(--color-error); }
+  .text-info { color: var(--color-info); }
   .text-purple { color: #a855f7; }
 
   .legend-btn:hover .hover-underline {

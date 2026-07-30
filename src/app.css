@@ -64,6 +64,235 @@
   /* ── Active State ─────────────────────────────────────────────────── */
   --color-active-bg: rgba(0, 218, 243, 0.08);
   --color-active-border: rgba(0, 218, 243, 0.3);
+
+  /* ── Component Specific Tokens ───────────────────────────────────── */
+  --color-bg-input: rgba(1, 15, 31, 0.6);
+  --color-bg-popover: #0d1c2d;
+  --color-bg-drawer: #0a1726;
+  --color-tab-bar-bg: rgba(1, 15, 31, 0.5);
+  --color-text-on-accent: #00363d;
+  --color-module-title: #d4e4fa;
+  --color-module-icon-bg: rgba(0, 218, 243, 0.08);
+  --color-module-icon-border: rgba(0, 218, 243, 0.18);
+}
+
+/* ─── Eye-Comfort Light Mode Design System ───────────────────────── */
+html.light-mode, [data-theme="light"] {
+  --color-bg-base: #F5F3ED;          /* Soft off-white / cream */
+  --color-bg-surface: #FAFAF9;       /* Warm Card */
+  --color-bg-card: #FAFAF9;          /* Warm Card */
+  --color-bg-raised: #FFFFFF;        /* Elevated container */
+  --color-bg-hover: rgba(74, 111, 165, 0.07);
+
+  --color-sidebar-bg: #EFECE4;       /* Soft warm sidebar tone */
+  --color-sidebar-border: #E0DCD0;   /* Muted border */
+
+  --color-accent: #4A6FA5;           /* Slate Blue */
+  --color-accent-bright: #3B5B8C;
+  --color-accent-soft: #4A6FA5;
+  --color-accent-glow: rgba(74, 111, 165, 0.22);
+  --color-accent-muted: rgba(74, 111, 165, 0.10);
+
+  --color-text-primary: #333333;     /* Deep gray #333333 */
+  --color-text-secondary: #666666;   /* Secondary text #666666 */
+  --color-text-muted: #888888;       /* Caption / muted text */
+  --color-text-accent: #4A6FA5;
+
+  --color-success: #6D9775;          /* Muted Green #6D9775 */
+  --color-success-muted: rgba(109, 151, 117, 0.15);
+  --color-warning: #CB854F;          /* Muted Orange #CB854F / Amber-Gold #B58B00 */
+  --color-warning-muted: rgba(203, 133, 79, 0.15);
+  --color-error: #BF616A;            /* Muted Red #BF616A */
+  --color-error-muted: rgba(191, 97, 106, 0.15);
+  --color-danger: var(--color-error);
+  --color-danger-muted: var(--color-error-muted);
+  --color-info: #4A6FA5;             /* Slate Blue #4A6FA5 */
+  --color-info-muted: rgba(74, 111, 165, 0.12);
+
+  --color-border: #DCD8CD;           /* Soft warm-gray border */
+  --color-border-subtle: #E8E4D8;
+  --color-border-hover: rgba(74, 111, 165, 0.35);
+  --color-border-focus: #4A6FA5;
+
+  --color-active-bg: rgba(74, 111, 165, 0.12);
+  --color-active-border: rgba(74, 111, 165, 0.4);
+
+  /* Component Specific Tokens — Light Mode */
+  --color-bg-input: #FFFFFF;
+  --color-bg-popover: #FAFAF9;
+  --color-bg-drawer: #FAFAF9;
+  --color-tab-bar-bg: #EFECE4;
+  --color-text-on-accent: #FFFFFF;
+  --color-module-title: #2C3E5A;
+  --color-module-icon-bg: rgba(74, 111, 165, 0.10);
+  --color-module-icon-border: rgba(74, 111, 165, 0.22);
+}
+
+html.light-mode input,
+html.light-mode textarea,
+html.light-mode select {
+  background: #FAFAF9 !important;
+  color: #333333 !important;
+  border-color: #DCD8CD !important;
+}
+
+html.light-mode input::placeholder,
+html.light-mode textarea::placeholder {
+  color: #888888 !important;
+}
+
+html.light-mode ::-webkit-scrollbar-thumb {
+  background: #C8C3B5;
+  border-radius: 4px;
+}
+html.light-mode ::-webkit-scrollbar-thumb:hover {
+  background: #A8A293;
+}
+
+/* ─── Eye-Comfort Light Mode Overrides ────────────────────────────── */
+html.light-mode .card,
+html.light-mode .card-raised,
+html.light-mode .card-glass,
+html.light-mode [class*="card"] {
+  background: #FAFAF9 !important;
+  border-color: #DCD8CD !important;
+  color: #333333 !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04) !important;
+}
+
+html.light-mode .card-title-header {
+  color: #333333 !important;
+}
+
+html.light-mode .card-title-icon {
+  color: #4A6FA5 !important;
+}
+
+/* Light mode tables & nested containers */
+html.light-mode table,
+html.light-mode .table,
+html.light-mode th,
+html.light-mode td {
+  border-color: #E2DEC9 !important;
+  color: #333333 !important;
+}
+
+html.light-mode tr:hover {
+  background: rgba(74, 111, 165, 0.05) !important;
+}
+
+html.light-mode th {
+  background: #EFECE4 !important;
+  color: #555555 !important;
+}
+
+/* Inline dark container overrides in light mode */
+html.light-mode div[style*="background: rgba(0,0,0"],
+html.light-mode div[style*="background: rgba(0, 0, 0"],
+html.light-mode div[style*="background:rgba(0,0,0"],
+html.light-mode div[style*="background:rgba(0, 0, 0"],
+html.light-mode div[style*="background: rgba(1, 15, 31"],
+html.light-mode div[style*="background:rgba(1, 15, 31"],
+html.light-mode div[style*="background: rgba(1,15,31"],
+html.light-mode div[style*="background: #0f111a"],
+html.light-mode div[style*="background:#0f111a"],
+html.light-mode div[style*="background: #0d1c2d"],
+html.light-mode div[style*="background:#0d1c2d"],
+html.light-mode div[style*="background: #0f1c2e"],
+html.light-mode div[style*="background:#0f1c2e"],
+html.light-mode div[style*="background: #111216"],
+html.light-mode div[style*="background:#111216"],
+html.light-mode div[style*="background: #081627"],
+html.light-mode div[style*="background:#081627"] {
+  background: var(--color-bg-card) !important;
+  border-color: var(--color-border) !important;
+  color: var(--color-text-primary) !important;
+}
+
+html.light-mode div[style*="background: rgba(255,255,255,0.0"],
+html.light-mode div[style*="background: rgba(255, 255, 255, 0.0"],
+html.light-mode div[style*="background:rgba(255,255,255,0.0"],
+html.light-mode div[style*="background:rgba(255, 255, 255, 0.0"] {
+  background: var(--color-bg-hover) !important;
+  color: var(--color-text-primary) !important;
+}
+
+html.light-mode div[style*="color: #38bdf8"],
+html.light-mode span[style*="color: #38bdf8"],
+html.light-mode div[style*="color: #00daf3"],
+html.light-mode span[style*="color: #00daf3"],
+html.light-mode div[style*="color: #3b82f6"],
+html.light-mode span[style*="color: #3b82f6"] {
+  color: var(--color-accent) !important;
+}
+
+/* Active tabs, pills, and buttons must consistently use primary accent color */
+html.light-mode .tab-btn.active,
+html.light-mode .stat-card.active,
+html.light-mode .nav-tab.active {
+  background: var(--color-accent) !important;
+  color: var(--color-text-on-accent) !important;
+  border-color: var(--color-accent) !important;
+}
+
+html.light-mode .tab-btn.active *,
+html.light-mode .stat-card.active * {
+  color: var(--color-text-on-accent) !important;
+}
+
+html.light-mode span[style*="color: #f8fafc"],
+html.light-mode div[style*="color: #f8fafc"],
+html.light-mode span[style*="color: #fff"],
+html.light-mode div[style*="color: #fff"] {
+  color: #333333 !important;
+}
+
+/* Modals & Popovers in Light Mode */
+html.light-mode .modal-backdrop {
+  background: rgba(40, 35, 30, 0.45) !important;
+}
+
+html.light-mode .iface-popover,
+html.light-mode .history-dropdown-menu,
+html.light-mode .flyout-menu-panel {
+  background: #FAFAF9 !important;
+  border-color: #DCD8CD !important;
+  color: #333333 !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12) !important;
+}
+
+html.light-mode .flyout-arrow {
+  background: #FAFAF9 !important;
+  border-color: #DCD8CD !important;
+}
+
+/* Status Badges & Pills in Light Mode */
+html.light-mode .pill-ok,
+html.light-mode .badge-success,
+html.light-mode .badge.Good {
+  background: #E4EFE6 !important;
+  color: #2E6038 !important;
+  border-color: #B8D8BC !important;
+}
+
+html.light-mode .pill-fail,
+html.light-mode .badge-error,
+html.light-mode .badge.Critical {
+  background: #FBF0F1 !important;
+  color: #9E2A34 !important;
+  border-color: #F4C4C8 !important;
+}
+
+html.light-mode .pill-root-on {
+  background: #E4EFE6 !important;
+  color: #2E6038 !important;
+  border-color: #B8D8BC !important;
+}
+
+html.light-mode .pill-root-off {
+  background: #EFECE4 !important;
+  color: #666666 !important;
+  border-color: #DCD8CD !important;
 }
 
 /* ─── Global Reset & Background ─────────────────────────────────────── */
@@ -201,17 +430,17 @@ body,
 
 /* ─── Card & Container Components ───────────────────────────────────────────── */
 .card {
-  background: #081627;
-  border: 1px solid rgba(0, 218, 243, 0.16);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
   padding: 20px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
 .card:hover {
-  border-color: rgba(0, 218, 243, 0.28);
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5), 0 0 16px rgba(0, 218, 243, 0.05);
+  border-color: var(--color-border-hover);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.25), 0 0 16px var(--color-accent-glow);
 }
 
 .card-title-header {
@@ -231,29 +460,29 @@ body,
 }
 
 .card-raised {
-  background: #0d1e32;
-  border: 1px solid rgba(0, 218, 243, 0.2);
+  background: var(--color-bg-raised);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
   padding: 16px 20px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
 }
 
 /* Glass card — for elevated surfaces */
 .card-glass {
-  background: rgba(8, 22, 39, 0.85);
+  background: var(--color-bg-surface);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(0, 218, 243, 0.18);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
   padding: 20px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
 }
 
 /* ─── Modal Backdrops ────────────────────────────────────────────────── */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(1, 15, 31, 0.7);
+  background: rgba(0, 0, 0, 0.65);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: flex;
@@ -264,17 +493,15 @@ body,
 }
 
 .modal {
-  background: rgba(10, 25, 41, 0.92);
+  background: var(--color-bg-popover);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(59, 73, 76, 0.7);
-  border-top: 1px solid rgba(195, 245, 255, 0.08);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
   padding: 28px;
   box-shadow:
-    0 0 0 1px rgba(0, 218, 243, 0.05),
-    0 24px 64px rgba(0, 0, 0, 0.6),
-    0 8px 20px rgba(0, 0, 0, 0.4);
+    0 0 0 1px var(--color-border-subtle),
+    0 24px 64px rgba(0, 0, 0, 0.35);
   animation: springIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -306,10 +533,10 @@ body,
   box-shadow: none !important;
 }
 
-/* Primary — solid electric cyan fill, dark text, flat appearance */
+/* Primary — solid fill, theme text */
 .btn-primary {
   background: var(--color-accent);
-  color: #00363d;
+  color: var(--color-text-on-accent);
   border-color: transparent;
   font-weight: 700;
   box-shadow: none;
@@ -324,7 +551,7 @@ body,
   transform: translateY(0);
 }
 
-/* Ghost / Secondary — transparent bg, thin outline border, light text */
+/* Ghost / Secondary */
 .btn-ghost {
   background: transparent;
   color: var(--color-text-primary);
@@ -333,8 +560,8 @@ body,
 
 .btn-ghost:hover:not(:disabled) {
   background: var(--color-bg-hover);
-  border-color: rgba(0, 218, 243, 0.35);
-  color: #fff;
+  border-color: var(--color-border-hover);
+  color: var(--color-accent);
 }
 
 /* Outline — border with cyan tint */
@@ -377,7 +604,7 @@ body,
 .input {
   width: 100%;
   padding: 9px 12px;
-  background: rgba(1, 15, 31, 0.6);
+  background: var(--color-bg-input);
   border: 1px solid var(--color-border);
   border-radius: 6px;
   color: var(--color-text-primary);
@@ -385,14 +612,14 @@ body,
   font-family: var(--font-sans);
   outline: none;
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .input:focus {
-  background: rgba(1, 15, 31, 0.8);
+  background: var(--color-bg-card);
   border-color: var(--color-accent);
   box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    inset 0 1px 3px rgba(0, 0, 0, 0.15),
     0 0 0 2px var(--color-accent-muted),
     0 0 8px var(--color-accent-glow);
 }
@@ -412,7 +639,7 @@ select.input {
 }
 
 select.input option {
-  background-color: #0d1c2d;
+  background-color: var(--color-bg-card);
   color: var(--color-text-primary);
 }
 
@@ -421,24 +648,22 @@ input[type="number"],
 input[type="password"] {
   width: 100%;
   padding: 9px 12px;
-  background: rgba(1, 15, 31, 0.6);
+  background: var(--color-bg-input);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--color-text-primary);
   font-size: 13px;
   font-family: var(--font-sans);
   outline: none;
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 input[type="text"]:focus,
 input[type="number"]:focus,
 input[type="password"]:focus {
-  background: rgba(1, 15, 31, 0.8);
+  background: var(--color-bg-card);
   border-color: var(--color-accent);
   box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
     0 0 0 2px var(--color-accent-muted),
     0 0 8px var(--color-accent-glow);
 }
@@ -453,7 +678,7 @@ input[type="password"]::placeholder {
   display: flex;
   align-items: center;
   gap: 9px;
-  background: rgba(1, 15, 31, 0.6);
+  background: var(--color-bg-input);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 0 12px;
@@ -462,10 +687,9 @@ input[type="password"]::placeholder {
 }
 
 .search-bar:focus-within {
-  background: rgba(1, 15, 31, 0.8);
+  background: var(--color-bg-card);
   border-color: var(--color-accent);
   box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
     0 0 0 2px var(--color-accent-muted),
     0 0 8px var(--color-accent-glow);
 }
@@ -494,8 +718,8 @@ input[type="checkbox"] {
   width: 16px;
   height: 16px;
   border: 1.5px solid var(--color-border);
-  border-radius: 3px;
-  background: rgba(1, 15, 31, 0.5);
+  border-radius: 4px;
+  background: var(--color-bg-input);
   cursor: pointer;
   position: relative;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
@@ -509,7 +733,7 @@ input[type="checkbox"] {
 
 input[type="checkbox"]:hover {
   border-color: var(--color-accent);
-  background: rgba(0, 218, 243, 0.06);
+  background: var(--color-active-bg);
 }
 
 input[type="checkbox"]:focus-visible {
@@ -528,7 +752,7 @@ input[type="checkbox"]:checked::after {
   position: absolute;
   width: 4px;
   height: 8px;
-  border: solid #00363d;
+  border: solid var(--color-text-on-accent);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg) scale(0);
   animation: check-draw 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.05s forwards;
@@ -869,25 +1093,20 @@ tbody tr:last-child td:last-child {
   width: 44px;
   height: 44px;
   border-radius: 8px;
-  background: rgba(0, 218, 243, 0.08);
-  border: 1px solid rgba(0, 218, 243, 0.18);
+  background: var(--color-module-icon-bg);
+  border: 1px solid var(--color-module-icon-border);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--color-accent);
-  box-shadow:
-    inset 0 1px 0 rgba(0, 218, 243, 0.12),
-    0 0 12px rgba(0, 218, 243, 0.08);
+  box-shadow: 0 0 12px var(--color-accent-glow);
 }
 
 .module-title {
   font-size: 22px;
   font-family: var(--font-display);
-  font-weight: 600;
-  background: linear-gradient(135deg, #d4e4fa, #c3f5ff);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-weight: 700;
+  color: var(--color-module-title);
   margin: 0;
   letter-spacing: -0.02em;
   line-height: 1.2;
@@ -911,13 +1130,13 @@ code,
 pre {
   font-family: var(--font-mono);
   font-size: 12px;
-  background: rgba(1, 15, 31, 0.7);
+  background: var(--color-bg-input);
   border: 1px solid var(--color-border);
   border-radius: 6px;
   padding: 14px;
   overflow: auto;
   color: var(--color-text-secondary);
-  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.3);
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.1);
 }
 
 /* ─── Misc Utility ───────────────────────────────────────────────────── */
@@ -950,7 +1169,7 @@ pre {
 .tab-bar {
   display: inline-flex;
   gap: 2px;
-  background: rgba(1, 15, 31, 0.5);
+  background: var(--color-tab-bar-bg);
   padding: 4px;
   border-radius: 6px;
   border: 1px solid var(--color-border-subtle);
@@ -975,12 +1194,12 @@ pre {
 
 .tab-btn:hover:not(.active) {
   color: var(--color-text-primary);
-  background: rgba(0, 218, 243, 0.04);
+  background: var(--color-bg-hover);
 }
 
 .tab-btn.active {
   background: var(--color-accent);
-  color: #00363d;
+  color: var(--color-text-on-accent);
   font-weight: 600;
 }
 
@@ -988,7 +1207,7 @@ pre {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(132, 147, 150, 0.15);
+  background: var(--color-accent-muted);
   color: var(--color-text-muted);
   font-size: 10px;
   font-weight: 700;
@@ -999,6 +1218,6 @@ pre {
 }
 
 .tab-count.active-count {
-  background: rgba(0, 54, 61, 0.12);
-  color: #00363d;
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--color-text-on-accent);
 }

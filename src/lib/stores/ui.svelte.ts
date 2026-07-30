@@ -41,6 +41,16 @@ class UIStore {
   private navHistory = $state<TabId[]>([]);
   sidebarCollapsed = $state(false);
   toasts = $state<Toast[]>([]);
+  theme = $state<'dark' | 'light'>('dark');
+  settingsModalOpen = $state(false);
+
+  openSettingsModal() {
+    this.settingsModalOpen = true;
+  }
+
+  closeSettingsModal() {
+    this.settingsModalOpen = false;
+  }
   preAppliedJournalPriority = $state<string>('all');
   serviceFilter = $state<string | null>(null);
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
@@ -62,6 +72,38 @@ class UIStore {
     onConfirm: null,
     danger: false,
   });
+
+  initTheme() {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('app_theme') as 'dark' | 'light';
+      if (saved) {
+        this.theme = saved;
+      } else {
+        this.theme = 'dark';
+      }
+      this.applyTheme();
+    }
+  }
+
+  toggleTheme() {
+    this.theme = this.theme === 'dark' ? 'light' : 'dark';
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_theme', this.theme);
+      this.applyTheme();
+    }
+  }
+
+  private applyTheme() {
+    if (typeof document !== 'undefined') {
+      if (this.theme === 'light') {
+        document.documentElement.classList.add('light-mode');
+        document.documentElement.setAttribute('data-theme', 'light');
+      } else {
+        document.documentElement.classList.remove('light-mode');
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    }
+  }
 
   setActiveTab(tab: TabId) {
     if (tab !== this.activeTab) {

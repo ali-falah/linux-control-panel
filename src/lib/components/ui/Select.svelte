@@ -153,7 +153,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background-color: rgba(1, 15, 31, 0.7);
+    background-color: var(--color-bg-card);
     border: 1px solid var(--color-border);
     color: var(--color-text-primary);
     padding: 0 12px;
@@ -169,16 +169,16 @@
   }
 
   .ui-select-trigger:hover:not(.disabled) {
-    border-color: rgba(0, 218, 243, 0.35);
-    background-color: rgba(1, 15, 31, 0.9);
+    border-color: var(--color-border-hover);
+    background-color: var(--color-bg-hover);
   }
 
   .ui-select-trigger.open {
     border-color: var(--color-accent);
     box-shadow:
-      0 0 0 2px rgba(0, 218, 243, 0.10),
-      0 0 8px rgba(0, 218, 243, 0.12);
-    background-color: rgba(1, 15, 31, 0.9);
+      0 0 0 2px var(--color-accent-muted),
+      0 0 8px var(--color-accent-glow);
+    background-color: var(--color-bg-card);
   }
 
   .ui-select-trigger.disabled {
@@ -222,7 +222,7 @@
     background-color: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
     z-index: 100;
     display: flex;
     flex-direction: column;
@@ -254,7 +254,7 @@
 
   .ui-select-option.selected {
     background-color: var(--color-accent);
-    color: #00363d;
+    color: #ffffff;
     font-weight: 600;
   }
 </style>

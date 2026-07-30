@@ -559,24 +559,25 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
     border-radius: 10px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    color: inherit;
+    color: var(--color-text-primary);
     font-family: inherit;
     cursor: pointer;
     transition: all 0.2s ease;
   }
   .stat-card:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.15);
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-hover);
   }
   .stat-card.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
-    color: #00363d !important;
+    color: var(--color-text-on-accent) !important;
+  }
+  .stat-card.active * {
+    color: var(--color-text-on-accent) !important;
   }
   .stat-card.active .stat-value,
   .stat-card.active .stat-label {

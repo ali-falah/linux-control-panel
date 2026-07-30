@@ -193,8 +193,8 @@
     width: 100%;
     height: 32px;
     padding: 0 10px;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.1);
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
     border-radius: 7px;
     color: var(--color-text-secondary);
     font-size: 12px;
@@ -206,12 +206,13 @@
   }
 
   .dp-trigger:hover {
-    border-color: rgba(0, 218, 243, 0.3);
+    border-color: var(--color-border-hover);
+    background: var(--color-bg-hover);
   }
 
   .dp-trigger.open {
     border-color: var(--color-accent);
-    box-shadow: 0 0 0 2px rgba(0, 218, 243, 0.12);
+    box-shadow: 0 0 0 2px var(--color-accent-muted);
     color: var(--color-text-primary);
   }
 
@@ -230,8 +231,8 @@
   .dp-calendar {
     width: 100%;
     margin-top: 6px;
-    background: rgba(0, 218, 243, 0.03);
-    border: 1px solid rgba(0, 218, 243, 0.15);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 8px;
     box-sizing: border-box;

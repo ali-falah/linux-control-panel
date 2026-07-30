@@ -67,9 +67,9 @@
     top: 0;
     right: 0;
     bottom: 0;
-    background: rgba(15, 15, 24, 0.95);
+    background: var(--color-bg-drawer, var(--color-bg-card));
     border-left: 1px solid var(--color-border);
-    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.5);
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.25);
     z-index: 101;
     display: flex;
     flex-direction: column;

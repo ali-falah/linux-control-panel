@@ -90,8 +90,8 @@
   }
 
   .trigger-btn:hover, .trigger-btn[aria-expanded="true"] {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
   }
 
   .menu-dropdown {
@@ -125,7 +125,8 @@
   }
   
   :global(.menu-dropdown .menu-item:hover) {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
   }
   
   :global(.menu-dropdown .menu-item.danger) {
