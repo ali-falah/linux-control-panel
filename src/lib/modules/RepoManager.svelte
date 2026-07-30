@@ -263,7 +263,7 @@
   </div>
 
   <!-- Repo List -->
-  <div class="card module-content-scroll" style="padding:0">
+  <div class="card" style="padding:0; flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden;">
     {#if loading}
       <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
         <Skeleton height="54px" borderRadius="8px" />
@@ -290,10 +290,9 @@
         {/if}
       </div>
     {:else}
-      <div class="table-wrap" style="border:none; border-radius:0; overflow-x:auto;">
-        <table use:tableFeatures style="min-width: 900px;">
-          <thead>
-            <tr>
+      <Table tableAction={tableFeatures} style="min-width: 900px; border:none; border-radius:0;">
+        <thead>
+          <tr>
               <th>Repository</th>
               <th>ID</th>
               <th>URL / Metalink</th>
@@ -355,9 +354,8 @@
               </tr>
             {/each}
           </tbody>
-        </table>
-      </div>
-    {/if}
+        </Table>
+      {/if}
   </div>
 </div>
 
@@ -574,14 +572,16 @@
   .stat-card.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
-    color: var(--color-text-on-accent) !important;
+    color: #FFFFFF !important;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
   }
   .stat-card.active * {
-    color: var(--color-text-on-accent) !important;
+    color: #FFFFFF !important;
   }
   .stat-card.active .stat-value,
   .stat-card.active .stat-label {
-    color: #00363d !important;
+    color: #FFFFFF !important;
+    font-weight: 700;
   }
   .stat-value {
     font-size: 16px;

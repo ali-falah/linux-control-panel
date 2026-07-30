@@ -8,7 +8,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
-    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight
+    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -304,11 +304,21 @@
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
     <div style="display:flex; align-items:center; gap:16px;">
       {#if mainTab === 'services'}
-        <!-- User Scope Toggle -->
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:12px; color:var(--color-text-muted); font-weight:600;">User Scope:</span>
-          <Toggle checked={userScope} onToggle={(checked) => { userScope = checked; load(); }} />
-        </div>
+        <!-- Single Toggleable Scope Button -->
+        <button 
+          class="scope-toggle-btn"
+          class:active={userScope}
+          onclick={() => { userScope = !userScope; load(); }}
+          title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
+        >
+          {#if userScope}
+            <User size={13} />
+            <span>User Scope</span>
+          {:else}
+            <Server size={13} />
+            <span>System Scope</span>
+          {/if}
+        </button>
       {/if}
 
       <div class="tab-bar" style="margin: 0; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 2px;">
@@ -417,8 +427,8 @@
     </SideDrawer>
 
     <!-- Service List -->
-    <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0;">
-      <div style="flex:1; overflow-y:auto; min-height:0;">
+    <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
+      <div style="flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;">
         {#if loading}
         <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
           <Skeleton height="42px" borderRadius="8px" />
@@ -649,17 +659,44 @@
     margin-bottom: 12px;
   }
 
+  /* ── Scope Toggle Button ───────────────────────────────────────────── */
+  .scope-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--color-bg-card, #FFFFFF);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    transition: all 0.2s ease;
+  }
+  .scope-toggle-btn:hover {
+    border-color: var(--color-border-hover);
+    color: var(--color-text-primary);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+  }
+  .scope-toggle-btn.active {
+    background: var(--color-accent) !important;
+    border-color: var(--color-accent) !important;
+    color: #FFFFFF !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
+  }
+
   .stat-chip {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 7px 16px;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
+    background: var(--color-bg-surface, #FFFFFF);
+    border: 1px solid var(--color-border);
     border-radius: 10px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    color: inherit;
+    box-shadow: 0 2px 8px -1px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+    color: var(--color-text-primary);
     font-family: inherit;
     font-size: inherit;
     cursor: pointer;
@@ -667,19 +704,21 @@
   }
 
   .stat-chip:hover {
-    background: rgba(255,255,255,0.08);
-    border-color: rgba(255,255,255,0.15);
+    border-color: var(--color-border-hover);
+    box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.10);
   }
 
   .stat-chip.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
-    color: #00363d !important;
+    color: #FFFFFF !important;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
   }
 
   .stat-chip.active .stat-num,
   .stat-chip.active .stat-label {
-    color: #00363d !important;
+    color: #FFFFFF !important;
+    font-weight: 700;
   }
 
   .stat-num {

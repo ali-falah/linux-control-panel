@@ -4,6 +4,7 @@
   import { Activity, Cpu, Database, HardDrive, TerminalSquare } from '@lucide/svelte';
   import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -756,16 +757,24 @@
                           <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono); font-size:11px;">{conn.pid || '-'}</td>
                           <td style="padding:6px; color:var(--color-text-secondary); font-size:11px;">{conn.process_name}</td>
                           <td style="padding:6px; text-align:right;" onclick={(e) => e.stopPropagation()}>
-                            {#if conn.pid}
+                            <KebabMenu align="right">
                               <button
-                                onclick={() => killProcess(conn.pid, conn.process_name)}
-                                style="background:transparent; border:none; color:var(--color-text-muted); cursor:pointer; padding:2px 4px; border-radius:4px; transition:all 0.15s;"
-                                class="hover-text-error"
-                                title="Kill Process ({conn.process_name} PID {conn.pid})"
+                                class="menu-item"
+                                onclick={() => openConnectionDetails(conn)}
                               >
-                                <Skull size={13} />
+                                <TerminalSquare size={14} style="color: var(--color-info);" />
+                                Show Details
                               </button>
-                            {/if}
+                              {#if conn.pid}
+                                <button
+                                  class="menu-item danger"
+                                  onclick={() => killProcess(conn.pid, conn.process_name)}
+                                >
+                                  <Skull size={14} style="color: var(--color-error);" />
+                                  Kill Process
+                                </button>
+                              {/if}
+                            </KebabMenu>
                           </td>
                         </tr>
                       {/each}
@@ -1150,12 +1159,12 @@
 
   /* Context Menu Styles */
   .custom-context-menu {
-    background: rgba(20, 20, 30, 0.95);
+    background: var(--color-bg-popover, var(--color-bg-card));
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
     padding: 6px;
-    min-width: 150px;
+    min-width: 160px;
     backdrop-filter: blur(12px);
     display: flex;
     flex-direction: column;
@@ -1166,7 +1175,7 @@
     align-items: center;
     background: transparent;
     border: none;
-    color: var(--color-text-secondary);
+    color: var(--color-text-primary);
     padding: 8px 12px;
     font-size: 12px;
     text-align: left;
@@ -1176,8 +1185,8 @@
     transition: all 0.15s;
   }
   .custom-context-menu button:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
   }
   .custom-context-menu button:disabled {
     opacity: 0.4;

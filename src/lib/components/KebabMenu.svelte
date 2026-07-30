@@ -3,7 +3,19 @@
   import type { Snippet } from 'svelte';
   import { portal } from '../actions/portal.ts';
 
-  let { children }: { children?: Snippet } = $props();
+  let { 
+    children, 
+    align = 'right',
+    icon: TriggerIcon = MoreVertical,
+    title = 'Actions',
+    buttonClass = ''
+  }: { 
+    children?: Snippet; 
+    align?: 'left' | 'right';
+    icon?: any;
+    title?: string;
+    buttonClass?: string;
+  } = $props();
 
   let isOpen = $state(false);
   let menuNode: HTMLElement;
@@ -14,8 +26,8 @@
     if (triggerBtn) {
       const rect = triggerBtn.getBoundingClientRect();
       const top = rect.bottom + 4;
-      const left = rect.right - 160;
-      dropdownStyle = `position: fixed; top: ${top}px; left: ${left}px; margin-top: 0; z-index: 9999;`;
+      const left = align === 'right' ? (rect.right - 160) : rect.left;
+      dropdownStyle = `position: fixed; top: ${top}px; left: ${Math.max(10, left)}px; margin-top: 0; z-index: 9999;`;
     }
   }
 
@@ -54,8 +66,15 @@
 </script>
 
 <div class="kebab-menu" bind:this={menuNode}>
-  <button bind:this={triggerBtn} class="trigger-btn btn btn-icon btn-ghost" onclick={toggleMenu} aria-haspopup="menu" aria-expanded={isOpen}>
-    <MoreVertical size={16} />
+  <button 
+    bind:this={triggerBtn} 
+    class="trigger-btn btn btn-icon btn-ghost {buttonClass}" 
+    onclick={toggleMenu} 
+    aria-haspopup="menu" 
+    aria-expanded={isOpen}
+    title={title}
+  >
+    <TriggerIcon size={16} />
   </button>
   
   {#if isOpen}
@@ -99,12 +118,15 @@
     top: 100%;
     right: 0;
     margin-top: 4px;
-    padding: 8px !important;
+    padding: 6px !important;
     min-width: 160px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    z-index: 50;
+    gap: 2px;
+    background: var(--color-bg-popover, var(--color-bg-card)) !important;
+    border: 1px solid var(--color-border) !important;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.08) !important;
+    z-index: 9999;
     transform-origin: top right;
   }
   

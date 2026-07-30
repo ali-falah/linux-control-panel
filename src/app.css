@@ -78,15 +78,16 @@
 
 /* ─── Eye-Comfort Light Mode Design System ───────────────────────── */
 /* ─── Eye-Comfort Modern Light Mode Design System (Slate & Royal Blue) ─── */
+/* ─── Eye-Comfort Modern Light Mode Design System (Slate & Royal Blue) ─── */
 html.light-mode, [data-theme="light"] {
-  --color-bg-base: #F8FAFC;          /* Clean Crisp Slate-50 Canvas */
-  --color-bg-surface: #FFFFFF;       /* Pure White Card */
-  --color-bg-card: #FFFFFF;          /* Pure White Card */
-  --color-bg-raised: #F1F5F9;        /* Slate-100 Container */
+  --color-bg-base: #F5F6F8;          /* Page/Canvas Background: subtle cool gray #F5F6F8 */
+  --color-bg-surface: #FFFFFF;       /* Pure White Card #FFFFFF */
+  --color-bg-card: #FFFFFF;          /* Pure White Card #FFFFFF */
+  --color-bg-raised: #EEF0F4;        /* Subtle Cool Gray Raised Container */
   --color-bg-hover: rgba(15, 23, 42, 0.04);
 
-  --color-sidebar-bg: #FFFFFF;       /* Crisp White Sidebar */
-  --color-sidebar-border: #E2E8F0;   /* Slate-200 Border */
+  --color-sidebar-bg: #F3F4F6;       /* Visually Distinct Sidebar Background #F3F4F6 */
+  --color-sidebar-border: #EDEEF1;   /* Lightened Border #EDEEF1 */
 
   --color-accent: #2563EB;           /* Vibrant Royal Blue #2563EB */
   --color-accent-bright: #1D4ED8;    /* Deep Royal Blue #1D4ED8 */
@@ -110,8 +111,8 @@ html.light-mode, [data-theme="light"] {
   --color-info: #0284C7;             /* Sky Blue #0284C7 */
   --color-info-muted: rgba(2, 132, 199, 0.10);
 
-  --color-border: #E2E8F0;           /* Slate-200 Border */
-  --color-border-subtle: #F1F5F9;    /* Slate-100 Border */
+  --color-border: #EDEEF1;           /* Lightened Border #EDEEF1 */
+  --color-border-subtle: #F5F6F8;    /* Subtle Canvas Border */
   --color-border-hover: #CBD5E1;     /* Slate-300 Hover Border */
   --color-border-focus: #2563EB;
 
@@ -122,7 +123,7 @@ html.light-mode, [data-theme="light"] {
   --color-bg-input: #FFFFFF;
   --color-bg-popover: #FFFFFF;
   --color-bg-drawer: #FFFFFF;
-  --color-tab-bar-bg: #F1F5F9;
+  --color-tab-bar-bg: #EEF0F4;
   --color-text-on-accent: #FFFFFF;
   --color-module-title: #0F172A;
   --color-module-icon-bg: rgba(37, 99, 235, 0.08);
@@ -134,7 +135,7 @@ html.light-mode textarea,
 html.light-mode select {
   background: #FFFFFF !important;
   color: #0F172A !important;
-  border-color: #CBD5E1 !important;
+  border-color: #EDEEF1 !important;
 }
 
 html.light-mode input:focus,
@@ -158,19 +159,31 @@ html.light-mode ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ─── Eye-Comfort Light Mode Overrides ────────────────────────────── */
+html.light-mode .page-header,
+html.light-mode .header-wrapper {
+  background: var(--color-bg-base) !important;
+  border-bottom: none !important;
+}
+
 html.light-mode .card,
 html.light-mode .card-raised,
-html.light-mode .card-glass,
-html.light-mode [class*="card"] {
+html.light-mode .card-glass {
   background: #FFFFFF !important;
-  border-color: #E2E8F0 !important;
+  border-color: #EDEEF1 !important;
   color: #0F172A !important;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+}
+
+html.light-mode .stat-cards,
+.stat-cards {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
 html.light-mode .card:hover {
   border-color: #CBD5E1 !important;
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06) !important;
 }
 
 html.light-mode .card-title-header {
@@ -182,21 +195,69 @@ html.light-mode .card-title-icon {
 }
 
 /* Light mode tables & nested containers */
+html.light-mode .table-wrap,
+html.light-mode .log-container {
+  background: #FFFFFF !important;
+  border-color: #EDEEF1 !important;
+  box-shadow: 0 4px 14px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.03) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+html.light-mode .table-wrap:hover,
+html.light-mode .log-container:hover {
+  border-color: #CBD5E1 !important;
+  box-shadow: 0 8px 20px -3px rgba(15, 23, 42, 0.10), 0 4px 8px -2px rgba(15, 23, 42, 0.05) !important;
+}
+
+html.light-mode .tab-bar {
+  background: #FFFFFF !important;
+  border-color: #EDEEF1 !important;
+  box-shadow: 0 4px 14px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.03) !important;
+}
+
+html.light-mode .tab-bar:hover {
+  border-color: #CBD5E1 !important;
+  box-shadow: 0 8px 20px -3px rgba(15, 23, 42, 0.10), 0 4px 8px -2px rgba(15, 23, 42, 0.05) !important;
+}
+
+html.light-mode .tab-btn.active {
+  background: #2563EB !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25) !important;
+}
+
 html.light-mode table,
 html.light-mode .table,
 html.light-mode th,
 html.light-mode td {
-  border-color: #E2E8F0 !important;
+  border-color: #EDEEF1 !important;
   color: #0F172A !important;
 }
 
 html.light-mode tr:hover {
-  background: #F1F5F9 !important;
+  background: #F5F6F8 !important;
 }
 
-html.light-mode th {
-  background: #F8FAFC !important;
-  color: #475569 !important;
+html.light-mode th,
+html.light-mode thead th {
+  background: #EEF0F4 !important;
+  color: #334155 !important;
+  border-bottom: 1px solid #CBD5E1 !important;
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 20 !important;
+}
+
+/* Scrollbar Track & Corner Fixes Across App */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+::-webkit-scrollbar-corner {
+  background: transparent !important;
 }
 
 /* Inline dark container overrides in light mode */
@@ -217,8 +278,8 @@ html.light-mode div[style*="background: #111216"],
 html.light-mode div[style*="background:#111216"],
 html.light-mode div[style*="background: #081627"],
 html.light-mode div[style*="background:#081627"] {
-  background: #F8FAFC !important;
-  border-color: #E2E8F0 !important;
+  background: #F5F6F8 !important;
+  border-color: #EDEEF1 !important;
   color: #0F172A !important;
 }
 
@@ -948,10 +1009,17 @@ input[type="checkbox"]:checked::after {
   border-radius: 8px;
   border: 1px solid var(--color-border);
   background: var(--color-bg-card);
-  overflow-y: auto;
-  overflow-x: hidden;
+  box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.18), 0 2px 6px -1px rgba(0, 0, 0, 0.1);
+  overflow: auto;
   display: flex;
   flex-direction: column;
+  isolation: isolate;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.table-wrap:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: 0 8px 20px -3px rgba(0, 0, 0, 0.25), 0 4px 8px -2px rgba(0, 0, 0, 0.15);
 }
 
 .action-btn {
@@ -1191,9 +1259,16 @@ pre {
   gap: 2px;
   background: var(--color-tab-bar-bg);
   padding: 4px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.12), 0 2px 6px -1px rgba(0, 0, 0, 0.06);
   align-self: flex-start;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tab-bar:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: 0 6px 18px -3px rgba(0, 0, 0, 0.18);
 }
 
 .tab-btn {

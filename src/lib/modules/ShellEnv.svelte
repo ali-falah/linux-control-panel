@@ -587,7 +587,7 @@
                   <span class="sg-name">{group.display_name}</span>
                   <div class="sg-badges">
                     {#if group.is_system}
-                      <span class="user-badge" style="color:var(--color-warning)">system</span>
+                      <span class="user-badge system-badge">system</span>
                     {:else}
                       <span class="user-badge">user</span>
                     {/if}
@@ -1308,207 +1308,12 @@
     padding-bottom: 24px;
   }
   .shell-group-card {
-    background: rgba(255,255,255,0.015);
-    border: 1px solid rgba(255,255,255,0.04);
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
     border-radius: 12px;
     overflow: hidden;
     flex-shrink: 0;
-  }
-  .sg-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 16px 20px;
-    cursor: pointer;
-    background: rgba(0, 0, 0, 0.4);
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    transition: background 0.2s;
-  }
-  .sg-header:hover {
-    background: rgba(0, 0, 0, 0.5);
-  }
-  .sg-name {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    font-size: 14px;
-    color: #fff;
-  }
-  .sg-badges {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .user-badge {
-    background: rgba(255,255,255,0.05);
-    color: var(--color-text-secondary);
-    padding: 4px 12px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 500;
-  }
-  .var-count {
-    font-size: 12px;
-    color: var(--color-text-muted);
-  }
-  .sg-content {
-    border-top: 1px solid rgba(255,255,255,0.04);
-  }
-  .sg-table-header {
-    display: flex;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    letter-spacing: 0.5px;
-  }
-  .sg-row {
-    display: flex;
-    align-items: center;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-  }
-  .sg-row:last-child {
-    border-bottom: none;
-  }
-  .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: #e2e8f0; font-size: 13px; }
-  .col-value { flex: 1; padding-right: 20px; min-width: 0; }
-  .col-meta { width: 160px; }
-  .col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }
-
-  .sg-input {
-    width: 100%;
-    background: rgba(0,0,0,0.25);
-    border: 1px solid rgba(255,255,255,0.04);
-    border-radius: 6px;
-    padding: 8px 12px;
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-    font-size: 13px;
-    outline: none;
-    transition: all 0.2s;
-  }
-  .sg-input:focus, .sg-input:not([readonly]) {
-    border-color: rgba(255,255,255,0.15);
-    color: #fff;
-    background: rgba(0,0,0,0.4);
-  }
-  .src-badge {
-    background: rgba(20, 184, 166, 0.1);
-    color: #2dd4bf;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-  }
-  .icon-btn {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 6px;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .icon-btn:hover {
-    background: rgba(255,255,255,0.08);
-    color: #fff;
-  }
-  .icon-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .sg-add-row {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 20px;
-    color: var(--color-text-muted);
-    font-size: 13px;
-    cursor: pointer;
-    transition: color 0.2s;
-  }
-  .sg-add-row:hover {
-    color: #fff;
-  }
-
-  /* ─── End Custom ShellEnv Design ────────────────────────────── */
-
-
-  /* ─── ShellEnv Custom Design ────────────────────────────── */
-  
-  
-  
-  
-
-  .custom-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-    gap: 16px;
-  }
-  
-  
-  
-  .toolbar-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .toolbar-btn {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 40px;
-    padding: 0 16px;
-    border-radius: 10px;
-    border: none;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .toolbar-btn:hover {
-    background: rgba(255,255,255,0.05);
-    color: #fff;
-  }
-  .primary-btn {
-    background: #7c3aed;
-    color: #fff;
-  }
-  .primary-btn:hover {
-    background: #6d28d9;
-  }
-
-  .shell-groups-list {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    padding-bottom: 32px;
-  }
-  .shell-group-card {
-    background: rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    border-radius: 10px;
-    overflow: hidden;
-    flex-shrink: 0;
-    transition: border-color 0.3s ease;
-  }
-  .shell-group-card:hover {
-    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   }
   .sg-header {
     display: flex;
@@ -1516,19 +1321,18 @@
     gap: 12px;
     padding: 14px 20px;
     cursor: pointer;
-    background: rgba(255, 255, 255, 0.03);
-    border-bottom: 1px solid transparent;
-    transition: background 0.2s ease;
+    background: var(--color-bg-surface);
+    border-bottom: 1px solid var(--color-border);
+    transition: background 0.2s;
   }
   .sg-header:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--color-bg-hover);
   }
   .sg-name {
     font-family: var(--font-mono);
     font-weight: 600;
     font-size: 14px;
-    letter-spacing: 0.3px;
-    color: #fff;
+    color: var(--color-text-primary);
   }
   .sg-badges {
     margin-left: auto;
@@ -1537,77 +1341,75 @@
     gap: 12px;
   }
   .user-badge {
-    background: rgba(255,255,255,0.05);
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
     color: var(--color-text-secondary);
     padding: 4px 12px;
     border-radius: 12px;
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
   }
   .var-count {
     font-size: 12px;
     color: var(--color-text-muted);
   }
   .sg-content {
-    border-top: 1px solid rgba(255,255,255,0.04);
+    border-top: 1px solid var(--color-border);
   }
   .sg-table-header {
     display: flex;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
+    padding: 10px 20px;
+    background: var(--color-bg-base);
+    border-bottom: 1px solid var(--color-border);
     font-size: 11px;
     font-weight: 600;
     color: var(--color-text-muted);
-    letter-spacing: 0.5px;
+    letter-spacing: 0.05em;
   }
   .sg-row {
     display: flex;
     align-items: center;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--color-border);
   }
   .sg-row:last-child {
     border-bottom: none;
   }
-  .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: #e2e8f0; font-size: 13px; }
+  .col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: var(--color-text-primary); font-size: 13px; }
   .col-value { flex: 1; padding-right: 20px; min-width: 0; }
-  .col-meta { width: 160px; min-width: 0; }
+  .col-meta { width: 160px; }
   .col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }
 
   .sg-input {
     width: 100%;
-    background: rgba(0,0,0,0.25);
-    border: 1px solid rgba(255,255,255,0.04);
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
     border-radius: 6px;
     padding: 8px 12px;
-    color: var(--color-text-secondary);
+    color: var(--color-text-primary);
     font-family: var(--font-mono);
     font-size: 13px;
     outline: none;
     transition: all 0.2s;
   }
   .sg-input:focus, .sg-input:not([readonly]) {
-    border-color: rgba(255,255,255,0.15);
-    color: #fff;
-    background: rgba(0,0,0,0.4);
+    border-color: var(--color-accent);
+    color: var(--color-text-primary);
+    background: var(--color-bg-surface);
   }
   .src-badge {
-    background: rgba(20, 184, 166, 0.1);
-    color: #2dd4bf;
+    background: rgba(20, 184, 166, 0.12);
+    color: #0d9488;
     padding: 4px 10px;
     border-radius: 12px;
     font-size: 11px;
+    font-weight: 600;
     font-family: var(--font-mono);
     white-space: nowrap;
-    display: inline-block;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    vertical-align: middle;
   }
   .icon-btn {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.05);
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
     border-radius: 6px;
     width: 32px;
     height: 32px;
@@ -1619,8 +1421,8 @@
     transition: all 0.2s;
   }
   .icon-btn:hover {
-    background: rgba(255,255,255,0.08);
-    color: #fff;
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
   }
   .icon-btn:disabled {
     opacity: 0.5;
@@ -1631,16 +1433,87 @@
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
-    padding: 16px 20px;
-    color: var(--color-text-muted);
+    padding: 14px 20px;
+    color: var(--color-text-secondary);
     font-size: 13px;
+    font-weight: 600;
     cursor: pointer;
     transition: color 0.2s;
   }
   .sg-add-row:hover {
-    color: #fff;
+    color: var(--color-accent);
+  }
+
+  /* ─── Light Mode Explicit Contrast Overrides ────────────────── */
+  html.light-mode .shell-group-card {
+    background: #FFFFFF !important;
+    border: 1px solid #E5E7EB !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  }
+  html.light-mode .sg-header {
+    background: #F9FAFB !important;
+    border-bottom: 1px solid #E5E7EB !important;
+  }
+  html.light-mode .sg-header:hover {
+    background: #F3F4F6 !important;
+  }
+  html.light-mode .sg-name {
+    color: #111827 !important;
+  }
+  html.light-mode .sg-table-header {
+    background: #F9FAFB !important;
+    border-bottom: 1px solid #E5E7EB !important;
+    color: #6B7280 !important;
+    font-weight: 600 !important;
+  }
+  html.light-mode .sg-row {
+    border-bottom: 1px solid #E5E7EB !important;
+  }
+  html.light-mode .col-name {
+    color: #111827 !important;
+  }
+  html.light-mode .sg-input {
+    background: #F9FAFB !important;
+    border: 1px solid #E5E7EB !important;
+    color: #111827 !important;
+  }
+  html.light-mode .sg-input:focus,
+  html.light-mode .sg-input:not([readonly]) {
+    background: #FFFFFF !important;
+    border-color: #2563EB !important;
+  }
+  html.light-mode .user-badge {
+    background: #F3F4F6 !important;
+    border: 1px solid #E5E7EB !important;
+    color: #374151 !important;
+  }
+  html.light-mode .user-badge.system-badge {
+    background: rgba(217, 119, 6, 0.12) !important;
+    color: #B45309 !important;
+    border: 1px solid rgba(217, 119, 6, 0.25) !important;
+  }
+  html.light-mode .var-count {
+    color: #4B5563 !important;
+  }
+  html.light-mode .src-badge {
+    background: rgba(37, 99, 235, 0.08) !important;
+    color: #1D4ED8 !important;
+  }
+  html.light-mode .icon-btn {
+    background: #FFFFFF !important;
+    border: 1px solid #E5E7EB !important;
+    color: #4B5563 !important;
+  }
+  html.light-mode .icon-btn:hover {
+    background: #F3F4F6 !important;
+    color: #111827 !important;
+  }
+  html.light-mode .sg-add-row {
+    color: #374151 !important;
+  }
+  html.light-mode .sg-add-row:hover {
+    color: #2563EB !important;
   }
 
   /* ─── End Custom ShellEnv Design ────────────────────────────── */
-
 </style>

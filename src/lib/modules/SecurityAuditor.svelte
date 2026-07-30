@@ -883,7 +883,7 @@
               <span class="std-select-label">Standard:</span>
               <Select
                 bind:value={activeStandard}
-                style="height: 28px; font-size: 11px; padding: 0 8px; border-radius: 6px; background: rgba(1, 15, 31, 0.7); border-color: rgba(255, 255, 255, 0.12);"
+                style="height: 28px; font-size: 11px; padding: 0 8px; border-radius: 6px;"
               >
                 <option value="all">All Standards</option>
                 <option value="CIS Level 1">CIS Level 1</option>
@@ -1076,7 +1076,7 @@
   }
 
   :global(.module-container .header-wrapper) {
-    margin: 0 0 16px 0 !important;
+    margin: 0 0 4px 0 !important;
     flex-shrink: 0;
   }
 
@@ -1857,5 +1857,88 @@
     border-top-color: #fff;
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
+  }
+
+  /* ── Light Mode Category Summary Grid Cards ── */
+  html.light-mode .cat-card {
+    background: #FFFFFF !important;
+    border: 1px solid #E5E7EB !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  }
+  html.light-mode .cat-card:hover {
+    background: #F9FAFB !important;
+    border-color: #D1D5DB !important;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
+  }
+  html.light-mode .cat-card.cat-active {
+    background: rgba(37, 99, 235, 0.08) !important;
+    border-color: #2563EB !important;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15) !important;
+  }
+  html.light-mode .cat-name {
+    color: #111827 !important;
+  }
+  html.light-mode .cat-bar {
+    background: #E5E7EB !important;
+  }
+
+  /* ── Light Mode Accordion & Finding Card Overrides ── */
+  html.light-mode .finding-card {
+    background: #FFFFFF !important;
+    border: 1px solid #E5E7EB !important;
+    border-left: 4px solid var(--sev-color) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  }
+  html.light-mode .finding-card:hover,
+  html.light-mode .finding-card.expanded {
+    border-color: #D1D5DB !important;
+    border-left: 4px solid var(--sev-color) !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08) !important;
+    background: #FFFFFF !important;
+  }
+  html.light-mode .finding-row {
+    background: #FFFFFF !important;
+    color: #111827 !important;
+  }
+  html.light-mode .finding-row:hover {
+    background: #F9FAFB !important;
+  }
+  html.light-mode .finding-title {
+    color: #111827 !important;
+  }
+  html.light-mode .finding-desc {
+    color: #4B5563 !important;
+  }
+  html.light-mode .finding-detail {
+    background: #FAFAFA !important;
+    border-top: 1px solid #E5E7EB !important;
+  }
+  html.light-mode .countermeasure-box {
+    background: rgba(37, 99, 235, 0.06) !important;
+    border: 1px solid rgba(37, 99, 235, 0.2) !important;
+    color: #111827 !important;
+  }
+  html.light-mode .cm-text {
+    color: #374151 !important;
+  }
+  html.light-mode .cat-tag {
+    background: #F3F4F6 !important;
+    color: #374151 !important;
+    border: 1px solid #E5E7EB !important;
+  }
+  html.light-mode .std-tag {
+    background: rgba(37, 99, 235, 0.08) !important;
+    color: #1D4ED8 !important;
+    border: 1px solid rgba(37, 99, 235, 0.20) !important;
+  }
+  html.light-mode .issue-badge {
+    background: #F3F4F6 !important;
+    color: #374151 !important;
+    border: 1px solid #E5E7EB !important;
+  }
+  html.light-mode .issue-badge.has-issues {
+    background: rgba(239, 68, 68, 0.1) !important;
+    color: #DC2626 !important;
+    border-color: rgba(239, 68, 68, 0.25) !important;
   }
 </style>

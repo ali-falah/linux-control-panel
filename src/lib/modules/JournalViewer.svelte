@@ -104,10 +104,12 @@
 
       logs = lines.map(line => {
         try { return JSON.parse(line); } catch { return null; }
-      }).filter(Boolean);
+      }).filter(Boolean).reverse();
 
       setTimeout(() => {
-        if (logContainer) logContainer.scrollTop = logContainer.scrollHeight;
+        if (logContainer) logContainer.scrollTop = 0;
+        const tableWrap = logContainer?.querySelector('.table-wrap');
+        if (tableWrap) tableWrap.scrollTop = 0;
       }, 50);
 
       statusStore.setLastCommand(
@@ -373,9 +375,12 @@
     const q = searchQuery.trim().toLowerCase();
     if (!q) return collapsedLogs;
     return collapsedLogs.filter(log => {
-      const msg = (log.MESSAGE || '').toLowerCase();
-      const unit = (log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel').toLowerCase();
-      return msg.includes(q) || unit.includes(q);
+      if (!log) return false;
+      const msg = typeof log.MESSAGE === 'string' ? log.MESSAGE.toLowerCase() : JSON.stringify(log.MESSAGE || '').toLowerCase();
+      const unit = String(log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || log._COMM || 'kernel').toLowerCase();
+      const sysIdent = String(log.SYSLOG_IDENTIFIER || '').toLowerCase();
+      const raw = JSON.stringify(log).toLowerCase();
+      return msg.includes(q) || unit.includes(q) || sysIdent.includes(q) || raw.includes(q);
     });
   });
 
@@ -466,6 +471,13 @@
       <input
         bind:this={searchInputRef}
         bind:value={searchQuery}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const tw = logContainer?.querySelector('.table-wrap');
+            if (tw) tw.scrollTop = 0;
+          }
+        }}
         type="text"
         class="log-search-input"
         placeholder="Search logs…"
@@ -475,8 +487,8 @@
 
       {#if hasActiveSearch}
         <span class="log-count-badge">{activeLogsCount}/{totalLogsCount}</span>
-        <button class="log-clear-btn" onclick={() => { searchQuery = ''; searchInputRef?.focus(); }} title="Clear">
-          <X size={12} />
+        <button class="log-clear-btn" onclick={() => { searchQuery = ''; searchInputRef?.focus(); }} title="Clear search">
+          <X size={14} />
         </button>
       {/if}
 
@@ -583,7 +595,7 @@
         {/if}
         <Table class="log-table">
           <thead>
-            <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
+            <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
               <th style="padding: 8px 12px; font-weight: 600;">Time</th>
               <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
               <th style="padding: 8px 12px; font-weight: 600;">Message</th>
@@ -634,7 +646,7 @@
         {:else}
           <Table class="log-table">
             <thead>
-              <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
+              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
                 <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('timestamp')}>
                   Time {authSortKey === 'timestamp' ? (authSortAsc ? '▲' : '▼') : ''}
                 </th>
@@ -738,7 +750,7 @@
         {:else}
           <Table class="log-table">
             <thead>
-              <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
+              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
                 <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('timestamp')}>
                   Time {auditSortKey === 'timestamp' ? (auditSortAsc ? '▲' : '▼') : ''}
                 </th>
@@ -1089,10 +1101,19 @@
 
   .log-container {
     flex: 1;
-    overflow-y: auto;
-    background: #111216;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--color-bg-card);
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
+  }
+
+  :global(.log-container .table-wrap) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .empty-state {
@@ -1109,6 +1130,12 @@
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed;
+  }
+
+  .log-table thead th {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 20 !important;
   }
 
   .log-row {

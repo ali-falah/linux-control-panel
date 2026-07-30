@@ -127,7 +127,7 @@
   .header-wrapper {
     display: flex;
     flex-direction: column;
-    margin: -24px -24px 20px -24px;
+    margin: -24px -24px 6px -24px;
   }
 
   .page-header {
@@ -135,8 +135,8 @@
     justify-content: space-between;
     align-items: center;
     padding: 10px 24px;
-    background: var(--color-bg-surface);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-base);
+    border-bottom: none;
     border-radius: 0;
   }
 
