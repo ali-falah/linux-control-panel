@@ -4,9 +4,6 @@
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
-  import Dashboard from './lib/modules/Dashboard.svelte';
-  import SystemMonitor from './lib/modules/SystemMonitor.svelte';
-  import JournalViewer from './lib/modules/JournalViewer.svelte';
   import RepoManager from './lib/modules/RepoManager.svelte';
   import DnfHistory from './lib/modules/DnfHistory.svelte';
   import CoprBrowser from './lib/modules/CoprBrowser.svelte';
@@ -18,9 +15,6 @@
   import SelinuxManager from './lib/modules/SelinuxManager.svelte';
   import CronManager from './lib/modules/CronManager.svelte';
   import EnvManager from './lib/modules/EnvManager.svelte';
-  import NetworkManager from './lib/modules/NetworkManager.svelte';
-  import DeviceManager from './lib/modules/DeviceManager.svelte';
-  import AppManager from './lib/modules/AppManager.svelte';
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
@@ -42,11 +36,23 @@
     <div class="content-area">
       {#key uiStore.activeTab}
         {#if uiStore.activeTab === 'system-dashboard'}
-          <Dashboard />
+          {#await import('./lib/modules/Dashboard.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Dashboard...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'system-monitor'}
-          <SystemMonitor />
+          {#await import('./lib/modules/SystemMonitor.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading System Monitor...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'journal-logs'}
-          <JournalViewer />
+          {#await import('./lib/modules/JournalViewer.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Journal Logs...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'repo-manager'}
           <RepoManager />
         {:else if uiStore.activeTab === 'dnf-history'}
@@ -88,11 +94,23 @@
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'network-manager'}
-          <NetworkManager />
+          {#await import('./lib/modules/NetworkManager.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Network Manager...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'device-manager'}
-          <DeviceManager />
+          {#await import('./lib/modules/DeviceManager.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Device Manager...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'app-manager'}
-          <AppManager />
+          {#await import('./lib/modules/AppManager.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading App Manager...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {/if}
       {/key}
     </div>

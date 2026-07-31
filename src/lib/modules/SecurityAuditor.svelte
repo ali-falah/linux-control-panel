@@ -1608,31 +1608,6 @@
     border-left-color: var(--color-text-muted) !important;
   }
 
-  /* ── Compliance Standards Filter Pills & Tags ─────────────────────────────── */
-  .std-pill {
-    padding: 3px 10px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-family: var(--font-sans);
-    font-weight: 500;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--color-text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .std-pill:hover {
-    background: rgba(0, 218, 243, 0.08);
-    border-color: rgba(0, 218, 243, 0.25);
-    color: var(--color-text-primary);
-  }
-  .std-pill.active {
-    background: rgba(0, 218, 243, 0.15);
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-    font-weight: 600;
-  }
-
   .std-tag {
     font-size: 10px;
     font-weight: 600;
@@ -1845,9 +1820,6 @@
   }
 
   /* ── Spinner ─────────────────────────────────────────────────────────────── */
-  .spin {
-    animation: spin 1s linear infinite;
-  }
   @keyframes spin { 100% { transform: rotate(360deg); } }
 
   .spinner-sm {

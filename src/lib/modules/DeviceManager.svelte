@@ -476,7 +476,7 @@
         </div>
 
         {#if triggerMessage}
-          <div class="card" style="background:#0f111a; border-color:var(--color-border); font-family:var(--font-mono); font-size:12px; color:var(--color-text-secondary); white-space:pre-wrap; padding:16px; margin-top:8px;">
+          <div class="card" style="background:var(--color-bg-card); border-color:var(--color-border); font-family:var(--font-mono); font-size:12px; color:var(--color-text-secondary); white-space:pre-wrap; padding:16px; margin-top:8px;">
             {triggerMessage}
           </div>
         {/if}

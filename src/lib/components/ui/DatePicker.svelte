@@ -331,13 +331,13 @@
 
   .dp-day.selected {
     background: var(--color-accent);
-    color: #0a1628;
+    color: var(--color-text-on-accent);
     font-weight: 700;
     border: none;
   }
 
   .dp-day.selected:hover {
-    background: #00b9cf;
-    color: #0a1628;
+    background: var(--color-accent-hover, var(--color-accent));
+    color: var(--color-text-on-accent);
   }
 </style>

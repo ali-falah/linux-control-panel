@@ -76,6 +76,14 @@
       selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     }
   }
+
+  function handleTriggerKeydown(e: KeyboardEvent) {
+    if (rest.disabled) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      isOpen = !isOpen;
+    }
+  }
 </script>
 
 <div bind:this={containerEl} class="ui-select-container {className}">
@@ -102,7 +110,13 @@
     class:open={isOpen}
     class:disabled={rest.disabled}
     onclick={() => { if (!rest.disabled) isOpen = !isOpen; }}
+    onkeydown={handleTriggerKeydown}
     disabled={rest.disabled}
+    role="combobox"
+    aria-expanded={isOpen}
+    aria-haspopup="listbox"
+    aria-controls="{id}-listbox"
+    aria-label={label || 'Select option'}
     {style}
   >
     <span class="ui-select-value">{activeLabel}</span>
@@ -115,13 +129,15 @@
 
   <!-- Custom Option Popover list -->
   {#if isOpen}
-    <div class="ui-select-dropdown">
+    <div id="{id}-listbox" class="ui-select-dropdown" role="listbox" tabindex="-1">
       {#each options as opt}
         <button
           type="button"
           class="ui-select-option"
           class:selected={opt.value === value}
           onclick={() => selectOption(opt.value)}
+          role="option"
+          aria-selected={opt.value === value}
         >
           {opt.label}
         </button>
@@ -254,7 +270,7 @@
 
   .ui-select-option.selected {
     background-color: var(--color-accent);
-    color: #ffffff;
+    color: var(--color-text-on-accent);
     font-weight: 600;
   }
 </style>

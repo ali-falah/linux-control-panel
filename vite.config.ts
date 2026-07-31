@@ -14,6 +14,21 @@ export default defineConfig(async () => ({
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   // prevent vite from obscuring rust errors
   clearScreen: false,
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/codemirror') || id.includes('node_modules/@codemirror')) {
+            return 'codemirror';
+          }
+          if (id.includes('node_modules/@lucide/svelte')) {
+            return 'lucide-icons';
+          }
+        },
+      },
+    },
+  },
   // tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

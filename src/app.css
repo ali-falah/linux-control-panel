@@ -163,7 +163,7 @@ html.light-mode input:not([type="checkbox"]):focus,
 html.light-mode textarea:focus,
 html.light-mode select:focus {
   border-color: #2563EB !important;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15) !important;
+  box-shadow: none !important;
 }
 
 html.light-mode input::placeholder,
@@ -765,9 +765,7 @@ input[type="number"]:focus,
 input[type="password"]:focus {
   background: var(--color-bg-card);
   border-color: var(--color-accent);
-  box-shadow:
-    0 0 0 2px var(--color-accent-muted),
-    0 0 8px var(--color-accent-glow);
+  box-shadow: none;
 }
 
 input[type="text"]::placeholder,
@@ -791,12 +789,12 @@ input[type="password"]::placeholder {
 .search-bar:focus-within {
   background: var(--color-bg-card);
   border-color: var(--color-accent);
-  box-shadow:
-    0 0 0 2px var(--color-accent-muted),
-    0 0 8px var(--color-accent-glow);
+  box-shadow: none;
 }
 
-.search-bar input {
+.search-bar input,
+.search-bar input:focus,
+.search-bar input:hover {
   flex: 1;
   background: transparent !important;
   border: none !important;

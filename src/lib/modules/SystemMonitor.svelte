@@ -686,25 +686,25 @@
                   <div style="display:flex; gap:4px; font-size:10px;">
                     <button
                       onclick={() => connFilter = 'all'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'all' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'all' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
                     >
                       All ({activeConnections.length})
                     </button>
                     <button
                       onclick={() => connFilter = 'listen'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'listen' ? '#f59e0b' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'listen' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'listen' ? 'var(--color-warning)' : 'var(--color-bg-hover)'}; color:{connFilter === 'listen' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
                     >
                       Listen ({connListenCount})
                     </button>
                     <button
                       onclick={() => connFilter = 'estab'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'estab' ? '#10b981' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'estab' ? '#000' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'estab' ? 'var(--color-success)' : 'var(--color-bg-hover)'}; color:{connFilter === 'estab' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
                     >
                       Estab ({connEstabCount})
                     </button>
                     <button
                       onclick={() => connFilter = 'external'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'external' ? '#3b82f6' : 'rgba(255,255,255,0.06)'}; color:{connFilter === 'external' ? '#fff' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'external' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'external' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
                     >
                       External
                     </button>
@@ -750,7 +750,7 @@
                             {conn.remote_address}
                           </td>
                           <td style="padding:6px;">
-                            <span style="font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:var(--font-mono); background:{isListen ? 'rgba(245,158,11,0.15)' : 'rgba(34,197,94,0.15)'}; color:{isListen ? '#f59e0b' : '#22c55e'};">
+                            <span style="font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:var(--font-mono); background:{isListen ? 'var(--color-warning-muted, rgba(245,158,11,0.15))' : 'var(--color-success-muted, rgba(34,197,94,0.15))'}; color:{isListen ? 'var(--color-warning)' : 'var(--color-success)'};">
                               {conn.state}
                             </span>
                           </td>

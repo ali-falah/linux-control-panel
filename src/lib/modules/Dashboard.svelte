@@ -302,22 +302,22 @@
             <strong style="font-family:var(--font-mono);">{osInfo.hostname}</strong>
           </div>
           <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="display:flex; align-items:center; gap:6px;"><Disc size={14} style="color:#3b82f6;" /> OS Name:</span>
+            <span style="display:flex; align-items:center; gap:6px;"><Disc size={14} style="color:var(--color-accent);" /> OS Name:</span>
             <div style="display:flex; align-items:center; gap:6px;">
               <Badge variant="primary" style="font-size:10px; padding:1px 6px;">{osInfo.name}</Badge>
               <strong style="font-size:12px;">{osInfo.os_version}</strong>
             </div>
           </div>
           <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="display:flex; align-items:center; gap:6px;"><Cpu size={14} style="color:#a855f7;" /> Kernel:</span>
+            <span style="display:flex; align-items:center; gap:6px;"><Cpu size={14} style="color:var(--color-accent-purple, #a855f7);" /> Kernel:</span>
             <strong style="font-family:var(--font-mono); font-size:12px;">{osInfo.kernel_version}</strong>
           </div>
           <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="display:flex; align-items:center; gap:6px;"><Clock size={14} style="color:#10b981;" /> Uptime:</span>
+            <span style="display:flex; align-items:center; gap:6px;"><Clock size={14} style="color:var(--color-success);" /> Uptime:</span>
             <strong style="color:var(--color-success); font-family:var(--font-mono);">{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '...'}</strong>
           </div>
           <div class="info-row" style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="display:flex; align-items:center; gap:6px;"><Calendar size={14} style="color:#f59e0b;" /> Last Updated:</span>
+            <span style="display:flex; align-items:center; gap:6px;"><Calendar size={14} style="color:var(--color-warning);" /> Last Updated:</span>
             <strong style="font-size:11px; color:var(--color-text-secondary);">{lastSystemUpdate || '...'}</strong>
           </div>
         {:else}
@@ -716,12 +716,12 @@
             </h4>
             {#if storageDist}
               <div style="display:flex; flex-direction:column; gap:10px;">
-                <!-- Stacked bar chart (RPM cyan, Flatpak purple, System blue) -->
+                <!-- Stacked bar chart (RPM amber, Flatpak purple, System blue/cyan) -->
                 {#if storageDistTotal > 0}
                   <div style="height: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 5px; overflow: hidden; display: flex; width: 100%;">
-                    <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: #00daf3;" title="RPM: {storageDist.rpm_gb.toFixed(1)} GB"></div>
-                    <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: #a855f7;" title="Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB"></div>
-                    <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: #3b82f6;" title="System: {storageDist.system_gb.toFixed(1)} GB"></div>
+                    <div style="width: {(storageDist.rpm_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-warning, #f59e0b);" title="RPM: {storageDist.rpm_gb.toFixed(1)} GB"></div>
+                    <div style="width: {(storageDist.flatpak_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-accent-purple, #a855f7);" title="Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB"></div>
+                    <div style="width: {(storageDist.system_gb / storageDistTotal * 100).toFixed(1)}%; background: var(--color-accent);" title="System: {storageDist.system_gb.toFixed(1)} GB"></div>
                   </div>
                 {/if}
                 <!-- Legend and metrics -->
@@ -735,7 +735,7 @@
                     class="legend-btn"
                     title="Filter App Manager by RPM packages"
                   >
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #00daf3;"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-warning, #f59e0b);"></span>
                     <span class="hover-underline">RPM: {storageDist.rpm_gb.toFixed(1)} GB</span>
                   </button>
                   <button 
@@ -747,11 +747,11 @@
                     class="legend-btn"
                     title="Filter App Manager by Flatpak packages"
                   >
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #a855f7;"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent-purple, #a855f7);"></span>
                     <span class="hover-underline">Flatpak: {storageDist.flatpak_gb.toFixed(1)} GB</span>
                   </button>
                   <div style="display: flex; align-items: center; gap: 6px; color: var(--color-text-muted);">
-                    <span style="width: 8px; height: 8px; border-radius: 50%; background: #3b82f6;"></span>
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent);"></span>
                     <span>System: {storageDist.system_gb.toFixed(1)} GB</span>
                   </div>
                 </div>

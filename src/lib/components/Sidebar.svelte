@@ -689,6 +689,33 @@
     flex-shrink: 0;
   }
 
+  /* Light Mode Sidebar Search Overrides */
+  :global(html.light-mode) .sidebar-search {
+    background: #F1F5F9 !important;
+    border: 1px solid #E2E8F0 !important;
+    border-radius: 8px !important;
+  }
+  :global(html.light-mode) .sidebar-search:hover {
+    border-color: #CBD5E1 !important;
+    background: #E2E8F0 !important;
+  }
+  :global(html.light-mode) .sidebar-search:focus-within {
+    background: #FFFFFF !important;
+    border-color: #2563EB !important;
+    box-shadow: none !important;
+  }
+  :global(html.light-mode) .sidebar-search input {
+    background: transparent !important;
+    border: none !important;
+    color: #0F172A !important;
+  }
+  :global(html.light-mode) .sidebar-search input::placeholder {
+    color: #64748B !important;
+  }
+  :global(html.light-mode) .sidebar-search :global(.search-icon) {
+    color: #64748B !important;
+  }
+
   /* ── Grouped nav ──────────────────────────────────────────────────── */
   .sidebar-nav {
     display: flex;
