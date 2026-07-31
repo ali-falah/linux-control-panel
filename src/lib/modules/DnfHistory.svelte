@@ -577,7 +577,7 @@
 
       {:else}
         <!-- Package list view -->
-        <div style="flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;">
+        <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;">
           {#if loadingUpdates && updates.length === 0}
             <div style="padding:48px 32px; display:flex; flex-direction:column; align-items:center; gap:16px; color:var(--color-text-muted);">
               <RefreshCw size={24} class="animate-spin-slow" />
@@ -589,7 +589,7 @@
               <span style="font-size:16px; font-weight:600;">System is up to date</span>
             </div>
           {:else}
-            <div class="table-wrap" style="border:none; border-radius:0; flex:1; overflow:visible;">
+            <div class="table-wrap" style="border:none; border-radius:0; flex:1; min-height:0;">
               <table use:tableFeatures>
                 <thead>
                   <tr>
@@ -627,7 +627,7 @@
 
   <!-- ── History Tab ────────────────────────────────────────────────────────── -->
   {:else if activeTab === 'history'}
-    <div class="card module-content-scroll" style="padding:0">
+    <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
       {#if loadingHistory && history.length === 0}
         <div style="padding:48px 32px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; color:var(--color-text-muted);">
           <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
@@ -642,7 +642,7 @@
           </span>
         </div>
       {:else}
-        <div class="table-wrap" style="border:none; border-radius:0">
+        <div class="table-wrap" style="border:none; border-radius:0; flex:1; min-height:0;">
           <table use:tableFeatures>
             <thead>
               <tr>

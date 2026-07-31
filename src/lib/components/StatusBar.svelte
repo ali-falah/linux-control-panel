@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { CheckCircle2, XCircle, Loader, Minus, Shield } from '@lucide/svelte';
-  import { ShieldCheck, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck, Terminal, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
@@ -128,15 +127,15 @@
   <div class="status-left">
     {#if statusStore.busy}
       <div class="status-indicator">
-        <Loader size={11} class="spin-icon" />
-        <span class="cmd-text" title={statusStore.busyLabel}>{statusStore.busyLabel}</span>
+        <Loader size={12} class="spin-icon" />
+        <span class="cmd-text busy" title={statusStore.busyLabel}>{statusStore.busyLabel}</span>
       </div>
     {:else if statusStore.lastEntry}
       <div class="status-indicator">
         {#if statusStore.lastEntry.success}
-          <CheckCircle2 size={11} class="icon-ok" />
+          <CheckCircle2 size={12} class="icon-ok" />
         {:else}
-          <XCircle size={11} class="icon-fail" />
+          <XCircle size={12} class="icon-fail" />
         {/if}
         <span class="cmd-text" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success} title={statusStore.lastEntry.command}>
           {statusStore.lastEntry.command}
@@ -144,13 +143,11 @@
       </div>
     {:else}
       <div class="status-indicator">
-        <Minus size={11} class="icon-idle" />
+        <Terminal size={12} class="icon-idle" />
         <span class="cmd-text idle">Ready</span>
       </div>
     {/if}
   </div>
-
-
 
   <!-- RIGHT: Root toggle + exit code -->
   <div class="status-right">
@@ -160,15 +157,21 @@
       title={hasRoot ? 'Click to disable root privileges' : 'Click to enable root privileges'}
     >
       {#if hasRoot}
-        <ShieldCheck size={11} /> Root: ON
+        <ShieldCheck size={12} /> Root: ON
       {:else}
-        <Shield size={11} /> Root: OFF
+        <Shield size={12} /> Root: OFF
       {/if}
     </button>
+
     <div class="right-divider"></div>
+
     {#if statusStore.lastEntry}
-      <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}">
-        exit {statusStore.lastEntry.exitCode ?? '—'}
+      <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}" title="Process Exit Code">
+        {#if statusStore.lastEntry.success}
+          ✓ exit {statusStore.lastEntry.exitCode ?? 0}
+        {:else}
+          ✕ exit {statusStore.lastEntry.exitCode ?? 1}
+        {/if}
       </span>
     {:else}
       <span class="ts-pill muted">Fedora / RHEL</span>
@@ -181,15 +184,16 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 30px;
-    padding: 0 14px;
+    height: 32px;
+    padding: 0 16px;
     background: var(--color-sidebar-bg);
-    border-top: 1px solid rgba(59, 73, 76, 0.5);
-    font-size: 11px;
+    border-top: 1px solid var(--color-border);
+    font-size: 11.5px;
     font-family: var(--font-mono);
     flex-shrink: 0;
-    gap: 8px;
+    gap: 12px;
     position: relative;
+    box-sizing: border-box;
   }
 
   /* ── Sections ──────────────────────────────────────────────────────────── */
@@ -197,23 +201,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 1;          /* grows to fill left half */
+    flex: 1;
     min-width: 0;
     overflow: hidden;
-  }
-
-  .status-center {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;   /* sized to IP pill content only */
   }
 
   .status-right {
     display: flex;
     align-items: center;
     gap: 10px;
-    flex: 1;          /* grows to fill right half, items pushed to the right */
+    flex-shrink: 0;
     justify-content: flex-end;
     min-width: 0;
   }
@@ -221,61 +218,102 @@
   .right-divider {
     width: 1px;
     height: 14px;
-    background: rgba(59, 73, 76, 0.5);
+    background: var(--color-border);
     flex-shrink: 0;
   }
 
   .status-indicator {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     min-width: 0;
   }
 
   .cmd-text {
-    color: var(--color-text-muted);
-    max-width: 320px;
+    color: var(--color-text-primary);
+    font-weight: 500;
+    max-width: 500px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .cmd-text.ok   { color: var(--color-success); }
+  .cmd-text.ok   { color: var(--color-text-primary); }
   .cmd-text.fail { color: var(--color-error); }
   .cmd-text.idle { color: var(--color-text-muted); }
+  .cmd-text.busy { color: var(--color-accent); font-weight: 600; }
+
+  .icon-ok   { color: var(--color-success); flex-shrink: 0; }
+  .icon-fail { color: var(--color-error); flex-shrink: 0; }
+  .icon-idle { color: var(--color-text-muted); flex-shrink: 0; }
 
   /* ── Pill badges ──────────────────────────────────────────────────────── */
   .pill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 1px 7px;
-    border-radius: 20px;
-    font-size: 10px;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 14px;
+    font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
     letter-spacing: 0.02em;
     cursor: pointer;
-    border: none;
-    font-family: inherit;
+    border: 1px solid transparent;
+    font-family: var(--font-mono);
+    transition: all 0.18s ease;
   }
-  .pill-ok   { background: var(--color-success-muted); color: var(--color-success); cursor: default; border: 1px solid rgba(16,185,129,0.18); }
-  .pill-fail { background: var(--color-error-muted); color: var(--color-error); cursor: default; border: 1px solid rgba(239,68,68,0.18); }
-  .pill-root-on  { background: var(--color-success-muted); color: var(--color-success); border: 1px solid rgba(16, 185, 129, 0.25); }
-  .pill-root-off { background: var(--color-bg-raised); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
-  .pill-root-on:hover  { background: rgba(16, 185, 129, 0.2); }
+  .pill-ok   { background: rgba(34, 197, 94, 0.12); color: #166534; border-color: rgba(34, 197, 94, 0.25); cursor: default; }
+  .pill-fail { background: rgba(239, 68, 68, 0.12); color: #991B1B; border-color: rgba(239, 68, 68, 0.25); cursor: default; }
+  .pill-root-on  { background: rgba(34, 197, 94, 0.14); color: #15803D; border-color: rgba(34, 197, 94, 0.3); }
+  .pill-root-off { background: var(--color-bg-base); color: var(--color-text-secondary); border-color: var(--color-border); }
+  .pill-root-on:hover  { background: rgba(34, 197, 94, 0.24); }
   .pill-root-off:hover { background: var(--color-bg-hover); color: var(--color-text-primary); border-color: var(--color-border-hover); }
 
   .ts-pill {
-    padding: 2px 8px;
+    padding: 3px 9px;
     border-radius: 6px;
-    background: var(--color-bg-raised);
+    background: var(--color-bg-base);
     color: var(--color-text-secondary);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     white-space: nowrap;
     border: 1px solid var(--color-border);
   }
   .ts-pill.muted { color: var(--color-text-muted); }
+
+  /* ── Light Mode High Contrast Status Bar Overrides ── */
+  :global(html.light-mode .status-bar) {
+    background: #FFFFFF !important;
+    border-top: 1px solid #E5E7EB !important;
+    color: #111827 !important;
+  }
+  :global(html.light-mode .cmd-text) {
+    color: #0F172A !important;
+    font-weight: 500 !important;
+  }
+  :global(html.light-mode .right-divider) {
+    background: #E5E7EB !important;
+  }
+  :global(html.light-mode .pill-root-on) {
+    background: rgba(34, 197, 94, 0.12) !important;
+    color: #15803D !important;
+    border: 1px solid rgba(34, 197, 94, 0.3) !important;
+  }
+  :global(html.light-mode .pill-root-off) {
+    background: #F3F4F6 !important;
+    color: #374151 !important;
+    border: 1px solid #E5E7EB !important;
+  }
+  :global(html.light-mode .pill-ok) {
+    background: rgba(34, 197, 94, 0.1) !important;
+    color: #166534 !important;
+    border: 1px solid rgba(34, 197, 94, 0.25) !important;
+  }
+  :global(html.light-mode .pill-fail) {
+    background: rgba(239, 68, 68, 0.1) !important;
+    color: #991B1B !important;
+    border: 1px solid rgba(239, 68, 68, 0.25) !important;
+  }
 
   /* ── IP pill ──────────────────────────────────────────────────────────── */
   .ip-pill {

@@ -130,7 +130,7 @@ html.light-mode, [data-theme="light"] {
   --color-module-icon-border: rgba(37, 99, 235, 0.20);
 }
 
-html.light-mode input,
+html.light-mode input:not([type="checkbox"]),
 html.light-mode textarea,
 html.light-mode select {
   background: #FFFFFF !important;
@@ -138,7 +138,28 @@ html.light-mode select {
   border-color: #EDEEF1 !important;
 }
 
-html.light-mode input:focus,
+/* ── Light Mode Checkbox Styling ── */
+html.light-mode input[type="checkbox"] {
+  background: #FFFFFF !important;
+  border: 1.5px solid #CBD5E1 !important;
+}
+
+html.light-mode input[type="checkbox"]:hover {
+  border-color: #2563EB !important;
+  background: #F8FAFC !important;
+}
+
+html.light-mode input[type="checkbox"]:checked {
+  background: #2563EB !important;
+  border-color: #2563EB !important;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3) !important;
+}
+
+html.light-mode input[type="checkbox"]:checked::after {
+  border-color: #FFFFFF !important;
+}
+
+html.light-mode input:not([type="checkbox"]):focus,
 html.light-mode textarea:focus,
 html.light-mode select:focus {
   border-color: #2563EB !important;

@@ -87,6 +87,7 @@
     border-radius: 8px;
     overflow: hidden;
     transition: border-color 0.2s;
+    height: 100%;
   }
 
   .code-editor-wrap:focus-within {
@@ -96,10 +97,75 @@
 
   :global(.cm-editor) {
     background: var(--color-bg-surface) !important;
+    color: var(--color-text-primary) !important;
+  }
+
+  :global(.cm-scroller) {
+    font-family: var(--font-mono) !important;
+  }
+
+  :global(.cm-content) {
+    color: var(--color-text-primary) !important;
+    caret-color: var(--color-accent) !important;
+  }
+
+  :global(.cm-line) {
+    color: var(--color-text-primary) !important;
   }
 
   :global(.cm-gutters) {
-    background: rgba(255,255,255,0.02) !important;
+    background: var(--color-bg-base) !important;
     border-right: 1px solid var(--color-border) !important;
+    color: var(--color-text-muted) !important;
+  }
+
+  :global(.cm-gutterElement) {
+    color: var(--color-text-muted) !important;
+  }
+
+  :global(.cm-activeLine) {
+    background: var(--color-bg-hover) !important;
+  }
+
+  :global(.cm-activeLineGutter) {
+    background: var(--color-bg-hover) !important;
+    color: var(--color-text-primary) !important;
+    font-weight: 600 !important;
+  }
+
+  /* ── Component-Level Light Mode High Contrast Overrides ── */
+  :global(html.light-mode .cm-editor) {
+    background: #FFFFFF !important;
+    color: #111827 !important;
+  }
+
+  :global(html.light-mode .cm-content),
+  :global(html.light-mode .cm-line) {
+    color: #111827 !important;
+    font-weight: 450 !important;
+  }
+
+  :global(html.light-mode .cm-gutters) {
+    background: #F8FAFB !important;
+    border-right: 1px solid #E5E7EB !important;
+    color: #4B5563 !important;
+  }
+
+  :global(html.light-mode .cm-gutterElement) {
+    color: #4B5563 !important;
+    font-weight: 500 !important;
+  }
+
+  :global(html.light-mode .cm-activeLine) {
+    background: #F3F4F6 !important;
+  }
+
+  :global(html.light-mode .cm-activeLineGutter) {
+    background: #E5E7EB !important;
+    color: #111827 !important;
+  }
+
+  :global(html.light-mode .code-editor-wrap) {
+    border-color: #E5E7EB !important;
   }
 </style>
