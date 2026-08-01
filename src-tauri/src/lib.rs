@@ -87,6 +87,12 @@ use commands::{
         get_auth_events, check_auditd_status, setup_auditd_rules,
         get_command_audit_logs, get_runtime_threats
     },
+    ssh_cert_vault::{
+        vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
+        vault_list_authorized_keys, vault_add_authorized_key, vault_remove_authorized_key,
+        vault_get_sshd_hardening, vault_list_ssl_certs,
+        vault_get_fail2ban_status, vault_unban_ip,
+    },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -349,12 +355,23 @@ pub fn run() {
             security_fix_passwd_perms,
             security_fix_shadow_perms,
             security_fix_usbguard,
-            // Audit Log & Threat Detection
+            // Audit Log
             get_auth_events,
             check_auditd_status,
             setup_auditd_rules,
             get_command_audit_logs,
             get_runtime_threats,
+            // SSH & SSL Vault
+            vault_list_ssh_keys,
+            vault_generate_ssh_key,
+            vault_delete_ssh_key,
+            vault_list_authorized_keys,
+            vault_add_authorized_key,
+            vault_remove_authorized_key,
+            vault_get_sshd_hardening,
+            vault_list_ssl_certs,
+            vault_get_fail2ban_status,
+            vault_unban_ip,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

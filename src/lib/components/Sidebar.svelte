@@ -2,7 +2,7 @@
   import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
-  import { HardDrive, Wifi, Activity, Search, LayoutDashboard } from '@lucide/svelte';
+  import { HardDrive, Wifi, Activity, Search, LayoutDashboard, KeyRound } from '@lucide/svelte';
   import { Sun, Moon, Settings } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
@@ -127,6 +127,7 @@
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
         { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
+        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, authorized access & TLS certs' },
         { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & vhosts' },
       ],
     },

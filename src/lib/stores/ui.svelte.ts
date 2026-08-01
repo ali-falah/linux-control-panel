@@ -28,6 +28,7 @@ export type TabId =
   | 'nginx-manager'
   | 'shell-env'
   | 'security-auditor'
+  | 'ssh-cert-manager'
   | 'device-manager'
   | 'network-manager'
   | 'app-manager'
@@ -39,7 +40,7 @@ class UIStore {
   recentTabs = $state<TabId[]>([]);
   /** Navigation history stack — used by PageHeader back button */
   private navHistory = $state<TabId[]>([]);
-  sidebarCollapsed = $state(false);
+  sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
   settingsModalOpen = $state(false);
@@ -63,7 +64,7 @@ class UIStore {
     isOpen: boolean;
     title: string;
     message: string;
-    onConfirm: (() => void) | null;
+    onConfirm: (() => void | Promise<void>) | null;
     danger?: boolean;
   }>({
     isOpen: false,
@@ -180,11 +181,15 @@ class UIStore {
     return id;
   }
 
+  showToast(message: string, type: ToastType = 'info', duration = 4000, actionLabel?: string, onAction?: () => void) {
+    return this.addToast(message, type, duration, actionLabel, onAction);
+  }
+
   removeToast(id: string) {
     this.toasts = this.toasts.filter((t) => t.id !== id);
   }
 
-  confirm(title: string, message: string, onConfirm: () => void, danger = false) {
+  confirm(title: string, message: string, onConfirm: () => void | Promise<void>, danger = false) {
     this.confirmDialog = { isOpen: true, title, message, onConfirm, danger };
   }
 

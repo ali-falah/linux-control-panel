@@ -1112,11 +1112,11 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(0,0,0,0.1);
+    background: var(--color-surface-elevated, rgba(0,0,0,0.1));
   }
   .search-box input {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--color-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--color-border);
     color: var(--color-text-primary);
     padding: 6px 12px;
     border-radius: 6px;
@@ -1127,6 +1127,19 @@
   }
   .search-box input:focus { border-color: var(--color-accent); }
   .toolbar-stats { font-size: 12px; color: var(--color-text-muted); }
+
+  :global(html.light-mode) .table-toolbar {
+    background: #F1F5F9;
+    border-bottom: 1px solid #E2E8F0;
+  }
+  :global(html.light-mode) .search-box input {
+    background: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    color: #1E293B;
+  }
+  :global(html.light-mode) .search-box input::placeholder {
+    color: #94A3B8;
+  }
 
   .table-scroll {
     flex: 1;

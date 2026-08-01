@@ -1119,14 +1119,15 @@
     align-items: center;
   }
 
-  /* ── Content Scroll ──────────────────────────────────────────────────────── */
+  /* ── Content Scroll Container ────────────────────────────────────────────── */
   .content-scroll {
     flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px;
+    min-height: 0;
+    overflow: hidden;
+    padding: 16px 24px 20px 24px;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 14px;
   }
 
   /* ── Scan Loading ─────────────────────────────────────────────────────────── */
@@ -1226,12 +1227,13 @@
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  /* ── Top Row ──────────────────────────────────────────────────────────────── */
+  /* ── Top Row (Fixed) ─────────────────────────────────────────────────────── */
   .top-row {
     display: grid;
-    grid-template-columns: 270px minmax(0, 1fr);
+    grid-template-columns: 360px minmax(0, 1fr);
     gap: 14px;
     align-items: start;
+    flex-shrink: 0;
   }
 
   /* ── Glass Panel ─────────────────────────────────────────────────────────── */
@@ -1422,9 +1424,9 @@
   .stat-pill.warning  { background: rgba(251,191,36,.12); color: var(--color-warning); }
   .stat-pill.good     { background: rgba(34,197,94,.12); color: var(--color-success); }
 
-  /* ── Category Grid (Reduced width by 10%) ──────────────────────────────── */
+  /* ── Category Grid ───────────────────────────────────────────────────────── */
   .category-grid-wrap {
-    max-width: 90%;
+    width: 100%;
   }
 
   .category-grid {
@@ -1528,6 +1530,9 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .findings-header {
@@ -1536,6 +1541,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
+    flex-shrink: 0;
   }
 
   .findings-header-right {
@@ -1576,11 +1582,36 @@
     border-color: rgba(239, 68, 68, 0.25);
   }
 
-  /* ── Findings List ───────────────────────────────────────────────────────── */
+  /* ── Findings List (Only this section scrolls) ────────────────────────────── */
   .findings-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .findings-list::-webkit-scrollbar {
+    width: 6px;
+  }
+  .findings-list::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px;
+  }
+  .findings-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+  }
+  .findings-list::-webkit-scrollbar-thumb:hover {
+    background: var(--color-accent);
+  }
+  :global(html.light-mode) .findings-list::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.05);
+  }
+  :global(html.light-mode) .findings-list::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.2);
   }
 
   /* ── Finding Card ────────────────────────────────────────────────────────── */
@@ -1591,6 +1622,7 @@
     border-radius: 10px;
     overflow: hidden;
     transition: all 0.18s ease;
+    flex-shrink: 0;
   }
 
   .finding-card:hover {

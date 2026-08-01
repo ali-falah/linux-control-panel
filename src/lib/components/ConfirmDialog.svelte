@@ -3,11 +3,12 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { fade, fly } from 'svelte/transition';
 
-  function handleConfirm() {
-    if (uiStore.confirmDialog.onConfirm) {
-      uiStore.confirmDialog.onConfirm();
-    }
+  async function handleConfirm() {
+    const callback = uiStore.confirmDialog.onConfirm;
     uiStore.closeConfirm();
+    if (callback) {
+      await callback();
+    }
   }
 </script>
 

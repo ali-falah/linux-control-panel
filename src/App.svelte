@@ -93,6 +93,12 @@
           {:then module}
             <module.default />
           {/await}
+        {:else if uiStore.activeTab === 'ssh-cert-manager'}
+          {#await import('./lib/modules/SshCertManager.svelte')}
+            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading SSH & SSL Vault...</div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'network-manager'}
           {#await import('./lib/modules/NetworkManager.svelte')}
             <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Network Manager...</div>
