@@ -8,6 +8,7 @@
   import KebabMenu from '../components/KebabMenu.svelte';
 
   import { tick } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
@@ -15,6 +16,7 @@
   import { AlertTriangle, Lock, Ban } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { dnfStore } from '../stores/dnfStore.svelte.ts';
 
   // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,22 +48,68 @@
   type Tab = 'updates' | 'history' | 'packages' | 'maintenance' | 'logs';
   let activeTab = $state<Tab>('updates');
 
+  // ─── Date Formatter ─────────────────────────────────────────────────────────
+
+  function formatToLocalDate(dateStr: string): string {
+    if (!dateStr) return '—';
+    let iso = dateStr.trim();
+    if (!iso.includes('T')) {
+      iso = iso.replace(' ', 'T');
+    }
+    if (!iso.endsWith('Z') && !iso.includes('+')) {
+      iso += 'Z';
+    }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return dateStr;
+
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const year = d.getFullYear();
+    const month = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    let hoursNum = d.getHours();
+    const ampm = hoursNum >= 12 ? 'PM' : 'AM';
+    hoursNum = hoursNum % 12 || 12;
+    const hours = pad(hoursNum);
+    const mins = pad(d.getMinutes());
+    const secs = pad(d.getSeconds());
+    return `${year}-${month}-${day} ${hours}:${mins}:${secs} ${ampm}`;
+  }
+
   // ─── DNF System Logs ─────────────────────────────────────────────────────────
 
   let dnfLogContent = $state('');
   let loadingLog = $state(false);
+  let logPageSize = $state(100);
+  let logCurrentPage = $state(1);
+
+  let logLines = $derived(dnfLogContent ? dnfLogContent.split('\n') : []);
+  let totalLogPages = $derived(Math.max(1, Math.ceil(logLines.length / logPageSize)));
+
+  let paginatedLogContent = $derived(() => {
+    if (logLines.length === 0) return 'Loading or no logs found...';
+    const start = (logCurrentPage - 1) * logPageSize;
+    const end = start + logPageSize;
+    return logLines.slice(start, end).join('\n');
+  });
+
+  function setLogPage(p: number) {
+    if (p < 1) logCurrentPage = 1;
+    else if (p > totalLogPages) logCurrentPage = totalLogPages;
+    else logCurrentPage = p;
+  }
 
   async function loadDnfLog() {
     loadingLog = true;
     dnfLogContent = '';
+    logCurrentPage = 1;
     statusStore.setBusy('Loading DNF log…');
     try {
       dnfLogContent = await invoke('dnf_read_log');
-      statusStore.setLastCommand('cat /var/log/dnf.log', 0, true);
+      statusStore.setLastCommand('cat /var/log/dnf5.log', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load DNF log: ${e}`, 'error');
       dnfLogContent = `Error: ${e}`;
-      statusStore.setLastCommand('cat /var/log/dnf.log', 1, false);
+      statusStore.setLastCommand('cat /var/log/dnf5.log', 1, false);
     } finally {
       loadingLog = false;
       statusStore.clearBusy();
@@ -75,28 +123,12 @@
   // ─── Updates State ───────────────────────────────────────────────────────────
 
   let updates = $state<DnfUpdateEntry[]>([]);
-  let selectedUpdates = $state<Set<string>>(new Set());
+  let selectedUpdates = new SvelteSet<string>();
   let loadingUpdates = $state(false);
-
-  // Terminal output — the full accumulated string
-  let upgradeOutput = $state('');
-  let isUpgrading = $state(false);
-  let upgradeFinished = $state(false);
-  let upgradeSuccess = $state(false);
-
-  let pendingCr = $state(false);
-  let unlistenOutput: UnlistenFn | null = null;
-  let unlistenFinished: UnlistenFn | null = null;
-
-  // Hang detector
-  let lastOutputTime = $state(0);
-  let hangWarning = $state(false);
-  let hangCheckInterval: ReturnType<typeof setInterval> | null = null;
-  const HANG_THRESHOLD_MS = 60_000; // 60 seconds
 
   /** Last 40 lines of upgradeOutput — what is shown in the non-scrollable terminal */
   let terminalLines = $derived(() => {
-    const lines = upgradeOutput.split('\n');
+    const lines = dnfStore.upgradeOutput.split('\n');
     return lines.slice(Math.max(0, lines.length - 40)).join('\n');
   });
 
@@ -137,18 +169,27 @@
 
   function toggleSelectAll(e: Event) {
     const checked = (e.target as HTMLInputElement).checked;
-    selectedUpdates = checked ? new Set(updates.map(u => u.package)) : new Set();
+    if (checked) {
+      for (const u of updates) {
+        selectedUpdates.add(u.package);
+      }
+    } else {
+      selectedUpdates.clear();
+    }
   }
 
   function toggleUpdateSelection(pkg: string) {
-    if (selectedUpdates.has(pkg)) selectedUpdates.delete(pkg);
-    else selectedUpdates.add(pkg);
-    selectedUpdates = new Set(selectedUpdates);
+    if (selectedUpdates.has(pkg)) {
+      selectedUpdates.delete(pkg);
+    } else {
+      selectedUpdates.add(pkg);
+    }
   }
 
   // ─── Check Updates ─────────────────────────────────────────────────────────
 
   async function checkUpdates() {
+    dnfStore.resetUpgradeView();
     loadingUpdates = true;
     statusStore.setBusy('Checking for updates…');
     try {
@@ -164,116 +205,11 @@
     }
   }
 
-  // ─── Cancel Upgrade ─────────────────────────────────────────────────────────
-
-  async function cancelUpgrade() {
-    try {
-      await invoke('dnf_cancel_upgrade');
-      upgradeOutput += '\n⚠ Upgrade cancelled by user.\n';
-      uiStore.addToast('Upgrade cancellation signal sent.', 'warning');
-    } catch (e) {
-      uiStore.addToast(`Could not cancel: ${e}`, 'error');
-    }
-  }
-
-  // ─── Start Upgrade ───────────────────────────────────────────────────────────
-
   async function startUpgrade() {
     if (selectedUpdates.size === 0) return;
-    const pkgs = Array.from(selectedUpdates);
-
-    isUpgrading = true;
-    upgradeFinished = false;
-    upgradeSuccess = false;
-    upgradeOutput = 'Starting upgrade…\n';
-    pendingCr = false;
-    hangWarning = false;
-    lastOutputTime = Date.now();
-    statusStore.setBusy('Upgrading packages…');
-
-    // Start hang detector
-    hangCheckInterval = setInterval(() => {
-      if (isUpgrading && Date.now() - lastOutputTime > HANG_THRESHOLD_MS) {
-        hangWarning = true;
-      }
-    }, 5_000);
-
-    try {
-      unlistenOutput = await listen<string>('dnf-upgrade-output', async (event) => {
-        let chunk = event.payload;
-        lastOutputTime = Date.now();
-        hangWarning = false;
-
-        // Strip ANSI escape codes
-        chunk = chunk.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
-
-        for (let i = 0; i < chunk.length; i++) {
-          let c = chunk[i];
-          if (pendingCr) {
-            pendingCr = false;
-            if (c === '\n') {
-              upgradeOutput += '\n';
-              continue;
-            } else {
-              const lastNewline = upgradeOutput.lastIndexOf('\n');
-              upgradeOutput = lastNewline !== -1
-                ? upgradeOutput.substring(0, lastNewline + 1)
-                : '';
-            }
-          }
-          if (c === '\r') { pendingCr = true; }
-          else if (c === '\b') {
-            if (upgradeOutput.length > 0 && upgradeOutput[upgradeOutput.length - 1] !== '\n') {
-              upgradeOutput = upgradeOutput.slice(0, -1);
-            }
-          } else {
-            upgradeOutput += c;
-          }
-        }
-        await tick();
-      });
-
-      unlistenFinished = await listen<boolean>('dnf-upgrade-finished', (event) => {
-        isUpgrading = false;
-        upgradeFinished = true;
-        upgradeSuccess = event.payload;
-        hangWarning = false;
-        if (hangCheckInterval) { clearInterval(hangCheckInterval); hangCheckInterval = null; }
-        statusStore.clearBusy();
-        if (event.payload) {
-          uiStore.addToast('Upgrade completed successfully', 'success');
-          statusStore.setLastCommand('dnf upgrade -y', 0, true);
-          selectedUpdates = new Set();
-          checkUpdates();
-        } else {
-          uiStore.addToast('Upgrade failed — check terminal output', 'error');
-          statusStore.setLastCommand('dnf upgrade -y', 1, false);
-        }
-        if (unlistenOutput) unlistenOutput();
-        if (unlistenFinished) unlistenFinished();
-      });
-
-      await invoke('dnf_run_upgrade', { packages: pkgs });
-    } catch (e) {
-      const msg = String(e);
-      uiStore.addToast(msg, 'error');
-      upgradeOutput += `\n\n✗ Error: ${msg}\n`;
-      isUpgrading = false;
-      upgradeFinished = true;
-      upgradeSuccess = false;
-      hangWarning = false;
-      if (hangCheckInterval) { clearInterval(hangCheckInterval); hangCheckInterval = null; }
-      statusStore.clearBusy();
-      statusStore.setLastCommand('dnf upgrade -y', 1, false);
-      if (unlistenOutput) unlistenOutput();
-      if (unlistenFinished) unlistenFinished();
-    }
-  }
-
-  function resetUpgradeView() {
-    upgradeOutput = '';
-    upgradeFinished = false;
-    upgradeSuccess = false;
+    const pkgs = Array.from(selectedUpdates).map(p => p.trim()).filter(Boolean);
+    await dnfStore.startUpgrade(pkgs);
+    selectedUpdates.clear();
   }
 
   // ─── History ─────────────────────────────────────────────────────────────────
@@ -505,8 +441,8 @@
       {:else if activeTab === 'updates'}
         <span style="font-size:13px; color:var(--color-text-secondary);">{updates.length} updates available</span>
         {#if updates.length > 0}
-          <Button variant="primary" size="sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0 || isUpgrading}>
-            <RefreshCw size={13} class={isUpgrading ? 'animate-spin-slow' : ''} />
+          <Button variant="primary" size="sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0 || dnfStore.isUpgrading}>
+            <RefreshCw size={13} class={dnfStore.isUpgrading ? 'animate-spin-slow' : ''} />
             Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
           </Button>
         {/if}
@@ -522,15 +458,28 @@
   {#if activeTab === 'updates'}
     <div class="card" style="display:flex; flex-direction:column; padding: 0; flex: 1; min-height: 0;">
 
-      {#if isUpgrading || upgradeFinished}
+      <!-- External Lock Warning Banner -->
+      {#if dnfStore.lockInfo?.locked && !dnfStore.isUpgrading}
+        <div style="padding: 12px 16px; background: rgba(245, 158, 11, 0.15); border-bottom: 1px solid rgba(245, 158, 11, 0.3); display:flex; align-items:center; justify-content:space-between;">
+          <div style="display:flex; align-items:center; gap:8px; color:var(--color-warning); font-size:13px; font-weight:600;">
+            <Lock size={15} />
+            <span>DNF is locked by process '{dnfStore.lockInfo.process_name || 'unknown'}' (PID {dnfStore.lockInfo.pid}). Another transaction is in progress.</span>
+          </div>
+          <Button variant="outline" size="sm" onclick={() => activeTab = 'maintenance'}>
+            Go to Maintenance
+          </Button>
+        </div>
+      {/if}
+
+      {#if dnfStore.isUpgrading || dnfStore.upgradeFinished}
         <!-- Terminal view (non-scrollable during upgrade) -->
         <div style="padding: 16px; display:flex; flex-direction:column; gap:12px; flex:1; min-height:0;">
           <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
             <h3 style="margin:0; font-size:15px; font-weight:600; display:flex; align-items:center; gap:8px;">
-              {#if isUpgrading}
+              {#if dnfStore.isUpgrading}
                 <RefreshCw size={15} class="animate-spin-slow" style="color:var(--color-accent)" />
                 Upgrading Packages…
-              {:else if upgradeSuccess}
+              {:else if dnfStore.upgradeSuccess}
                 <CheckCircle size={15} style="color:var(--color-success)" />
                 Upgrade Complete
               {:else}
@@ -539,12 +488,12 @@
               {/if}
             </h3>
             <div style="display:flex; align-items:center; gap:8px;">
-              {#if isUpgrading}
-                <Button variant="outline" size="sm" onclick={cancelUpgrade}>
+              {#if dnfStore.isUpgrading}
+                <Button variant="outline" size="sm" onclick={() => dnfStore.cancelUpgrade()}>
                   <Ban size={13} /> Cancel
                 </Button>
               {:else}
-                <Button variant="outline" size="sm" onclick={resetUpgradeView}>
+                <Button variant="outline" size="sm" onclick={() => { dnfStore.resetUpgradeView(); checkUpdates(); }}>
                   Back to Package List
                 </Button>
               {/if}
@@ -552,10 +501,10 @@
           </div>
 
           <!-- Hang warning banner -->
-          {#if hangWarning}
+          {#if dnfStore.hangWarning}
             <div class="hang-warning">
               <AlertTriangle size={14} />
-              <span>No output for 60+ seconds — the upgrade may be stuck on a slow repository. You can Cancel and retry, or wait.</span>
+              <span>No output for 30+ seconds — the upgrade may be stuck on a slow repository. You can Cancel and retry, or wait.</span>
             </div>
           {/if}
 
@@ -565,12 +514,12 @@
           </div>
 
           <!-- Post-upgrade: full scrollable log -->
-          {#if upgradeFinished}
+          {#if dnfStore.upgradeFinished}
             <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
               <div style="padding:8px 14px; background:rgba(0,0,0,0.2); border-bottom:1px solid var(--color-border); font-size:11px; font-weight:600; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:0.05em;">
                 Full Upgrade Log
               </div>
-              <CodeEditor value={upgradeOutput} readonly={true} height="100%" />
+              <CodeEditor value={dnfStore.upgradeOutput} readonly={true} height="100%" />
             </div>
           {/if}
         </div>
@@ -605,10 +554,13 @@
                 </thead>
                 <tbody>
                   {#each updates as pkg}
-                    <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;">
-                      <td style="text-align:center;">
-                        <input type="checkbox" checked={selectedUpdates.has(pkg.package)}
-                          onclick={(e) => { e.stopPropagation(); toggleUpdateSelection(pkg.package); }} />
+                    <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;" class:row-selected={selectedUpdates.has(pkg.package)}>
+                      <td style="text-align:center;" onclick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedUpdates.has(pkg.package)}
+                          onchange={() => toggleUpdateSelection(pkg.package)}
+                        />
                       </td>
                       <td style="font-weight:500;">{pkg.package}</td>
                       <td style="font-family:var(--font-mono); font-size:12px;">{pkg.version}</td>
@@ -661,7 +613,7 @@
                   <td><div style="font-weight:500; font-family:var(--font-mono); font-size:12px;">{entry.command || '—'}</div></td>
                   <td>
                     <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--color-text-secondary);">
-                      <Calendar size={12} /> {entry.date}
+                      <Calendar size={12} /> {formatToLocalDate(entry.date)}
                     </div>
                   </td>
                   <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Unknown'}</span></td>
@@ -806,15 +758,105 @@
 
   <!-- ── DNF Logs Tab ───────────────────────────────────────────────────────── -->
   {:else if activeTab === 'logs'}
-    <div class="card" style="display:flex; flex-direction:column; flex:1; min-height:0; padding:0; border:none; background:transparent;">
+    <div class="card" style="display:flex; flex-direction:column; flex:1; min-height:0; padding:0; border:none; background:transparent; gap:12px;">
       <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden;">
-        <CodeEditor value={dnfLogContent || 'Loading...'} readonly={true} height="100%" />
+        <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
       </div>
+
+      <!-- Pagination Toolbar -->
+      {#if logLines.length > 0}
+        <div class="pagination-bar">
+          <div class="pagination-info">
+            Showing {(logCurrentPage - 1) * logPageSize + 1}–{Math.min(logCurrentPage * logPageSize, logLines.length)} of {logLines.length.toLocaleString()} log lines
+          </div>
+
+          <div class="pagination-controls">
+            <Button variant="outline" size="sm" onclick={() => setLogPage(1)} disabled={logCurrentPage === 1}>
+              &laquo; First
+            </Button>
+            <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage - 1)} disabled={logCurrentPage === 1}>
+              &lsaquo; Prev
+            </Button>
+
+            <span class="pagination-page-indicator">
+              Page <strong>{logCurrentPage}</strong> of <strong>{totalLogPages}</strong>
+            </span>
+
+            <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage + 1)} disabled={logCurrentPage === totalLogPages}>
+              Next &rsaquo;
+            </Button>
+            <Button variant="outline" size="sm" onclick={() => setLogPage(totalLogPages)} disabled={logCurrentPage === totalLogPages}>
+              Last &raquo;
+            </Button>
+
+            <select
+              value={logPageSize}
+              onchange={(e) => { logPageSize = parseInt((e.target as HTMLSelectElement).value); logCurrentPage = 1; }}
+              class="pagination-size-select"
+            >
+              <option value={50}>50 / page</option>
+              <option value={100}>100 / page</option>
+              <option value={200}>200 / page</option>
+              <option value={500}>500 / page</option>
+            </select>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
 
 <style>
+  /* ── Pagination Bar ─────────────────────────────────────────────────── */
+  .pagination-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-card);
+    flex-shrink: 0;
+  }
+
+  :global(html.light-mode) .pagination-bar {
+    background: #FFFFFF;
+    border-color: #E2E8F0;
+  }
+
+  .pagination-info {
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .pagination-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .pagination-page-indicator {
+    font-size: 12px;
+    padding: 0 6px;
+    color: var(--color-text-primary);
+  }
+
+  .pagination-size-select {
+    background: var(--color-bg-input, rgba(0,0,0,0.2));
+    border: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  :global(html.light-mode) .pagination-size-select {
+    background: #F8FAFC;
+    border-color: #CBD5E1;
+    color: #0F172A;
+  }
+
   /* ── Non-scrollable upgrade terminal ─────────────────────────────────── */
   .upgrade-terminal {
     background: #0d0f14;

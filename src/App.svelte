@@ -16,11 +16,16 @@
   import CronManager from './lib/modules/CronManager.svelte';
   import EnvManager from './lib/modules/EnvManager.svelte';
 
+  import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
+
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
+  import { dnfStore } from './lib/stores/dnfStore.svelte.ts';
 
   onMount(() => {
     uiStore.initTheme();
+    dnfStore.initGlobalListeners();
+    dnfStore.checkLockStatus();
   });
 </script>
 
@@ -127,6 +132,7 @@
 <ToastContainer />
 <ConfirmDialog />
 <SettingsModal />
+<DnfGlobalUpgradeWidget />
 
 <style>
   .app-shell {

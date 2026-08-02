@@ -214,9 +214,63 @@ pub async fn dnf_makecache_cmd() -> Result<String, String> {
         + &String::from_utf8_lossy(&output.stderr))
 }
 
+fn format_log_timestamp(raw: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%z") {
+        let local_dt: chrono::DateTime<chrono::Local> = chrono::DateTime::from(dt);
+        return local_dt.format("%Y-%m-%d %I:%M:%S %p").to_string();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_str(&format!("{raw}+0000"), "%Y-%m-%dT%H:%M:%S%z") {
+        let local_dt: chrono::DateTime<chrono::Local> = chrono::DateTime::from(dt);
+        return local_dt.format("%Y-%m-%d %I:%M:%S %p").to_string();
+    }
+    raw.replace('T', " ")
+}
+
 #[tauri::command]
 pub fn dnf_read_log() -> Result<String, String> {
-    std::fs::read_to_string("/var/log/dnf.log").map_err(|e| e.to_string())
+    let log_paths = [
+        "/var/log/dnf5.log",
+        "/var/log/dnf.log",
+        "/var/log/dnf.rpm.log",
+    ];
+
+    let mut found_path = None;
+    for path in &log_paths {
+        if std::path::Path::new(path).exists() {
+            found_path = Some(*path);
+            break;
+        }
+    }
+
+    let path = match found_path {
+        Some(p) => p,
+        None => return Err("No DNF log file found in /var/log/".to_string()),
+    };
+
+    let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read {path}: {e}"))?;
+
+    let iso_re = regex::Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{4}|Z)?)(.*)$").unwrap();
+
+    let mut formatted_lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(caps) = iso_re.captures(trimmed) {
+            let raw_ts = caps.get(1).unwrap().as_str();
+            let rest = caps.get(2).unwrap().as_str();
+            let human_ts = format_log_timestamp(raw_ts);
+            formatted_lines.push(format!("[{human_ts}]{rest}"));
+        } else {
+            formatted_lines.push(trimmed.to_string());
+        }
+    }
+
+    // Reverse line order so newest entries appear at the top
+    formatted_lines.reverse();
+
+    Ok(formatted_lines.join("\n"))
 }
 
 // ─── Check Updates ────────────────────────────────────────────────────────────
@@ -457,14 +511,19 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     let mut cmd = tokio::process::Command::new("sudo");
     cmd.arg("-S")
        .arg("--prompt=")
-       .arg("python3")
-       .arg("-c")
-       .arg("import pty; import sys; pty.spawn(sys.argv[1:])")
        .arg("dnf")
        .arg("upgrade")
-       .arg("-y")
-       .arg("--setopt=timeout=120")   // network timeout guard
-       .args(&packages);
+       .arg("-y");
+
+    // Put package names BEFORE flags so `dnf history list` displays
+    // exact package names instead of truncating flags in UI output
+    if !packages.is_empty() {
+        cmd.args(&packages);
+    }
+
+    cmd.arg("--allowerasing")
+       .arg("--nogpgcheck")
+       .arg("--setopt=timeout=120");
 
     cmd.stdin(Stdio::piped())
        .stdout(Stdio::piped())
