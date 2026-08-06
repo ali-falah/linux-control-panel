@@ -8,10 +8,21 @@
   import Select from '../components/ui/Select.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus, Network } from '@lucide/svelte';
+  import { ShieldAlert, Shield, ShieldCheck, Power, RefreshCw, Trash2, Plus, Network, Sparkles } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+
+  let aiPromptInput = $state('');
+  let showAiPromptBox = $state(false);
+
+  function triggerAiRuleGen() {
+    if (!aiPromptInput.trim()) return;
+    aiStore.generateFirewallRule(aiPromptInput);
+    showAiPromptBox = false;
+    aiPromptInput = '';
+  }
 
   interface FirewallState {
     is_running: boolean;
@@ -277,6 +288,11 @@
 
 <div class="module-page">
   <PageHeader title="Firewall Manager" subtitle="Manage firewalld zones, open ports, and allowed services" icon={Shield}>
+    {#if aiStore.enabled}
+      <Button variant="outline" size="sm" onclick={() => showAiPromptBox = !showAiPromptBox} title="Generate firewalld rule with AI">
+        <Sparkles size={14} style="color:var(--color-accent);" /> AI Rule Generator
+      </Button>
+    {/if}
     <Button variant="ghost" class="" onclick={loadState} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
@@ -289,6 +305,29 @@
       </Button>
     {/if}
   </PageHeader>
+
+  {#if showAiPromptBox}
+    <div style="margin: 0 0 16px 0; padding: 14px 16px; background: rgba(0,218,243,0.06); border: 1px solid rgba(0,218,243,0.2); border-radius: 10px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <span style="font-size: 13px; font-weight: 600; color: var(--color-text-primary); display: flex; align-items: center; gap: 6px;">
+          <Sparkles size={15} style="color: var(--color-accent);" /> AI Firewall Rule Generator
+        </span>
+        <button type="button" onclick={() => showAiPromptBox = false} style="background:none; border:none; color:var(--color-text-muted); cursor:pointer; font-size:12px;">Cancel</button>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <input
+          type="text"
+          bind:value={aiPromptInput}
+          placeholder="e.g. Block port 8080 from public except IP 192.168.1.50..."
+          onkeydown={(e) => { if (e.key === 'Enter') triggerAiRuleGen(); }}
+          style="flex: 1; padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-primary); font-size: 12.5px;"
+        />
+        <Button variant="primary" size="sm" onclick={triggerAiRuleGen} disabled={!aiPromptInput.trim()}>
+          Generate Rule
+        </Button>
+      </div>
+    </div>
+  {/if}
 
   {#if loading && !state}
     <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">

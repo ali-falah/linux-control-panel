@@ -93,6 +93,13 @@ use commands::{
         vault_get_sshd_hardening, vault_list_ssl_certs,
         vault_get_fail2ban_status, vault_unban_ip,
     },
+    ai_advisor::{
+        ai_check_ollama_status, ai_explain_security_finding,
+        ai_load_settings, ai_save_settings,
+        ai_diagnose_log_error, ai_explain_dnf_conflict,
+        ai_generate_nginx_rule, ai_generate_firewall_rule,
+        ai_test_cloud_connection,
+    },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -372,6 +379,16 @@ pub fn run() {
             vault_list_ssl_certs,
             vault_get_fail2ban_status,
             vault_unban_ip,
+            // AI Advisor & Task Engine
+            ai_check_ollama_status,
+            ai_explain_security_finding,
+            ai_load_settings,
+            ai_save_settings,
+            ai_diagnose_log_error,
+            ai_explain_dnf_conflict,
+            ai_generate_nginx_rule,
+            ai_generate_firewall_rule,
+            ai_test_cloud_connection,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

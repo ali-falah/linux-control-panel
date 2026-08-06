@@ -17,6 +17,7 @@
   import EnvManager from './lib/modules/EnvManager.svelte';
 
   import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
+  import AiUniversalModal from './lib/components/AiUniversalModal.svelte';
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
@@ -133,6 +134,7 @@
 <ConfirmDialog />
 <SettingsModal />
 <DnfGlobalUpgradeWidget />
+<AiUniversalModal />
 
 <style>
   .app-shell {

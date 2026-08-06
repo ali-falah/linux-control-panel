@@ -13,10 +13,11 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
-  import { AlertTriangle, Lock, Ban } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban, Sparkles } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
 
   // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -493,6 +494,11 @@
                   <Ban size={13} /> Cancel
                 </Button>
               {:else}
+                {#if aiStore.enabled}
+                  <Button variant="outline" size="sm" onclick={() => aiStore.explainDnfConflict(terminalLines())} title="Analyze upgrade errors with AI">
+                    <Sparkles size={13} style="color:var(--color-accent);" /> AI Explain Conflict
+                  </Button>
+                {/if}
                 <Button variant="outline" size="sm" onclick={() => { dnfStore.resetUpgradeView(); checkUpdates(); }}>
                   Back to Package List
                 </Button>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, AlertTriangle } from '@lucide/svelte';
+  import { FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, AlertTriangle, Sparkles } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/ui/Select.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
@@ -11,6 +11,7 @@
   import DatePicker from '../components/ui/DatePicker.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
 
   let logs = $state<any[]>([]);
   let isLoading = $state(false);
@@ -599,6 +600,7 @@
               <th style="padding: 8px 12px; font-weight: 600;">Time</th>
               <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
               <th style="padding: 8px 12px; font-weight: 600;">Message</th>
+              <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -613,6 +615,19 @@
                   {@html highlight(log.MESSAGE, searchQuery)}
                   {#if (log.count ?? 1) > 1}
                     <span class="repeat-badge">×{log.count}</span>
+                  {/if}
+                </td>
+                <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
+                  {#if aiStore.enabled}
+                    <button
+                      type="button"
+                      class="btn btn-outline btn-xs"
+                      onclick={() => aiStore.diagnoseLogError(log.MESSAGE, unit)}
+                      title="Diagnose log message with AI"
+                      style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px;"
+                    >
+                      <Sparkles size={11} style="color:var(--color-accent);" /> AI Diagnose
+                    </button>
                   {/if}
                 </td>
               </tr>

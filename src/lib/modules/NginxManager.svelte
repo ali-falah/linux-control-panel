@@ -16,11 +16,22 @@
   import { Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle } from '@lucide/svelte';
   import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download } from '@lucide/svelte';
   import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2 } from '@lucide/svelte';
-  import { TerminalSquare, Filter, Search } from '@lucide/svelte';
+  import { TerminalSquare, Filter, Search, Sparkles, Bot } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+
+  let aiNginxPrompt = $state('');
+  let showAiNginxPromptBox = $state(false);
+
+  function triggerAiNginxGen() {
+    if (!aiNginxPrompt.trim()) return;
+    aiStore.generateNginxRule(aiNginxPrompt);
+    showAiNginxPromptBox = false;
+    aiNginxPrompt = '';
+  }
 
   // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -776,7 +787,36 @@
     title="Nginx Manager" 
     subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
     icon={Server} 
-  />
+  >
+    {#if aiStore.enabled && installInfo?.installed}
+      <Button variant="outline" size="sm" onclick={() => showAiNginxPromptBox = !showAiNginxPromptBox} title="Generate NGINX configuration block with AI">
+        <Sparkles size={14} style="color:var(--color-accent);" /> AI Config Generator
+      </Button>
+    {/if}
+  </PageHeader>
+
+  {#if showAiNginxPromptBox}
+    <div style="margin: 0 0 16px 0; padding: 14px 16px; background: rgba(0,218,243,0.06); border: 1px solid rgba(0,218,243,0.2); border-radius: 10px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <span style="font-size: 13px; font-weight: 600; color: var(--color-text-primary); display: flex; align-items: center; gap: 6px;">
+          <Sparkles size={15} style="color: var(--color-accent);" /> AI NGINX Server Block Generator
+        </span>
+        <button type="button" onclick={() => showAiNginxPromptBox = false} style="background:none; border:none; color:var(--color-text-muted); cursor:pointer; font-size:12px;">Cancel</button>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <input
+          type="text"
+          bind:value={aiNginxPrompt}
+          placeholder="e.g. Create a reverse proxy for Node.js app on port 3000 with SSL redirect for example.com..."
+          onkeydown={(e) => { if (e.key === 'Enter') triggerAiNginxGen(); }}
+          style="flex: 1; padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-primary); font-size: 12.5px;"
+        />
+        <Button variant="primary" size="sm" onclick={triggerAiNginxGen} disabled={!aiNginxPrompt.trim()}>
+          Generate Config
+        </Button>
+      </div>
+    </div>
+  {/if}
 
   {#if loading}
     <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">

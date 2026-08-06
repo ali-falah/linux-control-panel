@@ -13,8 +13,10 @@
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
     Server, Cpu, User, FolderLock, Network, Settings,
-    ExternalLink, RotateCcw, FolderOpen, ChevronDown
+    ExternalLink, RotateCcw, FolderOpen, ChevronDown, Sparkles
   } from '@lucide/svelte';
+  import AiSecurityAdvisorModal from '../components/AiSecurityAdvisorModal.svelte';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
 
   // ── Types ──────────────────────────────────────────────────────────────────
   interface SecurityFinding {
@@ -697,6 +699,22 @@
       uiStore.addToast(`Failed to open reference: ${e}`, 'error');
     }
   }
+
+  function triggerAiAdvisor(finding: SecurityFinding) {
+    aiStore.explainFinding({
+      id: finding.id,
+      title: finding.title,
+      severity: finding.severity,
+      category: finding.category,
+      description: finding.description,
+      current_value: finding.countermeasure || '',
+      recommendation: finding.countermeasure || '',
+    });
+  }
+
+  onMount(() => {
+    aiStore.checkOllamaStatus();
+  });
 </script>
 
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
@@ -1017,6 +1035,18 @@
                   {/if}
 
                   <div class="finding-actions">
+                    {#if aiStore.enabled}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onclick={() => triggerAiAdvisor(finding)}
+                        title="Analyze finding & generate remediation command with Ollama AI"
+                      >
+                        <Sparkles size={13} style="color:var(--color-accent);" />
+                        AI Advisor
+                      </Button>
+                    {/if}
+
                     {#if finding.has_auto_fix}
                       {#if !finding.is_resolved}
                         <Button
@@ -1065,6 +1095,8 @@
     {/if}
   </div>
 </div>
+
+<AiSecurityAdvisorModal />
 
 <!-- ── Styles ──────────────────────────────────────────────────────────────── -->
 <style>
