@@ -600,7 +600,9 @@
               <th style="padding: 8px 12px; font-weight: 600;">Time</th>
               <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
               <th style="padding: 8px 12px; font-weight: 600;">Message</th>
-              <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Action</th>
+              {#if aiStore.enabled}
+                <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Action</th>
+              {/if}
             </tr>
           </thead>
           <tbody>
@@ -608,7 +610,7 @@
               {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
               <tr class="log-row {getPriorityClass(log.PRIORITY)}">
                 <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
-                <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; color: {getPriorityColor(log.PRIORITY)}; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                   {@html highlight(unit, searchQuery)}
                 </td>
                 <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
@@ -617,8 +619,8 @@
                     <span class="repeat-badge">×{log.count}</span>
                   {/if}
                 </td>
-                <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
-                  {#if aiStore.enabled}
+                {#if aiStore.enabled}
+                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
                     <button
                       type="button"
                       class="btn btn-outline btn-xs"
@@ -628,8 +630,8 @@
                     >
                       <Sparkles size={11} style="color:var(--color-accent);" /> AI Diagnose
                     </button>
-                  {/if}
-                </td>
+                  </td>
+                {/if}
               </tr>
             {/each}
           </tbody>
@@ -1183,15 +1185,26 @@
     word-break: break-word;
   }
 
-  /* Priority Colors */
+  /* Priority Colors (Dark Mode Default) */
   .log-error .col-msg  { color: #ff7b72; font-weight: 500; }
-  .log-error .col-unit { color: #ff7b72; }
-  .log-warn  .col-msg  { color: #d29922; }
-  .log-warn  .col-unit { color: #d29922; }
-  .log-info  .col-msg  { color: #58a6ff; }
-  .log-info  .col-unit { color: #58a6ff; }
-  .log-debug .col-msg  { color: #484f58; }
-  .log-debug .col-unit { color: #484f58; }
+  .log-error .col-unit { color: #f87171 !important; }
+  .log-warn  .col-msg  { color: #fbbf24; }
+  .log-warn  .col-unit { color: #f59e0b !important; }
+  .log-info  .col-msg  { color: #38bdf8; }
+  .log-info  .col-unit { color: #38bdf8 !important; }
+  .log-debug .col-msg  { color: #94a3b8; }
+  .log-debug .col-unit { color: #94a3b8 !important; }
+
+  /* Priority Colors for Light Mode */
+  :global(html.light-mode) .log-error .col-unit { color: #dc2626 !important; }
+  :global(html.light-mode) .log-warn  .col-unit { color: #d97706 !important; }
+  :global(html.light-mode) .log-info  .col-unit { color: #0284c7 !important; }
+  :global(html.light-mode) .log-debug .col-unit { color: #64748b !important; }
+
+  :global(html.light-mode) .log-error .col-msg { color: #dc2626; }
+  :global(html.light-mode) .log-warn  .col-msg { color: #b45309; }
+  :global(html.light-mode) .log-info  .col-msg { color: #334155; }
+  :global(html.light-mode) .log-debug .col-msg { color: #64748b; }
 
   .repeat-badge {
     background: rgba(255, 255, 255, 0.1);

@@ -4,11 +4,13 @@
   interface Props extends HTMLButtonAttributes {
     checked?: boolean;
     onToggle?: (checked: boolean) => void;
+    onchange?: (checked: boolean) => void;
   }
 
   let { 
-    checked = false,
+    checked = $bindable(false),
     onToggle,
+    onchange,
     class: className = '',
     disabled = false,
     ...rest 
@@ -16,7 +18,10 @@
   
   function handleClick(e: MouseEvent) {
     if (disabled) return;
-    if (onToggle) onToggle(!checked);
+    const nextVal = !checked;
+    checked = nextVal;
+    if (onToggle) onToggle(nextVal);
+    if (onchange) onchange(nextVal);
   }
 </script>
 

@@ -273,7 +273,15 @@
         {:else if activeCategoryTab === 'ai'}
           <div class="settings-section">
             <!-- Master AI Enable Card -->
-            <div class="master-ai-card" style="padding: 16px; background: rgba(0, 218, 243, 0.06); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between;">
+            <div 
+              class="master-ai-card" 
+              onclick={() => { 
+                draftEnabled = !draftEnabled; 
+                aiStore.enabled = draftEnabled; 
+                aiStore.saveSettings(); 
+              }}
+              style="padding: 16px; background: rgba(0, 218, 243, 0.06); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; cursor: pointer;"
+            >
               <div style="display: flex; align-items: center; gap: 12px;">
                 <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(0, 218, 243, 0.12); display: flex; align-items: center; justify-content: center;">
                   <Bot size={22} style="color: var(--color-accent);" />
@@ -286,8 +294,12 @@
                 </div>
               </div>
               <Toggle
-                checked={draftEnabled}
-                onchange={() => { draftEnabled = !draftEnabled; }}
+                bind:checked={draftEnabled}
+                onToggle={(v) => { 
+                  draftEnabled = v; 
+                  aiStore.enabled = v; 
+                  aiStore.saveSettings(); 
+                }}
               />
             </div>
 

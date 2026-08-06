@@ -252,7 +252,7 @@ html.light-mode .table,
 html.light-mode th,
 html.light-mode td {
   border-color: #EDEEF1 !important;
-  color: #0F172A !important;
+  color: #0F172A;
 }
 
 html.light-mode tr:hover {
