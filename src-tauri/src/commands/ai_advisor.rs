@@ -21,7 +21,7 @@ impl Default for AiSettingsConfig {
             enabled: true,
             provider: "ollama".to_string(),
             ollama_url: "http://127.0.0.1:11434".to_string(),
-            ollama_model: "qwen2.5:1.5b".to_string(),
+            ollama_model: "llama3.2:1b".to_string(),
             cloud_provider: "gemini".to_string(),
             api_key: String::new(),
             cloud_model: "gemini-2.5-flash".to_string(),
@@ -274,7 +274,14 @@ async fn dispatch_ai_request(
         "model": model,
         "prompt": format!("{}\n\n{}", system_prompt, user_prompt),
         "stream": false,
-        "format": "json"
+        "format": "json",
+        "keep_alive": "30m",
+        "options": {
+            "num_thread": 8,
+            "num_predict": 300,
+            "num_ctx": 1536,
+            "temperature": 0.2
+        }
     });
 
     let res = client
@@ -391,13 +398,23 @@ pub async fn ai_explain_security_finding(
     finding: SecurityFindingInput,
     settings: Option<AiSettingsConfig>,
 ) -> Result<AiAdvisorResponse, String> {
-    let system_prompt = r#"You are an expert Linux System Security Specialist. Analyze the provided security audit finding for a Linux system.
-CRITICAL LANGUAGE REQUIREMENT: You MUST write your analysis strictly in clear, professional English. Do NOT output any Chinese or non-English characters.
+    let system_prompt = r#"You are an expert Fedora Linux Security Specialist. Analyze the provided security finding for a Fedora Linux system.
+
+TARGET OS: Fedora Linux (systemd, DNF, firewalld, SELinux).
+
+STRICT REMEDIATION COMMAND RULES FOR FEDORA LINUX:
+1. EXCLUSIVELY LINUX COMMANDS: Never use BSD or macOS sysctl keys like "net.inet.ip.flood". All sysctl parameters MUST be valid Linux kernel parameters starting with net.ipv4, net.ipv6, kernel., or fs.
+2. ACCURATE SSH CONFIG EDITS (/etc/ssh/sshd_config):
+   - Directives are CaseSensitive (e.g. LoginGraceTime, PermitRootLogin, MaxAuthTries, PasswordAuthentication).
+   - NEVER put a trailing slash on file paths (use "/etc/ssh/sshd_config", NOT "/etc/ssh/sshd_config/").
+   - Use correct sed syntax to set the actual target value (e.g., `sudo sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 60/' /etc/ssh/sshd_config && sudo sshd -t && sudo systemctl reload sshd`).
+3. EXECUTABLE SINGLE-LINE COMMAND: "remediation_command" MUST be a single, valid, safe bash shell command with sudo.
+4. CRITICAL LANGUAGE REQUIREMENT: You MUST write your analysis strictly in clear, professional English. Do NOT output any Chinese or non-English characters.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
   "risk_explanation": "A concise 2-3 sentence explanation in English of why this finding is dangerous and how attackers exploit it.",
-  "remediation_command": "The exact shell command (using sudo/sysctl/sed/systemctl) to fix it.",
+  "remediation_command": "The exact single-line bash command to fix it on Fedora Linux.",
   "safety_notes": "A short note in English on whether applying this fix could impact active services."
 }"#;
 
@@ -424,14 +441,20 @@ pub async fn ai_diagnose_log_error(
     service_name: Option<String>,
     settings: Option<AiSettingsConfig>,
 ) -> Result<LogDiagnosisResponse, String> {
-    let system_prompt = r#"You are an expert Linux System Administrator and Log Analyst. Analyze the provided systemd journal log or audit log error.
-CRITICAL LANGUAGE REQUIREMENT: You MUST write your diagnosis strictly in clear, professional English.
+    let system_prompt = r#"You are an expert Fedora Linux Administrator and Log Analyst. Analyze the provided systemd journal log or audit error for a Fedora Linux system.
+
+TARGET OS: Fedora Linux (systemd, DNF, firewalld, SELinux).
+
+CRITICAL CONSTRAINTS:
+1. Suggest strictly Linux/Fedora commands (systemctl, journalctl, dnf, firewall-cmd, sysctl).
+2. Never suggest BSD/macOS commands or invalid sysctl keys.
+3. CRITICAL LANGUAGE REQUIREMENT: You MUST write your diagnosis strictly in clear, professional English.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
-  "error_summary": "A concise 1-2 sentence summary of what went wrong.",
+  "error_summary": "A concise 1-2 sentence summary in English of what went wrong.",
   "root_cause": "The specific root cause (e.g. missing dependency, port conflict, permission denied, invalid configuration).",
-  "suggested_action": "The recommended terminal command or fix step to resolve the error."
+  "suggested_action": "The recommended single-line terminal command or fix step to resolve the error on Fedora Linux."
 }"#;
 
     let target_service = service_name.unwrap_or_else(|| "System Log / Audit".to_string());
@@ -449,14 +472,19 @@ pub async fn ai_explain_dnf_conflict(
     terminal_output: String,
     settings: Option<AiSettingsConfig>,
 ) -> Result<DnfConflictResponse, String> {
-    let system_prompt = r#"You are a Red Hat / Fedora DNF Package Manager Specialist. Analyze the provided DNF transaction failure log.
-CRITICAL LANGUAGE REQUIREMENT: You MUST write your explanation strictly in clear, professional English.
+    let system_prompt = r#"You are a Red Hat / Fedora DNF Package Manager Specialist. Analyze the provided DNF transaction failure log on Fedora Linux.
+
+TARGET OS: Fedora Linux (DNF5/DNF, RPM, rpm-ostree).
+
+CRITICAL CONSTRAINTS:
+1. Provide exact DNF/RPM commands (e.g. `sudo dnf clean all`, `sudo dnf upgrade --allowerasing`, `sudo rpm --import <key>`).
+2. CRITICAL LANGUAGE REQUIREMENT: You MUST write your explanation strictly in clear, professional English.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
   "conflict_summary": "A clear explanation of why DNF failed (e.g. broken GPG key, repository lock, package version conflict, or missing dependency).",
-  "remediation_command": "The exact shell command (e.g. sudo dnf clean all, sudo dnf upgrade --allowerasing, or rpm key import) to fix it.",
-  "explanation": "Brief additional context or advice for the user."
+  "remediation_command": "The exact single-line shell command to fix it on Fedora Linux.",
+  "explanation": "Brief additional context or advice for the user in English."
 }"#;
 
     let user_prompt = format!("DNF Terminal Output:\n{}", terminal_output);
@@ -473,13 +501,18 @@ pub async fn ai_generate_nginx_rule(
     prompt: String,
     settings: Option<AiSettingsConfig>,
 ) -> Result<NginxRuleResponse, String> {
-    let system_prompt = r#"You are an expert NGINX Web Server Specialist. Generate a valid, production-ready NGINX server configuration block based on the user's natural language request.
-CRITICAL LANGUAGE REQUIREMENT: All explanations MUST be strictly in clear English.
+    let system_prompt = r#"You are an expert NGINX Web Server Specialist for Fedora Linux. Generate a valid, production-ready NGINX server configuration block based on the user's natural language request.
+
+TARGET OS: Fedora Linux (/etc/nginx/conf.d/, /etc/nginx/nginx.conf).
+
+CRITICAL CONSTRAINTS:
+1. Use standard NGINX directive syntax.
+2. CRITICAL LANGUAGE REQUIREMENT: All explanations MUST be strictly in clear English.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
   "generated_config": "The complete NGINX server block configuration string.",
-  "explanation": "A short summary of what this configuration does.",
+  "explanation": "A short summary in English of what this configuration does.",
   "server_name": "The extracted domain or server_name (e.g. example.com or localhost).",
   "port": 80
 }"#;
@@ -498,14 +531,19 @@ pub async fn ai_generate_firewall_rule(
     prompt: String,
     settings: Option<AiSettingsConfig>,
 ) -> Result<FirewallRuleResponse, String> {
-    let system_prompt = r#"You are a Linux Network & Firewalld Specialist. Generate a valid firewalld rule or rich rule based on the user's natural language request.
-CRITICAL LANGUAGE REQUIREMENT: All explanations MUST be strictly in clear English.
+    let system_prompt = r#"You are a Fedora Linux Network & Firewalld Specialist. Generate a valid firewalld rule or rich rule based on the user's natural language request.
+
+TARGET OS & FIREWALL: Fedora Linux with firewalld (firewall-cmd).
+
+CRITICAL CONSTRAINTS:
+1. Always use `firewall-cmd` syntax (e.g. `sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload`).
+2. CRITICAL LANGUAGE REQUIREMENT: All explanations MUST be strictly in clear English.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
-  "generated_command": "The exact firewall-cmd terminal command (e.g. sudo firewall-cmd --permanent --add-port=8080/tcp --reload).",
+  "generated_command": "The exact firewall-cmd terminal command (e.g. sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload).",
   "rich_rule": "The rich rule string if applicable (or empty string).",
-  "explanation": "A short explanation of what this rule does.",
+  "explanation": "A short explanation in English of what this rule does.",
   "zone": "The target firewalld zone (e.g. public)."
 }"#;
 

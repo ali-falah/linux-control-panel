@@ -33,6 +33,15 @@
       draftApiKey = aiStore.apiKey;
       draftCloudModel = aiStore.cloudModel;
       testStatus = null;
+      aiStore.checkOllamaStatus().then(() => {
+        if (aiStore.availableModels.length > 0) {
+          if (aiStore.availableModels.includes('llama3.2:1b') && (!draftOllamaModel || draftOllamaModel === 'qwen2.5:1.5b')) {
+            draftOllamaModel = 'llama3.2:1b';
+          } else if (!aiStore.availableModels.includes(draftOllamaModel)) {
+            draftOllamaModel = aiStore.availableModels[0];
+          }
+        }
+      });
     }
   });
 
@@ -413,18 +422,32 @@
                     </button>
                   </div>
 
-                  <div style="display: flex; flex-direction: column; gap: 4px;">
-                    <label for="ai-ollama-model-input" style="font-size: 11.5px; color: var(--color-text-muted);">
-                      Ollama Model Name (e.g. <code>qwen2.5:1.5b</code>, <code>llama3.2:1b</code>, <code>mistral:7b</code>)
-                    </label>
+                  <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <label for="ai-ollama-model-select" style="font-size: 11.5px; font-weight: 600; color: var(--color-text-primary);">
+                        Installed Ollama Model
+                      </label>
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs"
+                        onclick={() => aiStore.checkOllamaStatus()}
+                        title="Query local Ollama server for newly pulled models"
+                        style="font-size: 11px; padding: 2px 6px; display: flex; align-items: center; gap: 4px;"
+                      >
+                        <RefreshCw size={11} /> Refresh Installed Models
+                      </button>
+                    </div>
+
                     {#if aiStore.availableModels.length > 0}
                       <select
                         id="ai-ollama-model-select"
                         bind:value={draftOllamaModel}
-                        style="padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-primary); font-size: 12px;"
+                        style="padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-primary); font-size: 12px; font-weight: 500;"
                       >
                         {#each aiStore.availableModels as m}
-                          <option value={m}>{m}</option>
+                          <option value={m}>
+                            {m} {m.includes('1b') || m.includes('0.5b') ? '⚡ (Fastest CPU Model)' : ''}
+                          </option>
                         {/each}
                       </select>
                     {:else}
@@ -432,7 +455,7 @@
                         id="ai-ollama-model-input"
                         type="text"
                         bind:value={draftOllamaModel}
-                        placeholder="qwen2.5:1.5b"
+                        placeholder="llama3.2:1b"
                         style="padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 6px; color: var(--color-text-primary); font-size: 12px; font-family: var(--font-mono);"
                       />
                     {/if}

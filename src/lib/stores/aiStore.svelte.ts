@@ -60,7 +60,7 @@ export class AiStore {
   // Config state
   provider = $state<'ollama' | 'gemini' | 'openai'>('ollama');
   ollamaUrl = $state('http://127.0.0.1:11434');
-  ollamaModel = $state('qwen2.5:1.5b');
+  ollamaModel = $state('llama3.2:1b');
   cloudProvider = $state<'gemini' | 'openai'>('gemini');
   apiKey = $state('');
   cloudModel = $state('gemini-2.5-flash');
@@ -102,7 +102,7 @@ export class AiStore {
         this.enabled = cfg.enabled ?? true;
         this.provider = (cfg.provider as any) || 'ollama';
         this.ollamaUrl = cfg.ollama_url || 'http://127.0.0.1:11434';
-        this.ollamaModel = cfg.ollama_model || 'qwen2.5:1.5b';
+        this.ollamaModel = cfg.ollama_model || 'llama3.2:1b';
         this.cloudProvider = (cfg.cloud_provider as any) || 'gemini';
         this.apiKey = cfg.api_key || '';
         this.cloudModel = cfg.cloud_model || 'gemini-2.5-flash';
@@ -137,8 +137,11 @@ export class AiStore {
       const models = await invoke<string[]>('ai_check_ollama_status', { url: this.ollamaUrl });
       this.ollamaConnected = true;
       this.availableModels = models;
-      if (models.length > 0 && !models.includes(this.ollamaModel)) {
-        this.ollamaModel = models[0];
+      if (models.length > 0) {
+        if (!models.includes(this.ollamaModel)) {
+          const llamaModel = models.find(m => m.includes('llama3.2') || m.includes('llama'));
+          this.ollamaModel = llamaModel || models[0];
+        }
       }
     } catch (e) {
       this.ollamaConnected = false;
@@ -183,7 +186,11 @@ export class AiStore {
   }
 
   async diagnoseLogError(logContext: string, serviceName?: string) {
-    this.activeLogContext = logContext;
+    if (!logContext || !logContext.trim()) {
+      uiStore.addToast('Cannot diagnose an empty log message.', 'warning');
+      return;
+    }
+    this.activeLogContext = logContext.trim();
     this.activeLogService = serviceName || 'System Journal / Audit';
     this.logResult = null;
     this.analysisError = null;
@@ -192,7 +199,7 @@ export class AiStore {
 
     try {
       const res = await invoke<LogDiagnosisResponse>('ai_diagnose_log_error', {
-        logContext,
+        logContext: logContext.trim(),
         serviceName: this.activeLogService,
         settings: this.getSettingsPayload(),
       });

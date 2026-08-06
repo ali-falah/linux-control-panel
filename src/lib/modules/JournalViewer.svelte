@@ -18,7 +18,7 @@
 
   // Backend filters (re-fetch journalctl)
   let filterPriority = $state('all');
-  let timeRange = $state('3'); // Default to last 3 days
+  let timeRange = $state('1'); // Default to last 24 hours (1 day)
   let customStartDate = $state('');
   let customStartTime = $state('00:00');
   let customEndDate = $state('');
@@ -620,13 +620,15 @@
                   {/if}
                 </td>
                 {#if aiStore.enabled}
+                  {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
                   <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
                     <button
                       type="button"
                       class="btn btn-outline btn-xs"
-                      onclick={() => aiStore.diagnoseLogError(log.MESSAGE, unit)}
-                      title="Diagnose log message with AI"
-                      style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px;"
+                      disabled={!hasMsg}
+                      onclick={() => hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit)}
+                      title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
+                      style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
                     >
                       <Sparkles size={11} style="color:var(--color-accent);" /> AI Diagnose
                     </button>
