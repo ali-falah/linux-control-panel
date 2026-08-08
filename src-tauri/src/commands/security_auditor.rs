@@ -1331,8 +1331,30 @@ pub async fn security_execute_remediation_command(command: String) -> Result<Str
         return Err("Empty remediation command provided.".to_string());
     }
 
+    // Clean up command string: strip redundant 'sudo' prefixes since pkexec already executes as root
+    let cleaned_segments: Vec<String> = command
+        .split("&&")
+        .map(|segment| {
+            let s = segment.trim();
+            let stripped = if s.starts_with("sudo ") {
+                s.trim_start_matches("sudo ").trim()
+            } else {
+                s
+            };
+            // On Fedora, if semanage port -a returns non-zero because port already exists in SELinux policy,
+            // fall back to semanage port -m (modify) to prevent multi-command transaction failure
+            if stripped.contains("semanage port -a") {
+                format!("({} || {})", stripped, stripped.replace("semanage port -a", "semanage port -m"))
+            } else {
+                stripped.to_string()
+            }
+        })
+        .collect();
+
+    let clean_exec = cleaned_segments.join(" && ");
+
     let out = Command::new("pkexec")
-        .args(["bash", "-c", &command])
+        .args(["bash", "-c", &clean_exec])
         .output()
         .await
         .map_err(|e| format!("Failed to execute remediation command: {}", e))?;
@@ -1347,6 +1369,14 @@ pub async fn security_execute_remediation_command(command: String) -> Result<Str
         }
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        Err(format!("Remediation error: {}", stderr.trim()))
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let combined = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("Command exited with status code: {}", out.status)
+        };
+        Err(format!("Remediation error: {}", combined))
     }
 }

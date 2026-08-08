@@ -118,8 +118,6 @@
       items: [
         { id: 'network-manager',  label: 'Advanced Network', icon: Wifi, desc: 'Interfaces, IP & DNS' },
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
-        { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
-        { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
         { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, authorized access & TLS certs' },
         { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & vhosts' },
       ],
@@ -128,8 +126,10 @@
       label: 'Security & System Logs',
       icon: Shield,
       items: [
-        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
+        { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
+        { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
         { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck, desc: 'Security policies & contexts' },
+        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
         { id: 'user-manager',    label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
       ],
     },

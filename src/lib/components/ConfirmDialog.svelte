@@ -17,14 +17,14 @@
 {#if uiStore.confirmDialog.isOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" transition:fade={{ duration: 150 }}>
+  <div class="confirm-dialog-backdrop" transition:fade={{ duration: 150 }}>
     <!-- Backdrop dismiss -->
     <div 
       class="backdrop" 
       onclick={() => uiStore.closeConfirm()}
     ></div>
     
-    <div class="modal" style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 1" transition:fly={{ y: 20, duration: 250 }}>
+    <div class="modal" style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 100001" transition:fly={{ y: 20, duration: 250 }}>
       <div class="dialog-header">
         {#if uiStore.confirmDialog.danger}
           <div class="dialog-icon danger">
@@ -55,6 +55,18 @@
 {/if}
 
 <style>
+  .confirm-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   .backdrop {
     position: absolute;
     inset: 0;
