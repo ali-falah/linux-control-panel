@@ -13,8 +13,209 @@ export interface SecurityFindingInput {
 
 export interface AiAdvisorResponse {
   risk_explanation: string;
-  remediation_command: string;
   safety_notes: string;
+}
+
+/** A pre-validated, hardcoded fix entry for a finding. Never comes from LLM output. */
+export interface HardcodedFix {
+  /** Human-readable label shown in the diff panel header */
+  label: string;
+  /** The setting/file that will be changed */
+  target: string;
+  /** The current (insecure) value shown in the red diff row */
+  current_label: string;
+  /** The proposed (secure) value shown in the green diff row */
+  proposed_label: string;
+  /** Tauri command name to invoke */
+  tauri_command: string;
+  /** Arguments to pass to the Tauri command */
+  tauri_args: Record<string, unknown>;
+}
+
+/** Hardcoded, validated fix table. Key = SecurityFinding.id.
+ *  NEVER sourced from LLM output. Only extend this by adding to the switch below. */
+const SECURITY_FIX_LOOKUP: Record<string, HardcodedFix> = {
+  ssh_root: {
+    label: 'SSH Root Login',
+    target: '/etc/ssh/sshd_config → PermitRootLogin',
+    current_label: 'PermitRootLogin yes',
+    proposed_label: 'PermitRootLogin prohibit-password',
+    tauri_command: 'security_fix_root_ssh',
+    tauri_args: { enable: true },
+  },
+  ssh_pass_auth: {
+    label: 'SSH Password Authentication',
+    target: '/etc/ssh/sshd_config → PasswordAuthentication',
+    current_label: 'PasswordAuthentication yes',
+    proposed_label: 'PasswordAuthentication no',
+    tauri_command: 'security_fix_ssh_param',
+    tauri_args: { param: 'PasswordAuthentication', value: 'no', revertValue: 'yes', enable: true },
+  },
+  ssh_max_auth: {
+    label: 'SSH MaxAuthTries',
+    target: '/etc/ssh/sshd_config → MaxAuthTries',
+    current_label: 'MaxAuthTries 6  (default)',
+    proposed_label: 'MaxAuthTries 4',
+    tauri_command: 'security_fix_ssh_param',
+    tauri_args: { param: 'MaxAuthTries', value: '4', revertValue: '6', enable: true },
+  },
+  ssh_grace: {
+    label: 'SSH LoginGraceTime',
+    target: '/etc/ssh/sshd_config → LoginGraceTime',
+    current_label: 'LoginGraceTime 120  (default)',
+    proposed_label: 'LoginGraceTime 60',
+    tauri_command: 'security_fix_ssh_param',
+    tauri_args: { param: 'LoginGraceTime', value: '60', revertValue: '120', enable: true },
+  },
+  kernel_aslr: {
+    label: 'ASLR (Address Space Layout Randomization)',
+    target: 'kernel.randomize_va_space',
+    current_label: 'kernel.randomize_va_space = 0  (disabled/partial)',
+    proposed_label: 'kernel.randomize_va_space = 2  (full randomization)',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'kernel.randomize_va_space', value: '2', revertValue: '0', enable: true },
+  },
+  kernel_syncookies: {
+    label: 'TCP SYN Cookies',
+    target: 'net.ipv4.tcp_syncookies',
+    current_label: 'net.ipv4.tcp_syncookies = 0',
+    proposed_label: 'net.ipv4.tcp_syncookies = 1',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.tcp_syncookies', value: '1', revertValue: '0', enable: true },
+  },
+  kernel_ipforward: {
+    label: 'IP Forwarding',
+    target: 'net.ipv4.ip_forward',
+    current_label: 'net.ipv4.ip_forward = 1  (enabled)',
+    proposed_label: 'net.ipv4.ip_forward = 0  (disabled)',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.ip_forward', value: '0', revertValue: '1', enable: true },
+  },
+  kernel_kptr: {
+    label: 'Kernel Pointer Restriction',
+    target: 'kernel.kptr_restrict',
+    current_label: 'kernel.kptr_restrict = 0',
+    proposed_label: 'kernel.kptr_restrict = 2',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'kernel.kptr_restrict', value: '2', revertValue: '0', enable: true },
+  },
+  kernel_dmesg: {
+    label: 'dmesg Restriction',
+    target: 'kernel.dmesg_restrict',
+    current_label: 'kernel.dmesg_restrict = 0',
+    proposed_label: 'kernel.dmesg_restrict = 1',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'kernel.dmesg_restrict', value: '1', revertValue: '0', enable: true },
+  },
+  kernel_icmp_redirect: {
+    label: 'ICMP Redirect Acceptance',
+    target: 'net.ipv4.conf.all.accept_redirects',
+    current_label: 'net.ipv4.conf.all.accept_redirects = 1',
+    proposed_label: 'net.ipv4.conf.all.accept_redirects = 0',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.conf.all.accept_redirects', value: '0', revertValue: '1', enable: true },
+  },
+  pass_policy: {
+    label: 'Password Aging Policy',
+    target: '/etc/login.defs',
+    current_label: 'PASS_MAX_DAYS unset or > 90',
+    proposed_label: 'PASS_MAX_DAYS=90, PASS_MIN_LEN=12',
+    tauri_command: 'security_fix_password_policy',
+    tauri_args: {},
+  },
+  fs_tmp_sticky: {
+    label: '/tmp Sticky Bit',
+    target: '/tmp permissions',
+    current_label: '/tmp mode = 777  (no sticky bit)',
+    proposed_label: '/tmp mode = 1777  (sticky bit set)',
+    tauri_command: 'security_fix_tmp_sticky',
+    tauri_args: { enable: true },
+  },
+  fs_coredump: {
+    label: 'SUID Core Dumps',
+    target: 'fs.suid_dumpable',
+    current_label: 'fs.suid_dumpable = 1  (dumps allowed)',
+    proposed_label: 'fs.suid_dumpable = 0  (dumps disabled)',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'fs.suid_dumpable', value: '0', revertValue: '1', enable: true },
+  },
+  fs_passwd_perms: {
+    label: '/etc/passwd Permissions',
+    target: '/etc/passwd mode',
+    current_label: '/etc/passwd  — incorrect permissions',
+    proposed_label: '/etc/passwd  — chmod 644 + chown root:root',
+    tauri_command: 'security_fix_passwd_perms',
+    tauri_args: {},
+  },
+  fs_shadow_perms: {
+    label: '/etc/shadow Permissions',
+    target: '/etc/shadow mode',
+    current_label: '/etc/shadow  — world-readable or too open',
+    proposed_label: '/etc/shadow  — chmod 000 + chown root:root',
+    tauri_command: 'security_fix_shadow_perms',
+    tauri_args: {},
+  },
+  net_src_route: {
+    label: 'Source Routing',
+    target: 'net.ipv4.conf.all.accept_source_route',
+    current_label: 'net.ipv4.conf.all.accept_source_route = 1',
+    proposed_label: 'net.ipv4.conf.all.accept_source_route = 0',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.conf.all.accept_source_route', value: '0', revertValue: '1', enable: true },
+  },
+  net_bogus_icmp: {
+    label: 'Bogus ICMP Error Responses',
+    target: 'net.ipv4.icmp_ignore_bogus_error_responses',
+    current_label: 'net.ipv4.icmp_ignore_bogus_error_responses = 0',
+    proposed_label: 'net.ipv4.icmp_ignore_bogus_error_responses = 1',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.icmp_ignore_bogus_error_responses', value: '1', revertValue: '0', enable: true },
+  },
+  net_martians: {
+    label: 'Martian Packet Logging',
+    target: 'net.ipv4.conf.all.log_martians',
+    current_label: 'net.ipv4.conf.all.log_martians = 0',
+    proposed_label: 'net.ipv4.conf.all.log_martians = 1',
+    tauri_command: 'security_fix_kernel_param',
+    tauri_args: { key: 'net.ipv4.conf.all.log_martians', value: '1', revertValue: '0', enable: true },
+  },
+  selinux: {
+    label: 'SELinux Mode',
+    target: '/etc/selinux/config → SELINUX=',
+    current_label: 'SELINUX=permissive  (or disabled)',
+    proposed_label: 'SELINUX=enforcing  (+ filesystem relabel + reboot)',
+    tauri_command: 'security_fix_selinux',
+    tauri_args: { enable: true },
+  },
+  auditd: {
+    label: 'Audit Daemon (auditd)',
+    target: 'systemd unit: auditd',
+    current_label: 'auditd — inactive / disabled',
+    proposed_label: 'auditd — enabled + running',
+    tauri_command: 'security_fix_auditd',
+    tauri_args: { enable: true },
+  },
+  time_sync: {
+    label: 'Time Synchronization',
+    target: 'systemd unit: chronyd / systemd-timesyncd',
+    current_label: 'chronyd / timesyncd — inactive',
+    proposed_label: 'chronyd — enabled + running',
+    tauri_command: 'security_fix_time_sync',
+    tauri_args: { enable: true },
+  },
+  usbguard: {
+    label: 'USBGuard',
+    target: 'systemd unit: usbguard',
+    current_label: 'usbguard — inactive',
+    proposed_label: 'usbguard — enabled + running',
+    tauri_command: 'security_fix_usbguard',
+    tauri_args: { enable: true },
+  },
+};
+
+/** Returns the hardcoded fix entry for a finding, or null if none exists. */
+export function getHardcodedFix(findingId: string): HardcodedFix | null {
+  return SECURITY_FIX_LOOKUP[findingId] ?? null;
 }
 
 export interface LogDiagnosisResponse {

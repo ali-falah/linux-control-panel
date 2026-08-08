@@ -88,7 +88,6 @@ pub struct SecurityFindingInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAdvisorResponse {
     pub risk_explanation: String,
-    pub remediation_command: String,
     pub safety_notes: String,
 }
 
@@ -458,34 +457,27 @@ pub async fn ai_explain_security_finding(
     finding: SecurityFindingInput,
     settings: Option<AiSettingsConfig>,
 ) -> Result<AiAdvisorResponse, String> {
-    let system_prompt = r#"You are an expert Fedora Linux Security Specialist. Analyze the provided security finding for a Fedora Linux system.
+    let system_prompt = r#"You are an expert Fedora Linux Security Specialist. Analyze the provided security finding for a Fedora Linux system and explain the risk to the system administrator.
 
 TARGET OS: Fedora Linux (systemd, DNF, firewalld, SELinux).
 
-STRICT REMEDIATION COMMAND RULES FOR FEDORA LINUX:
-1. EXCLUSIVELY LINUX COMMANDS: Never use BSD or macOS sysctl keys like "net.inet.ip.flood". All sysctl parameters MUST be valid Linux kernel parameters starting with net.ipv4, net.ipv6, kernel., or fs.
-2. ACCURATE SSH CONFIG EDITS (/etc/ssh/sshd_config):
-   - Directives are CaseSensitive (e.g. LoginGraceTime, PermitRootLogin, MaxAuthTries, PasswordAuthentication).
-   - NEVER put a trailing slash on file paths (use "/etc/ssh/sshd_config", NOT "/etc/ssh/sshd_config/").
-   - Use correct sed syntax to set the actual target value (e.g., `sudo sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 60/' /etc/ssh/sshd_config && sudo sshd -t && sudo systemctl reload sshd`).
-3. EXECUTABLE SINGLE-LINE COMMAND: "remediation_command" MUST be a single, valid, safe bash shell command with sudo.
-4. CRITICAL LANGUAGE REQUIREMENT: You MUST write your analysis strictly in clear, professional English. Do NOT output any Chinese or non-English characters.
+Your role is EXPLANATION ONLY. Do NOT generate shell commands — the application has pre-validated fix commands for every finding.
+
+CRITICAL LANGUAGE REQUIREMENT: You MUST write your analysis strictly in clear, professional English. Do NOT output any Chinese or non-English characters.
 
 Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
 {
-  "risk_explanation": "A concise 2-3 sentence explanation in English of why this finding is dangerous and how attackers exploit it.",
-  "remediation_command": "The exact single-line bash command to fix it on Fedora Linux.",
-  "safety_notes": "A short note in English on whether applying this fix could impact active services."
+  "risk_explanation": "A concise 2-3 sentence explanation in English of why this finding is dangerous, what an attacker gains from it, and how it is typically exploited in the wild.",
+  "safety_notes": "A short note in English on whether applying the standard fix for this finding could disrupt active services, and what the administrator should verify before and after remediation."
 }"#;
 
     let user_prompt = format!(
-        "Finding Title: {}\nSeverity: {}\nCategory: {}\nDescription: {}\nCurrent Value: {}\nRecommendation: {}\n\nProvide structured JSON response.",
+        "Finding Title: {}\nSeverity: {}\nCategory: {}\nDescription: {}\nCurrent Value: {}\n\nProvide structured JSON response with risk_explanation and safety_notes only.",
         finding.title,
         finding.severity,
         finding.category,
         finding.description,
         finding.current_value,
-        finding.recommendation
     );
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;

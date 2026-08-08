@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { Sparkles, X, Bot, ShieldAlert, Terminal, Check, Copy, RefreshCw, AlertTriangle, ShieldCheck, FileText, Package, Server, Shield, Zap } from '@lucide/svelte';
+  import { Sparkles, X, Bot, ShieldAlert, Terminal, Check, Copy, RefreshCw, AlertTriangle, ShieldCheck, FileText, Package, Server, Shield, Lock, Info } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
   import Button from './ui/Button.svelte';
   import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { getHardcodedFix } from '../stores/aiStore.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 
   let copied = $state(false);
-  let executingRemediation = $state(false);
+  let applyingFix = $state(false);
 
   function copyText(txt: string, msg: string = 'Copied to clipboard') {
     navigator.clipboard.writeText(txt);
@@ -15,26 +16,31 @@
     setTimeout(() => { copied = false; }, 2000);
   }
 
-  function handleRunRemediation() {
-    const cmd = aiStore.findingResult?.remediation_command;
-    if (!cmd || !cmd.trim()) return;
+  // Hardcoded fix for the active finding — NEVER from LLM output
+  let hardcodedFix = $derived(
+    aiStore.activeFinding ? getHardcodedFix(aiStore.activeFinding.id) : null
+  );
 
+  async function handleApplyFix() {
+    if (!hardcodedFix) return;
+    const fix = hardcodedFix;
     uiStore.confirm(
-      'Execute AI Remediation Command',
-      `Are you sure you want to execute this AI remediation command?\n\n$ ${cmd.trim()}`,
+      `Apply Verified Fix: ${fix.label}`,
+      `This will apply the following change:\n\n${fix.current_label}  →  ${fix.proposed_label}\n\nTarget: ${fix.target}`,
       async () => {
-        executingRemediation = true;
+        applyingFix = true;
         try {
-          const res = await invoke<string>('security_execute_remediation_command', { command: cmd.trim() });
-          uiStore.addToast(res || 'Remediation script executed successfully!', 'success');
+          await invoke(fix.tauri_command, fix.tauri_args);
+          uiStore.addToast(`Fix applied: ${fix.label}`, 'success');
           window.dispatchEvent(new CustomEvent('security-audit-run'));
           aiStore.closeModal();
         } catch (err: any) {
-          uiStore.addToast(`Remediation Error: ${err}`, 'error');
+          uiStore.addToast(`Fix failed: ${err}`, 'error');
         } finally {
-          executingRemediation = false;
+          applyingFix = false;
         }
-      }
+      },
+      false
     );
   }
 
@@ -172,49 +178,72 @@
         <!-- 1. Security Finding Result -->
         {:else if aiStore.activeModalType === 'finding' && aiStore.findingResult}
           <div class="ai-results-container">
-            <div class="ai-card risk-card">
-              <div class="card-header">
-                <ShieldAlert size={16} class="text-warning" />
-                <span>Risk &amp; Exploit Potential</span>
-              </div>
-              <p class="card-text">{aiStore.findingResult.risk_explanation}</p>
-            </div>
 
-            <div class="ai-card command-card">
-              <div class="card-header space-between">
-                <div class="flex-align">
-                  <Terminal size={16} class="text-accent" />
-                  <span>Suggested Remediation Command</span>
+            <!-- Hardcoded Verified Fix Panel — NEVER from LLM -->
+            {#if hardcodedFix}
+              <div class="ai-card fix-card">
+                <div class="card-header">
+                  <Lock size={15} style="color:var(--color-success)" />
+                  <span>Verified Fix</span>
+                  <span class="verified-badge">pre-validated · not AI-generated</span>
                 </div>
-                <div style="display: flex; gap: 6px; align-items: center;">
-                  <Button variant="outline" size="sm" onclick={() => copyText(aiStore.findingResult?.remediation_command || '')}>
-                    {#if copied}<Check size={13} style="color:var(--color-success)" /> Copied{:else}<Copy size={13} /> Copy{/if}
-                  </Button>
+                <div class="diff-target">
+                  <span class="diff-target-label">Target:</span>
+                  <code class="diff-target-value">{hardcodedFix.target}</code>
+                </div>
+                <div class="diff-block">
+                  <div class="diff-row diff-current">
+                    <span class="diff-sign">−</span>
+                    <code class="diff-text">{hardcodedFix.current_label}</code>
+                  </div>
+                  <div class="diff-row diff-proposed">
+                    <span class="diff-sign">+</span>
+                    <code class="diff-text">{hardcodedFix.proposed_label}</code>
+                  </div>
+                </div>
+                <div class="fix-actions">
                   <Button
                     variant="primary"
                     size="sm"
-                    onclick={handleRunRemediation}
-                    disabled={executingRemediation}
-                    style="display: flex; align-items: center; gap: 6px;"
-                    title="Execute this remediation command with elevated privileges"
+                    onclick={handleApplyFix}
+                    disabled={applyingFix}
+                    title="Apply the pre-validated fix using the application's built-in hardened command"
                   >
-                    {#if executingRemediation}
-                      <RefreshCw size={13} class="animate-spin-slow" />
-                      <span>Executing...</span>
+                    {#if applyingFix}
+                      <RefreshCw size={13} class="spin" /> Applying…
                     {:else}
-                      <Zap size={13} />
-                      <span>Run 1-Click Fix</span>
+                      <Lock size={13} /> Apply Verified Fix
                     {/if}
                   </Button>
                 </div>
               </div>
-              <pre class="command-block"><code>{aiStore.findingResult.remediation_command}</code></pre>
+            {:else}
+              <div class="ai-card no-fix-card">
+                <div class="card-header">
+                  <Info size={15} style="color:var(--color-info)" />
+                  <span>Manual Remediation Required</span>
+                </div>
+                <p class="card-text">
+                  This finding does not have a one-click fix. Use the <strong>Apply Fix</strong> button
+                  directly on the finding card, or follow the countermeasure guidance shown there.
+                </p>
+              </div>
+            {/if}
+
+            <div class="ai-card risk-card">
+              <div class="card-header">
+                <ShieldAlert size={16} class="text-warning" />
+                <span>Risk &amp; Exploit Potential</span>
+                <span class="ai-tag">AI Analysis</span>
+              </div>
+              <p class="card-text">{aiStore.findingResult.risk_explanation}</p>
             </div>
 
             <div class="ai-card safety-card">
               <div class="card-header">
                 <ShieldCheck size={16} style="color:var(--color-success)" />
                 <span>Safety &amp; Operational Impact</span>
+                <span class="ai-tag">AI Analysis</span>
               </div>
               <p class="card-text">{aiStore.findingResult.safety_notes}</p>
             </div>
@@ -658,4 +687,136 @@
     font-size: 11px;
     color: var(--color-text-muted);
   }
+
+  /* ── Verified Fix Card ───────────────────────────────────────────────────── */
+  .fix-card {
+    border-color: rgba(34, 197, 94, 0.3);
+    background: rgba(34, 197, 94, 0.04);
+  }
+
+  :global(html.light-mode) .fix-card {
+    border-color: rgba(22, 163, 74, 0.3);
+    background: rgba(22, 163, 74, 0.04);
+  }
+
+  .verified-badge {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-success);
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.25);
+    padding: 2px 7px;
+    border-radius: 10px;
+    letter-spacing: 0.2px;
+  }
+
+  .diff-target {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .diff-target-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .diff-target-value {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  :global(html.light-mode) .diff-target-value {
+    background: rgba(0, 0, 0, 0.06);
+  }
+
+  .diff-block {
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    margin-bottom: 12px;
+  }
+
+  :global(html.light-mode) .diff-block {
+    border-color: #E2E8F0;
+  }
+
+  .diff-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+  }
+
+  .diff-current {
+    background: rgba(239, 68, 68, 0.12);
+    border-bottom: 1px solid rgba(239, 68, 68, 0.15);
+  }
+
+  :global(html.light-mode) .diff-current {
+    background: rgba(220, 38, 38, 0.07);
+  }
+
+  .diff-proposed {
+    background: rgba(34, 197, 94, 0.10);
+  }
+
+  :global(html.light-mode) .diff-proposed {
+    background: rgba(22, 163, 74, 0.07);
+  }
+
+  .diff-sign {
+    font-size: 15px;
+    font-weight: 700;
+    width: 14px;
+    flex-shrink: 0;
+    text-align: center;
+    font-family: var(--font-mono);
+  }
+
+  .diff-current .diff-sign { color: var(--color-error); }
+  .diff-proposed .diff-sign { color: var(--color-success); }
+
+  .diff-text {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .diff-current .diff-text  { color: rgba(239, 68, 68, 0.9); }
+  .diff-proposed .diff-text { color: rgba(34, 197, 94, 0.95); }
+
+  :global(html.light-mode) .diff-current .diff-text  { color: #dc2626; }
+  :global(html.light-mode) .diff-proposed .diff-text { color: #16a34a; }
+
+  .fix-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .no-fix-card {
+    border-color: rgba(100, 116, 139, 0.25);
+  }
+
+  .ai-tag {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-accent);
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.18);
+    padding: 2px 7px;
+    border-radius: 10px;
+    letter-spacing: 0.2px;
+  }
+
+  :global(.spin) { animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
