@@ -1,17 +1,42 @@
 <script lang="ts">
-  import { Sparkles, X, Bot, ShieldAlert, Terminal, Check, Copy, RefreshCw, AlertTriangle, ShieldCheck } from '@lucide/svelte';
+  import { Sparkles, X, Bot, ShieldAlert, Terminal, Check, Copy, RefreshCw, AlertTriangle, ShieldCheck, Zap } from '@lucide/svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 
   let copied = $state(false);
+  let executingRemediation = $state(false);
 
   function copyCommand(cmd: string) {
     navigator.clipboard.writeText(cmd);
     copied = true;
     uiStore.addToast('Remediation command copied to clipboard', 'success');
     setTimeout(() => { copied = false; }, 2000);
+  }
+
+  function handleRunRemediation() {
+    const cmd = aiStore.activeResponse?.remediation_command;
+    if (!cmd || !cmd.trim()) return;
+
+    uiStore.confirm(
+      'Execute AI Remediation Command',
+      `Are you sure you want to execute this AI remediation command?\n\n$ ${cmd.trim()}`,
+      async () => {
+        executingRemediation = true;
+        try {
+          const res = await invoke<string>('security_execute_remediation_command', { command: cmd.trim() });
+          uiStore.addToast(res || 'Remediation script executed successfully!', 'success');
+          window.dispatchEvent(new CustomEvent('security-audit-run'));
+          aiStore.closeModal();
+        } catch (err: any) {
+          uiStore.addToast(`Remediation Error: ${err}`, 'error');
+        } finally {
+          executingRemediation = false;
+        }
+      }
+    );
   }
 
   function handleRetry() {
@@ -107,13 +132,31 @@
                   <Terminal size={16} class="text-accent" />
                   <span>Suggested Remediation Command</span>
                 </div>
-                <Button variant="outline" size="sm" onclick={() => copyCommand(aiStore.activeResponse?.remediation_command || '')}>
-                  {#if copied}
-                    <Check size={13} style="color:var(--color-success)" /> Copied
-                  {:else}
-                    <Copy size={13} /> Copy Command
-                  {/if}
-                </Button>
+                <div style="display: flex; gap: 6px; align-items: center;">
+                  <Button variant="outline" size="sm" onclick={() => copyCommand(aiStore.activeResponse?.remediation_command || '')}>
+                    {#if copied}
+                      <Check size={13} style="color:var(--color-success)" /> Copied
+                    {:else}
+                      <Copy size={13} /> Copy
+                    {/if}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onclick={handleRunRemediation}
+                    disabled={executingRemediation}
+                    style="display: flex; align-items: center; gap: 6px;"
+                    title="Execute this remediation command with elevated privileges"
+                  >
+                    {#if executingRemediation}
+                      <RefreshCw size={13} class="animate-spin-slow" />
+                      <span>Executing...</span>
+                    {:else}
+                      <Zap size={13} />
+                      <span>Run 1-Click Fix</span>
+                    {/if}
+                  </Button>
+                </div>
               </div>
               <pre class="command-block"><code>{aiStore.activeResponse.remediation_command}</code></pre>
             </div>

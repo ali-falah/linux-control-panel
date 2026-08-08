@@ -1323,3 +1323,30 @@ pub async fn security_fix_usbguard(enable: bool) -> Result<String, String> {
         Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
 }
+
+/// Execute AI-generated security remediation command safely.
+#[tauri::command]
+pub async fn security_execute_remediation_command(command: String) -> Result<String, String> {
+    if command.trim().is_empty() {
+        return Err("Empty remediation command provided.".to_string());
+    }
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", &command])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute remediation command: {}", e))?;
+
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            Ok("Remediation command executed successfully.".to_string())
+        } else {
+            Ok(format!("Remediation executed: {}", trimmed))
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        Err(format!("Remediation error: {}", stderr.trim()))
+    }
+}

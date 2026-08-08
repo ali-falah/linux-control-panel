@@ -18,6 +18,7 @@
 
   import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
   import AiUniversalModal from './lib/components/AiUniversalModal.svelte';
+  import GlobalSearchModal from './lib/components/GlobalSearchModal.svelte';
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
@@ -135,6 +136,7 @@
 <SettingsModal />
 <DnfGlobalUpgradeWidget />
 <AiUniversalModal />
+<GlobalSearchModal />
 
 <style>
   .app-shell {

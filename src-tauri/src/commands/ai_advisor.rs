@@ -324,7 +324,49 @@ async fn dispatch_ai_request(
     Ok(response_text.to_string())
 }
 
-fn extract_valid_json(raw: &str) -> &str {
+fn sanitize_json_string(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len() + 16);
+    let mut in_string = false;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            in_string = !in_string;
+            result.push(c);
+        } else if in_string && c == '\\' {
+            if let Some(&next_c) = chars.peek() {
+                match next_c {
+                    '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => {
+                        result.push('\\');
+                        result.push(chars.next().unwrap());
+                    }
+                    'u' => {
+                        result.push('\\');
+                        result.push(chars.next().unwrap());
+                    }
+                    _ => {
+                        // Invalid escape sequence in JSON string (e.g. \?, \s, \d, \.)
+                        // Escape the backslash itself so it becomes a literal backslash \\ in JSON
+                        result.push_str("\\\\");
+                    }
+                }
+            } else {
+                result.push_str("\\\\");
+            }
+        } else if in_string && (c == '\n' || c == '\r') {
+            if c == '\n' {
+                result.push_str("\\n");
+            } else {
+                result.push_str("\\r");
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn extract_valid_json(raw: &str) -> String {
     let trimmed = raw.trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
@@ -333,7 +375,7 @@ fn extract_valid_json(raw: &str) -> &str {
 
     let start = match trimmed.find('{') {
         Some(pos) => pos,
-        None => return trimmed,
+        None => return sanitize_json_string(trimmed),
     };
 
     let bytes = trimmed.as_bytes();
@@ -369,11 +411,13 @@ fn extract_valid_json(raw: &str) -> &str {
         }
     }
 
-    if depth == 0 && end >= start {
+    let json_substring = if depth == 0 && end >= start {
         &trimmed[start..=end]
     } else {
         trimmed
-    }
+    };
+
+    sanitize_json_string(json_substring)
 }
 
 #[tauri::command]
@@ -446,7 +490,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: AiAdvisorResponse = serde_json::from_str(clean)
+    let resp: AiAdvisorResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
@@ -478,7 +522,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: LogDiagnosisResponse = serde_json::from_str(clean)
+    let resp: LogDiagnosisResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI diagnosis: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
@@ -507,7 +551,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: DnfConflictResponse = serde_json::from_str(clean)
+    let resp: DnfConflictResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI DNF conflict response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
@@ -537,7 +581,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: NginxRuleResponse = serde_json::from_str(clean)
+    let resp: NginxRuleResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI NGINX response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
@@ -567,7 +611,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: FirewallRuleResponse = serde_json::from_str(clean)
+    let resp: FirewallRuleResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI Firewall response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
@@ -605,7 +649,7 @@ Respond ONLY with a valid JSON object in the exact following structure without m
 
     let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
     let clean = extract_valid_json(&raw_output);
-    let resp: TerminalCommandResponse = serde_json::from_str(clean)
+    let resp: TerminalCommandResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI Terminal response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }

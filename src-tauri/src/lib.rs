@@ -81,7 +81,7 @@ use commands::{
         security_fix_password_policy, security_fix_firewall, security_fix_selinux,
         security_fix_kernel_param, security_fix_auditd, security_fix_time_sync,
         security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
-        security_fix_usbguard,
+        security_fix_usbguard, security_execute_remediation_command,
     },
     audit_log::{
         get_auth_events, check_auditd_status, setup_auditd_rules,
@@ -363,6 +363,7 @@ pub fn run() {
             security_fix_passwd_perms,
             security_fix_shadow_perms,
             security_fix_usbguard,
+            security_execute_remediation_command,
             // Audit Log
             get_auth_events,
             check_auditd_status,

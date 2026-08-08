@@ -44,6 +44,7 @@ class UIStore {
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
   settingsModalOpen = $state(false);
+  searchModalOpen = $state(false);
 
   openSettingsModal() {
     this.settingsModalOpen = true;
@@ -51,6 +52,18 @@ class UIStore {
 
   closeSettingsModal() {
     this.settingsModalOpen = false;
+  }
+
+  openSearchModal() {
+    this.searchModalOpen = true;
+  }
+
+  closeSearchModal() {
+    this.searchModalOpen = false;
+  }
+
+  toggleSearchModal() {
+    this.searchModalOpen = !this.searchModalOpen;
   }
   preAppliedJournalPriority = $state<string>('all');
   serviceFilter = $state<string | null>(null);

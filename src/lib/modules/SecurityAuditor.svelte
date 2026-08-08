@@ -256,6 +256,10 @@
     loadHistory();
     loadMuted();
     runAudit();
+
+    const handleReaudit = () => runAudit(true);
+    window.addEventListener('security-audit-run', handleReaudit);
+    return () => window.removeEventListener('security-audit-run', handleReaudit);
   });
 
   // ── Fix handlers ───────────────────────────────────────────────────────────

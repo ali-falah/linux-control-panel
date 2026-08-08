@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck, Terminal, Wifi, Network, Copy, ExternalLink } from '@lucide/svelte';
+  import { CheckCircle2, XCircle, Loader, Minus, Shield, ShieldCheck, Terminal, Wifi, Network, Copy, ExternalLink, Search } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
@@ -149,6 +149,20 @@
     {/if}
   </div>
 
+  <!-- CENTER: Global Search Trigger -->
+  <div class="status-center">
+    <button
+      type="button"
+      class="global-search-trigger"
+      onclick={() => uiStore.openSearchModal()}
+      title="Global Search (Ctrl + K)"
+    >
+      <Search size={11} class="search-trigger-icon" />
+      <span class="search-trigger-text">Search...</span>
+      <kbd class="search-trigger-kbd">Ctrl K</kbd>
+    </button>
+  </div>
+
   <!-- RIGHT: Root toggle + exit code -->
   <div class="status-right">
     <button
@@ -204,6 +218,81 @@
     flex: 1;
     min-width: 0;
     overflow: hidden;
+  }
+
+  .status-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 175px;
+    flex-shrink: 0;
+  }
+
+  .global-search-trigger {
+    width: 100%;
+    height: 20px;
+    padding: 0 7px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--color-border);
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: var(--font-sans);
+    transition: all 0.15s ease;
+  }
+
+  .global-search-trigger:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--color-accent);
+    color: var(--color-text-primary);
+  }
+
+  .search-trigger-icon {
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .search-trigger-text {
+    flex: 1;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 450;
+  }
+
+  .search-trigger-kbd {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: 9.5px;
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    line-height: 14px;
+  }
+
+  :global(html.light-mode) .global-search-trigger {
+    background: #F1F5F9 !important;
+    border-color: #CBD5E1 !important;
+    color: #64748B !important;
+  }
+
+  :global(html.light-mode) .global-search-trigger:hover {
+    background: #E2E8F0 !important;
+    border-color: var(--color-accent) !important;
+    color: #0F172A !important;
+  }
+
+  :global(html.light-mode) .search-trigger-kbd {
+    background: #E2E8F0 !important;
+    border-color: #CBD5E1 !important;
+    color: #475569 !important;
   }
 
   .status-right {
