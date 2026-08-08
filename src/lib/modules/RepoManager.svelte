@@ -16,6 +16,8 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
+  import CoprBrowser from './CoprBrowser.svelte';
 
   interface RepoEntry {
     id: string;
@@ -33,6 +35,8 @@
     url: string;
     speed_ms: number | null;
   }
+
+  let activeTab = $state<'repos' | 'copr'>('repos');
 
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);
@@ -204,19 +208,36 @@
 </script>
 
 <div class="module-page"> 
-  <PageHeader title="Repo Manager" subtitle="Manage DNF repositories from /etc/yum.repos.d/" icon={Package}>
-    <Button variant="primary" onclick={() => showAddDialog = true}>
-      <Plus size={14} /> Add Repo
-    </Button>
-    <KebabMenu>
-      <button class="menu-item" onclick={makecache} disabled={loading}>
-        <RefreshCw size={14} /> makecache
-      </button>
-      <button class="menu-item" onclick={loadRepos} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
-    </KebabMenu>
+  <PageHeader title="Repo Manager" subtitle="Manage DNF repositories and Fedora COPR packages" icon={Package}>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <TabGroup
+        tabs={[
+          { id: 'repos', label: 'RPM Repos' },
+          { id: 'copr', label: 'COPR Packages' }
+        ]}
+        bind:activeTab={activeTab}
+        onchange={(id) => activeTab = id as any}
+      />
+
+      {#if activeTab === 'repos'}
+        <Button variant="primary" onclick={() => showAddDialog = true}>
+          <Plus size={14} /> Add Repo
+        </Button>
+        <KebabMenu>
+          <button class="menu-item" onclick={makecache} disabled={loading}>
+            <RefreshCw size={14} /> makecache
+          </button>
+          <button class="menu-item" onclick={loadRepos} disabled={loading}>
+            <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+          </button>
+        </KebabMenu>
+      {/if}
+    </div>
   </PageHeader>
+
+  {#if activeTab === 'copr'}
+    <CoprBrowser />
+  {:else}
 
   <!-- Controls: Stats & Search -->
   <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
@@ -307,15 +328,21 @@
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <tr class:disabled-row={!repo.enabled} onclick={() => openEditDrawer(repo)} style="cursor: pointer;">
-                <td>
-                  <div style="font-weight:500; color:var(--color-text-primary)">{repo.name}</div>
-                  <div style="font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono)">{repo.file_path.split('/').pop()}</div>
+                <td style="max-width:240px;">
+                  <div style="font-weight:500; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.name}>
+                    {repo.name}
+                  </div>
+                  <div style="font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.file_path.split('/').pop()}>
+                    {repo.file_path.split('/').pop()}
+                  </div>
                 </td>
-                <td>
-                  <code style="font-size:11px; color:var(--color-text-accent)">{repo.id}</code>
+                <td style="max-width:180px;">
+                  <code style="font-size:11px; color:var(--color-text-accent); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.id}>
+                    {repo.id}
+                  </code>
                 </td>
-                <td style="max-width:280px">
-                  <div style="font-size:11px; color:var(--color-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono)">
+                <td style="max-width:220px;">
+                  <div style="font-size:11px; color:var(--color-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono);" title={repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}>
                     {repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}
                   </div>
                 </td>
@@ -357,6 +384,7 @@
         </Table>
       {/if}
   </div>
+{/if}
 </div>
 
 <svelte:window onkeydown={(e) => { 

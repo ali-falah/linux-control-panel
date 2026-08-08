@@ -8,7 +8,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
-    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server
+    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server, Activity
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -302,7 +302,7 @@
 
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
-    <div style="display:flex; align-items:center; gap:16px;">
+    <div style="display:flex; align-items:center; gap:8px;">
       {#if mainTab === 'services'}
         <!-- Single Toggleable Scope Button -->
         <button 
@@ -312,39 +312,39 @@
           title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
         >
           {#if userScope}
-            <User size={13} />
+            <User size={12} />
             <span>User Scope</span>
           {:else}
-            <Server size={13} />
+            <Server size={12} />
             <span>System Scope</span>
           {/if}
         </button>
       {/if}
 
-      <div class="tab-bar" style="margin: 0; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 2px;">
-        <button class="tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
-          <Settings size={13} /> Services
-          <span class="tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
+      <div class="header-tab-bar">
+        <button class="header-tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
+          <Settings size={12} /> Services
+          <span class="header-tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
         </button>
-        <button class="tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
-          <Rocket size={13} /> XDG Autostart
-          <span class="tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
+        <button class="header-tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
+          <Rocket size={12} /> Autostart
+          <span class="header-tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
         </button>
-        <button class="tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
-          <Rocket size={13} /> Boot Analyzer
+        <button class="header-tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
+          <Activity size={12} /> Boot Analyzer
           {#if blameEntries.length > 0}
-            <span class="tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
+            <span class="header-tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
           {/if}
         </button>
       </div>
 
-      <Button variant="ghost" onclick={() => {
+      <Button variant="ghost" size="sm" onclick={() => {
         if (mainTab === 'services') load();
         else if (mainTab === 'autostart') loadAutostart();
         else loadBlame();
       }}
         disabled={mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame}>
-        <RefreshCw size={14} class={(mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame) ? 'animate-spin-slow' : ''} /> Refresh
+        <RefreshCw size={13} class={(mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame) ? 'animate-spin-slow' : ''} /> Refresh
       </Button>
     </div>
   </PageHeader>
@@ -823,5 +823,78 @@
 
   .selected-unit {
     background: var(--color-active-bg) !important;
+  }
+
+  /* Header controls optimization */
+  .scope-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .scope-toggle-btn:hover {
+    border-color: var(--color-border-hover);
+    color: var(--color-text-primary);
+  }
+  .scope-toggle-btn.active {
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .header-tab-bar {
+    display: inline-flex;
+    align-items: center;
+    background: var(--color-tab-bar-bg, rgba(0, 0, 0, 0.2));
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
+  }
+  .header-tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .header-tab-btn:hover {
+    color: var(--color-text-primary);
+  }
+  .header-tab-btn.active {
+    background: var(--color-accent);
+    color: #FFFFFF;
+    font-weight: 600;
+  }
+  .header-tab-count {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.15);
+    color: inherit;
+  }
+  .header-tab-btn.active .header-tab-count {
+    background: rgba(255, 255, 255, 0.25);
+    color: #FFFFFF;
   }
 </style>

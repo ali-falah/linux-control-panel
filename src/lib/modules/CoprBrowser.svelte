@@ -90,10 +90,16 @@
       true
     );
   }
+  interface Props {
+    embedded?: boolean;
+  }
+  let { embedded = true }: Props = $props();
 </script>
 
-<div class="module-page">
-  <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
+<div class={embedded ? 'copr-tab-content' : 'module-page'}>
+  {#if !embedded}
+    <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
+  {/if}
 
   <!-- Search Box -->
   <div style="display:flex; gap:8px">
@@ -201,6 +207,13 @@
 </div>
 
 <style>
+  .copr-tab-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 4px;
+  }
+
   .copr-card {
     transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
   }

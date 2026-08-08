@@ -21,6 +21,8 @@
   let stats = $state<any>(null);
   let cpuTemp = $state<number | null>(null);
   let cpuHistory = $state<number[]>(Array(40).fill(0));
+  let ramHistory = $state<number[]>(Array(40).fill(0));
+  let swapHistory = $state<number[]>(Array(40).fill(0));
 
   // Disk I/O
   let diskIoStats = $state<any[]>([]);
@@ -162,6 +164,8 @@
       cpuTemp = temp as number | null;
       processes = procList as any[];
       cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
+      ramHistory = [...ramHistory.slice(1), stats.ram_percent];
+      swapHistory = [...swapHistory.slice(1), stats.swap_percent];
     } catch(e) {}
     await fetchDiskIo();
   }
@@ -532,6 +536,11 @@
                   <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
                     <div class="progress-fill ram-fill" style="width: {stats.ram_percent}%; height: 100%; transition: width 0.3s ease;"></div>
                   </div>
+                  <div style="height: 36px; background: rgba(0,0,0,0.2); border-radius: 6px; overflow:hidden; padding: 2px;">
+                    <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
+                      <polyline points={generateSparklineStroke(ramHistory, 36, 200)} style="stroke: var(--color-accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
+                    </svg>
+                  </div>
                   <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
                     <span>Used: {formatBytes(stats.ram_used_mb)}</span>
                     <span>Total: {formatBytes(stats.ram_total_mb)}</span>
@@ -546,6 +555,11 @@
                   </div>
                   <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
                     <div class="progress-fill swap-fill" style="width: {stats.swap_percent}%; height: 100%; transition: width 0.3s ease;"></div>
+                  </div>
+                  <div style="height: 36px; background: rgba(0,0,0,0.2); border-radius: 6px; overflow:hidden; padding: 2px;">
+                    <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
+                      <polyline points={generateSparklineStroke(swapHistory, 36, 200)} style="stroke: var(--color-warning, #f59e0b); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
+                    </svg>
                   </div>
                   <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
                     <span>Used: {formatBytes(stats.swap_used_mb)}</span>
@@ -1029,7 +1043,7 @@
   /* 2-column layout */
   .monitor-layout {
     display: grid;
-    grid-template-columns: 4fr 6fr;
+    grid-template-columns: 4fr 7fr;
     gap: 20px;
     align-items: stretch;
     height: 100%;

@@ -103,9 +103,8 @@
       icon: Package,
       items: [
         { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid, desc: 'Flatpak & RPM applications' },
-        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database, desc: 'Software repositories' },
+        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database, desc: 'Repositories & COPR Packages' },
         { id: 'dnf-history',   label: 'DNF Manager',    icon: Package, desc: 'Package history & updates' },
-        { id: 'copr-browser',  label: 'Copr Browser',   icon: Layers, desc: 'Fedora Copr repositories' },
       ],
     },
     {

@@ -2,11 +2,12 @@
   import { onMount } from 'svelte';
   import { onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield, Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Layers } from '@lucide/svelte';
+  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield, Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Layers, Sparkles, AlertTriangle } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
   import Card from '../components/ui/Card.svelte';
   
   let osInfo = $state<any>(null);
@@ -32,6 +33,11 @@
   // New features state
   let lastSystemUpdate = $state<string>('');
   let failedServicesCount = $state<number>(0);
+
+  let cpuHigh = $derived(systemStats && systemStats.cpu_usage > 85);
+  let ramHigh = $derived(systemStats && systemStats.ram_usage > 90);
+  let hasFailedServices = $derived(failedServicesCount > 0);
+  let hasProactiveAlert = $derived(cpuHigh || ramHigh || hasFailedServices);
 
   let securityReport = $state<any>(null);
   let loadingSecurity = $state(false);
@@ -291,6 +297,40 @@
       <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} /> Refresh
     </Button>
   </PageHeader>
+
+  {#if hasProactiveAlert}
+    <div class="proactive-health-banner" style="padding: 14px 18px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <AlertTriangle size={20} style="color: #ef4444;" />
+        <div>
+          <div style="font-size: 13.5px; font-weight: 600; color: var(--color-text-primary);">
+            Proactive System Health Alert
+          </div>
+          <div style="font-size: 12px; color: var(--color-text-muted);">
+            {#if cpuHigh}High CPU utilization detected ({Math.round(systemStats.cpu_usage)}%). {/if}
+            {#if ramHigh}Memory saturation threshold reached ({Math.round(systemStats.ram_usage)}%). {/if}
+            {#if hasFailedServices}{failedServicesCount} systemd service(s) failed to start. {/if}
+          </div>
+        </div>
+      </div>
+      {#if aiStore.enabled}
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={() => {
+            if (hasFailedServices) {
+              uiStore.setActiveTab('journal-logs');
+            } else {
+              uiStore.setActiveTab('system-monitor');
+            }
+          }}
+          style="display: flex; align-items: center; gap: 6px;"
+        >
+          <Sparkles size={13} style="color: var(--color-accent);" /> Diagnose Logs
+        </Button>
+      {/if}
+    </div>
+  {/if}
 
   <div class="dashboard-grid">
     <!-- Column 1: System Overview & Resources -->

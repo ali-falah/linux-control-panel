@@ -145,6 +145,8 @@
     align-items: center;
     gap: 8px;
     font-size: 12px;
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   /* Back Split Button Container */
@@ -302,11 +304,17 @@
     font-weight: 400;
     font-size: 11px;
     font-family: var(--font-sans);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   .header-actions {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-shrink: 0;
   }
 </style>

@@ -90,7 +90,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
 
             if let (Some(n), Some(e)) = (name, exec) {
                 let path_str = path.to_string_lossy().to_string();
-                let mut source = "Unknown".to_string();
+                let source;
                 let mut package_id = None;
                 if path_str.contains("flatpak") {
                     source = "Flatpak".to_string();
@@ -98,7 +98,6 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                         package_id = Some(stem.to_string_lossy().to_string());
                     }
                 } else {
-                    // Try to resolve RPM
                     source = "RPM".to_string();
                     if let Ok(output) = Command::new("rpm")
                         .arg("-qf")

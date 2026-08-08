@@ -555,3 +555,41 @@ Respond ONLY with a valid JSON object in the exact following structure without m
         .map_err(|e| format!("Failed to parse AI Firewall response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalCommandResponse {
+    pub generated_command: String,
+    pub explanation: String,
+    pub safety_level: String, // "safe" | "caution" | "dangerous"
+}
+
+#[tauri::command]
+pub async fn ai_generate_terminal_command(
+    prompt: String,
+    settings: Option<AiSettingsConfig>,
+) -> Result<TerminalCommandResponse, String> {
+    let system_prompt = r#"You are an expert Fedora Linux Terminal & Shell Specialist. Translate the user's natural language request into a valid, precise bash terminal command string for Fedora Linux.
+
+TARGET OS: Fedora Linux.
+
+CRITICAL CONSTRAINTS:
+1. Provide single-line executable bash command strings.
+2. Provide a clear 1-2 sentence explanation of what the command does.
+3. Categorize safety_level as "safe" (read-only find/grep/ls), "caution" (modifies files/installs packages), or "dangerous" (destructive rm/dd/mkfs).
+4. CRITICAL LANGUAGE REQUIREMENT: All explanations MUST be strictly in clear English.
+
+Respond ONLY with a valid JSON object in the exact following structure without markdown formatting or backticks:
+{
+  "generated_command": "The exact bash command string.",
+  "explanation": "A short summary in English of what this command does.",
+  "safety_level": "safe"
+}"#;
+
+    let user_prompt = format!("User Request:\n{}", prompt);
+
+    let raw_output = dispatch_ai_request(system_prompt, &user_prompt, settings).await?;
+    let clean = extract_valid_json(&raw_output);
+    let resp: TerminalCommandResponse = serde_json::from_str(clean)
+        .map_err(|e| format!("Failed to parse AI Terminal response: {e}\nRaw output: {clean}"))?;
+    Ok(resp)
+}

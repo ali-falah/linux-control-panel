@@ -11,12 +11,48 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2 } from '@lucide/svelte';
+  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Play, Copy, Check } from '@lucide/svelte';
   import { Save, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { FileCode, ArchiveRestore, GripVertical, Search, Folder } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { aiStore } from '../stores/aiStore.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+
+  // ─── AI Terminal Assistant State ──────────────────────────────────────────
+  let aiPrompt = $state('');
+  let aiLoading = $state(false);
+  let aiResponse = $state<{ generated_command: string; explanation: string; safety_level: string } | null>(null);
+  let copiedCommand = $state(false);
+
+  async function handleGenerateCommand() {
+    if (!aiPrompt.trim()) return;
+    aiLoading = true;
+    aiResponse = null;
+    try {
+      const res = await invoke<any>('ai_generate_terminal_command', {
+        prompt: aiPrompt.trim(),
+        settings: aiStore.getSettingsPayload(),
+      });
+      aiResponse = res;
+    } catch (e: any) {
+      uiStore.addToast(`AI Generation failed: ${e}`, 'error');
+    } finally {
+      aiLoading = false;
+    }
+  }
+
+  function executeCommand(cmd: string) {
+    statusStore.setLastCommand(cmd, 0, true);
+    uiStore.addToast(`Command dispatched: ${cmd}`, 'success');
+  }
+
+  function copyCommand(cmd: string) {
+    navigator.clipboard.writeText(cmd);
+    copiedCommand = true;
+    setTimeout(() => copiedCommand = false, 2000);
+    uiStore.addToast('Copied to clipboard', 'info');
+  }
 
   // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -477,6 +513,59 @@
       </Button>
     {/if}
   </PageHeader>
+
+  {#if aiStore.enabled}
+    <div class="ai-terminal-card" style="padding: 16px; background: rgba(0, 218, 243, 0.04); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 20px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+        <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; color: var(--color-text-primary);">
+          <Sparkles size={16} style="color: var(--color-accent);" />
+          AI Terminal Assistant (Natural Language Bash Generator)
+        </div>
+        <span style="font-size: 11px; color: var(--color-text-muted);">Fedora Linux Optimized</span>
+      </div>
+
+      <div style="display: flex; gap: 8px;">
+        <input
+          type="text"
+          bind:value={aiPrompt}
+          onkeydown={(e) => e.key === 'Enter' && handleGenerateCommand()}
+          placeholder="e.g. Find all log files over 100MB modified in the last 7 days and sort by size..."
+          style="flex: 1; padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 8px; color: var(--color-text-primary); font-size: 12px;"
+        />
+        <Button variant="primary" onclick={handleGenerateCommand} disabled={aiLoading || !aiPrompt.trim()}>
+          {#if aiLoading}<RefreshCw size={13} class="animate-spin-slow" />{:else}<Sparkles size={13} />{/if}
+          Generate Command
+        </Button>
+      </div>
+
+      {#if aiResponse}
+        <div style="margin-top: 12px; padding: 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-size: 12px; font-weight: 600; color: var(--color-text-muted);">Generated Bash Command</span>
+            <span class="badge" style="text-transform: uppercase; font-size: 10px; padding: 2px 6px; border-radius: 4px; background: {aiResponse.safety_level === 'safe' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)'}; color: {aiResponse.safety_level === 'safe' ? '#22c55e' : '#ef4444'}; font-weight: 600;">
+              {aiResponse.safety_level}
+            </span>
+          </div>
+
+          <div style="font-family: var(--font-mono); font-size: 12.5px; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; color: var(--color-accent); word-break: break-all; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <code>{aiResponse.generated_command}</code>
+            <div style="display: flex; gap: 6px;">
+              <button type="button" class="btn btn-outline btn-xs" onclick={() => copyCommand(aiResponse.generated_command)} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
+                {#if copiedCommand}<Check size={12} />{:else}<Copy size={12} />{/if} Copy
+              </button>
+              <button type="button" class="btn btn-primary btn-xs" onclick={() => executeCommand(aiResponse.generated_command)} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
+                <Play size={12} /> Dispatch
+              </button>
+            </div>
+          </div>
+
+          <p style="font-size: 12px; color: var(--color-text-muted); margin-top: 8px; margin-bottom: 0;">
+            {aiResponse.explanation}
+          </p>
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Controls: Tabs & Actions -->
   <div class="controls-row">
