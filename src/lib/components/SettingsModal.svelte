@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Settings, X, Sun, Moon, Check, Monitor, Sparkles, Bot, Cpu, Globe, Key, RefreshCw, Eye, EyeOff, Save, Sliders, Shield, Bell, HardDrive, AlertTriangle } from '@lucide/svelte';
+  import { Settings, X, Sun, Moon, Check, Monitor, Sparkles, Bot, Cpu, Globe, Key, RefreshCw, Eye, EyeOff, Save, Sliders, Shield, Bell, HardDrive, AlertTriangle, FileText } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
   import Toggle from './ui/Toggle.svelte';
   import Button from './ui/Button.svelte';
@@ -8,6 +8,18 @@
 
   let activeCategoryTab = $state<'appearance' | 'ai' | 'system'>('appearance');
   let showKey = $state(false);
+  let openingConfig = $state(false);
+
+  async function handleOpenConfigFile() {
+    openingConfig = true;
+    try {
+      await invoke('open_system_config_file');
+    } catch (err) {
+      console.error('Failed to open config file:', err);
+    } finally {
+      openingConfig = false;
+    }
+  }
 
   // Draft settings state (manual save pattern)
   let draftEnabled = $state(aiStore.enabled);
@@ -549,15 +561,28 @@
                 <span class="badge badge-success" style="font-size: 11px;">Active</span>
               </div>
 
-              <div style="padding: 14px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 10px; display: flex; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                  <HardDrive size={18} style="color: var(--color-text-secondary);" />
-                  <div>
+              <div style="padding: 14px; background: rgba(0,0,0,0.15); border: 1px solid var(--color-border); border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+                  <HardDrive size={18} style="color: var(--color-text-secondary); flex-shrink: 0;" />
+                  <div style="min-width: 0;">
                     <div style="font-size: 13px; font-weight: 600; color: var(--color-text-primary);">Config Path</div>
-                    <div style="font-size: 11.5px; color: var(--color-text-muted); font-family: var(--font-mono);">~/.config/linux-control-panel/</div>
+                    <div style="font-size: 11.5px; color: var(--color-text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">~/.config/linux-control-panel/</div>
                   </div>
                 </div>
-                <span class="badge badge-muted" style="font-size: 11px;">Default</span>
+                <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                  <span class="badge badge-muted" style="font-size: 11px;">Default</span>
+                  <button
+                    type="button"
+                    class="btn btn-outline btn-sm"
+                    onclick={handleOpenConfigFile}
+                    disabled={openingConfig}
+                    style="padding: 4px 10px; font-size: 11.5px; display: inline-flex; align-items: center; gap: 6px;"
+                    title="Open global configuration file in default system text editor"
+                  >
+                    <FileText size={13} class={openingConfig ? 'animate-spin-slow' : ''} />
+                    <span>{openingConfig ? 'Opening...' : 'Open Config File'}</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

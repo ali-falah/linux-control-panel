@@ -99,6 +99,7 @@ use commands::{
         ai_diagnose_log_error, ai_explain_dnf_conflict,
         ai_generate_nginx_rule, ai_generate_firewall_rule,
         ai_generate_terminal_command, ai_test_cloud_connection,
+        open_system_config_file,
     },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
@@ -390,6 +391,7 @@ pub fn run() {
             ai_generate_firewall_rule,
             ai_generate_terminal_command,
             ai_test_cloud_connection,
+            open_system_config_file,
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

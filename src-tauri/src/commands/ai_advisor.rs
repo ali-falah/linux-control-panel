@@ -56,6 +56,22 @@ pub fn ai_save_settings(settings: AiSettingsConfig) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn open_system_config_file() -> Result<String, String> {
+    let path = get_ai_settings_file_path();
+    if !path.exists() {
+        let default_config = AiSettingsConfig::default();
+        if let Ok(json) = serde_json::to_string_pretty(&default_config) {
+            let _ = fs::write(&path, json);
+        }
+    }
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to launch system text editor: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 // ─── Data Types for AI Tasks ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

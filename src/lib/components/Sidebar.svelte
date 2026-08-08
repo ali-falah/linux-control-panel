@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
@@ -45,21 +46,25 @@
     };
   }
 
-  let expandedGroup = $state<string | null>('Overview');
+  let expandedCategory = $state<string>('');
+
+  function toggleCategory(label: string) {
+    expandedCategory = expandedCategory === label ? '' : label;
+  }
 
   $effect(() => {
-    if (uiStore.activeTab) {
-      for (const group of groups) {
-        if (group.items.some(i => i.id === uiStore.activeTab)) {
-          expandedGroup = group.label;
+    const tab = uiStore.activeTab;
+    untrack(() => {
+      if (tab) {
+        for (const group of groups) {
+          if (group.items.some(i => i.id === tab)) {
+            expandedCategory = group.label;
+            break;
+          }
         }
       }
-    }
+    });
   });
-
-  function toggleGroup(label: string) {
-    expandedGroup = expandedGroup === label ? null : label;
-  }
 
   let hoveredGroup = $state<string | null>(null);
   let hoverTimeout: any = null;
@@ -91,7 +96,7 @@
     items: { id: TabId; label: string; icon: any; desc?: string }[];
   }[] = [
     {
-      label: 'Overview',
+      label: 'Overview & Metrics',
       icon: LayoutDashboard,
       items: [
         { id: 'system-dashboard', label: 'Dashboard',  icon: LayoutDashboard, desc: 'System analytics overview' },
@@ -99,7 +104,7 @@
       ],
     },
     {
-      label: 'Packages',
+      label: 'Apps & Software',
       icon: Package,
       items: [
         { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid, desc: 'Flatpak & RPM applications' },
@@ -108,18 +113,7 @@
       ],
     },
     {
-      label: 'System',
-      icon: Server,
-      items: [
-        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
-        { id: 'service-manager', label: 'Service Manager', icon: Settings2, desc: 'System units & daemons' },
-        { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
-        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
-        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck, desc: 'Security policies & contexts' },
-      ],
-    },
-    {
-      label: 'Network & Security',
+      label: 'Network & Web Services',
       icon: Wifi,
       items: [
         { id: 'network-manager',  label: 'Advanced Network', icon: Wifi, desc: 'Interfaces, IP & DNS' },
@@ -131,13 +125,24 @@
       ],
     },
     {
-      label: 'Users & Config',
-      icon: Users,
+      label: 'Security & System Logs',
+      icon: Shield,
       items: [
-        { id: 'user-manager', label: 'Users & Groups',    icon: Users, desc: 'User accounts & privileges' },
-        { id: 'env-manager',  label: 'Environment',       icon: FileText, desc: 'System environment vars' },
-        { id: 'shell-env',    label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
-        { id: 'cron-manager', label: 'Scheduled Tasks',   icon: Clock, desc: 'Crontab jobs & timers' },
+        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
+        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck, desc: 'Security policies & contexts' },
+        { id: 'user-manager',    label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
+      ],
+    },
+    {
+      label: 'System Configuration',
+      icon: Settings2,
+      items: [
+        { id: 'service-manager', label: 'Service Manager', icon: Settings2, desc: 'System units & daemons' },
+        { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
+        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
+        { id: 'env-manager',     label: 'Environment',       icon: FileText, desc: 'System environment vars' },
+        { id: 'shell-env',       label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
+        { id: 'cron-manager',    label: 'Scheduled Tasks',   icon: Clock, desc: 'Crontab jobs & timers' },
       ],
     },
   ];
@@ -269,15 +274,16 @@
       {#each groups as group}
         {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
         {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
+        {@const isExpanded = searchQuery.trim() !== '' || expandedCategory === group.label}
         {#if filteredItems.length > 0}
           {#if !searchQuery}
             <button 
               class="group-label-btn" 
               class:active-group={isGroupActive} 
-              onclick={() => toggleGroup(group.label)}
+              onclick={() => toggleCategory(group.label)}
             >
               <span class="group-label">{group.label}</span>
-              <span class="group-chevron" class:expanded={expandedGroup === group.label} class:active-chevron={isGroupActive}>
+              <span class="group-chevron" class:expanded={isExpanded} class:active-chevron={isGroupActive}>
                 <ChevronDown size={14} />
               </span>
             </button>
@@ -285,7 +291,7 @@
             <div class="group-sep"></div>
           {/if}
 
-          <div class="group-items-wrapper" class:collapsed-anim={expandedGroup !== group.label && !searchQuery}>
+          <div class="group-items-wrapper" class:collapsed-anim={!isExpanded}>
             <div class="group-items">
               {#each filteredItems as item, itemIdx}
                 {@const isActive = uiStore.activeTab === item.id}
@@ -322,7 +328,10 @@
         title="Open System Settings"
       >
         <div class="profile-info">
-          <div class="avatar-circle">{userInitial}</div>
+          <div class="avatar-circle">
+            <span>{userInitial}</span>
+            <span class="status-dot"></span>
+          </div>
           <div class="profile-text">
             <span class="profile-name">{currentUsername}</span>
             <span class="profile-role">System Admin</span>
@@ -334,7 +343,7 @@
           title="Open System Settings"
           aria-label="Settings"
         >
-          <Settings size={18} />
+          <Settings size={16} />
         </button>
       </div>
     {:else}
@@ -907,7 +916,7 @@
     position: relative;
     width: 100%;
     margin-top: auto;
-    padding: 8px 4px 8px;
+    padding: 8px;
     border-top: 1px solid var(--color-sidebar-border);
     background: var(--color-sidebar-bg);
     flex-shrink: 0;
@@ -920,13 +929,104 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    padding: 6px 8px;
-    border-radius: 8px;
+    padding: 7px 10px;
+    border-radius: 10px;
+    background: var(--color-bg-card, rgba(255, 255, 255, 0.03));
+    border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.06));
     cursor: pointer;
-    transition: background 0.15s ease;
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   }
+
   .profile-settings-row:hover {
     background: var(--color-bg-hover);
+    border-color: var(--color-border);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  .profile-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .avatar-circle {
+    position: relative;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--color-accent) 0%, #2563EB 100%);
+    color: #FFFFFF;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+  }
+
+  .status-dot {
+    position: absolute;
+    bottom: -1px;
+    right: -1px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10B981;
+    border: 2px solid var(--color-sidebar-bg, #0F172A);
+  }
+
+  .profile-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .profile-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: capitalize;
+  }
+
+  .profile-role {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .gear-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+  }
+
+  .profile-settings-row:hover .gear-btn,
+  .gear-btn:hover {
+    color: var(--color-accent);
+    background: rgba(0, 218, 243, 0.1);
+    transform: rotate(45deg);
   }
 
   .collapsed-settings-anchor-btn {
@@ -947,23 +1047,25 @@
     color: var(--color-accent);
   }
 
-  .profile-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .avatar-circle.small {
-    width: 24px;
-    height: 24px;
-    font-size: 11px;
-  }
-
   .collapsed-cat-divider {
     width: 24px;
     height: 1px;
     background: var(--color-sidebar-border);
     margin: 6px 0;
+  }
+
+  /* Light Mode Profile Settings Card Overrides */
+  :global(html.light-mode) .profile-settings-row {
+    background: #F8FAFC !important;
+    border: 1px solid #E2E8F0 !important;
+  }
+
+  :global(html.light-mode) .profile-settings-row:hover {
+    background: #F1F5F9 !important;
+    border-color: #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .status-dot {
+    border-color: #FFFFFF !important;
   }
 </style>
