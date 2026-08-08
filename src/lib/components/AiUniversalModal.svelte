@@ -24,6 +24,7 @@
   async function handleApplyFix() {
     if (!hardcodedFix) return;
     const fix = hardcodedFix;
+    const finding = aiStore.activeFinding;
     uiStore.confirm(
       `Apply Verified Fix: ${fix.label}`,
       `This will apply the following change:\n\n${fix.current_label}  →  ${fix.proposed_label}\n\nTarget: ${fix.target}`,
@@ -31,6 +32,13 @@
         applyingFix = true;
         try {
           await invoke(fix.tauri_command, fix.tauri_args);
+          // ── Audit log ────────────────────────────────────────────────────
+          invoke('security_log_fix', {
+            findingId: finding?.id ?? fix.label,
+            findingTitle: finding?.title ?? fix.label,
+            action: 'apply',
+            outcome: `${fix.proposed_label} (via AI Advisor)`,
+          }).catch(() => {});
           uiStore.addToast(`Fix applied: ${fix.label}`, 'success');
           window.dispatchEvent(new CustomEvent('security-audit-run'));
           aiStore.closeModal();

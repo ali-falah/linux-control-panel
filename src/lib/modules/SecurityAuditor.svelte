@@ -13,10 +13,10 @@
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
     Server, Cpu, User, FolderLock, Network, Settings,
-    ExternalLink, RotateCcw, FolderOpen, ChevronDown, Sparkles
+    ExternalLink, RotateCcw, FolderOpen, ChevronDown, Sparkles, EyeOff, Eye
   } from '@lucide/svelte';
   import AiSecurityAdvisorModal from '../components/AiSecurityAdvisorModal.svelte';
-  import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { aiStore, getHardcodedFix } from '../stores/aiStore.svelte.ts';
 
   // ── Types ──────────────────────────────────────────────────────────────────
   interface SecurityFinding {
@@ -65,6 +65,8 @@
   let expandedId = $state<string | null>(null);
   let showExportDropdown = $state(false);
   let exportDropdownRef = $state<HTMLDivElement | null>(null);
+  /** Tracks tamper-flagged findings the user has explicitly acknowledged this session */
+  let reviewedTamperIds = $state<string[]>([]);
 
   // Close export dropdown when clicking outside
   $effect(() => {
@@ -279,6 +281,13 @@
           key, value: secureValue, revertValue: defaultValue, enable,
         });
         uiStore.addToast(msg, 'success');
+        // ── Audit log ────────────────────────────────────────────────────────
+        invoke('security_log_fix', {
+          findingId: finding.id,
+          findingTitle: finding.title,
+          action: enable ? 'apply' : 'revert',
+          outcome: msg,
+        }).catch(() => {});
         await runAudit();
       } catch (e) {
         uiStore.addToast(`Failed: ${e}`, 'error');
@@ -300,6 +309,7 @@
             try {
               const msg = await invoke<string>('security_fix_root_ssh', { enable });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -321,6 +331,7 @@
                 param: 'PasswordAuthentication', value: 'no', revertValue: 'yes', enable
               });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -342,6 +353,7 @@
                 param: 'MaxAuthTries', value: '4', revertValue: '6', enable
               });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -363,6 +375,7 @@
                 param: 'LoginGraceTime', value: '60', revertValue: '120', enable
               });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -406,6 +419,7 @@
             try {
               const msg = await invoke<string>('security_fix_password_policy');
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: 'apply', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -426,6 +440,7 @@
             try {
               const msg = await invoke<string>('security_fix_tmp_sticky', { enable });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -491,6 +506,7 @@
             try {
               const msg = await invoke<string>('security_fix_auditd', { enable });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -510,6 +526,7 @@
             try {
               const msg = await invoke<string>('security_fix_time_sync', { enable });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -529,6 +546,7 @@
             try {
               const msg = await invoke<string>('security_fix_usbguard', { enable });
               uiStore.addToast(msg, 'success');
+              invoke('security_log_fix', { findingId: finding.id, findingTitle: finding.title, action: enable ? 'apply' : 'revert', outcome: msg }).catch(() => {});
               await runAudit();
             } catch (e) { uiStore.addToast(`Failed: ${e}`, 'error'); }
             finally { fixingId = null; }
@@ -851,6 +869,18 @@
               <CheckCircle2 size={11} />
               {report.findings.filter(f => f.is_resolved).length} Passed
             </button>
+            {#if mutedIds.length > 0}
+              <button
+                type="button"
+                onclick={() => { activeStandard = 'Muted'; activeSeverity = 'all'; activeCategory = 'all'; }}
+                class="stat-pill muted clickable"
+                class:active={activeStandard === 'Muted'}
+                title="Score excludes these {mutedIds.length} finding{mutedIds.length !== 1 ? 's' : ''}"
+              >
+                <EyeOff size={11} />
+                {mutedIds.length} Muted
+              </button>
+            {/if}
           </div>
         </div>
 
@@ -1039,6 +1069,24 @@
                   {/if}
 
                   <div class="finding-actions">
+                    <!-- ── Dry-run diff preview ─────────────────────────────── -->
+                    {#if finding.has_auto_fix && !finding.is_resolved}
+                      {@const hfix = getHardcodedFix(finding.id)}
+                      {#if hfix}
+                        <div class="dryrun-diff">
+                          <div class="dryrun-header">
+                            <Lock size={11} style="color:var(--color-success)" />
+                            <span>Proposed Change</span>
+                            <code class="dryrun-target">{hfix.target}</code>
+                          </div>
+                          <div class="dryrun-rows">
+                            <div class="dryrun-row dryrun-del"><span class="dryrun-sign">−</span><code>{hfix.current_label}</code></div>
+                            <div class="dryrun-row dryrun-add"><span class="dryrun-sign">+</span><code>{hfix.proposed_label}</code></div>
+                          </div>
+                        </div>
+                      {/if}
+                    {/if}
+
                     {#if aiStore.enabled}
                       <Button
                         variant="outline"
@@ -1053,16 +1101,32 @@
 
                     {#if finding.has_auto_fix}
                       {#if !finding.is_resolved}
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          onclick={() => handleFix(finding)}
-                          disabled={fixingId === finding.id || loading}
-                        >
-                          {#if fixingId === finding.id}<div class="spinner-sm"></div>
-                          {:else}<Lock size={13} />{/if}
-                          Apply Fix
-                        </Button>
+                        <!-- ── Tamper-flag gate ─────────────────────────── -->
+                        {#if finding.tamper_flag && !reviewedTamperIds.includes(finding.id)}
+                          <span class="tamper-block-label">
+                            <AlertTriangle size={12} />
+                            Review tamper warning before applying
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onclick={() => reviewedTamperIds = [...reviewedTamperIds, finding.id]}
+                            title="Acknowledge the tamper warning and enable Apply Fix"
+                          >
+                            <Eye size={13} /> I've Reviewed
+                          </Button>
+                        {:else}
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            onclick={() => handleFix(finding)}
+                            disabled={fixingId === finding.id || loading}
+                          >
+                            {#if fixingId === finding.id}<div class="spinner-sm"></div>
+                            {:else}<Lock size={13} />{/if}
+                            Apply Fix
+                          </Button>
+                        {/if}
                       {/if}
                       {#if finding.is_resolved && isRevertable(finding)}
                         <Button
@@ -1459,6 +1523,94 @@
   .stat-pill.critical { background: rgba(239,68,68,.12); color: var(--color-error); }
   .stat-pill.warning  { background: rgba(251,191,36,.12); color: var(--color-warning); }
   .stat-pill.good     { background: rgba(34,197,94,.12); color: var(--color-success); }
+  .stat-pill.muted    { background: rgba(255,255,255,.07); color: var(--color-text-muted); }
+  .stat-pill.muted.active { background: rgba(255,255,255,.14); color: var(--color-text-secondary); }
+
+  /* ── Dry-run diff preview (inside finding card) ─────────────────────────── */
+  .dryrun-diff {
+    width: 100%;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+
+  :global(html.light-mode) .dryrun-diff {
+    border-color: #E2E8F0;
+  }
+
+  .dryrun-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: rgba(34, 197, 94, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-success);
+  }
+
+  :global(html.light-mode) .dryrun-header {
+    background: rgba(22, 163, 74, 0.05);
+    border-bottom-color: #E2E8F0;
+  }
+
+  .dryrun-target {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 400;
+    color: var(--color-text-muted);
+    background: rgba(255,255,255,0.05);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .dryrun-rows { display: flex; flex-direction: column; }
+
+  .dryrun-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 11.5px;
+  }
+
+  .dryrun-del { background: rgba(239, 68, 68, 0.08); }
+  .dryrun-add { background: rgba(34, 197, 94, 0.08); }
+
+  :global(html.light-mode) .dryrun-del { background: rgba(220, 38, 38, 0.06); }
+  :global(html.light-mode) .dryrun-add { background: rgba(22, 163, 74, 0.06); }
+
+  .dryrun-sign {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 14px;
+    width: 12px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+  .dryrun-del .dryrun-sign { color: var(--color-error); }
+  .dryrun-add .dryrun-sign { color: var(--color-success); }
+
+  .dryrun-del code { color: rgba(239, 68, 68, 0.85); font-family: var(--font-mono); }
+  .dryrun-add code { color: rgba(34, 197, 94, 0.9);  font-family: var(--font-mono); }
+  :global(html.light-mode) .dryrun-del code { color: #dc2626; }
+  :global(html.light-mode) .dryrun-add code { color: #16a34a; }
+
+  /* ── Tamper-block label ──────────────────────────────────────────────────── */
+  .tamper-block-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--color-warning);
+    background: rgba(245, 158, 11, 0.10);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    padding: 4px 9px;
+    border-radius: 6px;
+  }
 
   /* ── Category Grid ───────────────────────────────────────────────────────── */
   .category-grid-wrap {

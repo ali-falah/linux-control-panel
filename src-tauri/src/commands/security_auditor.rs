@@ -1284,6 +1284,74 @@ pub async fn security_fix_tmp_sticky(enable: bool) -> Result<String, String> {
     }
 }
 
+/// Append a fix event to the local audit log.
+///
+/// Log path: ~/.config/linux-control-panel/security_advisor.log
+/// Format:   one NDJSON line per event, e.g.:
+///   {"ts":"2026-08-09T01:40:00Z","finding_id":"kernel_aslr","title":"ASLR...","action":"apply","outcome":"kernel.randomize_va_space = 2 ..."}
+#[tauri::command]
+pub async fn security_log_fix(
+    finding_id: String,
+    finding_title: String,
+    action: String,   // "apply" | "revert"
+    outcome: String,  // success message from the backend
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Build ISO-8601 timestamp (seconds precision, no external crate needed)
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ts = format!(
+        "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        1970 + secs / 31_557_600,
+        ((secs % 31_557_600) / 2_628_000) + 1,
+        ((secs % 2_628_000) / 86_400) + 1,
+        (secs % 86_400) / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    );
+
+    // Resolve log path: prefer XDG_CONFIG_HOME, fall back to ~/.config
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            std::path::PathBuf::from(home).join(".config")
+        });
+    let log_dir = config_dir.join("linux-control-panel");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|e| format!("Could not create log directory: {e}"))?;
+    let log_path = log_dir.join("security_advisor.log");
+
+    // Escape the strings minimally for safe JSON embedding
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    }
+
+    let line = format!(
+        "{{\"ts\":\"{ts}\",\"finding_id\":\"{id}\",\"title\":\"{title}\",\"action\":\"{action}\",\"outcome\":\"{outcome}\"}}\n",
+        ts = ts,
+        id = esc(&finding_id),
+        title = esc(&finding_title),
+        action = esc(&action),
+        outcome = esc(&outcome),
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Could not open log file: {e}"))?;
+
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("Could not write to log file: {e}"))?;
+
+    Ok(())
+}
+
 /// Fix /etc/passwd permissions.
 #[tauri::command]
 pub async fn security_fix_passwd_perms() -> Result<String, String> {
