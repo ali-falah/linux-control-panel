@@ -597,38 +597,36 @@
             Below is a ranked list of services causing boot latency, ordered from slowest to fastest. Services starting in more than 2 seconds are flagged for inspection.
           </div>
           
-          <div class="table-wrap" style="max-height: calc(100vh - 280px); overflow-y:auto; border:none; border-radius:0;">
-            <table>
-              <thead>
+          <Table tableAction={tableFeatures} style="max-height: calc(100vh - 280px); overflow-y:auto; border:none; border-radius:0;">
+            <thead>
+              <tr>
+                <th style="width:140px;">Startup Time</th>
+                <th>Service Unit</th>
+                <th style="width:120px; text-align:center;">Severity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each blameEntries as entry}
                 <tr>
-                  <th style="width:140px;">Startup Time</th>
-                  <th>Service Unit</th>
-                  <th style="width:120px; text-align:center;">Severity</th>
+                  <td>
+                    <code style="font-family:var(--font-mono); font-weight:700; color:var(--color-text-primary);">
+                      {entry.time_str}
+                    </code>
+                  </td>
+                  <td style="font-family:var(--font-mono); color:var(--color-text-secondary);">{entry.name}</td>
+                  <td style="text-align:center;">
+                    {#if entry.time_ms > 5000}
+                      <span class="badge badge-danger">CRITICAL</span>
+                    {:else if entry.time_ms > 2000}
+                      <span class="badge badge-warning">SLOW</span>
+                    {:else}
+                      <span class="badge badge-success">FAST</span>
+                    {/if}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {#each blameEntries as entry}
-                  <tr>
-                    <td>
-                      <code style="font-family:var(--font-mono); font-weight:700; color:var(--color-text-primary);">
-                        {entry.time_str}
-                      </code>
-                    </td>
-                    <td style="font-family:var(--font-mono); color:var(--color-text-secondary);">{entry.name}</td>
-                    <td style="text-align:center;">
-                      {#if entry.time_ms > 5000}
-                        <span class="badge badge-danger">CRITICAL</span>
-                      {:else if entry.time_ms > 2000}
-                        <span class="badge badge-warning">SLOW</span>
-                      {:else}
-                        <span class="badge badge-success">FAST</span>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+              {/each}
+            </tbody>
+          </Table>
         </Card>
       {/if}
     </div>

@@ -1176,6 +1176,63 @@ tbody tr:last-child td:last-child {
   letter-spacing: 0.02em;
 }
 
+/* ─── Compact & Spacious View Mode Density Rules ────────────────────────── */
+
+/* Compact Mode (24px line height, 11px font, truncated text) */
+.table-wrap.table-compact table tbody td,
+.table-compact table tbody td {
+  padding: 3px 10px !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+}
+
+.table-wrap.table-compact table thead th,
+.table-compact table thead th {
+  padding: 4px 10px !important;
+  font-size: 9.5px !important;
+}
+
+.table-wrap.table-compact table tbody td .col-msg,
+.table-wrap.table-compact table tbody td.col-msg,
+.table-wrap.table-compact table tbody td.col-desc,
+.table-wrap.table-compact table tbody td.col-path,
+.table-wrap.table-compact table tbody td .truncate-path,
+.table-wrap.table-compact table tbody td code,
+.table-compact .truncate-path,
+.table-compact .path-text {
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
+}
+
+/* Spacious Mode (36px line height, 12.5px font, expanded text) */
+.table-wrap.table-spacious table tbody td,
+.table-spacious table tbody td {
+  padding: 9px 14px !important;
+  font-size: 12.5px !important;
+  line-height: 1.5 !important;
+}
+
+.table-wrap.table-spacious table thead th,
+.table-spacious table thead th {
+  padding: 8px 14px !important;
+  font-size: 10px !important;
+}
+
+.table-wrap.table-spacious table tbody td .col-msg,
+.table-wrap.table-spacious table tbody td.col-msg,
+.table-wrap.table-spacious table tbody td.col-desc,
+.table-wrap.table-spacious table tbody td.col-path,
+.table-wrap.table-spacious table tbody td .truncate-path,
+.table-wrap.table-spacious table tbody td code,
+.table-spacious .truncate-path,
+.table-spacious .path-text {
+  white-space: normal !important;
+  word-break: break-word !important;
+  max-width: none !important;
+}
+
 /* ─── Module Page Layout ─────────────────────────────────────────────── */
 .module-page {
   display: flex;

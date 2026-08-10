@@ -1253,3 +1253,227 @@ pub async fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthAlert {
+    pub id: String,
+    pub category: String, // "storage" | "hardware" | "security" | "network" | "services"
+    pub severity: String, // "critical" | "warning"
+    pub title: String,
+    pub message: String,
+    pub action_type: String, // "journal" | "services" | "system-monitor" | "security-auditor" | "device-manager" | "network-manager"
+    pub action_label: String,
+}
+
+/// Aggregates real-time health alerts across Storage, Hardware, Network, Security, and Systemd Services.
+#[tauri::command]
+pub async fn get_advanced_health_alerts() -> Result<Vec<HealthAlert>, String> {
+    let mut alerts = Vec::new();
+
+    // 1. Systemd Service Failures Check
+    if let Ok(failed_count) = get_failed_services_count().await {
+        if failed_count > 0 {
+            alerts.push(HealthAlert {
+                id: "svc_failed".to_string(),
+                category: "services".to_string(),
+                severity: "critical".to_string(),
+                title: "Systemd Service Failures".to_string(),
+                message: format!("{failed_count} systemd service(s) failed to start."),
+                action_type: "journal".to_string(),
+                action_label: "Diagnose Error Logs".to_string(),
+            });
+        }
+    }
+
+    // 2. Storage & Disk Exhaustion Checks (Disk %, Inode %)
+    if let Ok(mounts) = get_disk_usage().await {
+        for mount in mounts {
+            if mount.percent >= 90.0 {
+                let is_crit = mount.percent >= 95.0;
+                alerts.push(HealthAlert {
+                    id: format!("disk_full_{}", mount.mount.replace('/', "_")),
+                    category: "storage".to_string(),
+                    severity: if is_crit { "critical".to_string() } else { "warning".to_string() },
+                    title: format!("Disk Usage High ({})", mount.mount),
+                    message: format!("Mount '{}' is {:.1}% full ({:.1} GB remaining).", mount.mount, mount.percent, mount.free_gb),
+                    action_type: "device-manager".to_string(),
+                    action_label: "Inspect Disks".to_string(),
+                });
+            }
+        }
+    }
+
+    // 2b. Inode Exhaustion Check via df -i
+    if let Ok(output) = Command::new("df").args(["-i", "--output=pcent,target"]).output().await {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let pct_str = parts[0].trim_end_matches('%');
+                let target = parts[1];
+                if target == "/" || target == "/home" || target == "/var" {
+                    if let Ok(ipct) = pct_str.parse::<f64>() {
+                        if ipct >= 95.0 {
+                            alerts.push(HealthAlert {
+                                id: format!("inode_full_{}", target.replace('/', "_")),
+                                category: "storage".to_string(),
+                                severity: "critical".to_string(),
+                                title: format!("Inode Exhaustion ({target})"),
+                                message: format!("Partition '{target}' inodes are {ipct:.0}% full. File creation may fail."),
+                                action_type: "journal".to_string(),
+                                action_label: "Inspect Logs".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2c. SMART Drive Health Check
+    if let Ok(smart_list) = get_smart_health().await {
+        for drive in smart_list {
+            let status = drive.health_status.to_uppercase();
+            if status != "OK" && status != "PASSED" && !status.is_empty() {
+                alerts.push(HealthAlert {
+                    id: format!("smart_fail_{}", drive.disk_path.replace('/', "_")),
+                    category: "storage".to_string(),
+                    severity: "critical".to_string(),
+                    title: format!("S.M.A.R.T. Health Warning ({})", drive.model),
+                    message: format!("Storage drive '{}' ({}) reports status: {}", drive.disk_path, drive.model, drive.health_status),
+                    action_type: "device-manager".to_string(),
+                    action_label: "Inspect Drive SMART".to_string(),
+                });
+            }
+        }
+    }
+
+    // 3. Thermal & Hardware Throttling Checks
+    if let Ok(Some(temp_c)) = get_cpu_temperature().await {
+        if temp_c > 90.0 {
+            alerts.push(HealthAlert {
+                id: "cpu_thermal_high".to_string(),
+                category: "hardware".to_string(),
+                severity: "critical".to_string(),
+                title: "CPU Overheating / Thermal Warning".to_string(),
+                message: format!("CPU temperature reached {temp_c:.1}°C (>90°C). Risk of hardware throttling or shutdown."),
+                action_type: "system-monitor".to_string(),
+                action_label: "View System Monitor".to_string(),
+            });
+        }
+    }
+
+    if let Ok(stats) = get_system_stats().await {
+        if stats.cpu_percent > 85.0 {
+            alerts.push(HealthAlert {
+                id: "cpu_usage_high".to_string(),
+                category: "hardware".to_string(),
+                severity: "warning".to_string(),
+                title: "High CPU Utilization".to_string(),
+                message: format!("CPU usage is at {:.0}%.", stats.cpu_percent),
+                action_type: "system-monitor".to_string(),
+                action_label: "Inspect Processes".to_string(),
+            });
+        }
+        if stats.ram_percent > 90.0 {
+            alerts.push(HealthAlert {
+                id: "ram_usage_high".to_string(),
+                category: "hardware".to_string(),
+                severity: "warning".to_string(),
+                title: "Memory Saturation Threshold".to_string(),
+                message: format!("Memory usage is at {:.0}%. Risk of OOM process kills.", stats.ram_percent),
+                action_type: "system-monitor".to_string(),
+                action_label: "Inspect Processes".to_string(),
+            });
+        }
+        if stats.swap_percent > 85.0 {
+            alerts.push(HealthAlert {
+                id: "swap_usage_high".to_string(),
+                category: "hardware".to_string(),
+                severity: "warning".to_string(),
+                title: "Swap Space Saturation".to_string(),
+                message: format!("Swap usage is at {:.0}% ({} MB used). System thrashing may occur.", stats.swap_percent, stats.swap_used_mb),
+                action_type: "system-monitor".to_string(),
+                action_label: "Inspect Processes".to_string(),
+            });
+        }
+    }
+
+    // 4. Network & Gateway Outage Checks
+    if let Ok(net_details) = get_network_details().await {
+        if let Some(gw) = net_details.gateway {
+            match ping_gateway(gw.clone()).await {
+                Ok(ping_str) if ping_str == "timeout" => {
+                    alerts.push(HealthAlert {
+                        id: "gateway_unreachable".to_string(),
+                        category: "network".to_string(),
+                        severity: "warning".to_string(),
+                        title: "Default Gateway Connection Failure".to_string(),
+                        message: format!("Default gateway ({gw}) is unreachable or timing out."),
+                        action_type: "network-manager".to_string(),
+                        action_label: "Inspect Network".to_string(),
+                    });
+                }
+                Err(_) => {
+                    alerts.push(HealthAlert {
+                        id: "gateway_unreachable".to_string(),
+                        category: "network".to_string(),
+                        severity: "warning".to_string(),
+                        title: "Default Gateway Connection Failure".to_string(),
+                        message: format!("Default gateway ({gw}) ping failed."),
+                        action_type: "network-manager".to_string(),
+                        action_label: "Inspect Network".to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 5. Security & SSH Brute-Force / SELinux Checks
+    if let Ok(output) = Command::new("journalctl")
+        .args(["-u", "sshd", "-u", "ssh", "--since", "10 min ago", "-q"])
+        .output()
+        .await
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let failed_ssh_count = stdout.lines().filter(|l| {
+            l.contains("Failed password") || l.contains("Invalid user") || l.contains("authentication failure")
+        }).count();
+
+        if failed_ssh_count >= 10 {
+            alerts.push(HealthAlert {
+                id: "security_ssh_bruteforce".to_string(),
+                category: "security".to_string(),
+                severity: "critical".to_string(),
+                title: "SSH Brute-Force Attack Detected".to_string(),
+                message: format!("{failed_ssh_count} failed SSH authentication attempts detected in the last 10 minutes."),
+                action_type: "journal".to_string(),
+                action_label: "View Security Logs".to_string(),
+            });
+        }
+    }
+
+    if let Ok(output) = Command::new("journalctl")
+        .args(["-g", "AVC", "--since", "10 min ago", "-q"])
+        .output()
+        .await
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let avc_count = stdout.lines().filter(|l| l.contains("type=AVC") || l.contains("avc:  denied")).count();
+        if avc_count > 0 {
+            alerts.push(HealthAlert {
+                id: "security_selinux_avc".to_string(),
+                category: "security".to_string(),
+                severity: "warning".to_string(),
+                title: "SELinux Access Violations".to_string(),
+                message: format!("{avc_count} SELinux access denial(s) logged in the last 10 minutes."),
+                action_type: "security-auditor".to_string(),
+                action_label: "Inspect Security Auditor".to_string(),
+            });
+        }
+    }
+
+    Ok(alerts)
+}
+
+

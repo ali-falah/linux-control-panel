@@ -101,37 +101,7 @@
     'Runtime Threats':    ShieldAlert,
   };
 
-  // ── Compliance Standards Mapping ──────────────────────────────────────────
-  const STANDARDS_MAP: Record<string, string[]> = {
-    ssh_root: ['CIS Level 1', 'STIG'],
-    ssh_pass_auth: ['CIS Level 1', 'NIST 800-53'],
-    ssh_max_auth: ['CIS Level 1'],
-    ssh_port: ['CIS Level 2'],
-    kernel_aslr: ['CIS Level 1', 'STIG'],
-    kernel_syncookies: ['CIS Level 1', 'NIST 800-53'],
-    kernel_ipforward: ['CIS Level 1'],
-    kernel_kptr: ['CIS Level 2'],
-    kernel_dmesg: ['CIS Level 2'],
-    kernel_icmp_redirect: ['CIS Level 1'],
-    pass_policy: ['CIS Level 1', 'STIG', 'NIST 800-53'],
-    sudo_nopasswd: ['CIS Level 1', 'STIG'],
-    uid0: ['CIS Level 1', 'STIG'],
-    sys_shell: ['CIS Level 1', 'NIST 800-53'],
-    fs_passwd: ['CIS Level 1'],
-    fs_shadow: ['CIS Level 1', 'STIG'],
-    fs_gshadow: ['CIS Level 1'],
-    fs_group: ['CIS Level 1'],
-    firewall: ['CIS Level 1', 'NIST 800-53'],
-    net_src_route: ['CIS Level 1'],
-    net_bogus_icmp: ['CIS Level 2'],
-    net_martians: ['CIS Level 2'],
-    selinux: ['CIS Level 1', 'STIG'],
-    auditd: ['CIS Level 1', 'NIST 800-53'],
-    time_sync: ['CIS Level 1', 'NIST 800-53'],
-    usbguard: ['CIS Level 2', 'STIG']
-  };
-
-  let activeStandard = $state<string>('all'); // 'all' | 'CIS Level 1' | 'CIS Level 2' | 'STIG' | 'NIST 800-53'
+  let activeView = $state<'all' | 'muted'>('all');
 
   // ── Muted / Ignored Findings State ─────────────────────────────────────────
   const MUTED_KEY = 'security_audit_muted_ids_v1';
@@ -199,12 +169,8 @@
         items = items.filter(f => f.severity === activeSeverity && !f.is_resolved);
       }
     }
-    if (activeStandard !== 'all') {
-      if (activeStandard === 'Muted') {
-        items = items.filter(f => mutedIds.includes(f.id));
-      } else {
-        items = items.filter(f => (STANDARDS_MAP[f.id] || []).includes(activeStandard));
-      }
+    if (activeView === 'muted') {
+      items = items.filter(f => mutedIds.includes(f.id));
     }
     return items;
   });
@@ -741,7 +707,7 @@
 
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
 <div class="module-container">
-  <PageHeader title="Security Auditor" subtitle="System Hardening & CIS Benchmarks" icon={Shield}>
+  <PageHeader title="Security Auditor" subtitle="System Hardening &amp; Security Audit" icon={Shield}>
     {#if report}
       <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
         {effectiveScore}% — {getScoreLabel(effectiveScore)}
@@ -872,9 +838,9 @@
             {#if mutedIds.length > 0}
               <button
                 type="button"
-                onclick={() => { activeStandard = 'Muted'; activeSeverity = 'all'; activeCategory = 'all'; }}
+                onclick={() => { activeView = activeView === 'muted' ? 'all' : 'muted'; activeSeverity = 'all'; activeCategory = 'all'; }}
                 class="stat-pill muted clickable"
-                class:active={activeStandard === 'Muted'}
+                class:active={activeView === 'muted'}
                 title="Score excludes these {mutedIds.length} finding{mutedIds.length !== 1 ? 's' : ''}"
               >
                 <EyeOff size={11} />
@@ -930,24 +896,8 @@
           <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
           
           <div class="findings-header-right">
-            <!-- Inline Compliance Standard Filter Dropdown -->
-            <div class="std-select-wrap">
-              <span class="std-select-label">Standard:</span>
-              <Select
-                bind:value={activeStandard}
-                style="height: 28px; font-size: 11px; padding: 0 8px; border-radius: 6px;"
-              >
-                <option value="all">All Standards</option>
-                <option value="CIS Level 1">CIS Level 1</option>
-                <option value="CIS Level 2">CIS Level 2</option>
-                <option value="STIG">STIG</option>
-                <option value="NIST 800-53">NIST 800-53</option>
-                <option value="Muted">Muted ({mutedIds.length})</option>
-              </Select>
-            </div>
-
             <span class="issue-badge" class:has-issues={totalIssues > 0}>
-              {#if activeSeverity !== 'all' || activeStandard !== 'all' || activeCategory !== 'all'}
+              {#if activeSeverity !== 'all' || activeCategory !== 'all'}
                 {filteredFindings.length} showing ({totalIssues} unresolved total)
               {:else}
                 {totalIssues} issue{totalIssues !== 1 ? 's' : ''} total
@@ -979,29 +929,26 @@
                 <div class="finding-main">
                   <div class="finding-title-row">
                     <span class="finding-title">{finding.title}</span>
-                    <div class="finding-badges">
-                      {#if mutedIds.includes(finding.id)}
-                        <span class="sev-badge" style="background:rgba(255,255,255,0.1); color:var(--color-text-muted); border: 1px solid rgba(255,255,255,0.2);">
-                          MUTED
-                        </span>
-                      {/if}
-                      <span class="sev-badge" style="background:{getSeverityColor(finding.severity)}20;color:{getSeverityColor(finding.severity)}">
-                        {finding.severity}
+                    <span class="sev-badge" style="background:{getSeverityColor(finding.severity)}20;color:{getSeverityColor(finding.severity)}">
+                      {finding.severity}
+                    </span>
+                    {#if finding.tamper_flag}
+                      <span class="sev-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.3); display: flex; align-items: center; gap: 4px;">
+                        <AlertTriangle size={10} />
+                        {finding.tamper_flag}
                       </span>
-                      <span class="cat-tag">{finding.category}</span>
-                      {#each (STANDARDS_MAP[finding.id] || []) as stdTag}
-                        <span class="std-tag">{stdTag}</span>
-                      {/each}
-                      {#if finding.tamper_flag}
-                        <span class="sev-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.3); display: flex; align-items: center; gap: 4px;">
-                          <AlertTriangle size={10} />
-                          {finding.tamper_flag}
-                        </span>
-                      {/if}
-                    </div>
+                    {/if}
+                    {#if mutedIds.includes(finding.id)}
+                      <span class="sev-badge" style="background:rgba(255,255,255,0.1); color:var(--color-text-muted); border: 1px solid rgba(255,255,255,0.2);">
+                        MUTED
+                      </span>
+                    {/if}
                   </div>
                   <div class="finding-desc">{finding.description}</div>
                 </div>
+                <span class="cat-tag" style="margin-left: auto; align-self: center; flex-shrink: 0; font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.07); color: var(--color-text-muted); border: 1px solid rgba(255, 255, 255, 0.1);">
+                  {finding.category}
+                </span>
                 <div class="finding-expand-icon" class:rotated={expandedId === finding.id}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="6 9 12 15 18 9"></polyline>

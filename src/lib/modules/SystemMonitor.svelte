@@ -735,7 +735,7 @@
                   />
                 </div>
 
-                <div style="flex:1; overflow:auto; border: 1px solid var(--color-border); border-radius: 8px; background: rgba(0,0,0,0.2); min-height: 0;">
+                <div style="flex:1; min-height: 0; display:flex; flex-direction:column;">
                   <Table tableAction={tableFeatures}>
                     <thead>
                       <tr>

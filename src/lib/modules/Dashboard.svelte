@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield, Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Layers, Sparkles, AlertTriangle } from '@lucide/svelte';
+  import { LayoutDashboard, HardDrive, Wifi, Server, Heart, Activity, RefreshCw, Shield, Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Layers, Sparkles, AlertTriangle, ShieldAlert, Thermometer, WifiOff, ExternalLink, ChevronRight } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -10,11 +10,22 @@
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import Card from '../components/ui/Card.svelte';
   
+  interface HealthAlertItem {
+    id: string;
+    category: string;
+    severity: string;
+    title: string;
+    message: string;
+    action_type: string;
+    action_label: string;
+  }
+
   let osInfo = $state<any>(null);
   let systemStats = $state<any>(null);
   let diskUsage = $state<any[]>([]);
   let smartHealth = $state<any[]>([]);
   let networkInterfaces = $state<any[]>([]);
+  let healthAlerts = $state<HealthAlertItem[]>([]);
 
   function getIfaceMeta(name: string) {
     if (name.startsWith('wl')) return { label: 'Wi-Fi Interface', icon: Wifi, color: 'var(--color-accent)' };
@@ -37,7 +48,36 @@
   let cpuHigh = $derived(systemStats && systemStats.cpu_usage > 85);
   let ramHigh = $derived(systemStats && systemStats.ram_usage > 90);
   let hasFailedServices = $derived(failedServicesCount > 0);
-  let hasProactiveAlert = $derived(cpuHigh || ramHigh || hasFailedServices);
+  let hasProactiveAlert = $derived(uiStore.enableProactiveHealth && (healthAlerts.length > 0 || cpuHigh || ramHigh || hasFailedServices));
+
+  function handleAlertAction(alert: HealthAlertItem) {
+    switch (alert.action_type) {
+      case 'journal':
+        uiStore.preAppliedJournalPriority = '3';
+        if (alert.category === 'services') uiStore.preAppliedJournalSearch = 'failed';
+        else if (alert.category === 'security') uiStore.preAppliedJournalSearch = 'sshd';
+        uiStore.setActiveTab('journal-logs');
+        break;
+      case 'services':
+        uiStore.serviceFilter = 'failed';
+        uiStore.setActiveTab('service-manager');
+        break;
+      case 'system-monitor':
+        uiStore.setActiveTab('system-monitor');
+        break;
+      case 'security-auditor':
+        uiStore.setActiveTab('security-auditor');
+        break;
+      case 'device-manager':
+        uiStore.setActiveTab('device-manager');
+        break;
+      case 'network-manager':
+        uiStore.setActiveTab('network-manager');
+        break;
+      default:
+        uiStore.setActiveTab('system-dashboard');
+    }
+  }
 
   let securityReport = $state<any>(null);
   let loadingSecurity = $state(false);
@@ -252,14 +292,15 @@
   async function fetchData() {
     fetchStorageDistribution();
     try {
-      const [os, stats, disks, smart, ifaces, lastUpdate, failedSvc] = await Promise.all([
+      const [os, stats, disks, smart, ifaces, lastUpdate, failedSvc, alerts] = await Promise.all([
         invoke('get_os_info'),
         invoke('get_system_stats'),
         invoke('get_disk_usage'),
         invoke('get_smart_health'),
         invoke('get_network_interfaces'),
         invoke('get_last_system_update'),
-        invoke('get_failed_services_count')
+        invoke('get_failed_services_count'),
+        uiStore.enableProactiveHealth ? invoke('get_advanced_health_alerts') : Promise.resolve([])
       ]);
       osInfo = os;
       systemStats = stats;
@@ -268,6 +309,7 @@
       networkInterfaces = ifaces as any[];
       lastSystemUpdate = lastUpdate as string;
       failedServicesCount = failedSvc as number;
+      healthAlerts = uiStore.enableProactiveHealth ? ((alerts as HealthAlertItem[]) || []) : [];
       
       // Secondary updates
       fetchNetworkDetails();
@@ -293,41 +335,129 @@
 
 <div class="module-page">
   <PageHeader title="Dashboard" subtitle="System Analytics Overview" icon={LayoutDashboard}>
-    <Button variant="ghost" onclick={handleManualRefresh} disabled={isRefreshing}>
-      <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} /> Refresh
-    </Button>
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <Button
+        variant={uiStore.enableProactiveHealth ? 'outline' : 'ghost'}
+        size="sm"
+        onclick={() => {
+          uiStore.toggleProactiveHealth();
+          if (uiStore.enableProactiveHealth) {
+            fetchData();
+          } else {
+            healthAlerts = [];
+          }
+        }}
+        title={uiStore.enableProactiveHealth ? 'Proactive System Health Checks are Active (Click to Disable)' : 'Proactive System Health Checks are Disabled (Click to Enable)'}
+        style="display: flex; align-items: center; gap: 6px; font-size: 11.5px;"
+      >
+        <Activity size={13} style="color: {uiStore.enableProactiveHealth ? 'var(--color-success)' : 'var(--color-text-muted)'};" />
+        <span>Health Checks: <strong style="color: {uiStore.enableProactiveHealth ? 'var(--color-success)' : 'var(--color-text-muted)'};">{uiStore.enableProactiveHealth ? 'ON' : 'OFF'}</strong></span>
+      </Button>
+      <Button variant="ghost" onclick={handleManualRefresh} disabled={isRefreshing}>
+        <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} /> Refresh
+      </Button>
+    </div>
   </PageHeader>
 
   {#if hasProactiveAlert}
-    <div class="proactive-health-banner" style="padding: 14px 18px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between;">
-      <div style="display: flex; align-items: center; gap: 12px;">
-        <AlertTriangle size={20} style="color: #ef4444;" />
-        <div>
-          <div style="font-size: 13.5px; font-weight: 600; color: var(--color-text-primary);">
-            Proactive System Health Alert
+    <div class="proactive-health-container" style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;">
+      {#if healthAlerts.length > 0}
+        {#each healthAlerts as alert (alert.id)}
+          {@const isCrit = alert.severity === 'critical'}
+          <div
+            class="proactive-health-banner"
+            style="padding: 12px 16px; background: {isCrit ? 'rgba(239, 68, 68, 0.08)' : 'rgba(245, 158, 11, 0.08)'}; border: 1px solid {isCrit ? 'rgba(239, 68, 68, 0.3)' : 'rgba(245, 158, 11, 0.3)'}; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;"
+          >
+            <div style="display: flex; align-items: center; gap: 12px;">
+              {#if alert.category === 'storage'}
+                <HardDrive size={18} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
+              {:else if alert.category === 'hardware'}
+                <Thermometer size={18} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
+              {:else if alert.category === 'security'}
+                <ShieldAlert size={18} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
+              {:else if alert.category === 'network'}
+                <WifiOff size={18} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
+              {:else}
+                <AlertTriangle size={18} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
+              {/if}
+              <div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span style="font-size: 13px; font-weight: 600; color: var(--color-text-primary);">
+                    {alert.title}
+                  </span>
+                  <Badge variant={isCrit ? 'danger' : 'warning'} style="font-size: 9px; padding: 1px 5px;">
+                    {alert.severity.toUpperCase()}
+                  </Badge>
+                </div>
+                <div style="font-size: 11.5px; color: var(--color-text-muted); margin-top: 2px;">
+                  {alert.message}
+                </div>
+              </div>
+            </div>
+
+            <Button
+              variant={isCrit ? 'primary' : 'outline'}
+              size="sm"
+              onclick={() => handleAlertAction(alert)}
+              style="display: flex; align-items: center; gap: 6px; font-size: 11px;"
+            >
+              {#if alert.action_type === 'journal'}
+                <Sparkles size={12} /> {alert.action_label}
+              {:else}
+                <ExternalLink size={12} /> {alert.action_label}
+              {/if}
+            </Button>
           </div>
-          <div style="font-size: 12px; color: var(--color-text-muted);">
-            {#if cpuHigh}High CPU utilization detected ({Math.round(systemStats.cpu_usage)}%). {/if}
-            {#if ramHigh}Memory saturation threshold reached ({Math.round(systemStats.ram_usage)}%). {/if}
-            {#if hasFailedServices}{failedServicesCount} systemd service(s) failed to start. {/if}
+        {/each}
+      {:else}
+        <div class="proactive-health-banner" style="padding: 14px 18px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <AlertTriangle size={20} style="color: #ef4444;" />
+            <div>
+              <div style="font-size: 13.5px; font-weight: 600; color: var(--color-text-primary);">
+                Proactive System Health Alert
+              </div>
+              <div style="font-size: 12px; color: var(--color-text-muted);">
+                {#if cpuHigh}High CPU utilization detected ({Math.round(systemStats.cpu_usage)}%). {/if}
+                {#if ramHigh}Memory saturation threshold reached ({Math.round(systemStats.ram_usage)}%). {/if}
+                {#if hasFailedServices}{failedServicesCount} systemd service(s) failed to start. {/if}
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            {#if hasFailedServices}
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={() => {
+                  uiStore.serviceFilter = 'failed';
+                  uiStore.setActiveTab('service-manager');
+                }}
+                style="display: flex; align-items: center; gap: 6px;"
+              >
+                <Server size={13} /> Inspect Failed Services
+              </Button>
+            {/if}
+            {#if aiStore.enabled}
+              <Button
+                variant="primary"
+                size="sm"
+                onclick={() => {
+                  if (hasFailedServices) {
+                    uiStore.preAppliedJournalPriority = '3';
+                    uiStore.preAppliedJournalSearch = 'failed';
+                    uiStore.setActiveTab('journal-logs');
+                  } else {
+                    uiStore.setActiveTab('system-monitor');
+                  }
+                }}
+                style="display: flex; align-items: center; gap: 6px;"
+              >
+                <Sparkles size={13} /> Diagnose Error Logs
+              </Button>
+            {/if}
           </div>
         </div>
-      </div>
-      {#if aiStore.enabled}
-        <Button
-          variant="outline"
-          size="sm"
-          onclick={() => {
-            if (hasFailedServices) {
-              uiStore.setActiveTab('journal-logs');
-            } else {
-              uiStore.setActiveTab('system-monitor');
-            }
-          }}
-          style="display: flex; align-items: center; gap: 6px;"
-        >
-          <Sparkles size={13} style="color: var(--color-accent);" /> Diagnose Logs
-        </Button>
       {/if}
     </div>
   {/if}

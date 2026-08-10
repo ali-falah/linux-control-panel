@@ -3,6 +3,7 @@
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
   import CodeEditor from '../components/CodeEditor.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
@@ -543,41 +544,38 @@
               <CheckCircle size={32} class="empty-state-icon" style="color:var(--color-success)" />
               <span style="font-size:16px; font-weight:600;">System is up to date</span>
             </div>
-          {:else}
-            <div class="table-wrap" style="border:none; border-radius:0; flex:1; min-height:0;">
-              <table use:tableFeatures>
-                <thead>
-                  <tr>
-                    <th style="width:40px; text-align:center;">
-                      <input type="checkbox" checked={selectAllUpdates} onchange={toggleSelectAll} />
-                    </th>
-                    <th>Package</th>
-                    <th>Version</th>
-                    <th>Size</th>
-                    <th>Arch</th>
-                    <th>Repository</th>
+            <Table tableAction={tableFeatures} style="border:none; border-radius:0;">
+              <thead>
+                <tr>
+                  <th style="width:40px; text-align:center;">
+                    <input type="checkbox" checked={selectAllUpdates} onchange={toggleSelectAll} />
+                  </th>
+                  <th>Package</th>
+                  <th>Version</th>
+                  <th>Size</th>
+                  <th>Arch</th>
+                  <th>Repository</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each updates as pkg}
+                  <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;" class:row-selected={selectedUpdates.has(pkg.package)}>
+                    <td style="text-align:center;" onclick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedUpdates.has(pkg.package)}
+                        onchange={() => toggleUpdateSelection(pkg.package)}
+                      />
+                    </td>
+                    <td style="font-weight:500;">{pkg.package}</td>
+                    <td style="font-family:var(--font-mono); font-size:12px;">{pkg.version}</td>
+                    <td style="font-size:12px; font-weight:500;">{pkg.size}</td>
+                    <td style="color:var(--color-text-secondary);">{pkg.arch}</td>
+                    <td><span class="badge badge-muted">{pkg.repo}</span></td>
                   </tr>
-                </thead>
-                <tbody>
-                  {#each updates as pkg}
-                    <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;" class:row-selected={selectedUpdates.has(pkg.package)}>
-                      <td style="text-align:center;" onclick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={selectedUpdates.has(pkg.package)}
-                          onchange={() => toggleUpdateSelection(pkg.package)}
-                        />
-                      </td>
-                      <td style="font-weight:500;">{pkg.package}</td>
-                      <td style="font-family:var(--font-mono); font-size:12px;">{pkg.version}</td>
-                      <td style="font-size:12px; font-weight:500;">{pkg.size}</td>
-                      <td style="color:var(--color-text-secondary);">{pkg.arch}</td>
-                      <td><span class="badge badge-muted">{pkg.repo}</span></td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
+                {/each}
+              </tbody>
+            </Table>
           {/if}
         </div>
       {/if}
@@ -600,49 +598,47 @@
           </span>
         </div>
       {:else}
-        <div class="table-wrap" style="border:none; border-radius:0; flex:1; min-height:0;">
-          <table use:tableFeatures>
-            <thead>
+        <Table tableAction={tableFeatures} style="border:none; border-radius:0;">
+          <thead>
+            <tr>
+              <th style="width:60px">ID</th>
+              <th>Command</th>
+              <th>Date &amp; Time</th>
+              <th>Action</th>
+              <th style="text-align:right">Altered</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredHistory as entry (entry.id)}
               <tr>
-                <th style="width:60px">ID</th>
-                <th>Command</th>
-                <th>Date &amp; Time</th>
-                <th>Action</th>
-                <th style="text-align:right">Altered</th>
-                <th style="text-align:right">Actions</th>
+                <td><code style="font-size:11px; color:var(--color-text-accent)">#{entry.id}</code></td>
+                <td><div style="font-weight:500; font-family:var(--font-mono); font-size:12px;">{entry.command || '—'}</div></td>
+                <td>
+                  <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--color-text-secondary);">
+                    <Calendar size={12} /> {formatToLocalDate(entry.date)}
+                  </div>
+                </td>
+                <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Unknown'}</span></td>
+                <td style="text-align:right; font-weight:500;">{entry.altered}</td>
+                <td style="text-align:right">
+                  <KebabMenu>
+                    <button class="menu-item danger"
+                      onclick={(e) => { e.stopPropagation(); confirmUndo(entry); }}
+                      disabled={undoingId === entry.id}
+                    >
+                      {#if undoingId === entry.id}
+                        <RefreshCw size={14} class="animate-spin" /> Rolling back…
+                      {:else}
+                        <Undo2 size={14} /> Undo Transaction
+                      {/if}
+                    </button>
+                  </KebabMenu>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {#each filteredHistory as entry (entry.id)}
-                <tr>
-                  <td><code style="font-size:11px; color:var(--color-text-accent)">#{entry.id}</code></td>
-                  <td><div style="font-weight:500; font-family:var(--font-mono); font-size:12px;">{entry.command || '—'}</div></td>
-                  <td>
-                    <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--color-text-secondary);">
-                      <Calendar size={12} /> {formatToLocalDate(entry.date)}
-                    </div>
-                  </td>
-                  <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Unknown'}</span></td>
-                  <td style="text-align:right; font-weight:500;">{entry.altered}</td>
-                  <td style="text-align:right">
-                    <KebabMenu>
-                      <button class="menu-item danger"
-                        onclick={(e) => { e.stopPropagation(); confirmUndo(entry); }}
-                        disabled={undoingId === entry.id}
-                      >
-                        {#if undoingId === entry.id}
-                          <RefreshCw size={14} class="animate-spin" /> Rolling back…
-                        {:else}
-                          <Undo2 size={14} /> Undo Transaction
-                        {/if}
-                      </button>
-                    </KebabMenu>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+            {/each}
+          </tbody>
+        </Table>
       {/if}
     </div>
 

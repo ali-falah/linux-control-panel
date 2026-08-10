@@ -43,6 +43,7 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
+  tableDensity = $state<'compact' | 'spacious'>('compact');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
 
@@ -65,7 +66,30 @@ class UIStore {
   toggleSearchModal() {
     this.searchModalOpen = !this.searchModalOpen;
   }
+
+  initTableDensity() {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('app_table_density') as 'compact' | 'spacious';
+      if (saved === 'compact' || saved === 'spacious') {
+        this.tableDensity = saved;
+      }
+    }
+  }
+
+  setTableDensity(density: 'compact' | 'spacious') {
+    this.tableDensity = density;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_table_density', density);
+    }
+  }
+
+  toggleTableDensity() {
+    this.setTableDensity(this.tableDensity === 'compact' ? 'spacious' : 'compact');
+  }
+
   preAppliedJournalPriority = $state<string>('all');
+  preAppliedJournalSearch = $state<string>('');
+  enableProactiveHealth = $state<boolean>(true);
   serviceFilter = $state<string | null>(null);
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);
@@ -87,15 +111,31 @@ class UIStore {
     danger: false,
   });
 
+  setProactiveHealth(enabled: boolean) {
+    this.enableProactiveHealth = enabled;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_enable_proactive_health', String(enabled));
+    }
+  }
+
+  toggleProactiveHealth() {
+    this.setProactiveHealth(!this.enableProactiveHealth);
+  }
+
   initTheme() {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('app_theme') as 'dark' | 'light';
-      if (saved) {
-        this.theme = saved;
+      const savedTheme = localStorage.getItem('app_theme') as 'dark' | 'light';
+      if (savedTheme) {
+        this.theme = savedTheme;
       } else {
         this.theme = 'dark';
       }
       this.applyTheme();
+
+      const savedHealth = localStorage.getItem('app_enable_proactive_health');
+      if (savedHealth !== null) {
+        this.enableProactiveHealth = savedHealth === 'true';
+      }
     }
   }
 

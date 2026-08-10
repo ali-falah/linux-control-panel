@@ -277,6 +277,10 @@
       filterPriority = uiStore.preAppliedJournalPriority;
       uiStore.preAppliedJournalPriority = 'all';
     }
+    if (uiStore.preAppliedJournalSearch) {
+      searchQuery = uiStore.preAppliedJournalSearch;
+      uiStore.preAppliedJournalSearch = '';
+    }
     fetchLogs();
     fetchAuthEvents();
     fetchAuditLogs();
