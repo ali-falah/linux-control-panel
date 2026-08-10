@@ -345,6 +345,35 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 "Set 'LoginGraceTime 60' in /etc/ssh/sshd_config.", cat_ssh, true, Some("CIS 5.2.14")));
         }
 
+        // 1f. SSH X11 Forwarding
+        ssh_max += 5;
+        let x11_fwd = ssh_val(&ssh_full, "X11Forwarding").unwrap_or_else(|| "no".to_string()).to_lowercase();
+        if x11_fwd == "no" {
+            ssh_cur += 5;
+            findings.push(good("ssh_x11", "SSH X11 Forwarding Disabled",
+                "X11Forwarding is set to 'no'. GUI traffic forwarding over SSH is disabled, reducing attack surface.",
+                "Keep X11Forwarding disabled unless explicitly required.", cat_ssh, Some("CIS 5.2.6")));
+        } else {
+            findings.push(warn("ssh_x11", "SSH X11 Forwarding Enabled",
+                "X11Forwarding is enabled. Attackers with access to the remote X display could sniff mouse/keyboard input.",
+                "Set 'X11Forwarding no' in /etc/ssh/sshd_config.", cat_ssh, true, Some("CIS 5.2.6")));
+        }
+
+        // 1g. SSH Client Idle Timeout
+        ssh_max += 5;
+        let alive_int: u32 = ssh_val(&ssh_full, "ClientAliveInterval").unwrap_or_else(|| "0".to_string()).parse().unwrap_or(0);
+        let alive_cnt: u32 = ssh_val(&ssh_full, "ClientAliveCountMax").unwrap_or_else(|| "3".to_string()).parse().unwrap_or(3);
+        if alive_int > 0 && alive_int <= 300 && alive_cnt <= 3 {
+            ssh_cur += 5;
+            findings.push(good("ssh_idle_timeout", "SSH Client Idle Timeout Configured",
+                &format!("ClientAliveInterval is {}s and ClientAliveCountMax is {}. Inactive sessions are automatically terminated.", alive_int, alive_cnt),
+                "Maintain idle timeouts to protect unattended terminal sessions.", cat_ssh, Some("CIS 5.2.13")));
+        } else {
+            findings.push(warn("ssh_idle_timeout", "SSH Client Idle Timeout Unconfigured",
+                &format!("ClientAliveInterval is {} (should be 1-300s) and ClientAliveCountMax is {}. Inactive sessions remain open indefinitely.", alive_int, alive_cnt),
+                "Set 'ClientAliveInterval 300' and 'ClientAliveCountMax 3' in /etc/ssh/sshd_config.", cat_ssh, true, Some("CIS 5.2.13")));
+        }
+
         crate::log_to_file("INFO", "security_run_audit: SSH checks done");
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -437,6 +466,63 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 "Set net.ipv4.conf.all.accept_redirects=0 and net.ipv6.conf.all.accept_redirects=0", cat_kernel, true, Some("CIS 3.2.2")));
         }
 
+        // 2g. Disable Unused Filesystem Modules
+        kernel_max += 5;
+        let modprobe_conf = read_cmd(&["bash", "-c", "cat /etc/modprobe.d/*.conf 2>/dev/null || true"]).await;
+        let fs_disabled = modprobe_conf.contains("cramfs") && modprobe_conf.contains("hfs");
+        if fs_disabled {
+            kernel_cur += 5;
+            findings.push(good("kernel_fs_modules", "Unused Filesystem Modules Blacklisted",
+                "Unused legacy filesystem modules (cramfs, hfs, udf, etc.) are blacklisted via modprobe.",
+                "Maintain modprobe blacklist to prevent mounting vulnerable legacy filesystems.", cat_kernel, Some("CIS 1.1.1")));
+        } else {
+            findings.push(warn("kernel_fs_modules", "Unused Legacy Filesystem Modules Unrestricted",
+                "Legacy filesystem drivers (cramfs, freevxfs, hfs, hfsplus, jffs2, udf) can be dynamically loaded.",
+                "Blacklist unused filesystem modules in /etc/modprobe.d/disable-unused-fs.conf", cat_kernel, true, Some("CIS 1.1.1")));
+        }
+
+        // 2h. Reverse Path Filtering (rp_filter)
+        kernel_max += 5;
+        let rp_filt = read_sysctl("net.ipv4.conf.all.rp_filter").await;
+        if rp_filt == "1" {
+            kernel_cur += 5;
+            findings.push(good("kernel_rp_filter", "Reverse Path Filtering Enabled",
+                "net.ipv4.conf.all.rp_filter=1. Source route validation protects against IP address spoofing.",
+                "Maintain rp_filter=1 to prevent IP spoofing.", cat_kernel, Some("CIS 3.2.1")));
+        } else {
+            findings.push(warn("kernel_rp_filter", "Reverse Path Filtering Disabled or Loose",
+                "net.ipv4.conf.all.rp_filter=0 (or 2). System accepts network packets with spoofed source addresses.",
+                "Set net.ipv4.conf.all.rp_filter=1 in /etc/sysctl.d/99-hardening.conf", cat_kernel, true, Some("CIS 3.2.1")));
+        }
+
+        // 2i. SysRq Restriction
+        kernel_max += 5;
+        let sysrq_val = read_sysctl("kernel.sysrq").await;
+        if sysrq_val == "0" || sysrq_val == "4" {
+            kernel_cur += 5;
+            findings.push(good("kernel_sysrq", "Magic SysRq Key Restricted",
+                &format!("kernel.sysrq={} — keyboard SysRq shortcuts are restricted.", sysrq_val),
+                "Maintain restricted SysRq settings to prevent physical console reboot/dump exploits.", cat_kernel, Some("CIS 1.5.2")));
+        } else {
+            findings.push(warn("kernel_sysrq", "Magic SysRq Key Unrestricted",
+                &format!("kernel.sysrq={} (should be 0 or 4). Anyone with physical or console access can trigger immediate reboots or dumps.", sysrq_val),
+                "Set kernel.sysrq=4 in /etc/sysctl.d/99-hardening.conf", cat_kernel, true, Some("CIS 1.5.2")));
+        }
+
+        // 2j. Mask Ctrl-Alt-Del
+        kernel_max += 5;
+        let cad_status = read_cmd(&["systemctl", "is-enabled", "ctrl-alt-del.target"]).await;
+        if cad_status.trim() == "masked" {
+            kernel_cur += 5;
+            findings.push(good("kernel_ctrl_alt_del", "Ctrl-Alt-Del Reboot Masked",
+                "ctrl-alt-del.target is masked. Pressing Ctrl-Alt-Del at the console will not reboot the server.",
+                "Maintain masked status to prevent accidental or malicious physical reboots.", cat_kernel, Some("CIS 1.5.1")));
+        } else {
+            findings.push(warn("kernel_ctrl_alt_del", "Ctrl-Alt-Del Reboot Active",
+                "ctrl-alt-del.target is not masked. Anyone with console access can immediately reboot the server.",
+                "Run 'systemctl mask ctrl-alt-del.target' to disable reboot shortcut.", cat_kernel, true, Some("CIS 1.5.1")));
+        }
+
         crate::log_to_file("INFO", "security_run_audit: Kernel checks done");
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -495,7 +581,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         } else {
             findings.push(crit("empty_passwords", "Accounts with Empty Passwords Found",
                 &format!("The following accounts have no password: {}. Anyone can log in as these users without credentials.", empty_pw_users.join(", ")),
-                "Run 'passwd <username>' to set passwords, or 'passwd -l <username>' to lock unused accounts.", cat_user, false, Some("CIS 5.4.2")));
+                "Run 'passwd <username>' to set passwords, or click Apply Fix to lock accounts via 'passwd -l'.", cat_user, true, Some("CIS 5.4.2")));
         }
 
         // 3c. NOPASSWD in sudoers
@@ -540,6 +626,78 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             findings.push(crit("uid0", "Duplicate UID 0 Accounts Detected",
                 &format!("Non-root accounts with UID 0: {}. These have full root privileges by default.", uid0_users.join(", ")),
                 "Remove or change the UID of these accounts immediately. Only 'root' should have UID 0.", cat_user, false, Some("CIS 5.4.3")));
+        }
+
+        // 3e. Duplicate UIDs / GIDs
+        user_max += 5;
+        let mut seen_uids = std::collections::HashSet::new();
+        let mut dup_uids = Vec::new();
+        for line in passwd_file.lines() {
+            let p: Vec<&str> = line.splitn(7, ':').collect();
+            if p.len() >= 3 {
+                if let Ok(uid) = p[2].parse::<u32>() {
+                    if !seen_uids.insert(uid) { dup_uids.push(format!("UID {}", uid)); }
+                }
+            }
+        }
+        let group_file = read_file("/etc/group").await;
+        let mut seen_gids = std::collections::HashSet::new();
+        for line in group_file.lines() {
+            let p: Vec<&str> = line.splitn(4, ':').collect();
+            if p.len() >= 3 {
+                if let Ok(gid) = p[2].parse::<u32>() {
+                    if !seen_gids.insert(gid) { dup_uids.push(format!("GID {}", gid)); }
+                }
+            }
+        }
+        if dup_uids.is_empty() {
+            user_cur += 5;
+            findings.push(good("duplicate_uids_gids", "Unique User & Group IDs",
+                "All user accounts and groups have unique numeric identifiers.",
+                "Maintain unique UIDs and GIDs for distinct user identities.", cat_user, Some("CIS 5.4.4")));
+        } else {
+            findings.push(warn("duplicate_uids_gids", "Duplicate UIDs or GIDs Detected",
+                &format!("Duplicate user/group IDs found: {}. Duplicate IDs allow accounts to access each other's files.", dup_uids.join(", ")),
+                "Run 'pwck' and 'grpck' to audit and fix duplicate account numbers.", cat_user, false, Some("CIS 5.4.4")));
+        }
+
+        // 3f. PAM Faillock Lockout Policy
+        user_max += 5;
+        let faillock_conf = read_privileged_file("/etc/security/faillock.conf").await;
+        let faillock_d = read_cmd(&["bash", "-c", "cat /etc/security/faillock.conf.d/*.conf 2>/dev/null || true"]).await;
+        let faillock_full = format!("{}\n{}", faillock_conf, faillock_d);
+        let has_faillock = faillock_full.lines().any(|l| l.trim().starts_with("deny") && !l.trim().starts_with('#'));
+        if has_faillock {
+            user_cur += 5;
+            findings.push(good("pam_faillock", "PAM Account Lockout Active",
+                "PAM faillock is configured to lock accounts after repeated failed login attempts.",
+                "Maintain lockout policies to prevent SSH brute-force attacks.", cat_user, Some("CIS 5.3.2")));
+        } else {
+            findings.push(warn("pam_faillock", "PAM Account Lockout Unconfigured",
+                "PAM faillock lockout policy is missing or unconfigured. Brute-force login attempts are not throttled at the PAM layer.",
+                "Configure PAM faillock in /etc/security/faillock.conf (deny = 5, unlock_time = 900).", cat_user, true, Some("CIS 5.3.2")));
+        }
+
+        // 3g. Default System umask Policy
+        user_max += 5;
+        let has_stricter_umask = login_defs.lines().any(|l| {
+            let t = l.trim();
+            if t.starts_with('#') { return false; }
+            if t.starts_with("UMASK") {
+                let parts: Vec<&str> = t.split_whitespace().collect();
+                if parts.len() >= 2 { return parts[1] == "027" || parts[1] == "077"; }
+            }
+            false
+        });
+        if has_stricter_umask {
+            user_cur += 5;
+            findings.push(good("umask_policy", "Default System umask Secure",
+                "Default UMASK in /etc/login.defs is set to 027 (or 077), protecting newly created files from unauthorized group/other access.",
+                "Maintain restrictive umask defaults.", cat_user, Some("CIS 5.4.5")));
+        } else {
+            findings.push(warn("umask_policy", "Overly Permissive System umask",
+                "Default UMASK is set to 022 or unconfigured. Newly created files are world-readable by default.",
+                "Set 'UMASK 027' in /etc/login.defs.", cat_user, true, Some("CIS 5.4.5")));
         }
 
         // 3e. Locked/disabled system accounts with login shell
@@ -659,6 +817,63 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             findings.push(warn("fs_coredump", "SUID Core Dumps Enabled",
                 &format!("fs.suid_dumpable={} — privileged processes can write core dumps that may contain passwords or session tokens.", coredump),
                 "Set fs.suid_dumpable=0 in /etc/sysctl.d/99-hardening.conf", cat_fs, true, Some("CIS 1.6.1")));
+        }
+        // 4e. Partition Mount Options (/tmp, /var/tmp, /dev/shm)
+        fs_max += 5;
+        let mounts = read_file("/proc/mounts").await;
+        let mut missing_opts = Vec::new();
+        for target in ["/tmp", "/var/tmp", "/dev/shm"] {
+            if let Some(line) = mounts.lines().find(|l| l.contains(&format!(" {} ", target))) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let opts = parts[3];
+                    let mut unsecure = Vec::new();
+                    if !opts.contains("nodev") { unsecure.push("nodev"); }
+                    if !opts.contains("nosuid") { unsecure.push("nosuid"); }
+                    if !opts.contains("noexec") && target != "/tmp" { unsecure.push("noexec"); }
+                    if !unsecure.is_empty() { missing_opts.push(format!("{} missing {}", target, unsecure.join(","))); }
+                }
+            }
+        }
+        if missing_opts.is_empty() {
+            fs_cur += 5;
+            findings.push(good("fs_mount_options", "Temporary Mount Options Hardened",
+                "/tmp, /var/tmp, and /dev/shm have hardening mount options (nodev, nosuid) applied.",
+                "Maintain strict mount flags on temporary partitions.", cat_fs, Some("CIS 1.1.2 - 1.1.8")));
+        } else {
+            findings.push(warn("fs_mount_options", "Temporary Mount Options Missing Hardening",
+                &format!("Temporary partition mount options missing hardening flags: {}.", missing_opts.join("; ")),
+                "Edit /etc/fstab and add 'nodev,nosuid,noexec' to /tmp, /var/tmp, and /dev/shm mount entries.", cat_fs, false, Some("CIS 1.1.2 - 1.1.8")));
+        }
+
+        // 4f. World-Writable Files
+        fs_max += 5;
+        let ww_output = read_cmd(&["bash", "-c", "find /tmp /var/tmp /dev/shm /home -maxdepth 3 -type f -perm -0002 2>/dev/null | head -5"]).await;
+        let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        if ww_files.is_empty() {
+            fs_cur += 5;
+            findings.push(good("fs_world_writable", "No World-Writable Files Found in Key Paths",
+                "No unexpected world-writable regular files found in /tmp, /var/tmp, /dev/shm, or /home.",
+                "Maintain strict file permissions across all shared directories.", cat_fs, Some("CIS 1.1.21")));
+        } else {
+            findings.push(warn("fs_world_writable", "World-Writable Files Detected",
+                &format!("World-writable regular files found: {}. Any user can overwrite or tamper with these files.", ww_files.join(", ")),
+                "Run 'chmod o-w <file>' to remove world-write permissions on sensitive files.", cat_fs, false, Some("CIS 1.1.21")));
+        }
+
+        // 4g. Unowned Files / Groups
+        fs_max += 5;
+        let unowned_out = read_cmd(&["bash", "-c", "find /tmp /var/tmp /home -maxdepth 3 \\( -nouser -o -nogroup \\) 2>/dev/null | head -5"]).await;
+        let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        if unowned_files.is_empty() {
+            fs_cur += 5;
+            findings.push(good("fs_unowned_files", "No Unowned Files Detected",
+                "All scanned files belong to valid system users and groups.",
+                "Periodically audit for orphaned files left behind by deleted users.", cat_fs, Some("CIS 6.1.11")));
+        } else {
+            findings.push(warn("fs_unowned_files", "Unowned or Orphaned Files Found",
+                &format!("Files without a valid owner/group found: {}. Orphaned files may pose security risks if user IDs are re-assigned.", unowned_files.join(", ")),
+                "Run 'chown root:root <file>' or remove orphaned files.", cat_fs, false, Some("CIS 6.1.11")));
         }
 
         crate::log_to_file("INFO", "security_run_audit: Filesystem checks done");
@@ -923,6 +1138,84 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             findings.push(info_finding("sec_updates", "Package Manager Not Detected",
                 "Could not determine package manager to check for security updates.",
                 "Manually verify your system is up to date.", cat_sys, false));
+        }
+
+        // 6f. GRUB Bootloader Password
+        system_max += 5;
+        let grub_cfg = read_privileged_file("/boot/grub2/grub.cfg").await;
+        let has_grub_pw = grub_cfg.contains("password_pbkdf2") || grub_cfg.contains("password ");
+        if has_grub_pw {
+            system_cur += 5;
+            findings.push(good("sys_grub_password", "GRUB Bootloader Password Set",
+                "GRUB password protection is configured. Unauthorized boot option modifications are prevented.",
+                "Maintain GRUB password protection.", cat_sys, Some("CIS 1.4.1")));
+        } else {
+            findings.push(warn("sys_grub_password", "GRUB Bootloader Unprotected",
+                "No GRUB bootloader password detected. Anyone with physical access can edit kernel boot arguments to bypass authentication (e.g. init=/bin/sh).",
+                "Run 'grub2-setpassword' to set a bootloader password.", cat_sys, false, Some("CIS 1.4.1")));
+        }
+
+        // 6g. Legal Access Warning Banner
+        system_max += 5;
+        let issue_text = read_file("/etc/issue").await;
+        let issue_net = read_file("/etc/issue.net").await;
+        let ssh_banner = ssh_val(&ssh_full, "Banner").unwrap_or_default();
+        let has_banner = (!issue_text.trim().is_empty() && !issue_text.contains("Kernel \\r on an \\m"))
+            || (!issue_net.trim().is_empty() && !issue_net.contains("Kernel \\r on an \\m"))
+            || (!ssh_banner.is_empty() && ssh_banner != "none");
+        if has_banner {
+            system_cur += 5;
+            findings.push(good("sys_legal_banner", "Legal Access Banner Configured",
+                "A legal access warning banner is present in /etc/issue or /etc/ssh/sshd_config.",
+                "Maintain warning banners to establish legal notice for unauthorized access.", cat_sys, Some("CIS 1.7.1")));
+        } else {
+            findings.push(warn("sys_legal_banner", "Legal Access Banner Missing",
+                "No custom legal warning banner configured in /etc/issue or /etc/ssh/sshd_config.",
+                "Set an authorized access warning banner in /etc/issue and /etc/ssh/sshd_config.", cat_sys, true, Some("CIS 1.7.1")));
+        }
+
+        // 6h. Loaded Audit Rules
+        system_max += 5;
+        let auditctl_out = read_cmd(&["auditctl", "-l"]).await;
+        let has_audit_rules = !auditctl_out.contains("No rules") && !auditctl_out.trim().is_empty();
+        if has_audit_rules {
+            system_cur += 5;
+            findings.push(good("sys_audit_rules", "Auditd Rules Loaded",
+                "Security audit rules are active and loaded into the audit kernel subsystem.",
+                "Maintain comprehensive rules in /etc/audit/rules.d/audit.rules.", cat_sys, Some("CIS 4.1.3")));
+        } else {
+            findings.push(warn("sys_audit_rules", "No Security Audit Rules Loaded",
+                "auditctl reports no active audit rules loaded. auditd is running but not tracking system file/privilege calls.",
+                "Load standard CIS audit rules into /etc/audit/rules.d/ and run 'augenrules --load'.", cat_sys, false, Some("CIS 4.1.3")));
+        }
+
+        // 6i. Listening Network Ports Audit
+        system_max += 5;
+        let listening_out = read_cmd(&["ss", "-tuln"]).await;
+        let open_ports: Vec<String> = listening_out.lines()
+            .skip(1)
+            .filter(|l| {
+                let parts: Vec<&str> = l.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    let addr = parts[4];
+                    !addr.starts_with("127.") && !addr.starts_with("[::1]:") && !addr.starts_with("::1:")
+                } else { false }
+            })
+            .filter_map(|l| {
+                let p: Vec<&str> = l.split_whitespace().collect();
+                if p.len() >= 5 { Some(p[4].to_string()) } else { None }
+            })
+            .take(6)
+            .collect();
+        system_cur += 5;
+        if open_ports.is_empty() {
+            findings.push(good("sys_listening_ports", "Listening Services Audit (Loopback Only)",
+                "All listening network services are bound to localhost (127.0.0.0/8 or [::1]). No external listening ports detected.",
+                "Regularly audit listening ports using 'ss -tuln'.", cat_sys, Some("CIS 3.5")));
+        } else {
+            findings.push(info_finding("sys_listening_ports", "Active External Listening Network Sockets",
+                &format!("Listening sockets on non-loopback interfaces: {}. Review these services to ensure they are intended.", open_ports.join(", ")),
+                "Review listening network services. Disable or firewall any ports not required for external access.", cat_sys, false));
         }
 
         crate::log_to_file("INFO", "security_run_audit: System hygiene checks done");
@@ -1387,6 +1680,195 @@ pub async fn security_fix_usbguard(enable: bool) -> Result<String, String> {
         .output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(format!("USBGuard {}d.", action))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Lock user account with empty password (passwd -l <user>).
+#[tauri::command]
+pub async fn security_fix_lock_account(user: Option<String>) -> Result<String, String> {
+    let username = match user {
+        Some(u) if !u.trim().is_empty() => u,
+        _ => {
+            let shadow = read_privileged_file("/etc/shadow").await;
+            shadow.lines()
+                .find_map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, ':').collect();
+                    if parts.len() >= 2 && parts[1].is_empty() {
+                        Some(parts[0].to_string())
+                    } else { None }
+                })
+                .ok_or_else(|| "No accounts with empty passwords found.".to_string())?
+        }
+    };
+
+    let out = Command::new("pkexec")
+        .args(["passwd", "-l", &username])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        Ok(format!("Account '{username}' has been locked (passwd -l {username})."))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Configure PAM faillock lockout policy (deny = 5, unlock_time = 900).
+#[tauri::command]
+pub async fn security_fix_pam_faillock(enable: bool) -> Result<String, String> {
+    let script = if enable {
+        "set -e\n\
+         mkdir -p /etc/security/faillock.conf.d\n\
+         printf 'deny = 5\\nunlock_time = 900\\nfail_interval = 900\\n' > /etc/security/faillock.conf.d/50-hardening.conf\n\
+         if command -v authselect >/dev/null 2>&1; then authselect enable-feature with-faillock 2>/dev/null || true; fi"
+    } else {
+        "rm -f /etc/security/faillock.conf.d/50-hardening.conf"
+    };
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        if enable {
+            Ok("PAM faillock configured: deny = 5, unlock_time = 900s via /etc/security/faillock.conf.d/50-hardening.conf.".to_string())
+        } else {
+            Ok("PAM faillock hardening configuration removed.".to_string())
+        }
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Set default system umask 027 in /etc/login.defs.
+#[tauri::command]
+pub async fn security_fix_umask(enable: bool) -> Result<String, String> {
+    let script = if enable {
+        "if grep -qE '^\\s*UMASK' /etc/login.defs; then sed -i 's/^\\s*UMASK.*/UMASK 027/g' /etc/login.defs; else echo 'UMASK 027' >> /etc/login.defs; fi"
+    } else {
+        "sed -i 's/^\\s*UMASK.*/UMASK 022/g' /etc/login.defs"
+    };
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        if enable {
+            Ok("Default system UMASK set to 027 in /etc/login.defs.".to_string())
+        } else {
+            Ok("Default system UMASK set to 022 in /etc/login.defs.".to_string())
+        }
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Set SSH idle timeout parameters (ClientAliveInterval 300, ClientAliveCountMax 3).
+#[tauri::command]
+pub async fn security_fix_ssh_idle_timeout(enable: bool) -> Result<String, String> {
+    let script = if enable {
+        "set -e\n\
+         mkdir -p /etc/ssh/sshd_config.d\n\
+         printf 'ClientAliveInterval 300\\nClientAliveCountMax 3\\n' > /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
+         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    } else {
+        "set -e\n\
+         rm -f /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
+         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    };
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        if enable {
+            Ok("SSH idle timeout set: ClientAliveInterval=300, ClientAliveCountMax=3.".to_string())
+        } else {
+            Ok("SSH idle timeout configuration removed.".to_string())
+        }
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Blacklist legacy unused filesystem kernel modules via modprobe.d.
+#[tauri::command]
+pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, String> {
+    let script = if enable {
+        "set -e\n\
+         mkdir -p /etc/modprobe.d\n\
+         printf 'install cramfs /bin/true\\ninstall freevxfs /bin/true\\ninstall hfs /bin/true\\ninstall hfsplus /bin/true\\ninstall jffs2 /bin/true\\ninstall udf /bin/true\\n' > /etc/modprobe.d/disable-unused-fs.conf"
+    } else {
+        "rm -f /etc/modprobe.d/disable-unused-fs.conf"
+    };
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        if enable {
+            Ok("Unused filesystem kernel modules (cramfs, hfs, udf, etc.) disabled via /etc/modprobe.d/disable-unused-fs.conf.".to_string())
+        } else {
+            Ok("Modprobe blacklist for unused filesystem modules removed.".to_string())
+        }
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Mask/unmask systemd ctrl-alt-del.target reboot signal.
+#[tauri::command]
+pub async fn security_fix_mask_ctrl_alt_del(enable: bool) -> Result<String, String> {
+    let action = if enable { "mask" } else { "unmask" };
+    let out = Command::new("pkexec")
+        .args(["systemctl", action, "ctrl-alt-del.target"])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        Ok(format!("ctrl-alt-del.target {}ed successfully.", action))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// Configure legal access warning banner (/etc/issue, /etc/issue.net, sshd Banner).
+#[tauri::command]
+pub async fn security_fix_legal_banner(enable: bool) -> Result<String, String> {
+    let script = if enable {
+        "set -e\n\
+         BANNER='Authorized uses only. All activity may be monitored and reported.'\n\
+         printf \"$BANNER\\n\" > /etc/issue\n\
+         printf \"$BANNER\\n\" > /etc/issue.net\n\
+         mkdir -p /etc/ssh/sshd_config.d\n\
+         printf 'Banner /etc/issue.net\\n' > /etc/ssh/sshd_config.d/50-banner.conf\n\
+         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    } else {
+        "set -e\n\
+         rm -f /etc/ssh/sshd_config.d/50-banner.conf\n\
+         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    };
+
+    let out = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .output().await.map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        invalidate_audit_cache();
+        if enable {
+            Ok("Legal access warning banner configured in /etc/issue and /etc/ssh/sshd_config.".to_string())
+        } else {
+            Ok("SSH legal warning banner configuration removed.".to_string())
+        }
     } else {
         Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
