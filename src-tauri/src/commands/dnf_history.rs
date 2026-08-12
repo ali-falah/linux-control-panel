@@ -511,6 +511,9 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     let mut cmd = tokio::process::Command::new("sudo");
     cmd.arg("-S")
        .arg("--prompt=")
+       .arg("stdbuf")
+       .arg("-oL")
+       .arg("-eL")
        .arg("dnf")
        .arg("upgrade")
        .arg("-y");
@@ -524,6 +527,8 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     cmd.arg("--allowerasing")
        .arg("--nogpgcheck")
        .arg("--setopt=timeout=120");
+
+    cmd.env("PYTHONUNBUFFERED", "1");
 
     cmd.stdin(Stdio::piped())
        .stdout(Stdio::piped())

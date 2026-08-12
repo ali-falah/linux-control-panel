@@ -11,7 +11,7 @@ export interface DnfLockInfo {
   lock_path: string | null;
 }
 
-const HANG_THRESHOLD_MS = 30_000;
+const HANG_THRESHOLD_MS = 60_000;
 
 class DnfStore {
   isUpgrading = $state(false);

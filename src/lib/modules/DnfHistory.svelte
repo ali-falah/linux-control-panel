@@ -511,7 +511,7 @@
           {#if dnfStore.hangWarning}
             <div class="hang-warning">
               <AlertTriangle size={14} />
-              <span>No output for 30+ seconds — the upgrade may be stuck on a slow repository. You can Cancel and retry, or wait.</span>
+              <span>No output for 60+ seconds — the upgrade may be downloading large packages or waiting on a slow mirror. You can Cancel or wait.</span>
             </div>
           {/if}
 
@@ -544,6 +544,7 @@
               <CheckCircle size={32} class="empty-state-icon" style="color:var(--color-success)" />
               <span style="font-size:16px; font-weight:600;">System is up to date</span>
             </div>
+          {:else}
             <Table tableAction={tableFeatures} style="border:none; border-radius:0;">
               <thead>
                 <tr>

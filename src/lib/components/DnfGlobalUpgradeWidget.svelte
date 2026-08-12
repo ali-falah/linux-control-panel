@@ -99,7 +99,7 @@
       {#if dnfStore.hangWarning}
         <div class="hang-alert">
           <AlertTriangle size={15} />
-          <span>No terminal output received for >30s. Process may be waiting for a prompt or locked.</span>
+          <span>No terminal output received for >60s. Package download may be in progress or waiting on mirror response.</span>
         </div>
       {/if}
 
