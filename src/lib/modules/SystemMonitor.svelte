@@ -471,7 +471,7 @@
     </div>
   </PageHeader>
 
-  <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 24px; overflow-y: auto;">
+  <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 6px 8px; overflow: hidden;">
     {#if currentTab === 'overview'}
       {#if stats}
         <div class="monitor-layout">
@@ -691,52 +691,53 @@
                 </div>
               </div>
               <div style="display:flex; flex-direction:column; flex:1; min-height:0; gap:8px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                  <h4 style="margin: 0; font-size: 12px; color: var(--color-text-secondary); font-weight:600;">
-                    Active Connections <span style="font-size:10px; color:var(--color-text-muted); font-weight:normal; margin-left:4px;">({filteredConnections.length})</span>
+                <!-- Single Compact Toolbar Row: Title + Search Input + Filter Pills -->
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; margin-bottom: 2px;">
+                  <h4 style="margin: 0; font-size: 12px; color: var(--color-text-secondary); font-weight: 600; white-space: nowrap; flex-shrink: 0;">
+                    Connections <span style="font-size: 10px; color: var(--color-text-muted); font-weight: normal; margin-left: 2px;">({filteredConnections.length})</span>
                   </h4>
 
+                  <!-- Connection Search Box -->
+                  <div style="flex: 1; min-width: 130px;">
+                    <input
+                      type="text"
+                      placeholder="Search IP, port, PID, process..."
+                      bind:value={connSearch}
+                      style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); padding: 4px 8px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
+                    />
+                  </div>
+
                   <!-- Connection Filter Pills -->
-                  <div style="display:flex; gap:4px; font-size:10px;">
+                  <div style="display: flex; gap: 3px; font-size: 10px; flex-shrink: 0;">
                     <button
                       onclick={() => connFilter = 'all'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'all' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'all' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
                     >
                       All ({activeConnections.length})
                     </button>
                     <button
                       onclick={() => connFilter = 'listen'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'listen' ? 'var(--color-warning)' : 'var(--color-bg-hover)'}; color:{connFilter === 'listen' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'listen' ? 'var(--color-warning)' : 'var(--color-bg-hover)'}; color:{connFilter === 'listen' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
                     >
                       Listen ({connListenCount})
                     </button>
                     <button
                       onclick={() => connFilter = 'estab'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'estab' ? 'var(--color-success)' : 'var(--color-bg-hover)'}; color:{connFilter === 'estab' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'estab' ? 'var(--color-success)' : 'var(--color-bg-hover)'}; color:{connFilter === 'estab' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
                     >
                       Estab ({connEstabCount})
                     </button>
                     <button
                       onclick={() => connFilter = 'external'}
-                      style="padding:2px 8px; border-radius:4px; border:none; cursor:pointer; background:{connFilter === 'external' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'external' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight:600; transition:all 0.15s;"
+                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'external' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'external' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
                     >
                       External
                     </button>
                   </div>
                 </div>
 
-                <!-- Connection Search Box -->
-                <div style="width: 100%;">
-                  <input
-                    type="text"
-                    placeholder="Search connection address, port, PID, or process..."
-                    bind:value={connSearch}
-                    style="width: 100%; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); padding: 5px 10px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
-                  />
-                </div>
-
-                <div style="flex:1; min-height: 0; display:flex; flex-direction:column;">
-                  <Table tableAction={tableFeatures}>
+                <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px;">
+                  <Table tableAction={tableFeatures} class="active-conn-table" style="flex: 1; min-height: 0; overflow-y: auto;">
                     <thead>
                       <tr>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Proto</th>
@@ -1020,14 +1021,12 @@
   }
   .page-content {
     flex: 1;
-    overflow-y: auto;
-    padding: 24px;
+    overflow: hidden;
+    padding: 8px 12px 10px 12px;
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 10px;
   }
-
-
 
   /* Loading */
   .loading-state {
@@ -1043,8 +1042,8 @@
   /* 2-column layout */
   .monitor-layout {
     display: grid;
-    grid-template-columns: 4fr 7fr;
-    gap: 20px;
+    grid-template-columns: 3.5fr 10.5fr;
+    gap: 10px;
     align-items: stretch;
     height: 100%;
     min-height: 0;
@@ -1052,9 +1051,10 @@
   .monitor-column-left {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 10px;
     height: 100%;
     min-height: 0;
+    overflow-y: auto;
   }
   .monitor-column-left .monitor-panel {
     min-height: 0;
@@ -1064,6 +1064,13 @@
   }
   .monitor-column-left .monitor-panel:last-child {
     flex: 0.8;
+  }
+
+  :global(.active-conn-table table thead th) {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--color-bg-card);
   }
 
   .monitor-panel {

@@ -46,6 +46,7 @@ class UIStore {
   tableDensity = $state<'compact' | 'spacious'>('compact');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
+  version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
 
   openSettingsModal() {
     this.settingsModalOpen = true;

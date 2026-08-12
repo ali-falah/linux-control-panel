@@ -28,6 +28,38 @@
     uiStore.initTheme();
     dnfStore.initGlobalListeners();
     dnfStore.checkLockStatus();
+
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowLeft')) {
+        const target = e.target as HTMLElement | null;
+        if (target) {
+          const tag = target.tagName.toLowerCase();
+          if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+          if (target.isContentEditable || target.closest('.cm-editor') || target.closest('[contenteditable="true"]')) return;
+        }
+
+        if (uiStore.canGoBack) {
+          e.preventDefault();
+          uiStore.goBack();
+        }
+      }
+    }
+
+    function handleGlobalMouseUp(e: MouseEvent) {
+      // Mouse button 3 is hardware Back button
+      if (e.button === 3 && uiStore.canGoBack) {
+        e.preventDefault();
+        uiStore.goBack();
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
   });
 </script>
 

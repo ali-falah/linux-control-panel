@@ -6,9 +6,23 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
 
+  import { onMount } from 'svelte';
   let activeCategoryTab = $state<'appearance' | 'ai' | 'system'>('appearance');
   let showKey = $state(false);
   let openingConfig = $state(false);
+  let appVersion = $state(uiStore.version);
+
+  onMount(async () => {
+    try {
+      const ver = await invoke<string>('get_app_version');
+      if (ver) {
+        appVersion = ver;
+        uiStore.version = ver;
+      }
+    } catch (err) {
+      console.error('Failed to fetch app version:', err);
+    }
+  });
 
   async function handleOpenConfigFile() {
     openingConfig = true;
@@ -591,7 +605,7 @@
 
       <!-- Footer -->
       <div class="modal-footer">
-        <span class="app-build-info">Linux Control Panel v0.2.6</span>
+        <span class="app-build-info">Linux Control Panel v{appVersion}</span>
         <button 
           class="btn btn-primary"
           onclick={() => uiStore.closeSettingsModal()}

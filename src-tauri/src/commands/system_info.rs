@@ -1476,4 +1476,9 @@ pub async fn get_advanced_health_alerts() -> Result<Vec<HealthAlert>, String> {
     Ok(alerts)
 }
 
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 
