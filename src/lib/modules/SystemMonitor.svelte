@@ -112,6 +112,21 @@
     }
   }
 
+  let copiedPid = $state<number | null>(null);
+
+  async function copyPid(pid: number) {
+    try {
+      await navigator.clipboard.writeText(pid.toString());
+      copiedPid = pid;
+      uiStore.addToast(`Copied PID ${pid} to clipboard`, 'info', 1500);
+      setTimeout(() => {
+        if (copiedPid === pid) copiedPid = null;
+      }, 1800);
+    } catch (err) {
+      uiStore.handleError(err, 'Failed to copy PID');
+    }
+  }
+
   async function copyProcessCmdline(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -521,6 +536,19 @@
     );
   }
 
+  // Process Sorting State
+  let procSortKey = $state<'pid' | 'name' | 'user' | 'cpu' | 'mem' | 'rss'>('pid');
+  let procSortAsc = $state<boolean>(true);
+
+  function toggleProcSort(key: 'pid' | 'name' | 'user' | 'cpu' | 'mem' | 'rss') {
+    if (procSortKey === key) {
+      procSortAsc = !procSortAsc;
+    } else {
+      procSortKey = key;
+      procSortAsc = key === 'pid' || key === 'name' || key === 'user';
+    }
+  }
+
   // Build parent-child process hierarchy for Tree View
   let treeVisibleProcesses = $derived.by(() => {
     const search = processSearch.toLowerCase().trim();
@@ -531,9 +559,25 @@
       map.set(p.pid, p);
     }
 
+    // Tree-aware sorting function
+    function sortProcs(arr: any[]) {
+      return arr.slice().sort((a, b) => {
+        let cmp = 0;
+        switch (procSortKey) {
+          case 'pid': cmp = a.pid - b.pid; break;
+          case 'name': cmp = a.name.localeCompare(b.name); break;
+          case 'user': cmp = (a.user || '').localeCompare(b.user || ''); break;
+          case 'cpu': cmp = a.cpu_percent - b.cpu_percent; break;
+          case 'mem': cmp = a.mem_percent - b.mem_percent; break;
+          case 'rss': cmp = a.mem_rss_mb - b.mem_rss_mb; break;
+        }
+        return procSortAsc ? cmp : -cmp;
+      });
+    }
+
     // Map parent PID -> list of child processes
     const childrenMap = new Map<number, any[]>();
-    const roots: any[] = [];
+    let roots: any[] = [];
 
     for (const p of processes) {
       const parentId = p.ppid;
@@ -544,6 +588,8 @@
         roots.push(p);
       }
     }
+
+    roots = sortProcs(roots);
 
     // If searching, identify matching PIDs and their ancestor chain
     let matchingPids = new Set<number>();
@@ -580,7 +626,8 @@
         return;
       }
 
-      const children = childrenMap.get(proc.pid) || [];
+      const rawChildren = childrenMap.get(proc.pid) || [];
+      const children = sortProcs(rawChildren);
       const hasChildren = children.length > 0;
       const isExpanded = search ? (matchingAncestorPids.has(proc.pid) || expandedTreePids.has(proc.pid)) : expandedTreePids.has(proc.pid);
 
@@ -1016,15 +1063,27 @@
           </div>
         </div>
 
-        <Table tableAction={tableFeatures} class="process-table-wrap" style="flex:1; min-height:0; overflow-y:auto; border:none; border-radius:0;">
+        <Table class="process-table-wrap" style="flex:1; min-height:0; overflow-y:auto; border:none; border-radius:0;">
           <thead>
             <tr>
-              <th class="col-pid">PID</th>
-              <th class="col-name">Name</th>
-              <th class="col-user">User</th>
-              <th class="col-cpu">CPU %</th>
-              <th class="col-mem">Mem %</th>
-              <th class="col-rss">RSS</th>
+              <th class="col-pid sortable-th" onclick={() => toggleProcSort('pid')}>
+                <div class="th-content">PID <span class="th-sort-icon">{procSortKey === 'pid' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
+              <th class="col-name sortable-th" onclick={() => toggleProcSort('name')}>
+                <div class="th-content">Name <span class="th-sort-icon">{procSortKey === 'name' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
+              <th class="col-user sortable-th" onclick={() => toggleProcSort('user')}>
+                <div class="th-content">User <span class="th-sort-icon">{procSortKey === 'user' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
+              <th class="col-cpu sortable-th" onclick={() => toggleProcSort('cpu')}>
+                <div class="th-content">CPU % <span class="th-sort-icon">{procSortKey === 'cpu' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
+              <th class="col-mem sortable-th" onclick={() => toggleProcSort('mem')}>
+                <div class="th-content">Mem % <span class="th-sort-icon">{procSortKey === 'mem' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
+              <th class="col-rss sortable-th" onclick={() => toggleProcSort('rss')}>
+                <div class="th-content">RSS <span class="th-sort-icon">{procSortKey === 'rss' ? (procSortAsc ? '↑' : '↓') : '↕'}</span></div>
+              </th>
               <th class="col-actions"></th>
             </tr>
           </thead>
@@ -1035,34 +1094,76 @@
                 class="proc-row tree-row"
                 class:is-root={p.user === 'root'}
                 class:is-kernel={p.pid <= 100}
+                class:is-parent={item.hasChildren}
+                class:is-expanded-parent={item.hasChildren && item.isExpanded}
+                class:is-child={item.depth > 0}
+                class:depth-1={item.depth === 1}
+                class:depth-2={item.depth === 2}
+                class:depth-3={item.depth >= 3}
                 onclick={() => openProcessInspector(p)}
                 style="cursor: pointer;"
               >
-                <td class="col-pid">{p.pid}</td>
-                <td class="col-name" style="padding-left: {item.depth * 20 + 8}px;">
-                  <div style="display:flex; align-items:center; gap:6px;">
-                    {#if item.hasChildren}
-                      <!-- Clickable on Arrow + Process Name + Count Badge to expand/collapse -->
-                      <button
-                        type="button"
-                        class="tree-node-trigger"
-                        onclick={(e) => toggleTreeExpand(p.pid, e)}
-                        title={item.isExpanded ? 'Click to collapse sub-processes' : `Click to expand (${item.childrenCount} sub-processes)`}
-                      >
-                        <span class="tree-chevron-icon" class:is-expanded={item.isExpanded}>
-                          <ChevronRight size={13} />
-                        </span>
-                        <span class="proc-name parent-proc-name">{p.name}</span>
-                        <span class="tree-child-badge">
-                          {item.childrenCount}
-                        </span>
-                      </button>
-                    {:else}
-                      <span class="proc-name">{p.name}</span>
-                    {/if}
+                <td class="col-pid" onclick={(e) => e.stopPropagation()}>
+                  <div class="pid-badge-container">
+                    <span class="pid-text" class:parent-pid={item.hasChildren && item.isExpanded} class:child-pid={item.depth > 0}>
+                      {p.pid}
+                    </span>
+                    <button
+                      type="button"
+                      class="pid-copy-btn"
+                      onclick={(e) => { e.stopPropagation(); copyPid(p.pid); }}
+                      title="Copy PID {p.pid}"
+                    >
+                      {#if copiedPid === p.pid}
+                        <Check size={11} class="pid-copied-icon" />
+                      {:else}
+                        <Copy size={11} class="pid-copy-icon" />
+                      {/if}
+                    </button>
                   </div>
-                  <div class="proc-cmd" style="padding-left: {item.hasChildren ? 20 : 0}px;">
-                    {p.cmdline || p.name}
+                </td>
+                <td class="col-name">
+                  <div class="tree-cell-wrapper" style="margin-left: {item.depth > 0 ? (item.depth * 44) : 0}px;">
+                    <div style="display:flex; align-items:center; gap:6px;">
+                      {#if item.depth > 0}
+                        <!-- Multi-depth visual branch guide tracks -->
+                        <div class="tree-indent-tracks">
+                          {#each Array(item.depth) as _, d}
+                            {#if d === item.depth - 1}
+                              <span class="tree-branch-guide active-elbow" title="Sub-process of parent">
+                                <CornerDownRight size={13} class="branch-elbow-icon" />
+                              </span>
+                            {:else}
+                              <span class="tree-guide-vertical-bar"></span>
+                            {/if}
+                          {/each}
+                        </div>
+                      {/if}
+
+                      {#if item.hasChildren}
+                        <!-- Clickable on Arrow + Process Name + Count Badge to expand/collapse -->
+                        <button
+                          type="button"
+                          class="tree-node-trigger"
+                          class:is-expanded={item.isExpanded}
+                          onclick={(e) => toggleTreeExpand(p.pid, e)}
+                          title={item.isExpanded ? 'Click to collapse sub-processes' : `Click to expand (${item.childrenCount} sub-processes)`}
+                        >
+                          <span class="tree-chevron-icon" class:is-expanded={item.isExpanded}>
+                            <ChevronRight size={13} />
+                          </span>
+                          <span class="proc-name parent-proc-name" class:expanded-name={item.isExpanded}>{p.name}</span>
+                          <span class="tree-child-badge" class:expanded-badge={item.isExpanded}>
+                            {item.childrenCount}
+                          </span>
+                        </button>
+                      {:else}
+                        <span class="proc-name" class:child-proc-name={item.depth > 0}>{p.name}</span>
+                      {/if}
+                    </div>
+                    <div class="proc-cmd" style="padding-left: {item.hasChildren ? 22 : (item.depth > 0 ? 24 : 0)}px;">
+                      {p.cmdline || p.name}
+                    </div>
                   </div>
                 </td>
                 <td class="col-user">
@@ -1647,6 +1748,180 @@
     color: #2563EB;
   }
 
+  /* ── Process Tree Hierarchy Styles ─────────────────────────────────── */
+  .tree-row {
+    transition: background 0.15s ease, border-color 0.15s ease;
+    position: relative;
+  }
+
+  /* Expanded Parent Process Row */
+  .tree-row.is-expanded-parent {
+    background: rgba(0, 218, 243, 0.05) !important;
+    border-left: 3px solid var(--color-accent) !important;
+  }
+  :global(html.light-mode) .tree-row.is-expanded-parent {
+    background: rgba(37, 99, 235, 0.06) !important;
+    border-left: 3px solid #2563EB !important;
+  }
+
+  .tree-row.is-expanded-parent .parent-proc-name.expanded-name {
+    color: var(--color-accent);
+    font-weight: 700;
+  }
+  :global(html.light-mode) .tree-row.is-expanded-parent .parent-proc-name.expanded-name {
+    color: #2563EB;
+  }
+
+  .tree-child-badge.expanded-badge {
+    background: rgba(0, 218, 243, 0.15);
+    border-color: rgba(0, 218, 243, 0.4);
+    color: var(--color-accent);
+    font-weight: 700;
+  }
+  :global(html.light-mode) .tree-child-badge.expanded-badge {
+    background: rgba(37, 99, 235, 0.12);
+    border-color: rgba(37, 99, 235, 0.35);
+    color: #1D4ED8;
+  }
+
+  /* Child Process Rows with Rich Gradient and Left Border Accent */
+  .tree-row.is-child {
+    position: relative;
+    border-left: 2px dashed rgba(255, 255, 255, 0.12);
+  }
+  :global(html.light-mode) .tree-row.is-child {
+    border-left: 2px dashed rgba(0, 0, 0, 0.15);
+  }
+
+  /* Depth 1 Gradient (Direct Sub-processes) */
+  .tree-row.is-child.depth-1 {
+    background: linear-gradient(90deg, rgba(0, 218, 243, 0.06) 0%, rgba(0, 218, 243, 0.015) 30%, transparent 80%) !important;
+    border-left-color: rgba(0, 218, 243, 0.35);
+  }
+  :global(html.light-mode) .tree-row.is-child.depth-1 {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.06) 0%, rgba(37, 99, 235, 0.015) 35%, transparent 85%) !important;
+    border-left-color: rgba(37, 99, 235, 0.4);
+  }
+
+  /* Depth 2 Gradient (Sub-sub-processes) */
+  .tree-row.is-child.depth-2 {
+    background: linear-gradient(90deg, rgba(168, 85, 247, 0.06) 0%, rgba(168, 85, 247, 0.015) 35%, transparent 80%) !important;
+    border-left-color: rgba(168, 85, 247, 0.35);
+  }
+  :global(html.light-mode) .tree-row.is-child.depth-2 {
+    background: linear-gradient(90deg, rgba(147, 51, 234, 0.06) 0%, rgba(147, 51, 234, 0.015) 40%, transparent 85%) !important;
+    border-left-color: rgba(147, 51, 234, 0.4);
+  }
+
+  /* Depth 3+ Gradient */
+  .tree-row.is-child.depth-3 {
+    background: linear-gradient(90deg, rgba(236, 72, 153, 0.06) 0%, rgba(236, 72, 153, 0.015) 40%, transparent 80%) !important;
+    border-left-color: rgba(236, 72, 153, 0.35);
+  }
+  :global(html.light-mode) .tree-row.is-child.depth-3 {
+    background: linear-gradient(90deg, rgba(219, 39, 119, 0.06) 0%, rgba(219, 39, 119, 0.015) 45%, transparent 85%) !important;
+    border-left-color: rgba(219, 39, 119, 0.4);
+  }
+
+  /* Hover states for tree rows */
+  .tree-row:hover {
+    background: rgba(255, 255, 255, 0.04) !important;
+  }
+  :global(html.light-mode) .tree-row:hover {
+    background: #F1F5F9 !important;
+  }
+  .tree-row.is-child:hover {
+    background: linear-gradient(90deg, rgba(0, 218, 243, 0.1) 0%, rgba(255, 255, 255, 0.04) 40%, transparent 95%) !important;
+  }
+  :global(html.light-mode) .tree-row.is-child:hover {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.1) 0%, rgba(241, 245, 249, 0.8) 45%, transparent 95%) !important;
+  }
+
+  /* Tree Branch Elbow Connector & Guide Tracks */
+  .tree-cell-wrapper {
+    display: flex;
+    flex-direction: column;
+    transition: margin-left 0.15s ease;
+  }
+
+  .tree-indent-tracks {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: 2px;
+    flex-shrink: 0;
+  }
+
+  .tree-guide-vertical-bar {
+    width: 2px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 1px;
+    display: inline-block;
+  }
+  :global(html.light-mode) .tree-guide-vertical-bar {
+    background: rgba(0, 0, 0, 0.2);
+  }
+
+  .tree-branch-guide {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+  .tree-branch-guide.active-elbow {
+    background: rgba(0, 218, 243, 0.14);
+    border-radius: 4px;
+    padding: 2px 4px;
+    border: 1px solid rgba(0, 218, 243, 0.3);
+  }
+  .depth-2 .tree-branch-guide.active-elbow {
+    background: rgba(168, 85, 247, 0.14);
+    border-color: rgba(168, 85, 247, 0.3);
+    color: #C084FC;
+  }
+  .depth-3 .tree-branch-guide.active-elbow {
+    background: rgba(236, 72, 153, 0.14);
+    border-color: rgba(236, 72, 153, 0.3);
+    color: #F472B6;
+  }
+  :global(html.light-mode) .tree-branch-guide.active-elbow {
+    background: rgba(37, 99, 235, 0.1);
+    border-color: rgba(37, 99, 235, 0.25);
+    color: #2563EB;
+  }
+  :global(html.light-mode) .depth-2 .tree-branch-guide.active-elbow {
+    background: rgba(147, 51, 234, 0.1);
+    border-color: rgba(147, 51, 234, 0.25);
+    color: #9333EA;
+  }
+  :global(html.light-mode) .depth-3 .tree-branch-guide.active-elbow {
+    background: rgba(219, 39, 119, 0.1);
+    border-color: rgba(219, 39, 119, 0.25);
+    color: #DB2777;
+  }
+
+  .branch-elbow-icon {
+    transform: translateY(-1px);
+  }
+
+  .child-proc-name {
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+
+  .pid-text.parent-pid {
+    font-weight: 700;
+    color: var(--color-accent);
+  }
+  :global(html.light-mode) .pid-text.parent-pid {
+    color: #2563EB;
+  }
+  .pid-text.child-pid {
+    opacity: 0.75;
+  }
+
   .tree-node-trigger {
     background: transparent;
     border: none;
@@ -1756,11 +2031,81 @@
     color: #334155 !important;
     border-bottom: 1px solid #CBD5E1 !important;
   }
+  .sortable-th {
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .sortable-th:hover {
+    color: var(--color-accent) !important;
+  }
+  :global(html.light-mode) .sortable-th:hover {
+    color: #2563EB !important;
+  }
+  .th-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .th-sort-icon {
+    font-size: 11px;
+    opacity: 0.6;
+    color: var(--color-accent);
+  }
+  :global(html.light-mode) .th-sort-icon {
+    color: #2563EB;
+  }
+
   .is-root td { opacity: 0.8; }
   .is-kernel td { opacity: 0.5; }
 
-  .col-pid { width: 80px; font-family: var(--font-mono); color: var(--color-text-muted); }
-  .col-name { max-width: 300px; }
+  .col-pid {
+    width: 95px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    user-select: text;
+  }
+
+  .pid-badge-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .pid-copy-btn {
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .proc-row:hover .pid-copy-btn,
+  .pid-copy-btn:focus-visible {
+    opacity: 0.7;
+  }
+
+  .pid-copy-btn:hover {
+    opacity: 1 !important;
+    background: rgba(0, 218, 243, 0.15);
+    color: var(--color-accent);
+  }
+  :global(html.light-mode) .pid-copy-btn:hover {
+    background: #EFF6FF;
+    color: #2563EB;
+  }
+
+  .pid-copied-icon {
+    color: var(--color-success) !important;
+    opacity: 1 !important;
+  }
+  .col-name { min-width: 280px; max-width: 480px; }
   .col-user { width: 120px; }
   .col-cpu, .col-mem, .col-rss { width: 90px; font-family: var(--font-mono); }
   .col-actions { width: 60px; text-align: right; }
