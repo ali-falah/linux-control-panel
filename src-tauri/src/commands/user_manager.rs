@@ -12,6 +12,7 @@ pub struct UserInfo {
     pub shell: String,
     pub groups: Vec<String>,
     pub is_sudo: bool,
+    pub is_locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,13 @@ pub async fn list_users() -> Result<Vec<UserInfo>, String> {
                 let is_sudo = user_groups.contains(&"wheel".to_string())
                     || user_groups.contains(&"sudo".to_string());
 
+                let is_locked = if let Ok(out) = Command::new("passwd").args(["-S", &username]).output().await {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    s.contains(" L ") || s.contains(" LK ")
+                } else {
+                    false
+                };
+
                 users.push(UserInfo {
                     username,
                     uid,
@@ -88,6 +96,7 @@ pub async fn list_users() -> Result<Vec<UserInfo>, String> {
                     shell,
                     groups: user_groups,
                     is_sudo,
+                    is_locked,
                 });
             }
         }
@@ -451,4 +460,28 @@ pub async fn user_save_ssh_keys(username: String, keys: String) -> Result<String
     let _ = Command::new("pkexec").args(["chown", &owner, &keys_file]).output().await;
 
     Ok("SSH keys saved successfully.".to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_lock_user(username: String, lock: bool) -> Result<String, String> {
+    if is_protected_system_user(&username) {
+        return Err(format!("Action blocked: '{}' is a vital system account and cannot be locked/unlocked.", username));
+    }
+
+    let flag = if lock { "-l" } else { "-u" };
+    let output = Command::new("pkexec")
+        .args(["/usr/bin/passwd", flag, &username])
+        .output()
+        .await
+        .map_err(|e| format!("pkexec passwd failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    Ok(format!(
+        "User '{}' account successfully {}.",
+        username,
+        if lock { "locked" } else { "unlocked" }
+    ))
 }

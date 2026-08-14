@@ -413,3 +413,44 @@ fn parse_blame_time(s: &str) -> u64 {
     }
     total_ms
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitDependencies {
+    pub requires: Vec<String>,
+    pub wants: Vec<String>,
+    pub after: Vec<String>,
+    pub before: Vec<String>,
+}
+
+/// Query systemd dependencies for a unit (Requires, Wants, After, Before)
+#[tauri::command]
+pub async fn get_unit_dependencies(name: String, user_mode: Option<bool>) -> Result<UnitDependencies, String> {
+    let is_user = user_mode.unwrap_or(false);
+    let mut cmd = Command::new("systemctl");
+    if is_user {
+        cmd.arg("--user");
+    }
+    cmd.args(["show", &name, "--property=Requires,Wants,After,Before", "--no-pager"]);
+    let output = cmd.output().await.map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut requires = Vec::new();
+    let mut wants = Vec::new();
+    let mut after = Vec::new();
+    let mut before = Vec::new();
+
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let list: Vec<String> = v.split_whitespace().map(|s| s.to_string()).collect();
+            match k {
+                "Requires" => requires = list,
+                "Wants" => wants = list,
+                "After" => after = list,
+                "Before" => before = list,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(UnitDependencies { requires, wants, after, before })
+}

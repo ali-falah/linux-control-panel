@@ -559,12 +559,12 @@ fn uid_to_user(uid: u32) -> String {
 /// Hard safety rules enforced in Rust (not just UI):
 /// - PID 1 (systemd/init) → ALWAYS blocked
 /// - PID ≤ 100 → ALWAYS blocked (system processes)
-/// - Only signals 15 (SIGTERM), 9 (SIGKILL), 19 (SIGSTOP), and 18 (SIGCONT) are allowed
+/// - Signals 1 (SIGHUP), 15 (SIGTERM), 9 (SIGKILL), 19 (SIGSTOP), and 18 (SIGCONT) are allowed
 #[tauri::command]
 pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     // ── Guard 1: Safe signal whitelist ────────────────────────────────────
-    if signal != 15 && signal != 9 && signal != 19 && signal != 18 {
-        return Err(format!("Signal {signal} is not allowed. Allowed: SIGTERM (15), SIGKILL (9), SIGSTOP (19), SIGCONT (18)."));
+    if signal != 15 && signal != 9 && signal != 19 && signal != 18 && signal != 1 {
+        return Err(format!("Signal {signal} is not allowed. Allowed: SIGHUP (1), SIGTERM (15), SIGKILL (9), SIGSTOP (19), SIGCONT (18)."));
     }
 
     // ── Guard 2: PID 1 is always blocked ──────────────────────────────────
@@ -586,6 +586,7 @@ pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     let result = unsafe { libc::kill(pid as i32, signal as i32) };
     if result == 0 {
         let sig_name = match signal {
+            1 => "SIGHUP",
             15 => "SIGTERM",
             9 => "SIGKILL",
             19 => "SIGSTOP",
@@ -597,6 +598,38 @@ pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     } else {
         Err(format!("Failed to signal process {pid}: permission denied or process not found."))
     }
+}
+
+/// Change process niceness/priority (-20 to 19)
+#[tauri::command]
+pub async fn renice_process(pid: u32, priority: i32) -> Result<String, String> {
+    if priority < -20 || priority > 19 {
+        return Err("Priority (niceness) must be between -20 (highest priority) and 19 (lowest priority).".to_string());
+    }
+    if pid == 1 || pid <= 100 {
+        return Err(format!("Cannot change priority for PID {pid} (protected system process)."));
+    }
+
+    let output = if priority < 0 {
+        tokio::process::Command::new("pkexec")
+            .args(["renice", "-n", &priority.to_string(), "-p", &pid.to_string()])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to renice process: {e}"))?
+    } else {
+        tokio::process::Command::new("renice")
+            .args(["-n", &priority.to_string(), "-p", &pid.to_string()])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to renice process: {e}"))?
+    };
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("Failed to set process priority: {err}"));
+    }
+
+    Ok(format!("Successfully adjusted PID {pid} priority to {priority}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

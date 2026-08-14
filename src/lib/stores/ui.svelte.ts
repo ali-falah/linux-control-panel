@@ -90,6 +90,15 @@ class UIStore {
 
   preAppliedJournalPriority = $state<string>('all');
   preAppliedJournalSearch = $state<string>('');
+  preAppliedJournalUnit = $state<string>('');
+  availableUpdatesCount = $state<number>(0);
+
+  jumpToJournalService(serviceName: string) {
+    this.preAppliedJournalUnit = serviceName;
+    this.preAppliedJournalSearch = '';
+    this.navigateTo('journal-logs');
+  }
+
   enableProactiveHealth = $state<boolean>(true);
   serviceFilter = $state<string | null>(null);
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);

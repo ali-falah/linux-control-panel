@@ -20,7 +20,7 @@ use commands::{
     firewall_manager::{
         get_firewall_state, get_zone_rules, modify_firewall_rule, toggle_panic_mode,
         firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
-        firewall_modify_rich_rule, firewall_change_interface_zone,
+        firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
     grub_manager::{read_grub_config, rebuild_grub, write_grub_config},
@@ -32,6 +32,7 @@ use commands::{
     },
     service_manager::{
         get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
+        get_unit_dependencies,
     },
     startup_manager::{
         list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
@@ -39,6 +40,7 @@ use commands::{
     user_manager::{
         add_group, add_user, change_password, delete_group, delete_user, list_groups, list_users,
         modify_user_group, toggle_sudo, user_get_active_sessions, user_kill_session, user_get_ssh_keys, user_save_ssh_keys,
+        toggle_lock_user,
     },
     nginx_manager::{
         nginx_check_installed, nginx_service_status, nginx_service_action, nginx_test_config,
@@ -73,7 +75,7 @@ use commands::{
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_advanced_health_alerts, get_storage_distribution, open_folder, get_app_version},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_advanced_health_alerts, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream},
     security_auditor::{
         security_run_audit,
@@ -202,6 +204,7 @@ pub fn run() {
             read_unit_file,
             write_unit_file,
             get_boot_blame,
+            get_unit_dependencies,
             // Hosts Manager
             read_hosts,
             write_hosts,
@@ -211,6 +214,7 @@ pub fn run() {
             delete_user,
             change_password,
             toggle_sudo,
+            toggle_lock_user,
             list_groups,
             add_group,
             delete_group,
@@ -229,6 +233,7 @@ pub fn run() {
             firewall_get_all_interfaces,
             firewall_modify_rich_rule,
             firewall_change_interface_zone,
+            firewall_check_port_listener,
             // GRUB Configurator
             read_grub_config,
             write_grub_config,
@@ -334,6 +339,7 @@ pub fn run() {
             get_disk_usage,
             get_process_list,
             kill_process,
+            renice_process,
             get_network_traffic,
             get_smart_health,
             get_os_info,

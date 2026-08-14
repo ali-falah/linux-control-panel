@@ -87,10 +87,29 @@
     expandedTreePids = new Set();
   }
 
+  let inspectedProcessPriority = $state(0);
+  let renicing = $state(false);
+
   function openProcessInspector(proc: any, e?: MouseEvent) {
     if (e) e.stopPropagation();
     inspectedProcess = proc;
+    inspectedProcessPriority = 0;
     isProcessDrawerOpen = true;
+  }
+
+  async function applyRenice() {
+    if (!inspectedProcess) return;
+    renicing = true;
+    try {
+      await invoke('renice_process', { pid: inspectedProcess.pid, priority: Number(inspectedProcessPriority) });
+      uiStore.addToast(`Adjusted priority for ${inspectedProcess.name} (PID ${inspectedProcess.pid}) to ${inspectedProcessPriority}`, 'success');
+      statusStore.setLastCommand(`renice -n ${inspectedProcessPriority} -p ${inspectedProcess.pid}`, 0, true);
+    } catch (e: any) {
+      uiStore.addToast(e.toString(), 'error');
+      statusStore.setLastCommand(`renice -n ${inspectedProcessPriority} -p ${inspectedProcess.pid}`, 1, false);
+    } finally {
+      renicing = false;
+    }
   }
 
   async function copyProcessCmdline(text: string) {
@@ -1346,6 +1365,15 @@
           <button
             type="button"
             class="sig-btn"
+            style="background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.3); color:var(--color-accent); padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:600;"
+            onclick={() => sendProcessSignal(inspectedProcess.pid, 1, inspectedProcess.name)}
+            title="Reload process configuration (SIGHUP)"
+          >
+            <RefreshCw size={14} /> Reload (SIGHUP)
+          </button>
+          <button
+            type="button"
+            class="sig-btn"
             style="background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.3); color:var(--color-warning); padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:600;"
             onclick={() => sendProcessSignal(inspectedProcess.pid, 19, inspectedProcess.name)}
             title="Pause process execution (SIGSTOP)"
@@ -1373,12 +1401,34 @@
           <button
             type="button"
             class="sig-btn"
-            style="background:rgba(220,38,38,0.25); border:1px solid var(--color-error); color:#FFFFFF; padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:700;"
+            style="background:rgba(220,38,38,0.25); border:1px solid var(--color-error); color:#FFFFFF; padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:700; grid-column: span 2;"
             onclick={() => sendProcessSignal(inspectedProcess.pid, 9, inspectedProcess.name)}
             title="Force terminate process immediately (SIGKILL)"
           >
             <Skull size={14} /> Force Kill (SIGKILL)
           </button>
+        </div>
+      </div>
+
+      <!-- Priority / Niceness Adjustment -->
+      <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
+        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+          <span>Process Scheduling Priority (Niceness)</span>
+          <span class="badge" style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary);">{inspectedProcessPriority} ({inspectedProcessPriority < 0 ? 'High Priority' : (inspectedProcessPriority === 0 ? 'Normal Priority' : 'Low Priority')})</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="font-size:11px; color:var(--color-text-muted);">-20 (Max)</span>
+          <input 
+            type="range" 
+            min="-20" 
+            max="19" 
+            bind:value={inspectedProcessPriority} 
+            style="flex:1; accent-color:var(--color-accent); cursor:pointer;"
+          />
+          <span style="font-size:11px; color:var(--color-text-muted);">+19 (Idle)</span>
+          <Button variant="primary" style="padding: 4px 10px; font-size:11px; flex-shrink:0;" onclick={applyRenice} disabled={renicing}>
+            {renicing ? 'Applying…' : 'Set Priority'}
+          </Button>
         </div>
       </div>
 

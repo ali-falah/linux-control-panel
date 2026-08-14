@@ -22,6 +22,10 @@
   let isLoading = $state(false);
 
   // Backend filters (re-fetch journalctl)
+  let currentUnitFilter = $state(uiStore.preAppliedJournalUnit || '');
+  if (uiStore.preAppliedJournalUnit) {
+    uiStore.preAppliedJournalUnit = '';
+  }
   let filterPriority = $state('all');
   let timeRange = $state('1'); // Default to last 24 hours (1 day)
   let customStartDate = $state('');
@@ -105,8 +109,9 @@
         sinceF = `${timeRange} days ago`;
       }
 
+      const unitF = currentUnitFilter.trim() || null;
       const lines = await invoke<string[]>('get_journal_logs', {
-        unitFilter: null,
+        unitFilter: unitF,
         priority: prioF,
         sinceFilter: sinceF,
         untilFilter: untilF,
@@ -575,6 +580,20 @@
         <button class="log-clear-btn" onclick={() => { searchQuery = ''; searchInputRef?.focus(); }} title="Clear search">
           <X size={14} />
         </button>
+      {/if}
+
+      {#if currentUnitFilter}
+        <div style="display: flex; align-items: center; gap: 6px; padding: 2px 8px; background: rgba(0, 218, 243, 0.12); border: 1px solid rgba(0, 218, 243, 0.3); border-radius: 6px; font-size: 11.5px; color: var(--color-accent); flex-shrink: 0;">
+          <span>Unit: <strong>{currentUnitFilter}</strong></span>
+          <button 
+            type="button" 
+            onclick={() => { currentUnitFilter = ''; fetchLogs(); }} 
+            title="Clear unit filter"
+            style="background: transparent; border: none; color: var(--color-accent); cursor: pointer; padding: 0; display: flex; align-items: center;"
+          >
+            <X size={12} />
+          </button>
+        </div>
       {/if}
 
       <span class="log-sep"></span>

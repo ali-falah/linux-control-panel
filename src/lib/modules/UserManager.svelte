@@ -8,7 +8,7 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Users, UserPlus, Key, Shield, ShieldOff, Trash2, RefreshCw, Layers } from '@lucide/svelte';
+  import { Users, UserPlus, Key, Shield, ShieldOff, Trash2, RefreshCw, Layers, Lock, Unlock } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -26,6 +26,7 @@
     shell: string;
     groups: string[];
     is_sudo: boolean;
+    is_locked: boolean;
   }
 
   interface GroupInfo {
@@ -178,6 +179,31 @@
     } catch (e) {
       uiStore.addToast(`Failed to modify sudo access: ${e}`, 'error');
       statusStore.setLastCommand(grant ? `usermod -aG wheel ${username}` : `gpasswd -d ${username} wheel`, 1, false);
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  function confirmToggleLock(user: UserInfo) {
+    const lock = !user.is_locked;
+    uiStore.confirm(
+      lock ? 'Lock User Account' : 'Unlock User Account',
+      `Are you sure you want to ${lock ? 'lock' : 'unlock'} the account for '${user.username}'? ${lock ? 'The user will not be able to log in.' : 'The user will regain login access.'}`,
+      () => doToggleLock(user.username, lock),
+      lock
+    );
+  }
+
+  async function doToggleLock(username: string, lock: boolean) {
+    statusStore.setBusy(`${lock ? 'Locking' : 'Unlocking'} account ${username}…`);
+    try {
+      await invoke('toggle_lock_user', { username, lock });
+      statusStore.setLastCommand(`passwd ${lock ? '-l' : '-u'} ${username}`, 0, true);
+      uiStore.addToast(`User ${username} ${lock ? 'locked' : 'unlocked'} successfully`, 'success');
+      await loadData();
+    } catch (e) {
+      uiStore.addToast(`Failed to ${lock ? 'lock' : 'unlock'} user: ${e}`, 'error');
+      statusStore.setLastCommand(`passwd ${lock ? '-l' : '-u'} ${username}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -428,11 +454,16 @@
                 <td>{user.fullname || '—'}</td>
                 <td><code style="font-size:12px">{user.uid}</code></td>
                 <td>
-                  {#if user.is_sudo}
-                    <span class="badge badge-success"><Shield size={10} style="margin-right:4px"/> Admin</span>
-                  {:else}
-                    <span class="badge badge-muted">Standard</span>
-                  {/if}
+                  <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                    {#if user.is_sudo}
+                      <span class="badge" style="background: rgba(234, 179, 8, 0.15); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.3); font-weight:600;"><Shield size={11} style="margin-right:4px"/> Administrator (wheel)</span>
+                    {:else}
+                      <span class="badge badge-muted">👤 Standard User</span>
+                    {/if}
+                    {#if user.is_locked}
+                      <span class="badge" style="background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); font-weight:600;"><Lock size={10} style="margin-right:3px"/> Locked</span>
+                    {/if}
+                  </div>
                 </td>
                 <td style="text-align:right">
                   <KebabMenu>
@@ -441,6 +472,13 @@
                     </button>
                     <button class="menu-item" onclick={() => openSshKeys(user)}>
                       <Key size={14} /> Edit SSH Keys
+                    </button>
+                    <button class="menu-item" onclick={() => confirmToggleLock(user)}>
+                      {#if user.is_locked}
+                        <Unlock size={14} /> Unlock Account
+                      {:else}
+                        <Lock size={14} /> Lock Account
+                      {/if}
                     </button>
                     <button class="menu-item" onclick={() => confirmToggleSudo(user)}>
                       {#if user.is_sudo}

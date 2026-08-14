@@ -255,7 +255,12 @@
                         <item.icon size={15} />
                       </span>
                       <div class="flyout-item-text">
-                        <span class="flyout-item-label">{item.label}</span>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                          <span class="flyout-item-label">{item.label}</span>
+                          {#if (item.id === 'dnf-history' || item.id === 'app-manager') && uiStore.availableUpdatesCount > 0}
+                            <span class="nav-badge">{uiStore.availableUpdatesCount}</span>
+                          {/if}
+                        </div>
                         {#if item.desc}
                           <span class="flyout-item-desc">{item.desc}</span>
                         {/if}
@@ -307,6 +312,9 @@
                     <item.icon size={16} />
                   </span>
                   <span class="nav-label">{item.label}</span>
+                  {#if (item.id === 'dnf-history' || item.id === 'app-manager') && uiStore.availableUpdatesCount > 0}
+                    <span class="nav-badge">{uiStore.availableUpdatesCount}</span>
+                  {/if}
                 </button>
               {/each}
             </div>
@@ -840,6 +848,19 @@
     position: relative;
     min-height: 34px;
     width: 100%;
+  }
+
+  .nav-badge {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--color-accent);
+    color: #000;
+    line-height: 1.3;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
   }
 
   .sidebar.collapsed .nav-item {

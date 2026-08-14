@@ -196,11 +196,13 @@
     statusStore.setBusy('Checking for updates…');
     try {
       updates = await invoke<DnfUpdateEntry[]>('dnf_check_updates');
+      uiStore.availableUpdatesCount = updates.length;
       statusStore.setLastCommand('dnf check-update', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to check updates: ${e}`, 'error');
       statusStore.setLastCommand('dnf check-update', 1, false);
       updates = [];
+      uiStore.availableUpdatesCount = 0;
     } finally {
       loadingUpdates = false;
       statusStore.clearBusy();

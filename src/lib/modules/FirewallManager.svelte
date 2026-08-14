@@ -49,6 +49,39 @@
   let newPort = $state('');
   let newService = $state('');
 
+  // Port Listener Checker State
+  let portCheckResult = $state<{ port: number; proto: string; is_listening: boolean; process_name: string; pid: string } | null>(null);
+  let checkingPort = $state(false);
+  let portDebounceTimer: any = null;
+
+  function handlePortInput(val: string) {
+    newPort = val;
+    if (portDebounceTimer) clearTimeout(portDebounceTimer);
+    const cleaned = val.trim();
+    if (!cleaned) {
+      portCheckResult = null;
+      return;
+    }
+    const parts = cleaned.split('/');
+    const portNum = parseInt(parts[0]);
+    const proto = parts.length > 1 ? parts[1] : 'tcp';
+    if (isNaN(portNum) || portNum <= 0 || portNum > 65535) {
+      portCheckResult = null;
+      return;
+    }
+
+    portDebounceTimer = setTimeout(async () => {
+      checkingPort = true;
+      try {
+        portCheckResult = await invoke('firewall_check_port_listener', { port: portNum, proto });
+      } catch (e) {
+        portCheckResult = null;
+      } finally {
+        checkingPort = false;
+      }
+    }, 200);
+  }
+
   // Phase 3 Firewall Rich Rules & Interfaces states
   let activeSubTab = $state<'rules' | 'rich' | 'interfaces'>('rules');
   let richRules = $state<string[]>([]);
@@ -434,14 +467,30 @@
 
             <hr style="border:0; border-top:1px solid var(--color-border); margin:12px 0" />
 
-            <div>
-              <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
-              <div style="display:flex; gap:8px; margin-bottom:12px">
-                <input class="input" bind:value={newPort} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
-                <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
-                  <Plus size={14} /> Add
-                </Button>
-              </div>
+              <div>
+                <h3 style="margin-top:0; color:var(--color-text-primary); font-size:16px; margin-bottom:12px">Open Ports</h3>
+                <div style="display:flex; gap:8px; margin-bottom:8px">
+                  <input class="input" value={newPort} oninput={(e) => handlePortInput(e.currentTarget.value)} placeholder="e.g. 8080/tcp, 53/udp" onkeydown={(e) => e.key === 'Enter' && addRule('port')} />
+                  <Button variant="outline" class="" onclick={() => addRule('port')} disabled={!newPort.trim()}>
+                    <Plus size={14} /> Add
+                  </Button>
+                </div>
+
+                {#if checkingPort}
+                  <div style="font-size:11.5px; color:var(--color-text-muted); display:flex; align-items:center; gap:6px; margin-top:-4px; margin-bottom:8px;">
+                    <RefreshCw size={12} class="animate-spin-slow" /> Checking local port listener...
+                  </div>
+                {:else if portCheckResult}
+                  {#if portCheckResult.is_listening}
+                    <div style="font-size:11.5px; color:var(--color-success); display:flex; align-items:center; gap:6px; margin-top:-4px; margin-bottom:8px;">
+                      <ShieldCheck size={13} /> Active local listener detected: <strong>{portCheckResult.process_name || 'System service'}</strong> (PID: {portCheckResult.pid || '—'})
+                    </div>
+                  {:else}
+                    <div style="font-size:11.5px; color:var(--color-text-muted); display:flex; align-items:center; gap:6px; margin-top:-4px; margin-bottom:8px;">
+                      <span>⚪ No active local process currently listening on port {portCheckResult.port}/{portCheckResult.proto}</span>
+                    </div>
+                  {/if}
+                {/if}
 
               {#if rules.ports.length === 0}
                 <div style="font-size:13px; color:var(--color-text-muted); font-style:italic">No specific ports opened.</div>

@@ -8,7 +8,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
-    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server, Activity
+    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server, Activity, Network, GitFork, Link2
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -49,7 +49,7 @@
   }
 
   let selectedUnit = $state<ServiceUnit | null>(null);
-  let activePanel = $state<'logs' | 'editor' | null>(null);
+  let activePanel = $state<'logs' | 'editor' | 'dependencies' | null>(null);
   let panelOpen = $state(false);
   let logs = $state('');
   let logsLoading = $state(false);
@@ -58,6 +58,16 @@
   let actionInProgress = $state<string | null>(null);
   let editedContent = $state('');
   let saving = $state(false);
+
+  // Service Dependencies State
+  interface UnitDeps {
+    requires: string[];
+    wants: string[];
+    after: string[];
+    before: string[];
+  }
+  let unitDeps = $state<UnitDeps | null>(null);
+  let depsLoading = $state(false);
 
   // System vs User scope
   let userScope = $state(false);
@@ -174,6 +184,22 @@
       statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} cat ${unit.name}`, 1, false);
     } finally {
       unitFileLoading = false;
+    }
+  }
+
+  async function openDependencies(unit: ServiceUnit) {
+    selectedUnit = unit;
+    activePanel = 'dependencies';
+    panelOpen = true;
+    depsLoading = true;
+    unitDeps = null;
+    try {
+      unitDeps = await invoke<UnitDeps>('get_unit_dependencies', { name: unit.name, userMode: userScope });
+      statusStore.setLastCommand(`systemctl show ${unit.name} --property=Requires,Wants,After,Before`, 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to load dependencies: ${e}`, 'error');
+    } finally {
+      depsLoading = false;
     }
   }
 
@@ -397,14 +423,18 @@
   {/if}
 
   {#if mainTab === 'services'}
-    <!-- Side panel: Logs or Editor -->
+    <!-- Side panel: Logs, Editor, or Dependencies -->
     <SideDrawer
       bind:isOpen={panelOpen}
-      title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : `Unit File — ${selectedUnit?.name}`}
-      width="600px"
+      title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : (activePanel === 'dependencies' ? `Dependencies — ${selectedUnit?.name}` : `Unit File — ${selectedUnit?.name}`)}
+      width="640px"
     >
       {#snippet headerActions()}
-        {#if activePanel === 'editor'}
+        {#if activePanel === 'logs' && selectedUnit}
+          <Button variant="outline" class="btn-sm" onclick={() => uiStore.jumpToJournalService(selectedUnit!.name)}>
+            <FileText size={13} /> Full Journal ↗
+          </Button>
+        {:else if activePanel === 'editor'}
           <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
             disabled={saving || editedContent === unitFileContent}>
             {saving ? 'Saving…' : 'Save Override'}
@@ -419,6 +449,90 @@
           </div>
         {:else}
           <pre class="log-output">{logs || 'No log output found.'}</pre>
+        {/if}
+      {:else if activePanel === 'dependencies'}
+        {#if depsLoading}
+          <div style="padding:24px;color:var(--color-text-muted);display:flex;align-items:center;justify-content:center;gap:8px">
+            <RefreshCw size={18} class="animate-spin-slow" /> Querying systemd dependency tree…
+          </div>
+        {:else if unitDeps}
+          <div style="display:flex; flex-direction:column; gap:16px; padding:4px 0;">
+            <!-- Requires -->
+            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
+                  <ShieldCheck size={14} style="color:var(--color-error);" /> Requires (Hard Dependencies)
+                </span>
+                <span class="badge badge-muted">{unitDeps.requires.length}</span>
+              </div>
+              {#if unitDeps.requires.length === 0}
+                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                  {#each unitDeps.requires as req}
+                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{req}</code>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
+            <!-- Wants -->
+            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
+                  <Activity size={14} style="color:var(--color-warning);" /> Wants (Weak Dependencies)
+                </span>
+                <span class="badge badge-muted">{unitDeps.wants.length}</span>
+              </div>
+              {#if unitDeps.wants.length === 0}
+                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                  {#each unitDeps.wants as want}
+                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{want}</code>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
+            <!-- After -->
+            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
+                  <ChevronRight size={14} style="color:var(--color-accent);" /> Starts After (Order)
+                </span>
+                <span class="badge badge-muted">{unitDeps.after.length}</span>
+              </div>
+              {#if unitDeps.after.length === 0}
+                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                  {#each unitDeps.after as aft}
+                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{aft}</code>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
+            <!-- Before -->
+            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
+                  <ChevronRight size={14} style="color:var(--color-success);" /> Starts Before (Order)
+                </span>
+                <span class="badge badge-muted">{unitDeps.before.length}</span>
+              </div>
+              {#if unitDeps.before.length === 0}
+                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
+              {:else}
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                  {#each unitDeps.before as bef}
+                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{bef}</code>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
         {/if}
       {:else if activePanel === 'editor'}
         {#if unitFileLoading}
@@ -499,10 +613,11 @@
                       <button class="menu-item" onclick={() => openLogs(unit)}>
                         <FileText size={14} /> View Inline Logs
                       </button>
-                      <button class="menu-item" onclick={() => {
-                        uiStore.activeTab = 'journal-logs';
-                      }}>
-                        <FileText size={14} /> Open in Journal Logs
+                      <button class="menu-item" onclick={() => uiStore.jumpToJournalService(unit.name)}>
+                        <FileText size={14} /> Open in Journal Logs ↗
+                      </button>
+                      <button class="menu-item" onclick={() => openDependencies(unit)}>
+                        <GitFork size={14} /> Inspect Dependencies
                       </button>
                       <button class="menu-item" onclick={() => openEditor(unit)}>
                         <Settings size={14} /> Edit Unit File

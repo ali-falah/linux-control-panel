@@ -331,3 +331,59 @@ pub async fn firewall_change_interface_zone(
         interface, zone
     ))
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortListenerInfo {
+    pub port: u16,
+    pub proto: String,
+    pub is_listening: bool,
+    pub process_name: String,
+    pub pid: String,
+}
+
+/// Check if a local process is currently listening on the specified port
+#[tauri::command]
+pub async fn firewall_check_port_listener(port: u16, proto: String) -> Result<PortListenerInfo, String> {
+    let flag = if proto.to_lowercase().contains("udp") { "-ulpn" } else { "-tlpn" };
+    let output = Command::new("ss")
+        .args([flag, "-H"])
+        .output()
+        .await;
+
+    let mut is_listening = false;
+    let mut process_name = String::new();
+    let mut pid = String::new();
+
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let target = format!(":{}", port);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 && parts[3].ends_with(&target) {
+                is_listening = true;
+                if parts.len() >= 6 {
+                    let proc_info = parts[5];
+                    if let Some(name_start) = proc_info.find("(\"") {
+                        if let Some(name_end) = proc_info[name_start + 2..].find('"') {
+                            process_name = proc_info[name_start + 2..name_start + 2 + name_end].to_string();
+                        }
+                    }
+                    if let Some(pid_start) = proc_info.find("pid=") {
+                        let rest = &proc_info[pid_start + 4..];
+                        let pid_end = rest.find(',').unwrap_or(rest.len());
+                        pid = rest[..pid_end].to_string();
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(PortListenerInfo {
+        port,
+        proto,
+        is_listening,
+        process_name,
+        pid,
+    })
+}
