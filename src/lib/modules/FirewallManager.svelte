@@ -13,6 +13,8 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import GuideBanner from '../components/ui/GuideBanner.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   let aiPromptInput = $state('');
   let showAiPromptBox = $state(false);
@@ -349,6 +351,13 @@
       </span>
     </div>
   {:else if state}
+    <GuideBanner
+      icon={Shield}
+      title="Dynamic Zone Management"
+      description="Firewall rules are grouped by security zones. Traffic received on interfaces bound to a zone is filtered by that zone's services and port definitions."
+      variant="info"
+    />
+
     {#if state.is_panic}
       <div style="margin-bottom:16px; padding:16px; border-radius:12px; background:rgba(255, 71, 87, 0.1); border:1px solid rgba(255, 71, 87, 0.3); display:flex; align-items:center; gap:12px">
         <ShieldAlert size={24} style="color:var(--color-danger)" />
@@ -365,7 +374,7 @@
         <h3 style="margin-top:0; color:var(--color-text-primary); font-size:14px">Active Zones</h3>
         {#each state.active_zones as zone}
           <Button 
-            class="zone- {activeZone === zone ? 'active' : ''}"
+            class="zone-btn {activeZone === zone ? 'active' : ''}"
             onclick={() => { activeZone = zone; loadRules(zone); }}
           >
             <ShieldCheck size={16} />

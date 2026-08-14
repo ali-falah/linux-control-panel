@@ -12,6 +12,8 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import CodeEditor from '../components/CodeEditor.svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import KpiCard from '../components/ui/KpiCard.svelte';
+  import GuideBanner from '../components/ui/GuideBanner.svelte';
 
   interface GrubConfig {
     timeout: number;
@@ -143,6 +145,51 @@
       <span style="font-weight:500">Loading GRUB Config…</span>
     </div>
   {:else if config}
+    <!-- Top KPI Row -->
+    <div class="grub-kpi-grid">
+      <KpiCard
+        icon={TerminalSquare}
+        value={config.default_entry || 'saved'}
+        label="Default Boot Entry"
+        subtext="GRUB_DEFAULT target"
+        statusText="Default"
+        statusType="info"
+      />
+      <KpiCard
+        icon={RefreshCw}
+        value={`${config.timeout}s`}
+        label="Menu Timeout"
+        subtext="Wait delay before boot"
+        statusText={config.timeout > 0 ? 'Active' : 'Instant'}
+        statusType={config.timeout > 0 ? 'success' : 'warning'}
+        iconBg="rgba(16, 185, 129, 0.12)"
+        iconColor="var(--color-success)"
+      />
+      <KpiCard
+        icon={TerminalSquare}
+        value={config.hidden_timeout ? 'Hidden' : 'Visible'}
+        label="Menu Style"
+        subtext="GRUB_TIMEOUT_STYLE"
+        iconBg="rgba(0, 218, 243, 0.12)"
+        iconColor="var(--color-accent)"
+      />
+      <KpiCard
+        icon={AlertTriangle}
+        value={config.cmdline_linux ? config.cmdline_linux.split(' ').length : 0}
+        label="Kernel Arguments"
+        subtext="Active boot params"
+        iconBg="rgba(245, 158, 11, 0.12)"
+        iconColor="var(--color-warning)"
+      />
+    </div>
+
+    <GuideBanner
+      icon={TerminalSquare}
+      title="GRUB Bootloader Configuration"
+      description="Modify boot timeouts, default kernel targets, and Linux cmdline arguments. Changes are written safely as root via base64 decoding to /etc/default/grub."
+      variant="info"
+    />
+
     {#if hasChanges}
       <div style="margin-bottom:16px; padding:12px 16px; border-radius:8px; background:rgba(255, 171, 0, 0.1); border:1px solid rgba(255, 171, 0, 0.3); display:flex; align-items:center; gap:12px">
         <AlertTriangle size={20} style="color:var(--color-warning)" />
@@ -221,3 +268,12 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .grub-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+</style>

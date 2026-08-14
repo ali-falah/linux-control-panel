@@ -11,7 +11,7 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Play, Copy, Check } from '@lucide/svelte';
+  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Play, Copy, Check, X } from '@lucide/svelte';
   import { Save, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { FileCode, ArchiveRestore, GripVertical, Search, Folder } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -20,6 +20,7 @@
   import PageHeader from '../components/PageHeader.svelte';
 
   // ─── AI Terminal Assistant State ──────────────────────────────────────────
+  let showAiAssistant = $state(true);
   let aiPrompt = $state('');
   let aiLoading = $state(false);
   let aiResponse = $state<{ generated_command: string; explanation: string; safety_level: string } | null>(null);
@@ -504,6 +505,11 @@
 <div class="module-page">
   <!-- Header -->
   <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal}>
+    {#if aiStore.enabled && !showAiAssistant}
+      <Button variant="ghost" size="sm" onclick={() => showAiAssistant = true} title="Open AI Terminal Assistant">
+        <Sparkles size={14} style="color: var(--color-accent);" /> AI Assistant
+      </Button>
+    {/if}
     {#if activeTab === 'variables'}
       <Button variant="outline" onclick={loadVarGroups} disabled={varsLoading}>
         <RefreshCw size={14} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
@@ -514,14 +520,26 @@
     {/if}
   </PageHeader>
 
-  {#if aiStore.enabled}
-    <div class="ai-terminal-card" style="padding: 16px; background: rgba(0, 218, 243, 0.04); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 20px;">
+  {#if aiStore.enabled && showAiAssistant}
+    <div class="ai-terminal-card" style="padding: 14px 16px; background: rgba(0, 218, 243, 0.04); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 16px; position: relative;">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
         <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; color: var(--color-text-primary);">
           <Sparkles size={16} style="color: var(--color-accent);" />
           AI Terminal Assistant (Natural Language Bash Generator)
         </div>
-        <span style="font-size: 11px; color: var(--color-text-muted);">Fedora Linux Optimized</span>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 11px; color: var(--color-text-muted);">Fedora Linux Optimized</span>
+          <button 
+            type="button" 
+            onclick={() => showAiAssistant = false} 
+            title="Hide AI Assistant"
+            style="background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px; border-radius: 4px; transition: all 0.2s;"
+            onmouseenter={(e) => { e.currentTarget.style.color = 'var(--color-text-primary)'; e.currentTarget.style.background = 'var(--color-bg-raised)'; }}
+            onmouseleave={(e) => { e.currentTarget.style.color = 'var(--color-text-muted)'; e.currentTarget.style.background = 'transparent'; }}
+          >
+            <X size={15} />
+          </button>
+        </div>
       </div>
 
       <div style="display: flex; gap: 8px;">

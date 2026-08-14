@@ -5,12 +5,16 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { ShieldAlert, Shield, RefreshCw, Power } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
 
   interface SelinuxStatus {
     status: string;
@@ -25,9 +29,6 @@
     tcontext: string;
     tclass: string;
   }
-
-  import SideDrawer from '../components/SideDrawer.svelte';
-  import Select from '../components/ui/Select.svelte';
 
   let status = $state<SelinuxStatus | null>(null);
   let denials = $state<Denial[]>([]);
@@ -54,18 +55,24 @@
   let currentPage = $state(1);
   const itemsPerPage = 15;
 
+  $effect(() => {
+    searchQuery;
+    currentPage = 1;
+  });
+
   let filteredBooleans = $derived.by(() => {
     if (!searchQuery) return booleans;
     const lower = searchQuery.toLowerCase();
     return booleans.filter(b => b.name.toLowerCase().includes(lower));
   });
 
+  let totalPages = $derived(Math.ceil(filteredBooleans.length / itemsPerPage) || 1);
+
   let paginatedBooleans = $derived.by(() => {
-    const start = (currentPage - 1) * itemsPerPage;
+    const safePage = Math.max(1, Math.min(currentPage, totalPages));
+    const start = (safePage - 1) * itemsPerPage;
     return filteredBooleans.slice(start, start + itemsPerPage);
   });
-
-  let totalPages = $derived(Math.ceil(filteredBooleans.length / itemsPerPage));
   
   async function loadBooleans() {
     loadingBools = true;
@@ -138,15 +145,15 @@
   }
 
   async function applyPolicyOverride() {
-    if (!selectedDenial) return;
+    if (!selectedDenial || !customModuleName.trim()) return;
     applyingOverride = true;
-    statusStore.setBusy('Compiling and loading SELinux policy module…');
+    statusStore.setBusy(`Compiling and installing SELinux module '${customModuleName}'…`);
     try {
-      const res = await invoke<string>('selinux_apply_policy_override', {
-        name: customModuleName,
-        rawLog: selectedDenial.raw
+      const msg = await invoke<string>('selinux_apply_audit2allow', {
+        rawLog: selectedDenial.raw,
+        moduleName: customModuleName.trim()
       });
-      uiStore.addToast(res, 'success');
+      uiStore.addToast(msg, 'success');
       showTroubleshooter = false;
       await loadData();
     } catch (e) {
@@ -157,21 +164,24 @@
     }
   }
 
-  function confirmChangeMode(newMode: string) {
+  function confirmChangeMode(newMode: 'enforcing' | 'permissive') {
     uiStore.confirm(
       'Change SELinux Mode',
-      `Are you sure you want to change SELinux to ${newMode}?\n\nSetting it to permissive disables access denial enforcement but continues logging.`,
-      () => doChangeMode(newMode),
-      true
+      `Switch SELinux runtime mode to ${newMode.toUpperCase()}?\n\n` +
+      (newMode === 'permissive' 
+        ? 'WARNING: In Permissive mode, SELinux will log security violations (AVCs) but will NOT block unauthorized actions. Use this only for temporary debugging.'
+        : 'In Enforcing mode, SELinux will actively protect the system and block all unauthorized access attempts.'),
+      () => setRuntimeMode(newMode),
+      newMode === 'permissive'
     );
   }
 
-  async function doChangeMode(newMode: string) {
-    statusStore.setBusy(`Setting SELinux to ${newMode}…`);
+  async function setRuntimeMode(newMode: 'enforcing' | 'permissive') {
+    statusStore.setBusy(`Setting SELinux mode to ${newMode}…`);
     try {
-      await invoke('set_selinux_state', { mode: newMode });
+      const msg = await invoke<string>('set_selinux_mode', { mode: newMode });
+      uiStore.addToast(msg, 'success');
       statusStore.setLastCommand(`setenforce ${newMode === 'enforcing' ? '1' : '0'}`, 0, true);
-      uiStore.addToast(`SELinux mode changed to ${newMode}`, 'success');
       await loadData();
     } catch (e) {
       uiStore.addToast(`Failed to change SELinux mode: ${e}`, 'error');
@@ -184,9 +194,18 @@
   $effect(() => { loadData(); });
 </script>
 
-<div class="module-page">
+<div class="module-page" style="overflow-y: auto; padding-bottom: 40px;">
   <PageHeader title="SELinux Manager" subtitle="Manage Security-Enhanced Linux state and view access denials" icon={ShieldAlert}>
-    <Button variant="ghost" class="" onclick={loadData} disabled={loading}>
+    {#if status && status.status !== 'disabled'}
+      <TabGroup
+        tabs={[
+          { id: 'status', label: 'Status & Denials' },
+          { id: 'booleans', label: booleans.length > 0 ? `SELinux Booleans (${booleans.length})` : 'SELinux Booleans' }
+        ]}
+        bind:activeTab={activeTab}
+      />
+    {/if}
+    <Button variant="ghost" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
   </PageHeader>
@@ -199,176 +218,171 @@
       <span style="font-weight:500">Loading SELinux State…</span>
     </div>
   {:else if status}
-    <div class="card" style="margin-bottom:16px">
-      <h3 style="margin-top:0; color:var(--color-text-primary); margin-bottom:16px">Current Status</h3>
-      
-      {#if status.status === 'disabled'}
-        <div style="padding:16px; border-radius:8px; background:rgba(255, 71, 87, 0.1); color:var(--color-danger); display:flex; align-items:center; gap:12px">
-          <Power size={24} />
-          <div>
-            <div style="font-weight:600">SELinux is Disabled</div>
-            <div style="font-size:13px">Your system does not have SELinux active. Reboot may be required to enable it.</div>
-          </div>
-        </div>
-      {:else}
-        <div style="display:flex; gap:16px; align-items:center">
-          <div style="flex:1">
-            <div style="font-size:12px; color:var(--color-text-secondary); margin-bottom:4px">Current Runtime Mode</div>
-            <div style="font-size:20px; font-weight:600; color:var(--color-text-primary); text-transform:capitalize">
-              {status.current_mode}
-              {#if status.current_mode === 'enforcing'}
-                <Shield size={18} style="color:var(--color-success); display:inline-block; vertical-align:middle; margin-left:4px" />
-              {:else if status.current_mode === 'permissive'}
-                <ShieldAlert size={18} style="color:var(--color-warning); display:inline-block; vertical-align:middle; margin-left:4px" />
-              {/if}
+    {#if activeTab === 'status'}
+      <!-- Compact Current Status Card -->
+      <div class="card" style="padding: 10px 16px; margin-bottom: 12px;">
+        {#if status.status === 'disabled'}
+          <div style="padding:12px; border-radius:8px; background:rgba(255, 71, 87, 0.1); color:var(--color-danger); display:flex; align-items:center; gap:12px">
+            <Power size={20} />
+            <div>
+              <div style="font-weight:600; font-size:13px;">SELinux is Disabled</div>
+              <div style="font-size:12px;">Your system does not have SELinux active. Reboot may be required to enable it.</div>
             </div>
           </div>
-          <div style="flex:1">
-            <div style="font-size:12px; color:var(--color-text-secondary); margin-bottom:4px">Config File Mode (Next Boot)</div>
-            <div style="font-size:16px; color:var(--color-text-primary); text-transform:capitalize">
-              {status.config_mode}
-            </div>
-          </div>
-          <div style="display:flex; gap:8px">
-            <Button class="btn {status.current_mode === 'enforcing' ? 'btn-primary' : '-outline'}" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
-              Enforcing
-            </Button>
-            <Button class="btn {status.current_mode === 'permissive' ? 'btn-warning' : '-outline'}" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
-              Permissive
-            </Button>
-          </div>
-        </div>
-      {/if}
-    </div>
+        {:else}
+          <div style="display:flex; gap:16px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
+            <div style="display:flex; gap:20px; align-items:center;">
+              <div>
+                <div style="font-size:10.5px; color:var(--color-text-muted); font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">Runtime Mode</div>
+                <div style="font-size:14px; font-weight:700; color:var(--color-text-primary); text-transform:capitalize; display:flex; align-items:center; gap:6px; margin-top:2px;">
+                  {status.current_mode}
+                  {#if status.current_mode === 'enforcing'}
+                    <Shield size={14} style="color:var(--color-success);" />
+                  {:else if status.current_mode === 'permissive'}
+                    <ShieldAlert size={14} style="color:var(--color-warning);" />
+                  {/if}
+                </div>
+              </div>
 
-    {#if status.status !== 'disabled'}
-      <div class="controls-row" style="margin-bottom:16px; border-bottom:1px solid var(--color-border); padding-bottom:12px;">
-        <div class="tab-bar">
-          <button class="tab-btn { activeTab === 'status' ? 'active' : '' }" onclick={() => activeTab = 'status'}>
-            Status & Denials
-          </button>
-          <button class="tab-btn { activeTab === 'booleans' ? 'active' : '' }" onclick={() => activeTab = 'booleans'}>
-            SELinux Booleans
-          </button>
+              <div style="width:1px; height:24px; background:var(--color-border);"></div>
+
+              <div>
+                <div style="font-size:10.5px; color:var(--color-text-muted); font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">Config Mode (Boot)</div>
+                <div style="font-size:13px; font-weight:600; color:var(--color-text-secondary); text-transform:capitalize; margin-top:2px;">
+                  {status.config_mode}
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:6px;">
+              <Button class="btn btn-sm {status.current_mode === 'enforcing' ? 'btn-primary' : '-outline'}" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
+                Enforcing
+              </Button>
+              <Button class="btn btn-sm {status.current_mode === 'permissive' ? 'btn-warning' : '-outline'}" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
+                Permissive
+              </Button>
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <!-- AVC Denials Section -->
+      <div class="card" style="padding:0; overflow:hidden; display:flex; flex-direction:column;">
+        <div style="padding:10px 16px; border-bottom:1px solid var(--color-border); display:flex; justify-content:space-between; align-items:center; background:var(--color-bg-base);">
+          <h3 style="margin:0; font-size:13px; font-weight:700; color:var(--color-text-primary);">Recent Access Denials (AVC)</h3>
+          <span class="badge {denials.length > 0 ? 'badge-error' : 'badge-success'}">{denials.length} events</span>
+        </div>
+        
+        <div style="padding:14px; display:flex; flex-direction:column; gap:10px;">
+          {#if denials.length === 0}
+            <EmptyState
+              icon={Shield}
+              title="No Recent Denials"
+              description="SELinux has not blocked any actions recently. All subsystem operations are passing security verification."
+            />
+          {:else}
+            <div style="font-size:12px; color:var(--color-text-secondary); margin-bottom:4px;">
+              Click on any denial event below to analyze and troubleshoot it using <code>audit2allow</code>.
+            </div>
+            {#each denials as denial}
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div 
+                class="card" 
+                style="cursor:pointer; transition:all 0.15s ease; border:1px solid var(--color-border); background:var(--color-bg-raised); padding:10px 12px;"
+                onclick={() => explainDenial(denial)}
+                onmouseenter={(e) => e.currentTarget.style.borderColor='var(--color-danger)'}
+                onmouseleave={(e) => e.currentTarget.style.borderColor='var(--color-border)'}
+              >
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                  <span class="badge badge-error" style="font-size:10px;">AVC DENIED</span>
+                  <span style="font-size:11.5px; font-family:var(--font-mono); color:var(--color-text-muted);">{denial.timestamp}</span>
+                </div>
+                <div style="font-size:12px; font-family:var(--font-mono); color:var(--color-text-primary); margin-bottom:3px; word-break:break-all;">
+                  <strong style="color:var(--color-text-secondary);">Source:</strong> {denial.scontext}
+                </div>
+                <div style="font-size:12px; font-family:var(--font-mono); color:var(--color-text-primary); margin-bottom:3px; word-break:break-all;">
+                  <strong style="color:var(--color-text-secondary);">Target:</strong> {denial.tcontext}
+                </div>
+                <div style="font-size:12px; font-family:var(--font-mono); color:var(--color-text-primary);">
+                  <strong style="color:var(--color-text-secondary);">Class:</strong> <code style="color:var(--color-accent);">{denial.tclass}</code>
+                </div>
+              </div>
+            {/each}
+          {/if}
         </div>
       </div>
 
-      {#if activeTab === 'status'}
-        <div class="card module-content-scroll" style="flex:1; padding:0; display:flex; flex-direction:column">
-          <div style="padding:16px; border-bottom:1px solid var(--color-border); display:flex; justify-content:space-between; align-items:center">
-            <h3 style="margin:0; color:var(--color-text-primary)">Recent Access Denials (AVC)</h3>
-            <span class="badge badge-muted">{denials.length} events</span>
-          </div>
-          
-          <div style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px">
-            {#if denials.length === 0}
-              <div class="empty-state" style="padding: 64px 32px;">
-                <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-                  <Shield size={32} class="empty-state-icon" style="margin:0; color:var(--color-success);" />
-                </div>
-                <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-                  No Recent Denials
-                </span>
-                <span style="color:var(--color-text-muted); margin-top:8px;">
-                  SELinux has not blocked any actions recently.
-                </span>
-              </div>
-            {:else}
-              <div style="font-size:12px; color:var(--color-text-secondary); margin-bottom:8px;">
-                Click on any denial event below to analyze and troubleshoot it using audit2allow.
-              </div>
-              {#each denials as denial}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div 
-                  class="card" 
-                  style="cursor:pointer; transition:all 0.2s; border:1px solid transparent; background:var(--color-bg-raised); padding:12px;"
-                  onclick={() => explainDenial(denial)}
-                  onmouseenter={(e) => e.currentTarget.style.borderColor='var(--color-danger)'}
-                  onmouseleave={(e) => e.currentTarget.style.borderColor='transparent'}
-                >
-                  <div style="display:flex; justify-content:space-between; margin-bottom:8px">
-                    <span style="font-size:12px; font-weight:600; color:var(--color-danger)">DENIED</span>
-                    <span style="font-size:12px; color:var(--color-text-secondary)">{denial.timestamp}</span>
-                  </div>
-                  <div style="font-size:13px; font-family:var(--font-mono); color:var(--color-text-primary); margin-bottom:4px">
-                    <strong>Source:</strong> {denial.scontext}
-                  </div>
-                  <div style="font-size:13px; font-family:var(--font-mono); color:var(--color-text-primary); margin-bottom:4px">
-                    <strong>Target:</strong> {denial.tcontext}
-                  </div>
-                  <div style="font-size:13px; font-family:var(--font-mono); color:var(--color-text-primary)">
-                    <strong>Class:</strong> {denial.tclass}
-                  </div>
-                </div>
-              {/each}
-            {/if}
+    {:else if activeTab === 'booleans'}
+      <!-- SELinux Booleans Tab -->
+      <div class="card" style="padding:0; overflow:hidden; display:flex; flex-direction:column;">
+        <div style="padding:10px 16px; border-bottom:1px solid var(--color-border); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; background:var(--color-bg-base);">
+          <SearchBar 
+            bind:value={searchQuery} 
+            placeholder="Search booleans (e.g. 'httpd', 'samba', 'ftp')..." 
+            count={filteredBooleans.length} 
+            total={booleans.length} 
+            style="max-width:340px; flex:1;" 
+          />
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:12px; color:var(--color-text-secondary);">Save persistently (-P)</span>
+            <Toggle checked={permanentChange} onToggle={(checked) => permanentChange = checked} />
           </div>
         </div>
-      {:else}
-        <!-- SELinux Booleans Panel -->
-        <div class="card" style="flex:1; min-height:0; display:flex; flex-direction:column; gap:16px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <input class="input" bind:value={searchQuery} placeholder="Search booleans..." style="width:240px; margin:0;" oninput={() => currentPage = 1} />
-            </div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span style="font-size:12.5px; color:var(--color-text-secondary);">Save persistently (-P)</span>
-              <Toggle checked={permanentChange} onToggle={(checked) => permanentChange = checked} />
-            </div>
-          </div>
 
-          {#if loadingBools}
-            <div style="padding:40px; text-align:center; color:var(--color-text-muted);">
-              <RefreshCw size={20} class="animate-spin-slow" /> Loading booleans...
-            </div>
-          {:else}
-            <div class="table-wrap" style="flex:1; min-height:0; overflow-y:auto;">
-              <table>
-                <thead>
+        {#if loadingBools}
+          <div style="padding:40px; text-align:center; color:var(--color-text-muted);">
+            <RefreshCw size={20} class="animate-spin-slow" /> Loading booleans...
+          </div>
+        {:else if filteredBooleans.length === 0}
+          <EmptyState
+            icon={Shield}
+            title="No Booleans Found"
+            description={searchQuery ? `No SELinux booleans matched "${searchQuery}".` : 'No booleans returned by getsebool.'}
+            actionLabel={searchQuery ? 'Clear Search' : undefined}
+            onAction={searchQuery ? () => searchQuery = '' : undefined}
+          />
+        {:else}
+          <div class="table-wrap" style="border:none; border-radius:0; box-shadow:none; overflow-x:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Boolean Name</th>
+                  <th style="width:100px; text-align:center;">State</th>
+                  <th style="width:130px; text-align:center;">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each paginatedBooleans as bool (bool.name)}
                   <tr>
-                    <th>Boolean Name</th>
-                    <th style="width:100px; text-align:center;">Value</th>
-                    <th style="width:120px; text-align:center;">Action</th>
+                    <td style="font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary); font-weight:500;">
+                      {bool.name}
+                    </td>
+                    <td style="text-align:center;">
+                      <span class="badge {bool.value ? 'badge-success' : 'badge-muted'}">
+                        {bool.value ? 'ON' : 'OFF'}
+                      </span>
+                    </td>
+                    <td style="text-align:center;">
+                      <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" onclick={() => toggleBoolean(bool.name, bool.value)}>
+                        Toggle {bool.value ? 'OFF' : 'ON'}
+                      </Button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {#each paginatedBooleans as bool}
-                    <tr>
-                      <td style="font-family:var(--font-mono); color:var(--color-text-secondary);">{bool.name}</td>
-                      <td style="text-align:center;">
-                        <span class="badge {bool.value ? 'badge-success' : 'badge-muted'}">
-                          {bool.value ? 'on' : 'off'}
-                        </span>
-                      </td>
-                      <td style="text-align:center;">
-                        <Button variant="outline" style="padding: 4px 10px; font-size:12px;" onclick={() => toggleBoolean(bool.name, bool.value)}>
-                          Toggle to {bool.value ? 'off' : 'on'}
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
+                {/each}
+              </tbody>
+            </table>
+          </div>
 
-            <!-- Pagination controls -->
-            {#if totalPages > 1}
-              <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding-top:12px; border-top:1px solid var(--color-border); flex-shrink:0;">
-                <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={currentPage === 1} onclick={() => currentPage--}>
-                  Previous
-                </Button>
-                <span style="font-size:13px; color:var(--color-text-secondary);">
-                  Page {currentPage} of {totalPages}
-                </span>
-                <Button variant="outline" style="padding:4px 10px; font-size:12px;" disabled={currentPage === totalPages} onclick={() => currentPage++}>
-                  Next
-                </Button>
-              </div>
-            {/if}
+          {#if totalPages > 1}
+            <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:10px 16px; border-top:1px solid var(--color-border); background:var(--color-bg-base);">
+              <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" disabled={currentPage === 1} onclick={() => currentPage--}>Previous</Button>
+              <span style="font-size:12px; color:var(--color-text-secondary); font-weight:500;">Page {currentPage} of {totalPages} ({filteredBooleans.length} items)</span>
+              <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" disabled={currentPage === totalPages} onclick={() => currentPage++}>Next</Button>
+            </div>
           {/if}
-        </div>
-      {/if}
+        {/if}
+      </div>
     {/if}
   {/if}
 

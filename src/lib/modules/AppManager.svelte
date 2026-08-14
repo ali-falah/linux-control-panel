@@ -887,7 +887,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 24px;
+    padding: 8px 16px;
     border-bottom: 1px solid var(--color-border);
     background: var(--color-bg-base);
     flex-shrink: 0;
@@ -896,14 +896,14 @@
   .content {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
+    padding: 12px 16px;
     background: var(--color-bg-subtle);
   }
 
   .app-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
   }
 
   .app-card:hover {

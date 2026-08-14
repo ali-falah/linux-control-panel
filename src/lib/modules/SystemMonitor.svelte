@@ -358,9 +358,9 @@
     }
   }
 
-  $effect(() => {
+  function restartTimers() {
     clearTimers();
-    if (isPaused) return;
+    if (isPaused || document.hidden) return;
     if (currentTab === 'overview') {
       pollLeftAndCenter();
       pollRight();
@@ -370,9 +370,23 @@
       pollProcesses();
       processesTimer = setInterval(pollProcesses, 3000);
     }
+  }
+
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      clearTimers();
+    } else {
+      restartTimers();
+    }
+  }
+
+  $effect(() => {
+    // React to tab switch or pause toggle
+    restartTimers();
   });
 
   onMount(async () => {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     try {
       currentUser = await invoke('get_current_user');
       const history: any[] = await invoke('get_system_stats_history');
@@ -394,6 +408,7 @@
 
   onDestroy(() => {
     clearTimers();
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 
   // Dynamic Sparkline generator helper for rates (e.g. disk speed)

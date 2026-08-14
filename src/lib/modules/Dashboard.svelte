@@ -462,16 +462,32 @@
     return cleaned || '17 May 2026, 15:21';
   }
 
-  let pollInterval: any;
+  let pollInterval: any = null;
+
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    } else {
+      if (!pollInterval) {
+        fetchData();
+        pollInterval = setInterval(fetchData, 4000);
+      }
+    }
+  }
 
   onMount(() => {
     fetchData();
     fetchSecurityReport();
     pollInterval = setInterval(fetchData, 4000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
   });
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 </script>
 

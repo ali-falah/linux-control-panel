@@ -17,6 +17,7 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
   import Card from '../components/ui/Card.svelte';
 
   // ─── Tab ──────────────────────────────────────────────────────────────────
@@ -349,45 +350,51 @@
     </div>
   </PageHeader>
 
-  <!-- Single header row: stats & search -->
-  <div class="header-row">
-
-    {#if mainTab === 'services'}
-      <!-- Inline stat chips -->
-      <button 
-        onclick={() => statusFilter = statusFilter === 'active' ? 'all' : 'active'}
-        class="stat-chip"
-        class:active={statusFilter === 'active'}
-      >
-        <span class="stat-num" style="color:var(--color-success)">{units.filter(u => u.active_state === 'active').length}</span>
-        <span class="stat-label">Active</span>
-      </button>
-      <button 
-        onclick={() => statusFilter = statusFilter === 'failed' ? 'all' : 'failed'}
-        class="stat-chip"
-        class:active={statusFilter === 'failed'}
-      >
-        <span class="stat-num" style="color:var(--color-error)">{units.filter(u => u.active_state === 'failed').length}</span>
-        <span class="stat-label">Failed</span>
-      </button>
-      <button 
-        onclick={() => statusFilter = 'all'}
-        class="stat-chip"
-        class:active={statusFilter === 'all'}
-      >
-        <span class="stat-num">{units.length}</span>
-        <span class="stat-label">Total Units</span>
-      </button>
+  {#if mainTab === 'services'}
+    <!-- Filter & search row -->
+    <div class="header-row">
+      <div class="filter-pills">
+        <button 
+          class="pill-btn {statusFilter === 'all' ? 'active' : ''}" 
+          onclick={() => statusFilter = 'all'}
+        >
+          All ({units.length})
+        </button>
+        <button 
+          class="pill-btn {statusFilter === 'active' ? 'active' : ''}" 
+          onclick={() => statusFilter = 'active'}
+        >
+          Active ({units.filter(u => u.active_state === 'active').length})
+        </button>
+        <button 
+          class="pill-btn {statusFilter === 'failed' ? 'active' : ''}" 
+          onclick={() => statusFilter = 'failed'}
+        >
+          Failed ({units.filter(u => u.active_state === 'failed').length})
+        </button>
+      </div>
 
       <div class="header-spacer"></div>
-      <SearchBar bind:value={filter} placeholder="Filter services by name or description…" style="min-width:220px; max-width:320px; margin:0;" />
-    {:else if mainTab === 'autostart'}
+      <SearchBar 
+        bind:value={filter} 
+        count={filteredUnits.length} 
+        total={units.length} 
+        placeholder="Filter services by name or description…" 
+        style="min-width:240px; max-width:340px; margin:0;" 
+      />
+    </div>
+  {:else if mainTab === 'autostart'}
+    <div class="header-row">
       <div class="header-spacer"></div>
-      <SearchBar bind:value={autostartFilter} placeholder="Filter autostart entries…" style="min-width:220px; max-width:320px; margin:0;" />
-    {:else}
-      <div class="header-spacer"></div>
-    {/if}
-  </div>
+      <SearchBar 
+        bind:value={autostartFilter} 
+        count={filteredAutostart.length} 
+        total={autostartEntries.length} 
+        placeholder="Filter autostart entries…" 
+        style="min-width:240px; max-width:340px; margin:0;" 
+      />
+    </div>
+  {/if}
 
   {#if mainTab === 'services'}
     <!-- Side panel: Logs or Editor -->
@@ -490,7 +497,12 @@
                         <RotateCcw size={14} /> Restart
                       </button>
                       <button class="menu-item" onclick={() => openLogs(unit)}>
-                        <FileText size={14} /> View Logs
+                        <FileText size={14} /> View Inline Logs
+                      </button>
+                      <button class="menu-item" onclick={() => {
+                        uiStore.activeTab = 'journal-logs';
+                      }}>
+                        <FileText size={14} /> Open in Journal Logs
                       </button>
                       <button class="menu-item" onclick={() => openEditor(unit)}>
                         <Settings size={14} /> Edit Unit File
@@ -893,6 +905,48 @@
   }
   .header-tab-btn.active .header-tab-count {
     background: rgba(255, 255, 255, 0.25);
+    color: #FFFFFF;
+  }
+
+  .filter-pills {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--color-border);
+    padding: 3px;
+    border-radius: 8px;
+  }
+
+  :global(html.light-mode) .filter-pills {
+    background: #F1F5F9;
+    border-color: #E2E8F0;
+  }
+
+  .pill-btn {
+    border: none;
+    background: transparent;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .pill-btn:hover {
+    color: var(--color-text-primary);
+  }
+
+  .pill-btn.active {
+    background: var(--color-accent);
+    color: #000000;
+    font-weight: 700;
+  }
+
+  :global(html.light-mode) .pill-btn.active {
+    background: #2563EB;
     color: #FFFFFF;
   }
 </style>

@@ -13,6 +13,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   interface CoprProject {
     full_name: string;
@@ -130,9 +131,14 @@
     embedded?: boolean;
   }
   let { embedded = true }: Props = $props();
+
+  function quickSearch(tag: string) {
+    query = tag;
+    search();
+  }
 </script>
 
-<div class={embedded ? 'copr-tab-content' : 'module-page'}>
+<div class={embedded ? 'copr-tab-content' : 'module-page'} style={embedded ? '' : 'overflow-y: auto; padding-bottom: 24px;'}>
   {#if !embedded}
     <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
   {/if}
@@ -173,17 +179,13 @@
         <span style="font-weight:500">Checking system COPR repositories…</span>
       </div>
     {:else if systemCoprs.length === 0}
-      <div class="empty-state" style="padding: 64px 32px;">
-        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-          <Package size={32} class="empty-state-icon" style="margin:0" />
-        </div>
-        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-          No COPR Repositories Installed
-        </span>
-        <span style="color:var(--color-text-muted); margin-top:8px;">
-          Use the Search tab above to find and enable COPR packages.
-        </span>
-      </div>
+      <EmptyState 
+        icon={Package}
+        title="No COPR Repositories Installed"
+        description="You do not have any community COPR repositories enabled on your system yet."
+        actionLabel="Search COPR Repositories"
+        onAction={() => activeSubTab = 'search'}
+      />
     {:else}
       <div class="copr-results-scroll">
         {#each systemCoprs as sysRepo (sysRepo.repo_id)}
@@ -244,16 +246,20 @@
 
   {:else}
     <!-- SEARCH COPRS VIEW -->
-    <div style="display:flex; gap:8px; flex-shrink:0;">
-      <SearchBar bind:value={query} placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming')…" style="flex:1; border: 1px solid var(--color-border-focus)" />
-      <Button variant="primary" class="" onclick={search} disabled={loading || !query.trim()}>
+    <form class="copr-search-form" onsubmit={(e) => { e.preventDefault(); search(); }}>
+      <SearchBar 
+        bind:value={query} 
+        placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming', 'hyprland')…" 
+        style="flex: 1;" 
+      />
+      <Button variant="primary" type="submit" disabled={loading || !query.trim()} style="height: 32px; padding: 0 16px;">
         {#if loading}
-          <RefreshCw size={14} class="animate-spin-slow" /> Searching…
+          <RefreshCw size={13} class="animate-spin-slow" /> <span>Searching…</span>
         {:else}
-          <Search size={14} /> Search
+          <Search size={13} /> <span>Search</span>
         {/if}
       </Button>
-    </div>
+    </form>
 
     {#if loading}
       <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
@@ -263,17 +269,13 @@
         <span style="font-weight:500">Searching Copr API…</span>
       </div>
     {:else if hasSearched && results.length === 0}
-      <div class="empty-state" style="padding: 64px 32px;">
-        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-          <LayoutGrid size={32} class="empty-state-icon" style="margin:0" />
-        </div>
-        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-          No Projects Found
-        </span>
-        <span style="color:var(--color-text-muted); margin-top:8px;">
-          No Copr projects matched "{query}".
-        </span>
-      </div>
+      <EmptyState 
+        icon={LayoutGrid}
+        title="No COPR Projects Found"
+        description={`No Copr repositories matched "${query}". Try searching with alternate package names or broader terms.`}
+        actionLabel="Clear Search"
+        onAction={() => { query = ''; results = []; hasSearched = false; }}
+      />
     {:else if results.length > 0}
       <div style="display:flex; align-items:center; justify-content:space-between; flex-shrink:0; margin-bottom:4px">
         <span style="font-size:13px; color:var(--color-text-muted); font-weight:500;">{results.length} project{results.length !== 1 ? 's' : ''} found</span>
@@ -357,22 +359,110 @@
         {/each}
       </div>
     {:else}
-      <div class="empty-state" style="padding: 64px 32px;">
-        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-          <Search size={32} class="empty-state-icon" style="margin:0" />
+      <div class="copr-initial-state">
+        <EmptyState
+          icon={Search}
+          title="Search Copr Repositories"
+          description="Find community-maintained RPM packages for tools, drivers, and development builds."
+        />
+        
+        <div class="copr-suggestion-box">
+          <span class="suggestion-label">Popular Searches:</span>
+          <div class="suggestion-chips">
+            {#each ['vscode', 'neovim', 'gaming', 'wine', 'docker', 'rust', 'mesa', 'hyprland'] as tag}
+              <button type="button" class="copr-chip" onclick={() => quickSearch(tag)}>
+                + {tag}
+              </button>
+            {/each}
+          </div>
         </div>
-        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-          Search Copr Repositories
-        </span>
-        <span style="color:var(--color-text-muted); margin-top:8px;">
-          Try searching for "vscode", "gaming", "llvm", "wine"…
-        </span>
       </div>
     {/if}
   {/if}
 </div>
 
 <style>
+  .copr-search-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    flex-shrink: 0;
+  }
+
+  .copr-initial-state {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    align-items: center;
+    width: 100%;
+    margin-top: 12px;
+  }
+
+  .copr-suggestion-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    padding: 12px 18px;
+    border-radius: 10px;
+    width: 100%;
+    max-width: 540px;
+    box-sizing: border-box;
+  }
+
+  :global(html.light-mode) .copr-suggestion-box {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+  }
+
+  .suggestion-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .suggestion-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+  }
+
+  .copr-chip {
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.2);
+    color: var(--color-accent);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  :global(html.light-mode) .copr-chip {
+    background: #EFF6FF;
+    border-color: #BFDBFE;
+    color: #2563EB;
+  }
+
+  .copr-chip:hover {
+    background: var(--color-accent);
+    color: #000000;
+    transform: translateY(-1px);
+  }
+
+  :global(html.light-mode) .copr-chip:hover {
+    background: #2563EB;
+    color: #FFFFFF;
+  }
+
   .copr-tab-content {
     display: flex;
     flex-direction: column;
@@ -380,7 +470,10 @@
     margin-top: 4px;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    padding-bottom: 24px;
   }
 
   .copr-subtab-btn {

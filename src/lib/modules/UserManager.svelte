@@ -14,6 +14,8 @@
   import PageHeader from '../components/PageHeader.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+  import KpiCard from '../components/ui/KpiCard.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   interface UserInfo {
     username: string;
@@ -323,6 +325,47 @@
     {/if}
   </PageHeader>
 
+  <div class="user-kpi-grid">
+    <KpiCard
+      icon={Users}
+      value={users.length}
+      label="Total Accounts"
+      subtext="Configured local users"
+      active={view === 'users'}
+      onclick={() => view = 'users'}
+    />
+    <KpiCard
+      icon={Shield}
+      value={users.filter(u => u.is_sudo).length}
+      label="Sudoers / Admins"
+      subtext="Wheel / administrative"
+      statusText="Admin"
+      statusType="info"
+      iconBg="rgba(0, 218, 243, 0.12)"
+      iconColor="var(--color-accent)"
+    />
+    <KpiCard
+      icon={Layers}
+      value={groupsList.length}
+      label="System Groups"
+      subtext="Permission groups"
+      active={view === 'groups'}
+      onclick={() => view = 'groups'}
+      iconBg="rgba(168, 85, 247, 0.12)"
+      iconColor="#A855F7"
+    />
+    <KpiCard
+      icon={Key}
+      value={sessions.length}
+      label="Active Sessions"
+      subtext="Logged in sessions"
+      statusText={sessions.length > 0 ? `${sessions.length} Online` : '0'}
+      statusType={sessions.length > 0 ? 'success' : 'muted'}
+      active={view === 'sessions'}
+      onclick={() => view = 'sessions'}
+    />
+  </div>
+
   {#if view === 'users' && showAddUser}
     <div class="card" style="margin-bottom: 16px; border: 1px solid var(--color-border-focus)">
       <h3 style="margin-top:0; color:var(--color-text-primary)">Create New User</h3>
@@ -573,3 +616,12 @@
     </div>
   </div>
 </SideDrawer>
+
+<style>
+  .user-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+</style>

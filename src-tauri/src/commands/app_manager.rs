@@ -255,6 +255,10 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
 
 #[tauri::command]
 pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: String) -> Result<(), String> {
+    if source != "Flatpak" && crate::commands::flatpak_rpm::is_protected_package(&package_id) {
+        return Err(format!("Action blocked: '{}' is a vital system package and cannot be uninstalled.", package_id));
+    }
+
     let mut cmd = if source == "Flatpak" {
         let mut c = Command::new("pkexec");
         c.args(&["flatpak", "uninstall", "-y", &package_id]);

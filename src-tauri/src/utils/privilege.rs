@@ -300,12 +300,21 @@ pub mod tokio {
 }
 
 /// Write file contents to a root-owned path safely via base64 decoding.
-/// This completely isolates the file content from sudo -S password authentication on stdin.
+/// Automatically creates a timestamped backup (.bak.<timestamp>) and (.bak) before overwriting.
 pub async fn write_file_as_root(path: &str, content: &str) -> Result<(), String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     let encoded = BASE64.encode(content.as_bytes());
     let escaped_path = path.replace('\'', "'\\''");
-    let script = format!("echo -n '{}' | base64 -d > '{}'", encoded, escaped_path);
+    
+    // Script performs safety backup then decodes and writes the file
+    let script = format!(
+        r#"if [ -f '{escaped_path}' ]; then
+    TS=$(date +%Y%m%d_%H%M%S)
+    cp -p '{escaped_path}' '{escaped_path}.bak.'$TS 2>/dev/null || true
+    cp -p '{escaped_path}' '{escaped_path}.bak' 2>/dev/null || true
+fi
+echo -n '{encoded}' | base64 -d > '{escaped_path}'"#
+    );
     
     let mut cmd = tokio::Command::new("pkexec");
     cmd.args(["bash", "-c", &script]);

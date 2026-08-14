@@ -118,8 +118,27 @@ pub async fn add_user(username: String, fullname: String) -> Result<String, Stri
     Ok("User added successfully".to_string())
 }
 
+const PROTECTED_SYSTEM_USERS: &[&str] = &[
+    "root", "nobody", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
+    "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "systemd-network",
+    "systemd-resolve", "systemd-timesync", "systemd-coredump", "systemd-oom", "systemd-journal",
+    "dbus", "polkitd", "sshd", "chrony", "rpc", "avahi", "colord", "geoclue", "flatpak"
+];
+
+fn is_protected_system_user(username: &str) -> bool {
+    let lower = username.trim().to_lowercase();
+    if lower.starts_with("systemd-") {
+        return true;
+    }
+    PROTECTED_SYSTEM_USERS.contains(&lower.as_str())
+}
+
 #[tauri::command]
 pub async fn delete_user(username: String, remove_home: bool) -> Result<String, String> {
+    if is_protected_system_user(&username) {
+        return Err(format!("Action blocked: '{}' is a vital system account and cannot be deleted.", username));
+    }
+
     let mut args = vec!["/usr/sbin/userdel".to_string(), "--force".to_string()];
     if remove_home {
         args.push("--remove".to_string());

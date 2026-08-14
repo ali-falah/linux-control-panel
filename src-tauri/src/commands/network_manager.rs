@@ -81,6 +81,11 @@ pub fn network_save_connection(uuid: String, settings: std::collections::HashMap
 
 #[tauri::command]
 pub fn network_delete_connection(uuid: String) -> Result<String, String> {
+    let lower = uuid.trim().to_lowercase();
+    if lower == "lo" || lower == "loopback" {
+        return Err("Action blocked: The loopback connection (lo) is essential for system IPC and cannot be deleted.".to_string());
+    }
+
     let mut cmd = PrivCommand::new("pkexec");
     cmd.arg("nmcli");
     cmd.args(["connection", "delete", &uuid]);
@@ -107,6 +112,11 @@ pub fn network_up_connection(uuid: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn network_down_connection(uuid: String) -> Result<String, String> {
+    let lower = uuid.trim().to_lowercase();
+    if lower == "lo" || lower == "loopback" {
+        return Err("Action blocked: Cannot deactivate loopback interface (lo).".to_string());
+    }
+
     let mut cmd = PrivCommand::new("pkexec");
     cmd.arg("nmcli");
     cmd.args(["connection", "down", &uuid]);
@@ -120,6 +130,11 @@ pub fn network_down_connection(uuid: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn network_set_interface_state(iface: String, up: bool) -> Result<String, String> {
+    let iface_clean = iface.trim().to_lowercase();
+    if !up && (iface_clean == "lo" || iface_clean.starts_with("loopback")) {
+        return Err("Action blocked: Cannot bring down loopback interface (lo). It is vital for inter-process communication.".to_string());
+    }
+
     let mut cmd = PrivCommand::new("pkexec");
     cmd.arg("ip");
     cmd.args(["link", "set", "dev", &iface, if up { "up" } else { "down" }]);

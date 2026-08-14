@@ -1,7 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, AlertTriangle, Sparkles } from '@lucide/svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { 
+    FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, 
+    AlertTriangle, Sparkles, Copy, Download, Radio, Play, Square, Activity
+  } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/ui/Select.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
@@ -9,6 +13,7 @@
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
@@ -37,6 +42,10 @@
 
   let auditSortKey = $state('timestamp');
   let auditSortAsc = $state(false);
+
+  // Live Streaming state
+  let isLiveFollowing = $state(false);
+  let unlistenLive: (() => void) | null = null;
 
   // Client-side live search (instant, no fetch)
   let searchQuery = $state('');
@@ -318,8 +327,79 @@
       window.removeEventListener('journal-tab-select', handleTabSelect);
       document.removeEventListener('click', handleOutsideClick);
       document.removeEventListener('keydown', handleGlobalKeyDown);
+      if (unlistenLive) {
+        unlistenLive();
+        unlistenLive = null;
+      }
+      invoke('stop_journal_live_stream').catch(() => {});
     };
   });
+
+  async function toggleLiveFollow() {
+    isLiveFollowing = !isLiveFollowing;
+    if (isLiveFollowing) {
+      try {
+        const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
+        await invoke('start_journal_live_stream', { unitFilter: null, priority: prioF });
+        unlistenLive = await listen<string>('journal-live-log', (event) => {
+          try {
+            const parsed = JSON.parse(event.payload);
+            if (parsed) {
+              logs = [parsed, ...logs.slice(0, 2500)];
+            }
+          } catch(err) {
+            console.error(err);
+          }
+        });
+        uiStore.addToast('Live Journal streaming active', 'success');
+      } catch(e) {
+        uiStore.addToast(`Failed to start live stream: ${e}`, 'error');
+        isLiveFollowing = false;
+      }
+    } else {
+      if (unlistenLive) {
+        unlistenLive();
+        unlistenLive = null;
+      }
+      await invoke('stop_journal_live_stream').catch(() => {});
+      uiStore.addToast('Live follow paused', 'info');
+    }
+  }
+
+  function copyLog(log: LogItem) {
+    const ts = formatTimestamp(log.__REALTIME_TIMESTAMP);
+    const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel';
+    const text = `[${ts}] [${unit}] [Priority: ${log.PRIORITY}] ${log.MESSAGE}`;
+    navigator.clipboard.writeText(text);
+    uiStore.addToast('Log entry copied to clipboard', 'info');
+  }
+
+  function exportLogs(format: 'txt' | 'json') {
+    if (filteredLogs.length === 0) {
+      uiStore.addToast('No logs to export', 'warning');
+      return;
+    }
+    let content = '';
+    const filename = `journal-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.${format}`;
+    if (format === 'json') {
+      content = JSON.stringify(filteredLogs, null, 2);
+    } else {
+      content = filteredLogs.map(l => {
+        const ts = formatTimestamp(l.__REALTIME_TIMESTAMP);
+        const unit = l._SYSTEMD_UNIT || l.SYSLOG_IDENTIFIER || 'kernel';
+        return `[${ts}] [${unit}] [Prio:${l.PRIORITY}] ${l.MESSAGE}`;
+      }).join('\n');
+    }
+
+    const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    uiStore.addToast(`Exported ${filteredLogs.length} logs to ${filename}`, 'success');
+  }
 
   function formatTimestamp(us: string) {
     if (!us) return '';
@@ -553,6 +633,22 @@
         {/if}
       </div>
 
+      <!-- Live Follow Toggle -->
+      <button 
+        class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
+        onclick={toggleLiveFollow} 
+        title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
+      >
+        <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
+        <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
+      </button>
+
+      <!-- Export Logs -->
+      <button class="log-action-btn" onclick={() => exportLogs('txt')} title="Export filtered logs to .txt file">
+        <Download size={13} />
+        <span>Export</span>
+      </button>
+
       <!-- Refresh -->
       <button class="log-action-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh">
         <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
@@ -588,60 +684,80 @@
       <!-- Tab 1: Journalctl logs -->
       {#if activeTab === 'journal'}
         {#if filteredLogs.length === 0}
-          <div class="empty-state">
-            {#if isLoading}
-              Fetching logs…
-            {:else if hasActiveSearch && collapsedLogs.length > 0}
-              No logs match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
-            {:else}
-              No logs found.
-            {/if}
-          </div>
-        {/if}
-        <Table class="log-table">
-          <thead>
-            <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
-              <th style="padding: 8px 12px; font-weight: 600;">Time</th>
-              <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
-              <th style="padding: 8px 12px; font-weight: 600;">Message</th>
-              {#if aiStore.enabled}
-                <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Action</th>
-              {/if}
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredLogs as log}
-              {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
-              <tr class="log-row {getPriorityClass(log.PRIORITY)}">
-                <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
-                <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  {@html highlight(unit, searchQuery)}
-                </td>
-                <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
-                  {@html highlight(log.MESSAGE, searchQuery)}
-                  {#if (log.count ?? 1) > 1}
-                    <span class="repeat-badge">×{log.count}</span>
-                  {/if}
-                </td>
-                {#if aiStore.enabled}
-                  {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
-                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
-                    <button
-                      type="button"
-                      class="btn btn-outline btn-xs"
-                      disabled={!hasMsg}
-                      onclick={() => hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit)}
-                      title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
-                      style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
-                    >
-                      <Sparkles size={11} style="color:var(--color-accent);" /> AI Diagnose
-                    </button>
-                  </td>
-                {/if}
+          {#if isLoading}
+            <div class="empty-state">Fetching logs…</div>
+          {:else if hasActiveSearch && collapsedLogs.length > 0}
+            <EmptyState 
+              icon={FileText}
+              title="No Matching Logs"
+              description={`No log messages matched "${searchQuery}".`}
+              actionLabel="Clear Search"
+              onAction={() => { searchQuery = ''; }}
+            />
+          {:else}
+            <EmptyState 
+              icon={FileText}
+              title="No Logs in Selected Range"
+              description="No systemd journal messages found for the current time and level filters."
+              actionLabel="Refresh Logs"
+              onAction={fetchLogs}
+            />
+          {/if}
+        {:else}
+          <Table class="log-table">
+            <thead>
+              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
+                <th style="padding: 8px 12px; font-weight: 600;">Time</th>
+                <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
+                <th style="padding: 8px 12px; font-weight: 600;">Message</th>
+                <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Actions</th>
               </tr>
-            {/each}
-          </tbody>
-        </Table>
+            </thead>
+            <tbody>
+              {#each filteredLogs as log}
+                {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
+                {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
+                <tr class="log-row {getPriorityClass(log.PRIORITY)}">
+                  <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
+                  <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    {@html highlight(unit, searchQuery)}
+                  </td>
+                  <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
+                    {@html highlight(log.MESSAGE, searchQuery)}
+                    {#if (log.count ?? 1) > 1}
+                      <span class="repeat-badge">×{log.count}</span>
+                    {/if}
+                  </td>
+                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
+                    <div style="display: inline-flex; align-items: center; gap: 4px;">
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs"
+                        onclick={() => copyLog(log)}
+                        title="Copy log entry to clipboard"
+                        style="padding: 2px 6px; font-size: 11px;"
+                      >
+                        <Copy size={11} />
+                      </button>
+                      {#if aiStore.enabled}
+                        <button
+                          type="button"
+                          class="btn btn-outline btn-xs"
+                          disabled={!hasMsg}
+                          onclick={() => hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit)}
+                          title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
+                          style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
+                        >
+                          <Sparkles size={11} style="color:var(--color-accent);" /> Diagnose
+                        </button>
+                      {/if}
+                    </div>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </Table>
+        {/if}
 
       <!-- Tab 2: Auth Events -->
       {:else if activeTab === 'auth'}
@@ -1285,12 +1401,42 @@
     display: inline-block;
   }
 
-  /* Search highlight */
-  :global(.hl) {
-    background: rgba(253, 203, 110, 0.3);
-    color: #fdcb6e;
-    border-radius: 2px;
-    padding: 0 1px;
-    font-weight: 600;
+  .live-following-btn {
+    background: rgba(16, 185, 129, 0.15) !important;
+    color: var(--color-success) !important;
+    border: 1px solid rgba(16, 185, 129, 0.3) !important;
+  }
+
+  .live-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+    display: inline-block;
+  }
+
+  .live-status-dot.pulsing {
+    background: var(--color-success);
+    box-shadow: 0 0 8px var(--color-success);
+    animation: pulse-live 1.2s infinite;
+  }
+
+  @keyframes pulse-live {
+    0% { transform: scale(0.95); opacity: 0.8; }
+    50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 10px var(--color-success); }
+    100% { transform: scale(0.95); opacity: 0.8; }
+  }
+
+  .log-row.log-error {
+    border-left: 3px solid var(--color-error);
+  }
+  .log-row.log-warn {
+    border-left: 3px solid var(--color-warning);
+  }
+  .log-row.log-info {
+    border-left: 3px solid var(--color-accent);
+  }
+  .log-row.log-debug {
+    border-left: 3px solid var(--color-border);
   }
 </style>

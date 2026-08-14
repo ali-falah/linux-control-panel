@@ -728,17 +728,48 @@ pub async fn get_runtime_threats(
             });
         }
 
-        // 6. Identity or Sudoers File Tampering
-        if ev.command.contains("[identity]") || ev.command.contains("[sudoers_change]") || ev.command.contains("/etc/shadow") || ev.command.contains("/etc/passwd") {
+        // 6. Identity or Sudoers File Access & Modification
+        if ev.command.contains("[identity]") || ev.command.contains("[sudoers_change]") || ev.command.contains("/etc/shadow") || ev.command.contains("/etc/passwd") || ev.command.contains("/etc/gshadow") || ev.command.contains("/etc/sudoers") {
             if ev.result == "Success" && ev.user != "root" {
-                threats.push(RuntimeThreat {
-                    id: format!("threat_identity_tamper_{}", ev.timestamp),
-                    timestamp: ev.timestamp.clone(),
-                    title: "Authentication Credentials File Modification".to_string(),
-                    description: format!("User '{}' modified system identity files ({}) in working directory '{}'.", ev.user, ev.command, ev.cwd),
-                    severity: "Critical".to_string(),
-                    category: "Runtime Threats".to_string(),
-                });
+                let cmd_lower = ev.command.to_lowercase();
+                let is_write_or_edit = cmd_lower.contains("passwd") 
+                    || cmd_lower.contains("usermod") 
+                    || cmd_lower.contains("useradd") 
+                    || cmd_lower.contains("userdel") 
+                    || cmd_lower.contains("groupadd") 
+                    || cmd_lower.contains("groupmod") 
+                    || cmd_lower.contains("groupdel") 
+                    || cmd_lower.contains("chpasswd") 
+                    || cmd_lower.contains("vipw") 
+                    || cmd_lower.contains("vigr") 
+                    || cmd_lower.contains("visudo") 
+                    || cmd_lower.contains("sed") 
+                    || cmd_lower.contains("tee") 
+                    || cmd_lower.contains("chmod") 
+                    || cmd_lower.contains("chown") 
+                    || cmd_lower.contains('>') 
+                    || ev.command.contains("[sudoers_change]");
+
+                if is_write_or_edit {
+                    threats.push(RuntimeThreat {
+                        id: format!("threat_identity_tamper_{}", ev.timestamp),
+                        timestamp: ev.timestamp.clone(),
+                        title: "Authentication Credentials File Modification".to_string(),
+                        description: format!("User '{}' modified system identity files ({}) in working directory '{}'.", ev.user, ev.command, ev.cwd),
+                        severity: "Critical".to_string(),
+                        category: "Runtime Threats".to_string(),
+                    });
+                } else {
+                    // Read attempt (cat, grep, head, tail, strings, etc.)
+                    threats.push(RuntimeThreat {
+                        id: format!("threat_identity_read_{}", ev.timestamp),
+                        timestamp: ev.timestamp.clone(),
+                        title: "Sensitive Credential File Read Attempt".to_string(),
+                        description: format!("User '{}' inspected system identity files via '{}' in directory '{}'.", ev.user, ev.command, ev.cwd),
+                        severity: "Warning".to_string(),
+                        category: "Runtime Threats".to_string(),
+                    });
+                }
             }
         }
 
