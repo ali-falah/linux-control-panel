@@ -114,27 +114,8 @@ pub async fn write_grub_config(config: GrubConfig) -> Result<String, String> {
 
     let final_content = new_lines.join("\n") + "\n";
 
-    // Write via pkexec since /etc/default/grub requires root
-    let mut child = Command::new("pkexec")
-        .args(["bash", "-c", "cat > /etc/default/grub"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec: {}", e))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(final_content.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    // Write safely via base64 decoding as root
+    crate::utils::privilege::write_file_as_root("/etc/default/grub", &final_content).await?;
 
     Ok("Successfully wrote /etc/default/grub".to_string())
 }

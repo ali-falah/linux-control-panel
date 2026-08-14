@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use crate::utils::privilege::tokio::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvVar {
@@ -52,26 +51,8 @@ pub async fn write_env_vars(vars: Vec<EnvVar>) -> Result<String, String> {
 
     let final_content = lines.join("\n") + "\n";
 
-    let mut child = Command::new("pkexec")
-        .args(["bash", "-c", "cat > /etc/environment"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec: {}", e))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(final_content.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    // Write safely via base64 decoding as root
+    crate::utils::privilege::write_file_as_root("/etc/environment", &final_content).await?;
 
     Ok("Successfully updated /etc/environment".to_string())
 }

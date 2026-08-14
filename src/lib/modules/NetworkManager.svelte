@@ -1,23 +1,35 @@
 <script lang="ts">
-  import TabGroup from '../components/ui/TabGroup.svelte';
-  import Select from '../components/ui/Select.svelte';
-  import Button from '../components/ui/Button.svelte';
-  import Input from '../components/ui/Input.svelte';
-  import Card from '../components/ui/Card.svelte';
-  import Badge from '../components/ui/Badge.svelte';
-  import Table from '../components/ui/Table.svelte';
-  import Toggle from '../components/ui/Toggle.svelte';
-
+  import { onMount } from 'svelte';
+  import { 
+    Activity, Wifi, Globe, RefreshCw, Server, Hash, Network, Plus, ArrowLeft, Save, Trash2,
+    Play, Square, FileUp, ShieldCheck, ShieldAlert, Key, Link, AlertTriangle, CheckCircle2,
+    XCircle, Info, Sliders, Zap, Check, Copy, Sparkles, Cpu, Laptop, Radio, ExternalLink,
+    AlertCircle, CornerDownRight, CheckCheck, HelpCircle
+  } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { 
-    Activity, Wifi, Globe, RefreshCw, Server, Hash, Network, Plus, ArrowLeft, Save, Trash,
-    Play, Square, FileUp, ShieldCheck, ShieldAlert, Key, Link
-  } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import Select from '../components/ui/Select.svelte';
+  import { 
+    validateIpv4WithCidr, 
+    validateGateway, 
+    validateDnsServers, 
+    validateIpv6Address,
+    COMMON_SUBNET_MASKS, 
+    POPULAR_DNS_PRESETS,
+    cidrToSubnetMask,
+    subnetMaskToCidr,
+    type Ipv4ValidationResult,
+    type GatewayValidationResult,
+    type DnsValidationResult,
+    type Ipv6ValidationResult
+  } from '../utils/networkCalc';
+
+  // ─── State ───────────────────────────────────────────────────────────────────
 
   let interfaces = $state<any[]>([]);
   let dnsInfo = $state<string>('');
@@ -49,6 +61,85 @@
   let speedDownload = $state<number | null>(null);
   let speedUpload = $state<number | null>(null);
   let speedTestError = $state('');
+
+  // ─── Real-Time Network & Subnet Calculations (Svelte 5 Reactive Runes) ───────
+
+  let ipv4Validation = $derived.by<Ipv4ValidationResult>(() => {
+    if (!editConnectionData || editConnectionData['ipv4.method'] !== 'manual') {
+      return {
+        raw: '', ip: '', cidr: 24, maskStr: '255.255.255.0', wildcardStr: '0.0.0.255',
+        networkIp: '', broadcastIp: '', firstUsableIp: '', lastUsableIp: '',
+        totalHosts: 0, usableHosts: 0, scope: '', isNetworkAddress: false,
+        isBroadcastAddress: false, isLoopback: false, isLinkLocal: false, isMulticast: false,
+        isValid: true, errors: [], warnings: []
+      };
+    }
+    return validateIpv4WithCidr(editConnectionData['ipv4.addresses'] || '');
+  });
+
+  let gatewayValidation = $derived.by<GatewayValidationResult>(() => {
+    if (!editConnectionData || editConnectionData['ipv4.method'] !== 'manual') {
+      return {
+        raw: '', ip: '', isValid: true, inSameSubnet: true, isConflictWithHost: false,
+        isNetworkOrBroadcast: false, suggestedGateway: '', errors: [], warnings: []
+      };
+    }
+    return validateGateway(editConnectionData['ipv4.gateway'] || '', ipv4Validation);
+  });
+
+  let dnsValidation = $derived.by<DnsValidationResult>(() => {
+    if (!editConnectionData || editConnectionData['ipv4.method'] === 'disabled') {
+      return { raw: '', servers: [], isValid: true, errors: [] };
+    }
+    return validateDnsServers(editConnectionData['ipv4.dns'] || '');
+  });
+
+  let ipv6Validation = $derived.by<Ipv6ValidationResult>(() => {
+    if (!editConnectionData || editConnectionData['ipv6.method'] !== 'manual') {
+      return { raw: '', ip: '', prefix: 64, gateway: '', isValid: true, errors: [] };
+    }
+    return validateIpv6Address(editConnectionData['ipv6.addresses'] || '', editConnectionData['ipv6.gateway'] || '');
+  });
+
+  let hasBlockingErrors = $derived.by<boolean>(() => {
+    if (!editConnectionData) return false;
+    if (editConnectionData['ipv4.method'] === 'manual') {
+      if (!ipv4Validation.isValid || !gatewayValidation.isValid || !dnsValidation.isValid) {
+        return true;
+      }
+    }
+    if (editConnectionData['ipv6.method'] === 'manual') {
+      if (!ipv6Validation.isValid) return true;
+    }
+    return false;
+  });
+
+  // ─── Subnet & IP Convenience Actions ─────────────────────────────────────────
+
+  function handleMaskDropdownChange(newCidr: number) {
+    if (!editConnectionData) return;
+    const currentAddr = (editConnectionData['ipv4.addresses'] || '').trim();
+    if (!currentAddr) {
+      editConnectionData['ipv4.addresses'] = `192.168.1.10/${newCidr}`;
+      return;
+    }
+    const ipPart = currentAddr.split('/')[0].trim();
+    editConnectionData['ipv4.addresses'] = `${ipPart || '192.168.1.10'}/${newCidr}`;
+  }
+
+  function applyDnsPreset(preset: { primary: string; secondary: string; name: string }) {
+    if (!editConnectionData) return;
+    editConnectionData['ipv4.dns'] = `${preset.primary}, ${preset.secondary}`;
+    uiStore.addToast(`Applied ${preset.name} DNS servers (${preset.primary}, ${preset.secondary})`, 'success');
+  }
+
+  function fixGateway(suggested: string) {
+    if (!editConnectionData || !suggested) return;
+    editConnectionData['ipv4.gateway'] = suggested;
+    uiStore.addToast(`Gateway updated to ${suggested}`, 'info');
+  }
+
+  // ─── Data Fetching ───────────────────────────────────────────────────────────
 
   async function loadVpnProfiles() {
     loadingVpn = true;
@@ -95,18 +186,21 @@
 
   async function editConnection(uuid: string) {
     if (uuid === '') {
-       // New connection profile defaults
-       editConnectionData = { 
-         'connection.id': 'New Connection',
-         'connection.type': '802-3-ethernet',
-         'ipv4.method': 'auto', 
-         'ipv6.method': 'auto', 
-         'ipv4.addresses': '', 
-         'ipv4.gateway': '', 
-         'ipv4.dns': '' 
-       };
-       selectedConnectionUuid = uuid;
-       return;
+      // New connection profile defaults
+      editConnectionData = { 
+        'connection.id': 'New Connection',
+        'connection.type': '802-3-ethernet',
+        'ipv4.method': 'auto', 
+        'ipv6.method': 'auto', 
+        'ipv4.addresses': '', 
+        'ipv4.gateway': '', 
+        'ipv4.dns': '',
+        'ipv6.addresses': '',
+        'ipv6.gateway': '',
+        'ipv6.dns': ''
+      };
+      selectedConnectionUuid = uuid;
+      return;
     }
     
     statusStore.setBusy('Loading connection properties…');
@@ -114,10 +208,10 @@
       const raw: string = await invoke('network_get_connection', { uuid });
       const parsed: any = {};
       raw.split('\n').forEach(line => {
-         const idx = line.indexOf(':');
-         if (idx > -1) {
-            parsed[line.slice(0, idx)] = line.slice(idx + 1);
-         }
+        const idx = line.indexOf(':');
+        if (idx > -1) {
+          parsed[line.slice(0, idx)] = line.slice(idx + 1);
+        }
       });
       editConnectionData = parsed;
       selectedConnectionUuid = uuid;
@@ -129,76 +223,36 @@
     statusStore.clearBusy();
   }
 
-  function isValidIPv4WithCidr(ip: string) {
-    if (!ip) return false;
-    const parts = ip.split('/');
-    if (parts.length !== 2) return false;
-    const addr = parts[0];
-    const cidr = parseInt(parts[1], 10);
-    if (isNaN(cidr) || cidr < 0 || cidr > 32) return false;
-    const octets = addr.split('.');
-    if (octets.length !== 4) return false;
-    return octets.every(o => {
-      const num = parseInt(o, 10);
-      return !isNaN(num) && num >= 0 && num <= 255 && String(num) === o;
-    });
-  }
-
-  function isValidIPv4(ip: string) {
-    if (!ip) return false;
-    const octets = ip.split('.');
-    if (octets.length !== 4) return false;
-    return octets.every(o => {
-      const num = parseInt(o, 10);
-      return !isNaN(num) && num >= 0 && num <= 255 && String(num) === o;
-    });
-  }
-
   async function saveConnection() {
-    isSaving = true;
-    statusStore.setBusy('Saving connection…');
-    
-    // Validations
-    if (editConnectionData['ipv4.method'] === 'manual') {
-      const addr = editConnectionData['ipv4.addresses'];
-      if (!addr || !isValidIPv4WithCidr(addr)) {
-        alert('Invalid IPv4 Address. Must be in CIDR format, e.g. 192.168.1.10/24');
-        isSaving = false;
-        statusStore.clearBusy();
-        return;
-      }
-      const gw = editConnectionData['ipv4.gateway'];
-      if (gw && !isValidIPv4(gw)) {
-        alert('Invalid IPv4 Gateway.');
-        isSaving = false;
-        statusStore.clearBusy();
-        return;
-      }
+    if (hasBlockingErrors) {
+      const errorList = [
+        ...ipv4Validation.errors,
+        ...gatewayValidation.errors,
+        ...dnsValidation.errors,
+        ...ipv6Validation.errors
+      ];
+      uiStore.addToast(`Cannot save: ${errorList[0] || 'Please resolve network configuration errors.'}`, 'error');
+      return;
     }
-    
-    const dns = editConnectionData['ipv4.dns'];
-    if (dns) {
-      const dnsList = dns.split(',').map((d: string) => d.trim()).filter(Boolean);
-      for (const d of dnsList) {
-        if (!isValidIPv4(d)) {
-          alert(`Invalid DNS Server IP: ${d}`);
-          isSaving = false;
-          statusStore.clearBusy();
-          return;
-        }
-      }
-    }
+
     isSaving = true;
-    statusStore.setBusy('Saving connection…');
+    statusStore.setBusy('Saving connection settings…');
+    
     try {
       const settings: Record<string, string> = {
         'ipv4.method': editConnectionData['ipv4.method'],
-        'ipv4.addresses': editConnectionData['ipv4.addresses'] || '',
-        'ipv4.gateway': editConnectionData['ipv4.gateway'] || '',
+        'ipv4.addresses': editConnectionData['ipv4.method'] === 'manual' ? (editConnectionData['ipv4.addresses'] || '') : '',
+        'ipv4.gateway': editConnectionData['ipv4.method'] === 'manual' ? (editConnectionData['ipv4.gateway'] || '') : '',
         'ipv4.dns': editConnectionData['ipv4.dns'] || '',
         'ipv6.method': editConnectionData['ipv6.method'] || 'auto',
       };
       
+      if (editConnectionData['ipv6.method'] === 'manual') {
+        settings['ipv6.addresses'] = editConnectionData['ipv6.addresses'] || '';
+        settings['ipv6.gateway'] = editConnectionData['ipv6.gateway'] || '';
+        settings['ipv6.dns'] = editConnectionData['ipv6.dns'] || '';
+      }
+
       if (selectedConnectionUuid === '') {
         settings['connection.id'] = editConnectionData['connection.id'];
         settings['connection.type'] = editConnectionData['connection.type'];
@@ -206,8 +260,9 @@
       
       await invoke('network_save_connection', { uuid: selectedConnectionUuid, settings });
       statusStore.setLastCommand(`nmcli connection modify ${selectedConnectionUuid || 'new'}`, 0, true);
+      uiStore.addToast('Connection settings saved successfully', 'success');
       
-      // If we modified an existing one, try to bring it up
+      // If we modified an existing connection, try to reactivate it
       if (selectedConnectionUuid) {
         await invoke('network_up_connection', { uuid: selectedConnectionUuid }).catch(() => {});
       }
@@ -215,7 +270,7 @@
       await loadData();
       activeTab = 'connections';
     } catch(e: any) {
-      alert("Error saving connection: " + e);
+      uiStore.addToast(`Error saving connection: ${e}`, 'error');
       statusStore.setLastCommand(`nmcli connection modify`, 1, false);
     } finally {
       isSaving = false;
@@ -229,10 +284,11 @@
     try {
       await invoke('network_delete_connection', { uuid });
       statusStore.setLastCommand(`nmcli connection delete ${uuid}`, 0, true);
+      uiStore.addToast('Connection profile deleted', 'info');
       await loadData();
       selectedConnectionUuid = null;
     } catch(e) {
-      alert("Error deleting connection");
+      uiStore.addToast(`Error deleting connection: ${e}`, 'error');
       statusStore.setLastCommand(`nmcli connection delete ${uuid}`, 1, false);
     }
     statusStore.clearBusy();
@@ -243,9 +299,10 @@
     try {
       await invoke('network_down_connection', { uuid });
       statusStore.setLastCommand(`nmcli connection down ${uuid}`, 0, true);
+      uiStore.addToast('Connection deactivated', 'info');
       await loadData();
     } catch(e) {
-      alert("Error disconnecting: " + e);
+      uiStore.addToast(`Error disconnecting: ${e}`, 'error');
       statusStore.setLastCommand(`nmcli connection down ${uuid}`, 1, false);
     }
     statusStore.clearBusy();
@@ -256,9 +313,10 @@
     try {
       await invoke('network_set_interface_state', { iface, up });
       statusStore.setLastCommand(`ip link set ${iface} ${up ? 'up' : 'down'}`, 0, true);
+      uiStore.addToast(`Interface ${iface} turned ${up ? 'UP' : 'DOWN'}`, 'success');
       await loadData();
     } catch(e) {
-      alert("Error setting interface state: " + e);
+      uiStore.addToast(`Error setting interface state: ${e}`, 'error');
       statusStore.setLastCommand(`ip link set ${iface} ${up ? 'up' : 'down'}`, 1, false);
     }
     statusStore.clearBusy();
@@ -365,114 +423,372 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Advanced Network" icon={Wifi} description="Manage network interfaces, connections, and DNS settings" />
+  <PageHeader title="Advanced Network" icon={Wifi} description="Manage network interfaces, connection profiles, subnets, and routing" />
 
   {#if selectedConnectionUuid !== null}
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px; flex-shrink:0;">
-      <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" onclick={() => { selectedConnectionUuid = null; editConnectionData = null; }}>
-        <ArrowLeft size={14}/> Back to Connections
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         CONNECTION EDITOR & SUBNET CALCULATOR VIEW
+         ══════════════════════════════════════════════════════════════════════════ -->
+    <div class="editor-header-bar">
+      <Button variant="outline" class="btn-sm" onclick={() => { selectedConnectionUuid = null; editConnectionData = null; }}>
+        <ArrowLeft size={14} /> Back to Connections
       </Button>
-      <div style="display:flex; gap:8px;">
+      
+      <div class="editor-actions">
         {#if selectedConnectionUuid !== ''}
-          <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-warning); color:var(--color-warning);" onclick={() => disconnectConnection(selectedConnectionUuid)}>
-            <Activity size={14}/> Disconnect
+          <Button variant="outline" class="btn-sm btn-warn-outline" onclick={() => disconnectConnection(selectedConnectionUuid!)}>
+            <Activity size={13} /> Deactivate
           </Button>
-          <Button variant="outline" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px; border-color:var(--color-error); color:var(--color-error);" onclick={() => deleteConnection(selectedConnectionUuid)}>
-            <Trash size={14}/> Delete
+          <Button variant="outline" class="btn-sm btn-danger-outline" onclick={() => deleteConnection(selectedConnectionUuid!)}>
+            <Trash2 size={13} /> Delete Profile
           </Button>
         {/if}
-        <Button variant="primary" class="" style="display:flex; align-items:center; gap:6px; font-size:12px; padding:6px 12px;" disabled={isSaving} onclick={saveConnection}>
+        <Button 
+          variant="primary" 
+          class="btn-sm" 
+          disabled={isSaving || hasBlockingErrors} 
+          onclick={saveConnection}
+          title={hasBlockingErrors ? 'Resolve validation errors to save' : 'Save connection settings'}
+        >
           {#if isSaving}
-            <RefreshCw size={14} class="animate-spin-slow" /> Saving...
+            <RefreshCw size={13} class="animate-spin-slow" /> Saving...
           {:else}
-            <Save size={14}/> Save Settings
+            <Save size={13} /> Save Settings
           {/if}
         </Button>
       </div>
     </div>
     
-    <div class="module-content-scroll">
-      <div class="card" style="display:flex; flex-direction:column; gap:16px;">
-        <h3 style="margin:0; color:var(--color-text-primary); font-size:16px;">
-          {selectedConnectionUuid === '' ? 'Add New Connection' : 'Edit Connection: ' + editConnectionData['connection.id']}
-        </h3>
-        
-        {#if selectedConnectionUuid === ''}
-          <div style="display:flex; flex-direction:column; gap:4px;">
-            <label for="conn-id" style="font-size:12px; color:var(--color-text-secondary);">Connection Name</label>
-            <input id="conn-id" type="text" class="input" bind:value={editConnectionData['connection.id']} placeholder="e.g. eth0-custom" />
+    <div class="module-content-scroll editor-scroll-body">
+      <!-- ── Live Blocking Errors Alert Banner ── -->
+      {#if hasBlockingErrors}
+        <div class="net-alert-box net-alert-error">
+          <div class="net-alert-header">
+            <AlertCircle size={18} class="text-danger flex-shrink-0" />
+            <strong>Configuration Errors Detected (Please fix before saving):</strong>
           </div>
-          <div style="display:flex; flex-direction:column; gap:4px;">
-            <label for="conn-type" style="font-size:12px; color:var(--color-text-secondary);">Connection Type</label>
-            <Select id="conn-type"  bind:value={editConnectionData['connection.type']}>
-              <option value="802-3-ethernet">Ethernet</option>
-              <option value="802-11-wireless">Wi-Fi</option>
-              <option value="wireguard">WireGuard</option>
-              <option value="bridge">Bridge</option>
-            </Select>
+          <ul class="net-error-list">
+            {#each ipv4Validation.errors as err}
+              <li><strong>IPv4 Error:</strong> {err}</li>
+            {/each}
+            {#each gatewayValidation.errors as err}
+              <li><strong>Gateway Error:</strong> {err}</li>
+            {/each}
+            {#each dnsValidation.errors as err}
+              <li><strong>DNS Error:</strong> {err}</li>
+            {/each}
+            {#each ipv6Validation.errors as err}
+              <li><strong>IPv6 Error:</strong> {err}</li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+
+      <div class="card editor-main-card">
+        <div class="card-title-row">
+          <div class="card-title-group">
+            <Network size={18} class="text-accent" />
+            <h3>
+              {selectedConnectionUuid === '' ? 'Add New Network Connection' : 'Edit Connection: ' + (editConnectionData['connection.id'] || 'Profile')}
+            </h3>
+          </div>
+          <span class="badge {editConnectionData['ipv4.method'] === 'manual' ? 'badge-warning' : 'badge-success'}">
+            IPv4: {editConnectionData['ipv4.method'] === 'manual' ? 'Static IP' : editConnectionData['ipv4.method'] === 'auto' ? 'DHCP' : editConnectionData['ipv4.method']}
+          </span>
+        </div>
+
+        {#if selectedConnectionUuid === ''}
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label for="conn-id">Connection Profile Name</label>
+              <input id="conn-id" type="text" class="form-input" bind:value={editConnectionData['connection.id']} placeholder="e.g. eth0-static" />
+            </div>
+            <div class="form-group">
+              <label for="conn-type">Connection Type</label>
+              <Select id="conn-type" bind:value={editConnectionData['connection.type']}>
+                <option value="802-3-ethernet">Ethernet (Wired LAN)</option>
+                <option value="802-11-wireless">Wi-Fi (Wireless)</option>
+                <option value="wireguard">WireGuard Tunnel</option>
+                <option value="bridge">Network Bridge (br0)</option>
+              </Select>
+            </div>
           </div>
         {/if}
         
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
-          <div style="display:flex; flex-direction:column; gap:16px; padding-right:16px; border-right:1px solid var(--color-border);">
-            <h4 style="margin:0; color:var(--color-text-primary); border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:8px;">IPv4 Configuration</h4>
+        <div class="network-columns-layout">
+          <!-- ══ LEFT COLUMN: IPv4 & SUBNET CALCULATOR ════════════════════════ -->
+          <div class="net-column">
+            <div class="section-title">
+              <span class="section-tag">IPv4</span>
+              <h4>IPv4 Addressing &amp; Subnetting</h4>
+            </div>
             
-            <div style="display:flex; flex-direction:column; gap:4px;">
-              <label for="ipv4-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <Select id="ipv4-method"  bind:value={editConnectionData['ipv4.method']}>
-                <option value="auto">Automatic (DHCP)</option>
-                <option value="manual">Manual (Static)</option>
+            <div class="form-group">
+              <label for="ipv4-method">Configuration Method</label>
+              <Select id="ipv4-method" bind:value={editConnectionData['ipv4.method']}>
+                <option value="auto">Automatic (DHCP) — Recommended for Home/Office</option>
+                <option value="manual">Manual (Static IP &amp; Subnet Mask)</option>
+                <option value="link-local">Link-Local Only (169.254.x.x)</option>
                 <option value="disabled">Disabled</option>
-                <option value="link-local">Link-Local</option>
               </Select>
             </div>
             
             {#if editConnectionData['ipv4.method'] === 'manual'}
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <label for="ipv4-addr" style="font-size:12px; color:var(--color-text-secondary);">Addresses (e.g. 192.168.1.10/24)</label>
-                <input id="ipv4-addr" type="text" class="input" bind:value={editConnectionData['ipv4.addresses']} oninput={(e) => editConnectionData['ipv4.addresses'] = e.currentTarget.value.replace(/[^\d./]/g, '')} />
+              <!-- ── IP Address & CIDR Prefix Input ── -->
+              <div class="form-group">
+                <div class="label-with-badge">
+                  <label for="ipv4-addr">Host IP Address &amp; CIDR Prefix</label>
+                  {#if ipv4Validation.isValid}
+                    <span class="status-chip chip-success"><Check size={11} /> {ipv4Validation.scope}</span>
+                  {:else if ipv4Validation.raw}
+                    <span class="status-chip chip-error"><AlertTriangle size={11} /> Invalid IP / Subnet</span>
+                  {/if}
+                </div>
+                
+                <div class="input-with-select">
+                  <input 
+                    id="ipv4-addr" 
+                    type="text" 
+                    class="form-input font-mono {ipv4Validation.errors.length > 0 ? 'input-error' : ipv4Validation.isValid ? 'input-valid' : ''}" 
+                    bind:value={editConnectionData['ipv4.addresses']} 
+                    placeholder="e.g. 192.168.1.10/24" 
+                  />
+                  
+                  <select 
+                    class="cidr-quick-select" 
+                    value={ipv4Validation.cidr} 
+                    onchange={(e) => handleMaskDropdownChange(parseInt(e.currentTarget.value, 10))}
+                    title="Quick Subnet Mask Preset"
+                  >
+                    {#each COMMON_SUBNET_MASKS as sm}
+                      <option value={sm.cidr}>{sm.label}</option>
+                    {/each}
+                  </select>
+                </div>
+
+                <!-- Instant Subnet Error Feedback -->
+                {#if ipv4Validation.errors.length > 0}
+                  <div class="field-error-box">
+                    <AlertCircle size={13} class="flex-shrink-0" />
+                    <span>{ipv4Validation.errors[0]}</span>
+                  </div>
+                {:else if ipv4Validation.warnings.length > 0}
+                  <div class="field-warn-box">
+                    <AlertTriangle size={13} class="flex-shrink-0" />
+                    <span>{ipv4Validation.warnings[0]}</span>
+                  </div>
+                {:else}
+                  <span class="field-hint">Format: <code>IP/CIDR</code> (e.g. <code>192.168.1.50/24</code> = Netmask <code>255.255.255.0</code>).</span>
+                {/if}
               </div>
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <label for="ipv4-gw" style="font-size:12px; color:var(--color-text-secondary);">Gateway</label>
-                <input id="ipv4-gw" type="text" class="input" bind:value={editConnectionData['ipv4.gateway']} oninput={(e) => editConnectionData['ipv4.gateway'] = e.currentTarget.value.replace(/[^\d.]/g, '')} />
+
+              <!-- ── Gateway Input with Subnet Cross-Check ── -->
+              <div class="form-group">
+                <div class="label-with-badge">
+                  <label for="ipv4-gw">Default Gateway (Router IP)</label>
+                  {#if editConnectionData['ipv4.gateway']}
+                    {#if gatewayValidation.isValid && gatewayValidation.inSameSubnet}
+                      <span class="status-chip chip-success"><Check size={11} /> In Subnet</span>
+                    {:else}
+                      <span class="status-chip chip-error"><XCircle size={11} /> Subnet Mismatch</span>
+                    {/if}
+                  {/if}
+                </div>
+
+                <input 
+                  id="ipv4-gw" 
+                  type="text" 
+                  class="form-input font-mono {gatewayValidation.errors.length > 0 ? 'input-error' : (gatewayValidation.isValid && editConnectionData['ipv4.gateway']) ? 'input-valid' : ''}" 
+                  bind:value={editConnectionData['ipv4.gateway']} 
+                  placeholder="e.g. 192.168.1.1" 
+                />
+
+                <!-- Instant Gateway Subnet Error Feedback -->
+                {#if gatewayValidation.errors.length > 0}
+                  <div class="field-error-box gateway-error-box">
+                    <div class="err-text">
+                      <AlertCircle size={13} class="flex-shrink-0" />
+                      <span>{gatewayValidation.errors[0]}</span>
+                    </div>
+                    {#if gatewayValidation.suggestedGateway && ipv4Validation.isValid}
+                      <button type="button" class="btn-fix-gateway" onclick={() => fixGateway(gatewayValidation.suggestedGateway)}>
+                        <Sparkles size={11} /> Auto-Fix: Set to {gatewayValidation.suggestedGateway}
+                      </button>
+                    {/if}
+                  </div>
+                {:else}
+                  <span class="field-hint">Must belong to the same subnet (<code>{ipv4Validation.networkIp || '192.168.1.0'}/{ipv4Validation.cidr || 24}</code>).</span>
+                {/if}
               </div>
+
+              <!-- ── Live Subnet Inspector & Diagnostics Widget ── -->
+              {#if ipv4Validation.isValid}
+                <div class="subnet-inspector-card">
+                  <div class="inspector-header">
+                    <Sliders size={14} class="text-accent" />
+                    <strong>Subnet Inspection &amp; Routing Table</strong>
+                    <span class="inspector-badge">{ipv4Validation.scope}</span>
+                  </div>
+
+                  <div class="inspector-grid">
+                    <div class="inspector-stat">
+                      <span class="stat-label">Network ID</span>
+                      <span class="stat-val font-mono">{ipv4Validation.networkIp}/{ipv4Validation.cidr}</span>
+                    </div>
+                    <div class="inspector-stat">
+                      <span class="stat-label">Subnet Mask</span>
+                      <span class="stat-val font-mono">{ipv4Validation.maskStr}</span>
+                    </div>
+                    <div class="inspector-stat">
+                      <span class="stat-label">Usable Host Range</span>
+                      <span class="stat-val font-mono text-accent">{ipv4Validation.firstUsableIp} – {ipv4Validation.lastUsableIp}</span>
+                    </div>
+                    <div class="inspector-stat">
+                      <span class="stat-label">Usable Capacity</span>
+                      <span class="stat-val">{ipv4Validation.usableHosts.toLocaleString()} Hosts</span>
+                    </div>
+                    <div class="inspector-stat">
+                      <span class="stat-label">Broadcast Address</span>
+                      <span class="stat-val font-mono">{ipv4Validation.broadcastIp}</span>
+                    </div>
+                    <div class="inspector-stat">
+                      <span class="stat-label">Wildcard Mask</span>
+                      <span class="stat-val font-mono">{ipv4Validation.wildcardStr}</span>
+                    </div>
+                  </div>
+                </div>
+              {/if}
             {/if}
             
+            <!-- ── DNS Servers with 1-Click Presets ── -->
             {#if editConnectionData['ipv4.method'] !== 'disabled'}
-              <div style="display:flex; flex-direction:column; gap:4px;">
-                <label for="ipv4-dns" style="font-size:12px; color:var(--color-text-secondary);">DNS Servers (comma-separated)</label>
-                <input id="ipv4-dns" type="text" class="input" bind:value={editConnectionData['ipv4.dns']} oninput={(e) => editConnectionData['ipv4.dns'] = e.currentTarget.value.replace(/[^\d., ]/g, '')} placeholder="e.g. 8.8.8.8, 1.1.1.1" />
+              <div class="form-group">
+                <div class="label-with-badge">
+                  <label for="ipv4-dns">DNS Nameservers (Comma-Separated)</label>
+                  {#if dnsValidation.errors.length > 0}
+                    <span class="status-chip chip-error"><AlertTriangle size={11} /> Invalid DNS IP</span>
+                  {/if}
+                </div>
+
+                <input 
+                  id="ipv4-dns" 
+                  type="text" 
+                  class="form-input font-mono {dnsValidation.errors.length > 0 ? 'input-error' : ''}" 
+                  bind:value={editConnectionData['ipv4.dns']} 
+                  placeholder="e.g. 1.1.1.1, 1.0.0.1" 
+                />
+
+                {#if dnsValidation.errors.length > 0}
+                  <div class="field-error-box">
+                    <AlertCircle size={13} class="flex-shrink-0" />
+                    <span>{dnsValidation.errors[0]}</span>
+                  </div>
+                {/if}
+
+                <!-- Quick 1-Click DNS Presets -->
+                <div class="dns-presets-row">
+                  <span class="dns-preset-title">Fast Presets:</span>
+                  {#each POPULAR_DNS_PRESETS as preset}
+                    <button 
+                      type="button" 
+                      class="dns-preset-btn" 
+                      onclick={() => applyDnsPreset(preset)}
+                      title="{preset.name} ({preset.primary}, {preset.secondary}) — {preset.tag}"
+                    >
+                      <Zap size={11} /> {preset.name}
+                    </button>
+                  {/each}
+                </div>
               </div>
             {/if}
           </div>
           
-          <div style="display:flex; flex-direction:column; gap:16px;">
-            <h4 style="margin:0; color:var(--color-text-primary); border-bottom:1px solid rgba(255,255,255,0.05); padding-bottom:8px;">IPv6 Configuration</h4>
+          <!-- ══ RIGHT COLUMN: IPv6 CONFIGURATION ══════════════════════════════ -->
+          <div class="net-column">
+            <div class="section-title">
+              <span class="section-tag section-tag-purple">IPv6</span>
+              <h4>IPv6 Next-Gen Configuration</h4>
+            </div>
             
-            <div style="display:flex; flex-direction:column; gap:4px;">
-              <label for="ipv6-method" style="font-size:12px; color:var(--color-text-secondary);">Method</label>
-              <Select id="ipv6-method"  bind:value={editConnectionData['ipv6.method']}>
-                <option value="auto">Automatic</option>
-                <option value="dhcp">DHCP Only</option>
-                <option value="manual">Manual (Static)</option>
+            <div class="form-group">
+              <label for="ipv6-method">Configuration Method</label>
+              <Select id="ipv6-method" bind:value={editConnectionData['ipv6.method']}>
+                <option value="auto">Automatic (SLAAC / Router Advertisement)</option>
+                <option value="dhcp">DHCPv6 Only</option>
+                <option value="manual">Manual (Static IPv6 Address)</option>
+                <option value="link-local">Link-Local Only (fe80::/64)</option>
                 <option value="ignore">Disabled / Ignore</option>
               </Select>
+            </div>
+
+            {#if editConnectionData['ipv6.method'] === 'manual'}
+              <div class="form-group">
+                <label for="ipv6-addr">IPv6 Address &amp; Prefix Length</label>
+                <input 
+                  id="ipv6-addr" 
+                  type="text" 
+                  class="form-input font-mono {ipv6Validation.errors.length > 0 ? 'input-error' : ''}" 
+                  bind:value={editConnectionData['ipv6.addresses']} 
+                  placeholder="e.g. 2001:db8:1::10/64" 
+                />
+                {#if ipv6Validation.errors.length > 0}
+                  <div class="field-error-box">
+                    <AlertCircle size={13} class="flex-shrink-0" />
+                    <span>{ipv6Validation.errors[0]}</span>
+                  </div>
+                {:else}
+                  <span class="field-hint">Standard global unicast prefix is typically <code>/64</code>.</span>
+                {/if}
+              </div>
+
+              <div class="form-group">
+                <label for="ipv6-gw">IPv6 Gateway</label>
+                <input 
+                  id="ipv6-gw" 
+                  type="text" 
+                  class="form-input font-mono" 
+                  bind:value={editConnectionData['ipv6.gateway']} 
+                  placeholder="e.g. 2001:db8:1::1 or fe80::1" 
+                />
+              </div>
+
+              <div class="form-group">
+                <label for="ipv6-dns">IPv6 DNS Servers</label>
+                <input 
+                  id="ipv6-dns" 
+                  type="text" 
+                  class="form-input font-mono" 
+                  bind:value={editConnectionData['ipv6.dns']} 
+                  placeholder="e.g. 2606:4700:4700::1111, 2001:4860:4860::8888" 
+                />
+              </div>
+            {/if}
+
+            <div class="info-guide-box">
+              <Info size={16} class="text-accent flex-shrink-0" />
+              <div class="info-guide-text">
+                <strong>Networking Tip:</strong>
+                <span>NetworkManager dynamically generates on-link routing rules. For static IP setups, ensure your host IP address and gateway share the exact same network prefix mask.</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </div>
   {:else}
+    <!-- ══════════════════════════════════════════════════════════════════════════
+         MAIN NAVIGATION TABS
+         ══════════════════════════════════════════════════════════════════════════ -->
     <div class="controls-row">
       <div class="tab-bar">
         <button class="tab-btn { activeTab === 'interfaces' ? 'active' : '' }" onclick={() => activeTab = 'interfaces'}>
           <Activity size={14} style="margin-right:6px" /> Physical Adapters
         </button>
         <button class="tab-btn { activeTab === 'connections' ? 'active' : '' }" onclick={() => activeTab = 'connections'}>
-          <Network size={14} style="margin-right:6px" /> Connections
+          <Network size={14} style="margin-right:6px" /> Connections ({connections.length})
         </button>
         <button class="tab-btn { activeTab === 'vpn' ? 'active' : '' }" onclick={() => activeTab = 'vpn'}>
-          <Key size={14} style="margin-right:6px" /> VPN Profiles
+          <Key size={14} style="margin-right:6px" /> VPN Profiles ({vpnProfiles.length})
         </button>
         <button class="tab-btn { activeTab === 'dns' ? 'active' : '' }" onclick={() => activeTab = 'dns'}>
           <Globe size={14} style="margin-right:6px" /> Global DNS
@@ -558,26 +874,26 @@
       {:else if activeTab === 'connections'}
         <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
           {#each connections as conn}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div 
-              class="card" 
-              style="cursor:pointer; transition:all 0.2s; border:1px solid transparent; display:flex; flex-direction:column; gap:8px;" 
+              class="card connection-card" 
               tabindex="0"
               role="button"
               onclick={() => editConnection(conn.uuid)} 
               onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editConnection(conn.uuid); } }}
-              onmouseenter={(e) => e.currentTarget.style.borderColor='var(--color-accent)'} 
-              onmouseleave={(e) => e.currentTarget.style.borderColor='transparent'}
             >
               <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-weight:600; color:var(--color-text-primary); font-size:15px;">{conn.name}</span>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <Network size={16} class="text-accent" />
+                  <span style="font-weight:600; color:var(--color-text-primary); font-size:15px;">{conn.name}</span>
+                </div>
                 <span class="badge {conn.state === 'activated' ? 'badge-success' : 'badge-muted'}">{conn.state || 'inactive'}</span>
               </div>
-              <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--color-text-secondary)">
-                <span>Type: {conn.type}</span>
-                <span>Device: {conn.device || 'N/A'}</span>
+              <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--color-text-secondary); margin-top:4px;">
+                <span>Type: <strong>{conn.type}</strong></span>
+                <span>Device: <code style="font-size:11px;">{conn.device || 'N/A'}</code></span>
+              </div>
+              <div style="display:flex; justify-content:flex-end; margin-top:6px;">
+                <span style="font-size:11.5px; color:var(--color-accent); font-weight:600;">Configure IP &amp; Subnet &rarr;</span>
               </div>
             </div>
           {/each}
@@ -618,7 +934,7 @@
                   </div>
                   <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px; border-top:1px solid rgba(255,255,255,0.03); padding-top:10px;">
                     <Button variant="outline" style="padding: 4px 8px; font-size:12px; color:var(--color-error); border-color:var(--color-error);" onclick={() => deleteConnection(vpn.uuid)}>
-                      <Trash size={12} style="margin-right:4px;" /> Delete
+                      <Trash2 size={12} style="margin-right:4px;" /> Delete
                     </Button>
                     <Button variant={vpn.active ? 'outline' : 'primary'} style="padding: 4px 10px; font-size:12px;" onclick={() => vpn.active ? disconnectConnection(vpn.uuid) : connectVpn(vpn.uuid)}>
                       {#if vpn.active}
@@ -720,34 +1036,34 @@
 
   <SideDrawer bind:isOpen={showVpnDrawer} title="Create VPN Profile" width="480px">
     <div style="display:flex; flex-direction:column; gap:16px; padding:8px 0;">
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label for="vpn-name" style="font-size:12px; color:var(--color-text-secondary);">Profile Name</label>
-        <input id="vpn-name" type="text" class="input" bind:value={vpnForm.name} placeholder="e.g. Work VPN" />
+      <div class="form-group">
+        <label for="vpn-name">Profile Name</label>
+        <input id="vpn-name" type="text" class="form-input" bind:value={vpnForm.name} placeholder="e.g. Work VPN" />
       </div>
       
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label for="vpn-type-select" style="font-size:12px; color:var(--color-text-secondary);">VPN Protocol</label>
+      <div class="form-group">
+        <label for="vpn-type-select">VPN Protocol</label>
         <Select id="vpn-type-select" bind:value={vpnForm.type}>
           <option value="openvpn">OpenVPN</option>
           <option value="wireguard">WireGuard</option>
         </Select>
       </div>
       
-      <div style="display:flex; flex-direction:column; gap:4px;">
-        <label for="vpn-gateway" style="font-size:12px; color:var(--color-text-secondary);">
+      <div class="form-group">
+        <label for="vpn-gateway">
           {vpnForm.type === 'openvpn' ? 'Gateway Address' : 'Peer Endpoint (e.g. 198.51.100.1:51820)'}
         </label>
-        <input id="vpn-gateway" type="text" class="input" bind:value={vpnForm.gateway} placeholder={vpnForm.type === 'openvpn' ? 'vpn.example.com' : '198.51.100.1:51820'} />
+        <input id="vpn-gateway" type="text" class="form-input" bind:value={vpnForm.gateway} placeholder={vpnForm.type === 'openvpn' ? 'vpn.example.com' : '198.51.100.1:51820'} />
       </div>
       
       {#if vpnForm.type === 'openvpn'}
-        <div style="display:flex; flex-direction:column; gap:4px;">
-          <label for="vpn-username" style="font-size:12px; color:var(--color-text-secondary);">Username (Optional)</label>
-          <input id="vpn-username" type="text" class="input" bind:value={vpnForm.username} placeholder="vpnuser" />
+        <div class="form-group">
+          <label for="vpn-username">Username (Optional)</label>
+          <input id="vpn-username" type="text" class="form-input" bind:value={vpnForm.username} placeholder="vpnuser" />
         </div>
-        <div style="display:flex; flex-direction:column; gap:4px;">
-          <label for="vpn-password" style="font-size:12px; color:var(--color-text-secondary);">Password (Optional)</label>
-          <input id="vpn-password" type="password" class="input" bind:value={vpnForm.password} placeholder="••••••••" />
+        <div class="form-group">
+          <label for="vpn-password">Password (Optional)</label>
+          <input id="vpn-password" type="password" class="form-input" bind:value={vpnForm.password} placeholder="••••••••" />
         </div>
       {/if}
       
@@ -760,7 +1076,518 @@
 </div>
 
 <style>
-  
-  
-  
+  /* ── Layout & Structure ─────────────────────────────────────────────────── */
+  .editor-header-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  .editor-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .editor-scroll-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-bottom: 32px;
+  }
+
+  .editor-main-card {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  :global(html.light-mode) .editor-main-card {
+    background: #FFFFFF;
+    border-color: #E2E8F0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+
+  .card-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: 12px;
+  }
+
+  :global(html.light-mode) .card-title-row {
+    border-bottom-color: #E2E8F0;
+  }
+
+  .card-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .card-title-group h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .form-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .network-columns-layout {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 24px;
+  }
+
+  @media (max-width: 1000px) {
+    .network-columns-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .net-column {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  :global(html.light-mode) .section-title {
+    border-bottom-color: #E2E8F0;
+  }
+
+  .section-title h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .section-tag {
+    font-size: 10px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(0, 218, 243, 0.15);
+    color: var(--color-accent);
+    letter-spacing: 0.5px;
+  }
+
+  .section-tag-purple {
+    background: rgba(168, 85, 247, 0.15);
+    color: #A855F7;
+  }
+
+  /* ── Form Groups & Inputs ───────────────────────────────────────────────── */
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .form-group label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+  }
+
+  :global(html.light-mode) .form-group label {
+    color: #475569;
+  }
+
+  .label-with-badge {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .form-input {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 13px;
+    color: var(--color-text-primary);
+    transition: all 0.15s ease;
+  }
+
+  :global(html.light-mode) .form-input {
+    background: #F8FAFC;
+    border-color: #CBD5E1;
+    color: #0F172A;
+  }
+
+  .form-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 2px rgba(0, 218, 243, 0.2);
+  }
+
+  .form-input.input-error {
+    border-color: var(--color-error) !important;
+    background: rgba(239, 68, 68, 0.05) !important;
+  }
+
+  .form-input.input-valid {
+    border-color: var(--color-success) !important;
+  }
+
+  .input-with-select {
+    display: flex;
+    gap: 8px;
+  }
+
+  .input-with-select input {
+    flex: 1;
+  }
+
+  .cidr-quick-select {
+    width: 200px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--color-text-primary);
+    cursor: pointer;
+  }
+
+  :global(html.light-mode) .cidr-quick-select {
+    background: #F8FAFC;
+    border-color: #CBD5E1;
+    color: #0F172A;
+  }
+
+  .field-hint {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  .field-hint code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+  }
+
+  /* ── Error & Warning Callouts ───────────────────────────────────────────── */
+  .net-alert-box {
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .net-alert-error {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid var(--color-error);
+    color: var(--color-error);
+  }
+
+  .net-alert-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+  }
+
+  .net-error-list {
+    margin: 0;
+    padding-left: 24px;
+    font-size: 12.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--color-text-primary);
+  }
+
+  :global(html.light-mode) .net-error-list {
+    color: #991B1B;
+  }
+
+  .field-error-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11.5px;
+    color: var(--color-error);
+    margin-top: 2px;
+  }
+
+  :global(html.light-mode) .field-error-box {
+    background: #FEF2F2;
+    border-color: #FECACA;
+    color: #B91C1C;
+  }
+
+  .gateway-error-box {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .gateway-error-box .err-text {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .btn-fix-gateway {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--color-accent);
+    color: #000000;
+    font-weight: 700;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    margin-top: 2px;
+    transition: opacity 0.15s ease;
+  }
+
+  .btn-fix-gateway:hover {
+    opacity: 0.9;
+  }
+
+  .field-warn-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11.5px;
+    color: var(--color-warning);
+    margin-top: 2px;
+  }
+
+  /* ── Status Chips ───────────────────────────────────────────────────────── */
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .chip-success {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--color-success);
+  }
+
+  .chip-error {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--color-error);
+  }
+
+  /* ── Live Subnet Inspector Card ─────────────────────────────────────────── */
+  .subnet-inspector-card {
+    background: rgba(0, 218, 243, 0.03);
+    border: 1px solid rgba(0, 218, 243, 0.2);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  :global(html.light-mode) .subnet-inspector-card {
+    background: #F0F9FF;
+    border-color: #BAE6FD;
+  }
+
+  .inspector-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--color-text-primary);
+  }
+
+  .inspector-badge {
+    margin-left: auto;
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(0, 218, 243, 0.15);
+    color: var(--color-accent);
+  }
+
+  .inspector-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+  }
+
+  @media (max-width: 720px) {
+    .inspector-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  .inspector-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+  }
+
+  :global(html.light-mode) .inspector-stat {
+    background: #FFFFFF;
+    border-color: #E2E8F0;
+  }
+
+  .stat-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  .stat-val {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  /* ── DNS Presets ────────────────────────────────────────────────────────── */
+  .dns-presets-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .dns-preset-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }
+
+  .dns-preset-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  :global(html.light-mode) .dns-preset-btn {
+    background: #F1F5F9;
+    border-color: #CBD5E1;
+    color: #334155;
+  }
+
+  .dns-preset-btn:hover {
+    background: rgba(0, 218, 243, 0.15);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  /* ── Info Box ───────────────────────────────────────────────────────────── */
+  .info-guide-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    line-height: 1.4;
+  }
+
+  :global(html.light-mode) .info-guide-box {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+    color: #475569;
+  }
+
+  .info-guide-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .info-guide-text strong {
+    color: var(--color-text-primary);
+  }
+
+  /* ── Connection Cards ───────────────────────────────────────────────────── */
+  .connection-card {
+    cursor: pointer;
+    transition: all 0.18s ease;
+    border: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .connection-card:hover {
+    border-color: var(--color-accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  /* ── Outline Buttons ────────────────────────────────────────────────────── */
+  :global(.btn-warn-outline) {
+    border-color: var(--color-warning) !important;
+    color: var(--color-warning) !important;
+  }
+
+  :global(.btn-danger-outline) {
+    border-color: var(--color-error) !important;
+    color: var(--color-error) !important;
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  .text-accent { color: var(--color-accent); }
+  .text-danger { color: var(--color-error); }
+  .flex-shrink-0 { flex-shrink: 0; }
 </style>

@@ -338,32 +338,11 @@ pub async fn shell_create_profile_d_file(name: String) -> Result<String, String>
     }
     let path = format!("{PROFILE_D}/{clean}.sh");
     let content = "#!/usr/bin/env bash\n# Created by Linux Control Panel\n";
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &format!("cat > {path} && chmod 644 {path}")])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec: {e}"))?;
-
-    // We use a simpler approach: write via tee
-    let mut child = Command::new("pkexec")
-        .args(["tee", &path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec: {e}"))?;
-    drop(out);
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(content.as_bytes()).await.map_err(|e| e.to_string())?;
-    }
-    let o = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !o.status.success() {
-        return Err(String::from_utf8_lossy(&o.stderr).to_string());
-    }
+    write_file_content(&path, content).await?;
+    let _ = crate::utils::privilege::tokio::Command::new("pkexec")
+        .args(["chmod", "644", &path])
+        .output()
+        .await;
     Ok(path)
 }
 

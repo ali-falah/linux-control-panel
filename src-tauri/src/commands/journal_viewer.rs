@@ -1,6 +1,4 @@
-use tokio::process::Command;
-use tokio::io::AsyncReadExt;
-use std::process::Stdio;
+
 
 #[tauri::command]
 pub async fn get_journal_logs(
