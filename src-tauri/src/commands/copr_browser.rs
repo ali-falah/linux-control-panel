@@ -133,6 +133,82 @@ pub async fn disable_copr(repo: String) -> Result<String, String> {
     Ok(stdout)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCoprRepo {
+    pub copr_name: String,
+    pub repo_id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub file_path: String,
+    pub baseurl: String,
+}
+
+/// List all installed COPR repositories from /etc/yum.repos.d/*.repo
+#[tauri::command]
+pub async fn list_system_coprs() -> Result<Vec<SystemCoprRepo>, String> {
+    let repos = crate::commands::repo_manager::list_repos().await?;
+    let mut coprs = Vec::new();
+
+    for repo in repos {
+        let is_copr = repo.id.to_lowercase().contains("copr")
+            || repo.file_path.to_lowercase().contains("copr")
+            || repo.baseurl.to_lowercase().contains("copr")
+            || repo.baseurl.to_lowercase().contains("fedorainfracloud.org");
+
+        if !is_copr {
+            continue;
+        }
+
+        let copr_name = extract_copr_name(&repo.id, &repo.baseurl, &repo.file_path);
+
+        coprs.push(SystemCoprRepo {
+            copr_name,
+            repo_id: repo.id,
+            name: repo.name,
+            enabled: repo.enabled,
+            file_path: repo.file_path,
+            baseurl: repo.baseurl,
+        });
+    }
+
+    Ok(coprs)
+}
+
+fn extract_copr_name(id: &str, baseurl: &str, file_path: &str) -> String {
+    // 1. Try baseurl pattern: .../results/owner/project/...
+    if let Some(pos) = baseurl.find("/results/") {
+        let rest = &baseurl[pos + 9..];
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 {
+            return format!("{}/{}", parts[0], parts[1]);
+        }
+    }
+
+    // 2. Try ID pattern: copr:copr.fedorainfracloud.org:owner:project or _copr:owner:project
+    let id_parts: Vec<&str> = id.split(':').collect();
+    if id_parts.len() >= 4 {
+        return format!("{}/{}", id_parts[2], id_parts[3]);
+    } else if id_parts.len() == 3 && id_parts[0].contains("copr") {
+        return format!("{}/{}", id_parts[1], id_parts[2]);
+    }
+
+    // 3. Try filename pattern: _copr:copr.fedorainfracloud.org:owner:project.repo
+    let filename = std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    if filename.contains("copr") {
+        let clean_name = filename.trim_end_matches(".repo");
+        let parts: Vec<&str> = clean_name.split(':').collect();
+        if parts.len() >= 4 {
+            return format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+        }
+    }
+
+    id.to_string()
+}
+
 fn urlencoding(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {

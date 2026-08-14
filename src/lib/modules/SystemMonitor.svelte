@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { Activity, Cpu, Database, HardDrive, TerminalSquare } from '@lucide/svelte';
+  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network } from '@lucide/svelte';
   import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
@@ -41,11 +41,114 @@
   // Active Connections
   let activeConnections = $state<any[]>([]);
 
-  // Processes
+  // Processes & Tree State
   let processes = $state<any[]>([]);
   let processSearch = $state('');
   let isRefreshing = $state(false);
   let isPaused = $state(false);
+  let processCategoryFilter = $state<'all' | 'user' | 'cpu' | 'mem'>('all');
+  let expandedTreePids = $state<Set<number>>(new Set([1]));
+
+  // Process Inspector Drawer State
+  let isProcessDrawerOpen = $state(false);
+  let inspectedProcess = $state<any | null>(null);
+  let copiedCmd = $state(false);
+
+  let inspectedParentProcess = $derived.by(() => {
+    if (!inspectedProcess || !inspectedProcess.ppid) return null;
+    return processes.find(p => p.pid === inspectedProcess.ppid) || null;
+  });
+
+  let inspectedChildProcesses = $derived.by(() => {
+    if (!inspectedProcess) return [];
+    return processes.filter(p => p.ppid === inspectedProcess.pid && p.pid !== inspectedProcess.pid);
+  });
+
+  function toggleTreeExpand(pid: number, e?: MouseEvent) {
+    if (e) e.stopPropagation();
+    const next = new Set(expandedTreePids);
+    if (next.has(pid)) {
+      next.delete(pid);
+    } else {
+      next.add(pid);
+    }
+    expandedTreePids = next;
+  }
+
+  function expandAllTree() {
+    const allPids = new Set<number>();
+    for (const p of processes) {
+      allPids.add(p.pid);
+    }
+    expandedTreePids = allPids;
+  }
+
+  function collapseAllTree() {
+    expandedTreePids = new Set();
+  }
+
+  function openProcessInspector(proc: any, e?: MouseEvent) {
+    if (e) e.stopPropagation();
+    inspectedProcess = proc;
+    isProcessDrawerOpen = true;
+  }
+
+  async function copyProcessCmdline(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedCmd = true;
+      setTimeout(() => { copiedCmd = false; }, 2000);
+      uiStore.addToast('Full command line copied to clipboard', 'info', 2000);
+    } catch (err) {
+      uiStore.handleError(err, 'Failed to copy command');
+    }
+  }
+
+  async function sendProcessSignal(pid: number, signal: number, name: string) {
+    if (pid <= 100) {
+      uiStore.addToast(`PID ${pid} is a critical system process and cannot be signaled.`, 'warning');
+      return;
+    }
+    try {
+      const res: string = await invoke('kill_process', { pid, signal });
+      uiStore.addToast(res, 'info');
+      if (inspectedProcess && inspectedProcess.pid === pid && (signal === 15 || signal === 9)) {
+        isProcessDrawerOpen = false;
+      }
+      forceRefresh();
+    } catch (err) {
+      uiStore.handleError(err, `Failed to send signal to PID ${pid}`);
+    }
+  }
+
+  function killProcessTree(parentPid: number, parentName: string) {
+    const children = processes.filter(p => p.ppid === parentPid && p.pid !== parentPid);
+    const totalCount = children.length + 1;
+    uiStore.confirm(
+      `Terminate Process Tree`,
+      `Kill ${parentName} (PID ${parentPid}) and all ${children.length} child processes (${totalCount} processes total)?`,
+      async () => {
+        for (const child of children) {
+          if (child.pid > 100) {
+            try {
+              await invoke('kill_process', { pid: child.pid, signal: 15 });
+            } catch (_) {}
+          }
+        }
+        if (parentPid > 100) {
+          try {
+            await invoke('kill_process', { pid: parentPid, signal: 15 });
+            uiStore.addToast(`Terminated process tree (${totalCount} processes)`, 'success');
+          } catch (e: any) {
+            uiStore.handleError(e, `Failed to terminate PID ${parentPid}`);
+          }
+        }
+        isProcessDrawerOpen = false;
+        forceRefresh();
+      },
+      true
+    );
+  }
 
   // Context Menu State for Active Connections
   let contextMenu = $state<{
@@ -384,57 +487,89 @@
     );
   }
 
-  interface GroupedProcess {
-    pid: number;
-    name: string;
-    cmdline: string;
-    cpu_percent: number;
-    mem_percent: number;
-    mem_rss_mb: number;
-    user: string;
-    count: number;
-    pids: number[];
-  }
+  // Build parent-child process hierarchy for Tree View
+  let treeVisibleProcesses = $derived.by(() => {
+    const search = processSearch.toLowerCase().trim();
+    
+    // Map of all processes
+    const map = new Map<number, any>();
+    for (const p of processes) {
+      map.set(p.pid, p);
+    }
 
-  // Deduplicate and collapse processes by identical name
-  let groupedProcesses = $derived.by(() => {
-    const search = processSearch.toLowerCase();
-    const list = processes.filter(p => 
-      !search || 
-      p.name.toLowerCase().includes(search) || 
-      p.pid.toString().includes(search) ||
-      (p.user && p.user.toLowerCase().includes(search))
-    );
+    // Map parent PID -> list of child processes
+    const childrenMap = new Map<number, any[]>();
+    const roots: any[] = [];
 
-    const groups = new Map<string, GroupedProcess>();
-    for (const p of list) {
-      const existing = groups.get(p.name);
-      if (existing) {
-        existing.cpu_percent += p.cpu_percent;
-        existing.mem_percent += p.mem_percent;
-        existing.mem_rss_mb += p.mem_rss_mb;
-        existing.count += 1;
-        existing.pids.push(p.pid);
-        if (p.pid < existing.pid) {
-          existing.pid = p.pid;
-          existing.cmdline = p.cmdline;
-          existing.user = p.user;
-        }
+    for (const p of processes) {
+      const parentId = p.ppid;
+      if (parentId && map.has(parentId) && parentId !== p.pid) {
+        if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
+        childrenMap.get(parentId)!.push(p);
       } else {
-        groups.set(p.name, {
-          pid: p.pid,
-          name: p.name,
-          cmdline: p.cmdline,
-          cpu_percent: p.cpu_percent,
-          mem_percent: p.mem_percent,
-          mem_rss_mb: p.mem_rss_mb,
-          user: p.user,
-          count: 1,
-          pids: [p.pid],
-        });
+        roots.push(p);
       }
     }
-    return Array.from(groups.values());
+
+    // If searching, identify matching PIDs and their ancestor chain
+    let matchingPids = new Set<number>();
+    let matchingAncestorPids = new Set<number>();
+
+    if (search) {
+      for (const p of processes) {
+        const matches = p.name.toLowerCase().includes(search) ||
+          p.pid.toString().includes(search) ||
+          (p.cmdline && p.cmdline.toLowerCase().includes(search)) ||
+          (p.user && p.user.toLowerCase().includes(search));
+        
+        if (matches) {
+          matchingPids.add(p.pid);
+          let curr = p;
+          while (curr.ppid && map.has(curr.ppid) && curr.ppid !== curr.pid) {
+            matchingAncestorPids.add(curr.ppid);
+            curr = map.get(curr.ppid)!;
+          }
+        }
+      }
+    }
+
+    const result: Array<{ 
+      process: any; 
+      depth: number; 
+      hasChildren: boolean; 
+      childrenCount: number; 
+      isExpanded: boolean;
+    }> = [];
+
+    function walk(proc: any, depth: number) {
+      if (search && !matchingPids.has(proc.pid) && !matchingAncestorPids.has(proc.pid)) {
+        return;
+      }
+
+      const children = childrenMap.get(proc.pid) || [];
+      const hasChildren = children.length > 0;
+      const isExpanded = search ? (matchingAncestorPids.has(proc.pid) || expandedTreePids.has(proc.pid)) : expandedTreePids.has(proc.pid);
+
+      result.push({ 
+        process: proc, 
+        depth, 
+        hasChildren, 
+        childrenCount: children.length, 
+        isExpanded 
+      });
+
+      if (hasChildren && isExpanded) {
+        for (const child of children) {
+          walk(child, depth + 1);
+        }
+      }
+    }
+
+    for (const root of roots) {
+      walk(root, 0);
+    }
+
+    return result;
   });
 
   async function forceRefresh() {
@@ -813,74 +948,135 @@
         </div>
       {/if}
     {:else}
-      <!-- Processes Tab -->
+      <!-- Processes Tab (Pure Tree View) -->
       <div class="table-container" style="flex:1; min-height:0; display:flex; flex-direction:column;">
-        <div class="table-toolbar">
-          <div class="search-box">
+        <div class="table-toolbar" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--color-bg-card);">
+          <!-- Left: Search Box -->
+          <div class="search-box" style="flex:1; min-width:240px; max-width:340px; position:relative;">
             <input type="text" placeholder="Search processes by name, PID, or user..." bind:value={processSearch} />
           </div>
-          <div class="toolbar-stats">
-            Showing {groupedProcesses.length} process groups
+
+          <!-- Middle: Expand / Collapse Actions -->
+          <div style="display:flex; align-items:center; gap:6px;">
+            <button
+              type="button"
+              class="toolbar-tree-btn"
+              onclick={expandAllTree}
+              title="Expand all process branches"
+            >
+              Expand All
+            </button>
+            <button
+              type="button"
+              class="toolbar-tree-btn"
+              onclick={collapseAllTree}
+              title="Collapse all process branches"
+            >
+              Collapse All
+            </button>
+          </div>
+
+          <!-- Right: Process Stats -->
+          <div class="toolbar-stats" style="font-size:12px; color:var(--color-text-muted);">
+            Showing <strong>{treeVisibleProcesses.length}</strong> processes ({processes.length} total)
           </div>
         </div>
 
-        <div class="table-scroll" style="flex:1; overflow:auto;">
-          <Table tableAction={tableFeatures}>
-            <thead>
-              <tr>
-                <th class="col-pid">PID</th>
-                <th class="col-name">Name</th>
-                <th class="col-user">User</th>
-                <th class="col-cpu">CPU %</th>
-                <th class="col-mem">Mem %</th>
-                <th class="col-rss">RSS</th>
-                <th class="col-actions"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each groupedProcesses as p (p.name)}
-                <tr class:is-root={p.user === 'root'} class:is-kernel={p.pid <= 100}>
-                  <td class="col-pid">{p.pid}</td>
-                  <td class="col-name">
-                    <div style="display:flex; align-items:center; gap:6px;">
-                      <div class="proc-name">{p.name}</div>
-                      {#if p.count > 1}
-                        <span style="background:rgba(255,255,255,0.06); border:1px solid var(--color-border); color:var(--color-text-accent); font-size:10px; font-weight:bold; padding:1px 5px; border-radius:4px;">
-                          {p.count}
+        <Table tableAction={tableFeatures} class="process-table-wrap" style="flex:1; min-height:0; overflow-y:auto; border:none; border-radius:0;">
+          <thead>
+            <tr>
+              <th class="col-pid">PID</th>
+              <th class="col-name">Name</th>
+              <th class="col-user">User</th>
+              <th class="col-cpu">CPU %</th>
+              <th class="col-mem">Mem %</th>
+              <th class="col-rss">RSS</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each treeVisibleProcesses as item (item.process.pid)}
+              {@const p = item.process}
+              <tr
+                class="proc-row tree-row"
+                class:is-root={p.user === 'root'}
+                class:is-kernel={p.pid <= 100}
+                onclick={() => openProcessInspector(p)}
+                style="cursor: pointer;"
+              >
+                <td class="col-pid">{p.pid}</td>
+                <td class="col-name" style="padding-left: {item.depth * 20 + 8}px;">
+                  <div style="display:flex; align-items:center; gap:6px;">
+                    {#if item.hasChildren}
+                      <!-- Clickable on Arrow + Process Name + Count Badge to expand/collapse -->
+                      <button
+                        type="button"
+                        class="tree-node-trigger"
+                        onclick={(e) => toggleTreeExpand(p.pid, e)}
+                        title={item.isExpanded ? 'Click to collapse sub-processes' : `Click to expand (${item.childrenCount} sub-processes)`}
+                      >
+                        <span class="tree-chevron-icon" class:is-expanded={item.isExpanded}>
+                          <ChevronRight size={13} />
                         </span>
-                      {/if}
-                    </div>
-                    <div class="proc-cmd">{p.cmdline}</div>
-                  </td>
-                  <td class="col-user">
-                    <span 
-                      class="user-badge"
-                      style="color: {p.user === 'root' ? 'var(--color-error)' : p.user === currentUser ? 'var(--color-success)' : 'var(--color-text-secondary)'}; font-weight: 600;"
-                    >
-                      {p.user}
-                    </span>
-                  </td>
-                  <td class="col-cpu {p.cpu_percent > 20 ? 'text-warn' : p.cpu_percent > 50 ? 'text-danger' : ''}">
-                    {p.cpu_percent.toFixed(1)}%
-                  </td>
-                  <td class="col-mem {p.mem_percent > 15 ? 'text-warn' : ''}">
-                    {p.mem_percent.toFixed(1)}%
-                  </td>
-                  <td class="col-rss">{p.mem_rss_mb.toFixed(1)} MB</td>
-                  <td class="col-actions">
+                        <span class="proc-name parent-proc-name">{p.name}</span>
+                        <span class="tree-child-badge">
+                          {item.childrenCount}
+                        </span>
+                      </button>
+                    {:else}
+                      <span class="proc-name">{p.name}</span>
+                    {/if}
+                  </div>
+                  <div class="proc-cmd" style="padding-left: {item.hasChildren ? 20 : 0}px;">
+                    {p.cmdline || p.name}
+                  </div>
+                </td>
+                <td class="col-user">
+                  <span 
+                    class="user-badge"
+                    style="color: {p.user === 'root' ? 'var(--color-error)' : p.user === currentUser ? 'var(--color-success)' : 'var(--color-text-secondary)'}; font-weight: 600;"
+                  >
+                    {p.user}
+                  </span>
+                </td>
+                <td class="col-cpu {p.cpu_percent > 20 ? 'text-warn' : p.cpu_percent > 50 ? 'text-danger' : ''}">
+                  {p.cpu_percent.toFixed(1)}%
+                </td>
+                <td class="col-mem {p.mem_percent > 15 ? 'text-warn' : ''}">
+                  {p.mem_percent.toFixed(1)}%
+                </td>
+                <td class="col-rss">{p.mem_rss_mb.toFixed(1)} MB</td>
+                <td class="col-actions" onclick={(e) => e.stopPropagation()}>
+                  <KebabMenu align="right">
+                    <button class="menu-item" onclick={() => openProcessInspector(p)}>
+                      <Activity size={14} style="color: var(--color-info);" />
+                      Inspect Details
+                    </button>
                     {#if p.pid > 100}
-                      <button class="action-btn kill" onclick={() => killProcess(p.pid, p.name)} title="Kill Process (SIGTERM)">
-                        <Skull size={14} />
+                      <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 15, p.name)}>
+                        <Skull size={14} style="color: var(--color-error);" />
+                        Soft Kill (SIGTERM)
+                      </button>
+                      <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 9, p.name)}>
+                        <Skull size={14} style="color: var(--color-error);" />
+                        Force Kill (SIGKILL)
                       </button>
                     {/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </Table>
-        </div>
+                  </KebabMenu>
+                </td>
+              </tr>
+            {/each}
+            {#if treeVisibleProcesses.length === 0}
+              <tr>
+                <td colspan="7" style="padding:32px 16px; text-align:center; color:var(--color-text-muted); font-size:13px;">
+                  No processes match the search criteria.
+                </td>
+              </tr>
+            {/if}
+          </tbody>
+        </Table>
       </div>
-    {/if}
+      {/if}
   </div>
 </div>
 
@@ -1006,6 +1202,216 @@
           </div>
         {/if}
       </div>
+    </div>
+  {/if}
+</SideDrawer>
+
+<!-- Process Inspector Side Drawer -->
+<SideDrawer bind:isOpen={isProcessDrawerOpen} title="Process Inspector — {inspectedProcess?.name || 'Process'}" width="580px">
+  {#if inspectedProcess}
+    <div style="display:flex; flex-direction:column; gap:16px; padding:4px;">
+
+      <!-- Header Overview Card -->
+      <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:10px; padding:14px; display:flex; align-items:center; justify-content:space-between;">
+        <div>
+          <div style="font-size:15px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
+            <Cpu size={18} style="color:var(--color-accent);" />
+            {inspectedProcess.name}
+          </div>
+          <div style="font-size:12px; color:var(--color-text-muted); font-family:var(--font-mono); margin-top:2px;">
+            PID: <strong style="color:var(--color-text-primary);">{inspectedProcess.pid}</strong> &nbsp;|&nbsp; PPID: <strong style="color:var(--color-text-primary);">{inspectedProcess.ppid || '1'}</strong> &nbsp;|&nbsp; User: <strong style="color:var(--color-success);">{inspectedProcess.user}</strong>
+          </div>
+        </div>
+        <span style="font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; font-family:var(--font-mono); background:rgba(34,197,94,0.15); color:var(--color-success);">
+          {inspectedProcess.state || 'Running'}
+        </span>
+      </div>
+
+      <!-- Process Hierarchy & Parent/Child Tree -->
+      <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted);">
+            Process Hierarchy
+          </div>
+          {#if inspectedChildProcesses.length > 0}
+            <button
+              type="button"
+              class="action-btn danger"
+              style="font-size:11px; display:flex; align-items:center; gap:4px; padding:4px 9px; border-radius:6px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); color:var(--color-error); cursor:pointer; font-weight:600;"
+              onclick={() => killProcessTree(inspectedProcess.pid, inspectedProcess.name)}
+              title="Terminate parent process and all {inspectedChildProcesses.length} sub-processes"
+            >
+              <Skull size={12} /> Kill Tree ({inspectedChildProcesses.length + 1})
+            </button>
+          {/if}
+        </div>
+
+        <!-- Parent Process Row -->
+        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:6px; padding:8px 12px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <CornerDownRight size={14} style="color:var(--color-text-muted);" />
+            <div>
+              <div style="font-size:10px; color:var(--color-text-muted); text-transform:uppercase;">Parent Process (PPID)</div>
+              <div style="font-size:12px; font-weight:600; color:var(--color-text-primary); font-family:var(--font-mono);">
+                {#if inspectedParentProcess}
+                  {inspectedParentProcess.name} (PID: {inspectedParentProcess.pid})
+                {:else if inspectedProcess.ppid === 0 || inspectedProcess.pid === 1}
+                  None (System Root)
+                {:else}
+                  PID: {inspectedProcess.ppid}
+                {/if}
+              </div>
+            </div>
+          </div>
+          {#if inspectedParentProcess}
+            <button
+              type="button"
+              style="font-size:11px; padding:4px 8px; border-radius:4px; background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--color-accent); cursor:pointer;"
+              onclick={() => openProcessInspector(inspectedParentProcess)}
+              title="Inspect parent process"
+            >
+              Inspect Parent
+            </button>
+          {/if}
+        </div>
+
+        <!-- Child Processes List -->
+        <div>
+          <div style="font-size:11px; font-weight:600; color:var(--color-text-secondary); margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+            <Network size={13} style="color:var(--color-accent);" />
+            Direct Child Processes ({inspectedChildProcesses.length})
+          </div>
+
+          {#if inspectedChildProcesses.length === 0}
+            <div style="font-size:12px; color:var(--color-text-muted); font-style:italic; padding:6px 0;">
+              No active sub-processes under this process.
+            </div>
+          {:else}
+            <div class="drawer-children-list" style="max-height:160px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:6px; padding:6px;">
+              {#each inspectedChildProcesses as child (child.pid)}
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-radius:4px; background:rgba(255,255,255,0.02);">
+                  <div style="display:flex; align-items:center; gap:6px; min-width:0;">
+                    <span style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-muted); min-width:36px;">{child.pid}</span>
+                    <span style="font-size:12px; font-weight:500; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{child.name}</span>
+                    <span style="font-size:10px; color:var(--color-text-muted);">({child.cpu_percent.toFixed(1)}% CPU, {child.mem_rss_mb.toFixed(0)}MB)</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:4px; flex-shrink:0;">
+                    <button
+                      type="button"
+                      style="font-size:10px; padding:2px 6px; border-radius:4px; background:transparent; border:1px solid var(--color-border); color:var(--color-text-secondary); cursor:pointer;"
+                      onclick={() => openProcessInspector(child)}
+                      title="Inspect child details"
+                    >
+                      Inspect
+                    </button>
+                    {#if child.pid > 100}
+                      <button
+                        type="button"
+                        style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.2); color:var(--color-error); cursor:pointer;"
+                        onclick={() => sendProcessSignal(child.pid, 15, child.name)}
+                        title="Soft Kill child (SIGTERM)"
+                      >
+                        Kill
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <!-- Process Signal Controls -->
+      <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
+        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:10px;">
+          Process Signals
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <button
+            type="button"
+            class="sig-btn"
+            style="background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.3); color:var(--color-warning); padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:600;"
+            onclick={() => sendProcessSignal(inspectedProcess.pid, 19, inspectedProcess.name)}
+            title="Pause process execution (SIGSTOP)"
+          >
+            <Pause size={14} /> Pause (SIGSTOP)
+          </button>
+          <button
+            type="button"
+            class="sig-btn"
+            style="background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.3); color:var(--color-success); padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:600;"
+            onclick={() => sendProcessSignal(inspectedProcess.pid, 18, inspectedProcess.name)}
+            title="Resume paused process (SIGCONT)"
+          >
+            <Play size={14} /> Resume (SIGCONT)
+          </button>
+          <button
+            type="button"
+            class="sig-btn"
+            style="background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.3); color:var(--color-error); padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:600;"
+            onclick={() => sendProcessSignal(inspectedProcess.pid, 15, inspectedProcess.name)}
+            title="Soft terminate process (SIGTERM)"
+          >
+            <Skull size={14} /> Soft Kill (SIGTERM)
+          </button>
+          <button
+            type="button"
+            class="sig-btn"
+            style="background:rgba(220,38,38,0.25); border:1px solid var(--color-error); color:#FFFFFF; padding:8px 10px; border-radius:6px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; font-size:11px; font-weight:700;"
+            onclick={() => sendProcessSignal(inspectedProcess.pid, 9, inspectedProcess.name)}
+            title="Force terminate process immediately (SIGKILL)"
+          >
+            <Skull size={14} /> Force Kill (SIGKILL)
+          </button>
+        </div>
+      </div>
+
+      <!-- Full Command Line -->
+      <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <span style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted);">
+            Full Execution Command
+          </span>
+          <button
+            type="button"
+            class="action-btn"
+            onclick={() => copyProcessCmdline(inspectedProcess.cmdline)}
+            title="Copy command"
+            style="font-size:11px; display:flex; align-items:center; gap:4px; color:var(--color-accent); background:transparent; border:none; cursor:pointer;"
+          >
+            {#if copiedCmd}
+              <Check size={13} /> Copied!
+            {:else}
+              <Copy size={13} /> Copy
+            {/if}
+          </button>
+        </div>
+        <div style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary); background:rgba(0,0,0,0.3); border:1px solid var(--color-border); border-radius:6px; padding:10px; word-break:break-all; max-height:120px; overflow-y:auto; line-height:1.4;">
+          {inspectedProcess.cmdline || inspectedProcess.name}
+        </div>
+      </div>
+
+      <!-- Metrics Grid -->
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+        <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px;">
+          <div style="font-size:10px; color:var(--color-text-muted); text-transform:uppercase;">CPU Load</div>
+          <div style="font-size:18px; font-weight:700; color:var(--color-accent); margin-top:2px;">{inspectedProcess.cpu_percent}%</div>
+        </div>
+        <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px;">
+          <div style="font-size:10px; color:var(--color-text-muted); text-transform:uppercase;">Memory (RSS)</div>
+          <div style="font-size:18px; font-weight:700; color:var(--color-warning); margin-top:2px;">{inspectedProcess.mem_rss_mb} MB ({inspectedProcess.mem_percent}%)</div>
+        </div>
+        <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px;">
+          <div style="font-size:10px; color:var(--color-text-muted); text-transform:uppercase;">Active Threads</div>
+          <div style="font-size:16px; font-weight:600; color:var(--color-text-primary); margin-top:2px;">{inspectedProcess.threads || 1}</div>
+        </div>
+        <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px;">
+          <div style="font-size:10px; color:var(--color-text-muted); text-transform:uppercase;">Owner User</div>
+          <div style="font-size:16px; font-weight:600; color:var(--color-success); margin-top:2px;">{inspectedProcess.user}</div>
+        </div>
+      </div>
+
     </div>
   {/if}
 </SideDrawer>
@@ -1149,6 +1555,105 @@
   .search-box input:focus { border-color: var(--color-accent); }
   .toolbar-stats { font-size: 12px; color: var(--color-text-muted); }
 
+  .toolbar-tree-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .toolbar-tree-btn:hover {
+    background: rgba(59, 130, 246, 0.12);
+    color: var(--color-accent);
+    border-color: rgba(59, 130, 246, 0.4);
+  }
+  :global(html.light-mode) .toolbar-tree-btn {
+    background: #FFFFFF;
+    border-color: #CBD5E1;
+    color: #475569;
+  }
+  :global(html.light-mode) .toolbar-tree-btn:hover {
+    background: #EFF6FF;
+    border-color: #93C5FD;
+    color: #2563EB;
+  }
+
+  .tree-node-trigger {
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 2px 6px 2px 2px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+    text-align: left;
+    outline: none;
+  }
+  .tree-node-trigger:hover {
+    background: rgba(59, 130, 246, 0.12);
+  }
+  :global(html.light-mode) .tree-node-trigger:hover {
+    background: rgba(37, 99, 235, 0.08);
+  }
+  .tree-node-trigger:hover .parent-proc-name {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .tree-chevron-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
+  }
+  .tree-node-trigger:hover .tree-chevron-icon {
+    color: var(--color-accent);
+  }
+  .tree-chevron-icon.is-expanded {
+    transform: rotate(90deg);
+  }
+  .tree-child-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+  .tree-node-trigger:hover .tree-child-badge {
+    background: rgba(59, 130, 246, 0.2);
+    border-color: rgba(59, 130, 246, 0.4);
+    color: var(--color-accent);
+  }
+  :global(html.light-mode) .tree-child-badge {
+    background: #E2E8F0;
+    color: #475569;
+    border-color: #CBD5E1;
+  }
+  .tree-branch-icon {
+    color: var(--color-text-muted);
+    opacity: 0.4;
+    margin-right: 2px;
+    flex-shrink: 0;
+  }
+
+  .proc-row:hover {
+    background: rgba(255, 255, 255, 0.04) !important;
+  }
+  :global(html.light-mode) .proc-row:hover {
+    background: #F1F5F9 !important;
+  }
+
   :global(html.light-mode) .table-toolbar {
     background: #F1F5F9;
     border-bottom: 1px solid #E2E8F0;
@@ -1162,9 +1667,29 @@
     color: #94A3B8;
   }
 
-  .table-scroll {
+  :global(.process-table-wrap) {
     flex: 1;
-    overflow-y: auto;
+    min-height: 0;
+    overflow-y: auto !important;
+  }
+
+  :global(.process-table-wrap table thead) {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  :global(.process-table-wrap table thead th) {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 20 !important;
+    background: var(--color-bg-card, #0B1726) !important;
+  }
+
+  :global(html.light-mode .process-table-wrap table thead th) {
+    background: #EEF0F4 !important;
+    color: #334155 !important;
+    border-bottom: 1px solid #CBD5E1 !important;
   }
   .is-root td { opacity: 0.8; }
   .is-kernel td { opacity: 0.5; }

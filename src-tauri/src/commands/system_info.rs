@@ -418,6 +418,7 @@ pub async fn get_disk_usage() -> Result<Vec<DiskMount>, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessEntry {
     pub pid: u32,
+    pub ppid: u32,
     pub name: String,
     pub cmdline: String,
     pub cpu_percent: f64,
@@ -447,7 +448,7 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
 
     // Snapshot all proc utime+stime
     let proc_dir = fs::read_dir("/proc").map_err(|e| e.to_string())?;
-    let mut snapshot1: Vec<(u32, u64, u64, String, String, String, u32, u64)> = Vec::new();
+    let mut snapshot1: Vec<(u32, u32, u64, u64, String, String, String, u32, u64)> = Vec::new();
 
     for entry in proc_dir.flatten() {
         let name = entry.file_name();
@@ -462,6 +463,7 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
         // Extract fields from /proc/pid/stat
         let proc_name = parts[1].trim_matches(|c| c == '(' || c == ')').to_string();
         let state = parts[2].to_string();
+        let ppid: u32 = parts[3].parse().unwrap_or(0);
         let utime: u64 = parts[13].parse().unwrap_or(0);
         let stime: u64 = parts[14].parse().unwrap_or(0);
         let threads: u32 = parts[19].parse().unwrap_or(1);
@@ -482,7 +484,7 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
 
         let user = uid_to_user(uid);
 
-        snapshot1.push((pid, utime + stime, rss_kb, proc_name, state, user, threads, uid as u64));
+        snapshot1.push((pid, ppid, utime + stime, rss_kb, proc_name, state, user, threads, uid as u64));
     }
 
     // Wait 300ms then re-sample for CPU %
@@ -495,7 +497,7 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
         .unwrap_or(1);
     let d_total = total_jiffies_2.saturating_sub(total_jiffies_1).max(1);
 
-    let mut processes: Vec<ProcessEntry> = snapshot1.iter().filter_map(|(pid, jiffies1, rss_kb, name, state, user, threads, _uid)| {
+    let mut processes: Vec<ProcessEntry> = snapshot1.iter().filter_map(|(pid, ppid, jiffies1, rss_kb, name, state, user, threads, _uid)| {
         let stat_path = format!("/proc/{pid}/stat");
         let stat2 = fs::read_to_string(&stat_path).ok()?;
         let parts2: Vec<&str> = stat2.split_whitespace().collect();
@@ -514,11 +516,12 @@ pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
             .replace('\0', " ")
             .trim()
             .chars()
-            .take(120)
+            .take(240)
             .collect::<String>();
 
         Some(ProcessEntry {
             pid: *pid,
+            ppid: *ppid,
             name: name.clone(),
             cmdline: if cmdline.is_empty() { format!("[{name}]") } else { cmdline },
             cpu_percent: (cpu_pct * 10.0).round() / 10.0,
@@ -556,12 +559,12 @@ fn uid_to_user(uid: u32) -> String {
 /// Hard safety rules enforced in Rust (not just UI):
 /// - PID 1 (systemd/init) → ALWAYS blocked
 /// - PID ≤ 100 → ALWAYS blocked (system processes)
-/// - Only signals 15 (SIGTERM) and 9 (SIGKILL) are allowed
+/// - Only signals 15 (SIGTERM), 9 (SIGKILL), 19 (SIGSTOP), and 18 (SIGCONT) are allowed
 #[tauri::command]
 pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     // ── Guard 1: Safe signal whitelist ────────────────────────────────────
-    if signal != 15 && signal != 9 {
-        return Err(format!("Signal {signal} is not allowed. Only SIGTERM (15) and SIGKILL (9) are permitted."));
+    if signal != 15 && signal != 9 && signal != 19 && signal != 18 {
+        return Err(format!("Signal {signal} is not allowed. Allowed: SIGTERM (15), SIGKILL (9), SIGSTOP (19), SIGCONT (18)."));
     }
 
     // ── Guard 2: PID 1 is always blocked ──────────────────────────────────
@@ -582,7 +585,13 @@ pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     // ── Send signal ────────────────────────────────────────────────────────
     let result = unsafe { libc::kill(pid as i32, signal as i32) };
     if result == 0 {
-        let sig_name = if signal == 15 { "SIGTERM" } else { "SIGKILL" };
+        let sig_name = match signal {
+            15 => "SIGTERM",
+            9 => "SIGKILL",
+            19 => "SIGSTOP",
+            18 => "SIGCONT",
+            _ => "SIGNAL",
+        };
         crate::log_to_file("INFO", &format!("Sent {sig_name} to PID {pid}"));
         Ok(format!("Signal {sig_name} sent to process {pid}."))
     } else {

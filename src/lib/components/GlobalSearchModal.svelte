@@ -577,7 +577,7 @@
     color: var(--color-text-muted);
   }
 
-  .empty-icon {
+  :global(.empty-icon) {
     color: var(--color-text-muted);
     opacity: 0.5;
   }

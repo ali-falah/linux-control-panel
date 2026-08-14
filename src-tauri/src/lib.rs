@@ -5,7 +5,7 @@ pub mod commands;
 pub mod error;
 
 use commands::{
-    copr_browser::{disable_copr, enable_copr, search_copr},
+    copr_browser::{disable_copr, enable_copr, search_copr, list_system_coprs},
     cron_manager::{
         list_cron_jobs, add_cron_job, delete_cron_job,
         cron_list_timers, cron_toggle_timer,
@@ -181,6 +181,7 @@ pub fn run() {
             search_copr,
             enable_copr,
             disable_copr,
+            list_system_coprs,
             // Flatpak vs RPM
             list_flatpaks,
             list_rpms,

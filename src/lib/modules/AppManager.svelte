@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { Command } from '@tauri-apps/plugin-shell';
-  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2, AlertTriangle, CheckCircle } from '@lucide/svelte';
+  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -10,6 +10,7 @@
   import SearchBar from '../components/ui/SearchBar.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import Select from '../components/ui/Select.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
 
@@ -239,6 +240,25 @@
     // Load AppImage shortcut state
     if (app.source === 'AppImage') {
       appimageShortcutEnabled = app.package_id !== "";
+    }
+  }
+
+  async function selectDetailTab(tab: DetailTab) {
+    activeDetailTab = tab;
+    if (tab === 'dependencies' && selectedAppForDetails && dependencies.length === 0 && !loadingDependencies) {
+      if (selectedAppForDetails.source === 'RPM' || selectedAppForDetails.source === 'Flatpak') {
+        loadingDependencies = true;
+        try {
+          dependencies = await invoke<string[]>('get_app_dependencies', {
+            packageId: selectedAppForDetails.package_id || selectedAppForDetails.name.toLowerCase(),
+            source: selectedAppForDetails.source
+          });
+        } catch (e) {
+          console.error("Failed to load dependencies", e);
+        } finally {
+          loadingDependencies = false;
+        }
+      }
     }
   }
 
@@ -646,33 +666,36 @@
     <div class="panel-backdrop" onclick={closeDetails}></div>
     <div class="side-panel">
       <div class="panel-header">
-        <div class="panel-title">{selectedAppForDetails.name}</div>
+        <div class="panel-title" title={selectedAppForDetails.name}>{selectedAppForDetails.name}</div>
         <button class="panel-close-btn" onclick={closeDetails}><X size={20} /></button>
       </div>
 
       <!-- Detail Panel Tabs -->
-      <div style="display:flex; border-bottom:1px solid var(--color-border); background:var(--color-bg-surface); padding: 0 16px;">
+      <div class="panel-tabs" style="display:flex; border-bottom:1px solid var(--color-border); background:var(--color-bg-card); padding: 0 16px; position:relative; z-index:10;">
         <button 
+          type="button"
           class="panel-tab-btn" 
           class:active={activeDetailTab === 'details'} 
-          onclick={() => activeDetailTab = 'details'}
+          onclick={() => selectDetailTab('details')}
         >
           Details
         </button>
         {#if selectedAppForDetails.source === 'Flatpak'}
           <button 
+            type="button"
             class="panel-tab-btn" 
             class:active={activeDetailTab === 'permissions'} 
-            onclick={() => activeDetailTab = 'permissions'}
+            onclick={() => selectDetailTab('permissions')}
           >
             Permissions
           </button>
         {/if}
         {#if selectedAppForDetails.source !== 'AppImage'}
           <button 
+            type="button"
             class="panel-tab-btn" 
             class:active={activeDetailTab === 'dependencies'} 
-            onclick={() => activeDetailTab = 'dependencies'}
+            onclick={() => selectDetailTab('dependencies')}
           >
             Dependencies
           </button>
@@ -680,13 +703,15 @@
       </div>
       
       <div class="panel-content">
+
+        <!-- ====== DETAILS TAB ====== -->
         {#if activeDetailTab === 'details'}
           <div class="panel-section">
             <div class="detail-label">Full Package Name</div>
-            <div class="detail-value" style="font-family: var(--font-mono); color: var(--color-text-accent);">{selectedAppForDetails.package_id || 'Unknown'}</div>
+            <div class="detail-value" style="font-family: var(--font-mono); color: var(--color-text-accent); word-break: break-all;">{selectedAppForDetails.package_id || 'Unknown'}</div>
           </div>
 
-          <div style="display:flex; gap:16px; margin-bottom: 24px;">
+          <div style="display:flex; gap:16px; margin-bottom: 20px;">
             <div class="panel-section" style="margin-bottom:0; flex:1;">
               <div class="detail-label">Source</div>
               <div class="detail-value">
@@ -735,18 +760,18 @@
 
               <div class="panel-section">
                 <div class="detail-label">Description</div>
-                <div class="detail-value" style="line-height: 1.5; color: var(--color-text-secondary); white-space: pre-wrap;">{appDetails.description}</div>
+                <div class="detail-value" style="line-height: 1.5; color: var(--color-text-secondary); white-space: pre-wrap; word-break: break-word;">{appDetails.description}</div>
               </div>
 
               {#if appDetails.files && appDetails.files.length > 0}
                 <div class="panel-section">
                   <div class="detail-label">Owned Files ({appDetails.files.length})</div>
                   <div class="files-list">
-                    {#each (showMoreFiles ? appDetails.files : appDetails.files.slice(0, 20)) as file}
+                    {#each (showMoreFiles ? appDetails.files : appDetails.files.slice(0, 25)) as file}
                       <div class="file-item">{file}</div>
                     {/each}
                   </div>
-                  {#if appDetails.files.length > 20}
+                  {#if appDetails.files.length > 25}
                     <Button variant="ghost" class="btn-sm" style="width: 100%; margin-top: 8px;" onclick={() => showMoreFiles = !showMoreFiles}>
                       {showMoreFiles ? 'Show Less' : `Show All ${appDetails.files.length} Files`}
                     </Button>
@@ -754,16 +779,9 @@
                 </div>
               {/if}
             {/if}
-
-            {#if selectedAppForDetails.source !== 'AppImage'}
-              <div style="margin-top: auto; padding-top: 24px;">
-                <Button variant="outline" class="text-danger" style="width: 100%; border-color: rgba(239,68,68,0.2);" onclick={() => confirmUninstall(selectedAppForDetails!)}>
-                  <Trash2 size={16} style="margin-right:8px;" /> Uninstall Application
-                </Button>
-              </div>
-            {/if}
           {/if}
 
+        <!-- ====== PERMISSIONS TAB ====== -->
         {:else if activeDetailTab === 'permissions'}
           {#if loadingPermissions}
             <div style="display:flex; justify-content:center; padding: 48px 0;">
@@ -780,7 +798,7 @@
                 <div style="display:flex; align-items:center; justify-content:space-between;">
                   <div style="display:flex; flex-direction:column;">
                     <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Network Access</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Allow app to access internet/sockets</span>
+                    <span style="font-size:11px; color:var(--color-text-muted);">Access local network & internet</span>
                   </div>
                   <Toggle checked={flatpakPermissions.network} onchange={(e: any) => toggleFlatpakPermission('network', e.target.checked)} />
                 </div>
@@ -789,8 +807,8 @@
 
                 <div style="display:flex; align-items:center; justify-content:space-between;">
                   <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">IPC Communication</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Allow inter-process communication</span>
+                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Inter-Process Communication (IPC)</span>
+                    <span style="font-size:11px; color:var(--color-text-muted);">Share memory & signals with other processes</span>
                   </div>
                   <Toggle checked={flatpakPermissions.ipc} onchange={(e: any) => toggleFlatpakPermission('ipc', e.target.checked)} />
                 </div>
@@ -799,94 +817,59 @@
 
                 <div style="display:flex; align-items:center; justify-content:space-between;">
                   <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">GPU Graphics Acceleration</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Allow hardware rendering via DRI devices</span>
-                  </div>
-                  <Toggle checked={flatpakPermissions.gpu} onchange={(e: any) => toggleFlatpakPermission('gpu', e.target.checked)} />
-                </div>
-
-                <div style="height:1px; background:var(--color-border); opacity:0.5;"></div>
-
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                  <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Audio Server</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Access PulseAudio/Pipewire for sound</span>
-                  </div>
-                  <Toggle checked={flatpakPermissions.pulseaudio} onchange={(e: any) => toggleFlatpakPermission('pulseaudio', e.target.checked)} />
-                </div>
-              </div>
-
-              <!-- Display Server -->
-              <div style="display:flex; flex-direction:column; gap:14px; background:rgba(0,0,0,0.15); border:1px solid var(--color-border); border-radius:8px; padding:16px;">
-                <h4 style="margin:0; font-size:12px; text-transform:uppercase; color:var(--color-text-muted); font-weight:700;">Display Servers</h4>
-                
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                  <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Wayland Session</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Access modern display compositor</span>
+                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Wayland Windowing System</span>
+                    <span style="font-size:11px; color:var(--color-text-muted);">Native Wayland graphical display support</span>
                   </div>
                   <Toggle checked={flatpakPermissions.wayland} onchange={(e: any) => toggleFlatpakPermission('wayland', e.target.checked)} />
                 </div>
 
                 <div style="height:1px; background:var(--color-border); opacity:0.5;"></div>
-
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                  <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">X11 Window System</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Access legacy X11 window display</span>
-                  </div>
-                  <Toggle checked={flatpakPermissions.x11} onchange={(e: any) => toggleFlatpakPermission('x11', e.target.checked)} />
-                </div>
               </div>
-
-              <!-- Filesystem Overrides -->
-              <div style="display:flex; flex-direction:column; gap:14px; background:rgba(0,0,0,0.15); border:1px solid var(--color-border); border-radius:8px; padding:16px;">
-                <h4 style="margin:0; font-size:12px; text-transform:uppercase; color:var(--color-text-muted); font-weight:700;">Filesystem Access</h4>
-                
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                  <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Host Filesystem (`/`)</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Allow full system disk read/write</span>
-                  </div>
-                  <Toggle checked={flatpakPermissions.host_files} onchange={(e: any) => toggleFlatpakPermission('host_files', e.target.checked)} />
-                </div>
-
-                <div style="height:1px; background:var(--color-border); opacity:0.5;"></div>
-
-                <div style="display:flex; align-items:center; justify-content:space-between;">
-                  <div style="display:flex; flex-direction:column;">
-                    <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">Home Folder (`~/`)</span>
-                    <span style="font-size:11px; color:var(--color-text-muted);">Access personal user files</span>
-                  </div>
-                  <Toggle checked={flatpakPermissions.home_files} onchange={(e: any) => toggleFlatpakPermission('home_files', e.target.checked)} />
-                </div>
-              </div>
+            </div>
+          {:else}
+            <div style="text-align:center; padding:32px; color:var(--color-text-muted); font-size:13px;">
+              No permission data available for this package.
             </div>
           {/if}
 
+        <!-- ====== DEPENDENCIES TAB ====== -->
         {:else if activeDetailTab === 'dependencies'}
           {#if loadingDependencies}
             <div style="display:flex; justify-content:center; padding: 48px 0;">
               <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-text-muted)" />
             </div>
-          {:else if dependencies.length > 0}
-            <div style="display:flex; flex-direction:column; gap:12px; flex:1;">
+          {:else if dependencies && dependencies.length > 0}
+            <div style="display:flex; flex-direction:column; gap:12px;">
               <div style="font-size:12px; color:var(--color-text-muted);">
-                Below are the package runtimes, libraries, and binaries required by this application:
+                Required libraries and runtime packages ({dependencies.length}):
               </div>
-              <div class="files-list" style="max-height: calc(100vh - 200px);">
+              <div class="files-list" style="max-height:400px;">
                 {#each dependencies as dep}
-                  <div class="file-item" style="padding: 6px 12px; border-bottom:1px solid rgba(255,255,255,0.02);">{dep}</div>
+                  <div class="file-item" style="display:flex; align-items:center; gap:8px;">
+                    <Layers size={13} style="color:var(--color-accent); flex-shrink:0;" />
+                    <span>{dep}</span>
+                  </div>
                 {/each}
               </div>
             </div>
           {:else}
-            <div style="text-align:center; padding:32px; color:var(--color-text-muted); font-size:13px;">
-              No dependencies loaded or required for this package.
+            <div style="text-align:center; padding:48px 32px; color:var(--color-text-muted); font-size:13px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+              <Layers size={32} style="opacity:0.3;" />
+              <span>No dependencies found for this package.</span>
             </div>
           {/if}
         {/if}
+
       </div>
+
+      <!-- Fixed Footer Action Bar -->
+      {#if selectedAppForDetails.source !== 'AppImage'}
+        <div class="panel-footer">
+          <Button variant="outline" class="text-danger" style="width: 100%; border-color: rgba(239,68,68,0.25);" onclick={() => confirmUninstall(selectedAppForDetails!)}>
+            <Trash2 size={16} style="margin-right:8px;" /> Uninstall Application
+          </Button>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -1026,29 +1009,31 @@
 
   /* Side Panel */
   .panel-backdrop {
-    position: absolute;
+    position: fixed;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0,0,0,0.4);
-    z-index: 40;
-    backdrop-filter: blur(2px);
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 9998;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     animation: fade-in 0.2s ease-out forwards;
   }
 
   .side-panel {
-    position: absolute;
+    position: fixed;
     top: 0;
     right: 0;
     bottom: 0;
-    width: 360px;
-    background: var(--color-bg-base);
+    width: 440px;
+    max-width: 90vw;
+    background: var(--color-bg-card, var(--color-bg-base));
     border-left: 1px solid var(--color-border);
-    z-index: 50;
+    z-index: 9999;
     display: flex;
     flex-direction: column;
-    box-shadow: -8px 0 24px rgba(0,0,0,0.3);
+    box-shadow: -12px 0 36px rgba(0, 0, 0, 0.4);
     animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
 
@@ -1056,15 +1041,18 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 20px 24px;
+    padding: 16px 20px;
     border-bottom: 1px solid var(--color-border);
-    background: var(--color-bg-raised);
+    background: var(--color-bg-card, var(--color-bg-raised));
   }
 
   .panel-title {
     font-size: 16px;
-    font-weight: 600;
+    font-weight: 700;
     color: var(--color-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .panel-close-btn {
@@ -1086,13 +1074,21 @@
   .panel-content {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
   }
 
+  .panel-footer {
+    padding: 14px 20px;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-card, var(--color-bg-raised));
+    display: flex;
+    align-items: center;
+  }
+
   .panel-section {
-    margin-bottom: 24px;
+    margin-bottom: 20px;
   }
 
   .detail-label {
@@ -1110,11 +1106,11 @@
   }
 
   .files-list {
-    background: rgba(0,0,0,0.2);
+    background: var(--color-surface, rgba(0,0,0,0.2));
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 8px 0;
-    max-height: 250px;
+    max-height: 220px;
     overflow-y: auto;
   }
 
@@ -1154,6 +1150,26 @@
     background: rgba(16, 185, 129, 0.1);
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.2);
+  }
+
+  :global(html.light-mode) .side-panel {
+    background: #FFFFFF !important;
+  }
+  :global(html.light-mode) .panel-header,
+  :global(html.light-mode) .panel-footer {
+    background: #F8FAFC !important;
+    border-color: #E2E8F0 !important;
+  }
+  :global(html.light-mode) .files-list {
+    background: #F1F5F9 !important;
+    border-color: #CBD5E1 !important;
+  }
+  :global(html.light-mode) .file-item {
+    color: #334155 !important;
+  }
+  :global(html.light-mode) .file-item:hover {
+    background: #E2E8F0 !important;
+    color: #0F172A !important;
   }
 
   @keyframes fade-in {

@@ -73,9 +73,10 @@
   .drawer-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    backdrop-filter: blur(4px);
-    z-index: 100;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 9998;
   }
 
   .drawer {
@@ -85,11 +86,12 @@
     bottom: 0;
     background: var(--color-bg-drawer, var(--color-bg-card));
     border-left: 1px solid var(--color-border);
-    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.25);
-    z-index: 101;
+    box-shadow: -12px 0 36px rgba(0, 0, 0, 0.4);
+    z-index: 9999;
     display: flex;
     flex-direction: column;
     backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
   }
 
   .drawer-header {

@@ -8,7 +8,7 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { LayoutGrid, Search, Plus, Minus, Package, ExternalLink, RefreshCw } from '@lucide/svelte';
+  import { LayoutGrid, Search, Plus, Minus, Package, ExternalLink, RefreshCw, CheckCircle2 } from '@lucide/svelte';
   import { open } from '@tauri-apps/plugin-shell';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -24,11 +24,44 @@
     packages_count: number;
   }
 
+  interface SystemCoprRepo {
+    copr_name: string;
+    repo_id: string;
+    name: string;
+    enabled: boolean;
+    file_path: string;
+    baseurl: string;
+  }
+
   let query = $state('');
   let results = $state<CoprProject[]>([]);
   let loading = $state(false);
   let enablingRepo = $state<string | null>(null);
   let hasSearched = $state(false);
+
+  // System COPR tracking state
+  let systemCoprs = $state<SystemCoprRepo[]>([]);
+  let loadingSystemCoprs = $state(false);
+  let activeSubTab = $state<'search' | 'installed'>('search');
+
+  const installedMap = $derived(
+    new Map(systemCoprs.map(c => [c.copr_name.toLowerCase(), c]))
+  );
+
+  async function loadSystemCoprs() {
+    loadingSystemCoprs = true;
+    try {
+      systemCoprs = await invoke<SystemCoprRepo[]>('list_system_coprs');
+    } catch (e) {
+      console.error("Failed to list system COPRs", e);
+    } finally {
+      loadingSystemCoprs = false;
+    }
+  }
+
+  $effect(() => {
+    loadSystemCoprs();
+  });
 
   async function search() {
     if (!query.trim()) return;
@@ -58,6 +91,7 @@
           await invoke('enable_copr', { repo: repoName });
           uiStore.addToast(`Copr repo "${repoName}" enabled`, 'success');
           statusStore.setLastCommand(`dnf copr enable ${repoName}`, 0, true);
+          await loadSystemCoprs();
         } catch (e) {
           uiStore.addToast(`Failed to enable repo: ${e}`, 'error');
           statusStore.setLastCommand(`dnf copr enable ${repoName}`, 1, false);
@@ -80,6 +114,7 @@
           await invoke('disable_copr', { repo: repoName });
           uiStore.addToast(`Copr repo "${repoName}" disabled`, 'info');
           statusStore.setLastCommand(`dnf copr disable ${repoName}`, 0, true);
+          await loadSystemCoprs();
         } catch (e) {
           uiStore.addToast(`Failed to disable repo: ${e}`, 'error');
           statusStore.setLastCommand(`dnf copr disable ${repoName}`, 1, false);
@@ -90,6 +125,7 @@
       true
     );
   }
+
   interface Props {
     embedded?: boolean;
   }
@@ -101,108 +137,238 @@
     <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
   {/if}
 
-  <!-- Search Box -->
-  <div style="display:flex; gap:8px">
-    <SearchBar bind:value={query} placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming')…" style="flex:1; border: 1px solid var(--color-border-focus)" />
-    <Button variant="primary" class="" onclick={search} disabled={loading || !query.trim()}>
-      {#if loading}
-        <RefreshCw size={14} class="animate-spin-slow" /> Searching…
-      {:else}
-        <Search size={14} /> Search
-      {/if}
-    </Button>
+  <!-- Sub-Tabs Navigation -->
+  <div style="display:flex; align-items:center; justify-content:space-between; flex-shrink:0; border-bottom:1px solid var(--color-border); padding-bottom:8px; margin-bottom:4px;">
+    <div style="display:flex; gap:8px;">
+      <button 
+        type="button" 
+        class="copr-subtab-btn" 
+        class:active={activeSubTab === 'search'} 
+        onclick={() => activeSubTab = 'search'}
+      >
+        <Search size={13} /> Search COPR Repos
+      </button>
+      <button 
+        type="button" 
+        class="copr-subtab-btn" 
+        class:active={activeSubTab === 'installed'} 
+        onclick={() => activeSubTab = 'installed'}
+      >
+        <Package size={13} /> Installed on System ({systemCoprs.length})
+      </button>
+    </div>
+
+    {#if activeSubTab === 'installed'}
+      <Button variant="ghost" class="btn-sm" onclick={loadSystemCoprs} disabled={loadingSystemCoprs}>
+        <RefreshCw size={13} class={loadingSystemCoprs ? 'animate-spin-slow' : ''} /> Refresh
+      </Button>
+    {/if}
   </div>
 
-  <!-- Results -->
-  {#if loading}
-    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
-      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+  {#if activeSubTab === 'installed'}
+    <!-- INSTALLED COPRS VIEW -->
+    {#if loadingSystemCoprs}
+      <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
         <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+        <span style="font-weight:500">Checking system COPR repositories…</span>
       </div>
-      <span style="font-weight:500">Searching Copr API…</span>
-    </div>
-  {:else if hasSearched && results.length === 0}
-    <div class="empty-state" style="padding: 64px 32px;">
-      <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-        <LayoutGrid size={32} class="empty-state-icon" style="margin:0" />
+    {:else if systemCoprs.length === 0}
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <Package size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          No COPR Repositories Installed
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          Use the Search tab above to find and enable COPR packages.
+        </span>
       </div>
-      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-        No Projects Found
-      </span>
-      <span style="color:var(--color-text-muted); margin-top:8px;">
-        No Copr projects matched "{query}".
-      </span>
-    </div>
-  {:else if results.length > 0}
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px">
-      <span style="font-size:13px; color:var(--color-text-muted)">{results.length} project{results.length !== 1 ? 's' : ''} found</span>
-    </div>
-    <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:10px; padding-bottom:12px; padding-right:6px;">
-      {#each results as project (project.full_name)}
-        <div class="card animate-fade-slide copr-card">
-          <div class="copr-header">
-            <div class="copr-meta">
-              <h3 class="copr-name">{project.full_name}</h3>
-              {#if project.packages_count > 0}
-                <span class="badge badge-accent">
-                  <Package size={10} /> {project.packages_count} pkg{project.packages_count !== 1 ? 's' : ''}
-                </span>
-              {/if}
-            </div>
-            <div style="display:flex; gap:6px; flex-shrink:0">
-              <!-- Always show link to Copr project page -->
-              <Button
-                class="btn btn-sm -ghost"
-                title="View on Copr"
-                onclick={() => open(`https://copr.fedorainfracloud.org/coprs/${project.full_name}/`)}
-              >
-                <ExternalLink size={12} />
-              </Button>
+    {:else}
+      <div class="copr-results-scroll">
+        {#each systemCoprs as sysRepo (sysRepo.repo_id)}
+          <div class="card animate-fade-slide copr-card">
+            <div class="copr-header">
+              <div class="copr-meta">
+                <h3 class="copr-name">{sysRepo.copr_name}</h3>
+                {#if sysRepo.enabled}
+                  <span class="copr-active-badge">
+                    <CheckCircle2 size={12} /> Active on System
+                  </span>
+                {:else}
+                  <span class="badge badge-muted" style="font-size:11px;">
+                    ⚪ Disabled
+                  </span>
+                {/if}
+              </div>
 
-              <Button
-                class="btn btn-sm -danger"
-                onclick={() => disableRepo(project.full_name)}
-              >
-                <Minus size={12} /> Disable
-              </Button>
-              <Button
-                class="btn btn-sm -primary"
-                onclick={() => enableRepo(project.full_name)}
-              >
-                <Plus size={12} /> Enable
-              </Button>
+              <div class="copr-actions">
+                <button
+                  type="button"
+                  class="copr-btn copr-btn-link"
+                  title="View on Copr project page"
+                  onclick={() => open(`https://copr.fedorainfracloud.org/coprs/${sysRepo.copr_name}/`)}
+                >
+                  <ExternalLink size={13} />
+                </button>
+
+                {#if sysRepo.enabled}
+                  <button
+                    type="button"
+                    class="copr-btn copr-btn-disable"
+                    onclick={() => disableRepo(sysRepo.copr_name)}
+                    disabled={enablingRepo === sysRepo.copr_name}
+                  >
+                    <Minus size={13} /> Disable
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    class="copr-btn copr-btn-enable"
+                    onclick={() => enableRepo(sysRepo.copr_name)}
+                    disabled={enablingRepo === sysRepo.copr_name}
+                  >
+                    <Plus size={13} /> Enable
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            <div style="font-size:11.5px; color:var(--color-text-muted); font-family:var(--font-mono); word-break:break-all;">
+              Repo ID: {sysRepo.repo_id}
             </div>
           </div>
-
-          {#if project.description}
-            <p class="copr-desc">{project.description}</p>
-          {/if}
-
-          {#if project.chroot_repos.length > 0}
-            <div class="copr-chroots">
-              {#each project.chroot_repos.slice(0, 6) as chroot}
-                <span class="badge badge-muted">{chroot}</span>
-              {/each}
-              {#if project.chroot_repos.length > 6}
-                <span class="badge badge-muted">+{project.chroot_repos.length - 6} more</span>
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {:else}
-    <div class="empty-state" style="padding: 64px 32px;">
-      <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
-        <Search size={32} class="empty-state-icon" style="margin:0" />
+        {/each}
       </div>
-      <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-        Search Copr Repositories
-      </span>
-      <span style="color:var(--color-text-muted); margin-top:8px;">
-        Try searching for "vscode", "gaming", "llvm", "wine"…
-      </span>
+    {/if}
+
+  {:else}
+    <!-- SEARCH COPRS VIEW -->
+    <div style="display:flex; gap:8px; flex-shrink:0;">
+      <SearchBar bind:value={query} placeholder="Search Copr projects (e.g. 'vscode', 'neovim', 'gaming')…" style="flex:1; border: 1px solid var(--color-border-focus)" />
+      <Button variant="primary" class="" onclick={search} disabled={loading || !query.trim()}>
+        {#if loading}
+          <RefreshCw size={14} class="animate-spin-slow" /> Searching…
+        {:else}
+          <Search size={14} /> Search
+        {/if}
+      </Button>
     </div>
+
+    {#if loading}
+      <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+        <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+          <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+        </div>
+        <span style="font-weight:500">Searching Copr API…</span>
+      </div>
+    {:else if hasSearched && results.length === 0}
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <LayoutGrid size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          No Projects Found
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          No Copr projects matched "{query}".
+        </span>
+      </div>
+    {:else if results.length > 0}
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-shrink:0; margin-bottom:4px">
+        <span style="font-size:13px; color:var(--color-text-muted); font-weight:500;">{results.length} project{results.length !== 1 ? 's' : ''} found</span>
+      </div>
+      <div class="copr-results-scroll">
+        {#each results as project (project.full_name)}
+          {@const sysRepo = installedMap.get(project.full_name.toLowerCase())}
+          <div class="card animate-fade-slide copr-card">
+            <div class="copr-header">
+              <div class="copr-meta">
+                <h3 class="copr-name">{project.full_name}</h3>
+                {#if project.packages_count > 0}
+                  <span class="badge badge-accent">
+                    <Package size={10} /> {project.packages_count} pkg{project.packages_count !== 1 ? 's' : ''}
+                  </span>
+                {/if}
+
+                {#if sysRepo}
+                  {#if sysRepo.enabled}
+                    <span class="copr-active-badge">
+                      <CheckCircle2 size={12} /> Active on System
+                    </span>
+                  {:else}
+                    <span class="badge badge-muted" style="font-size:11px;">
+                      ⚪ Disabled
+                    </span>
+                  {/if}
+                {/if}
+              </div>
+
+              <!-- Context-Sensitive Single Action Button -->
+              <div class="copr-actions">
+                <button
+                  type="button"
+                  class="copr-btn copr-btn-link"
+                  title="View on Copr project page"
+                  onclick={() => open(`https://copr.fedorainfracloud.org/coprs/${project.full_name}/`)}
+                >
+                  <ExternalLink size={13} />
+                </button>
+
+                {#if sysRepo && sysRepo.enabled}
+                  <!-- IF ENABLED ON SYSTEM: SHOW ONLY DISABLE BUTTON -->
+                  <button
+                    type="button"
+                    class="copr-btn copr-btn-disable"
+                    onclick={() => disableRepo(project.full_name)}
+                    disabled={enablingRepo === project.full_name}
+                  >
+                    <Minus size={13} /> Disable
+                  </button>
+                {:else}
+                  <!-- IF NOT ENABLED ON SYSTEM: SHOW ONLY ENABLE BUTTON -->
+                  <button
+                    type="button"
+                    class="copr-btn copr-btn-enable"
+                    onclick={() => enableRepo(project.full_name)}
+                    disabled={enablingRepo === project.full_name}
+                  >
+                    <Plus size={13} /> Enable
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            {#if project.description}
+              <p class="copr-desc">{project.description}</p>
+            {/if}
+
+            {#if project.chroot_repos.length > 0}
+              <div class="copr-chroots">
+                {#each project.chroot_repos.slice(0, 6) as chroot}
+                  <span class="badge badge-muted">{chroot}</span>
+                {/each}
+                {#if project.chroot_repos.length > 6}
+                  <span class="badge badge-muted">+{project.chroot_repos.length - 6} more</span>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <Search size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          Search Copr Repositories
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          Try searching for "vscode", "gaming", "llvm", "wine"…
+        </span>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -210,8 +376,45 @@
   .copr-tab-content {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
     margin-top: 4px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .copr-subtab-btn {
+    padding: 6px 14px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--color-text-muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+  }
+  .copr-subtab-btn:hover {
+    color: var(--color-text-primary);
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .copr-subtab-btn.active {
+    color: var(--color-accent);
+    background: rgba(59, 130, 246, 0.12);
+  }
+
+  .copr-results-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 6px;
+    padding-bottom: 24px;
   }
 
   .copr-card {
@@ -225,7 +428,8 @@
 
   .copr-header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
+    justify-content: space-between;
     gap: 12px;
     margin-bottom: 8px;
   }
@@ -247,6 +451,24 @@
     font-family: var(--font-mono);
   }
 
+  .copr-active-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  :global(html.light-mode) .copr-active-badge {
+    background: #ECFDF5;
+    color: #059669;
+    border-color: #6EE7B7;
+  }
+
   .copr-desc {
     font-size: 13px;
     color: var(--color-text-secondary);
@@ -262,5 +484,78 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+
+  /* Action Buttons */
+  .copr-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .copr-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+    user-select: none;
+  }
+
+  .copr-btn-link {
+    background: var(--color-surface, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    padding: 6px 10px;
+  }
+  .copr-btn-link:hover {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: rgba(59, 130, 246, 0.4);
+    color: #3b82f6;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+  }
+
+  .copr-btn-disable {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.28);
+    color: #ef4444;
+  }
+  :global(html.light-mode) .copr-btn-disable {
+    background: #FEF2F2;
+    border-color: #FCA5A5;
+    color: #DC2626;
+  }
+  .copr-btn-disable:hover {
+    background: #EF4444 !important;
+    border-color: #EF4444 !important;
+    color: #FFFFFF !important;
+    transform: translateY(-1.5px);
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+  }
+
+  .copr-btn-enable {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #10b981;
+  }
+  :global(html.light-mode) .copr-btn-enable {
+    background: #ECFDF5;
+    border-color: #6EE7B7;
+    color: #059669;
+  }
+  .copr-btn-enable:hover {
+    background: #10B981 !important;
+    border-color: #10B981 !important;
+    color: #FFFFFF !important;
+    transform: translateY(-1.5px);
+    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
   }
 </style>
