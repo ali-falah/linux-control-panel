@@ -224,8 +224,8 @@ pub mod tokio {
                     cmd.arg(arg);
                 }
                 cmd.stdin(Stdio::piped());
-                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
-                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
                 let mut child = cmd.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
                     use ::tokio::io::AsyncWriteExt;
@@ -240,8 +240,8 @@ pub mod tokio {
                     cmd.current_dir(path);
                 }
                 cmd.args(&self.args);
-                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
-                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
                 cmd.output().await
             }
         }
@@ -297,4 +297,26 @@ pub mod tokio {
             }
         }
     }
+}
+
+/// Write file contents to a root-owned path safely via base64 decoding.
+/// This completely isolates the file content from sudo -S password authentication on stdin.
+pub async fn write_file_as_root(path: &str, content: &str) -> Result<(), String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    let encoded = BASE64.encode(content.as_bytes());
+    let escaped_path = path.replace('\'', "'\\''");
+    let script = format!("echo -n '{}' | base64 -d > '{}'", encoded, escaped_path);
+    
+    let mut cmd = tokio::Command::new("pkexec");
+    cmd.args(["bash", "-c", &script]);
+    
+    let output = cmd.output().await.map_err(|e| format!("Failed to execute root write: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        let out = String::from_utf8_lossy(&output.stdout).to_string();
+        let combined = if err.is_empty() { out } else { err };
+        return Err(format!("Failed to write {path}: {combined}"));
+    }
+    
+    Ok(())
 }

@@ -335,33 +335,8 @@ pub async fn write_unit_file(name: String, content: String, user_mode: Option<bo
             return Err(format!("Failed to create drop-in directory: {err}"));
         }
 
-        // Write content via pkexec tee
-        use tokio::io::AsyncWriteExt;
-        let mut child = Command::new("pkexec")
-            .args(["tee", &drop_in_file])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn pkexec tee: {e}"))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(content.as_bytes())
-                .await
-                .map_err(|e| format!("Failed to write to stdin: {e}"))?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            log_to_file("ERROR", &format!("write_unit_file {name} failed: {err}"));
-            return Err(format!("Failed to write unit file: {err}"));
-        }
+        // Write content safely as root
+        crate::utils::privilege::write_file_as_root(&drop_in_file, &content).await?;
 
         // Reload systemd daemon
         let _ = Command::new("pkexec")

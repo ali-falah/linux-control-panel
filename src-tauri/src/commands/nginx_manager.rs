@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::io::AsyncWriteExt;
 use crate::utils::privilege::tokio::Command;
-
 use crate::log_to_file;
 
 // ─── Data Structures ──────────────────────────────────────────────────────────
@@ -159,34 +157,9 @@ async fn backup_file(original_path: &str) -> Result<String, String> {
     Ok(backup_path)
 }
 
-/// Write content to a path via pkexec tee
+/// Write content to a path safely as root
 async fn pkexec_write(path: &str, content: &str) -> Result<(), String> {
-    let mut child = Command::new("pkexec")
-        .args(["tee", path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec tee: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(content.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(format!("pkexec tee failed: {err}"));
-    }
-
-    Ok(())
+    crate::utils::privilege::write_file_as_root(path, content).await
 }
 
 // ─── Commands: Install Check ───────────────────────────────────────────────────

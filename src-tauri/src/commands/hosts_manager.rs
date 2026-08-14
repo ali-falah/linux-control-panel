@@ -1,7 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use crate::utils::privilege::tokio::Command;
-
 use crate::log_to_file;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,37 +110,12 @@ fn looks_like_ip(s: &str) -> bool {
     s.contains(':')
 }
 
-/// Serialize entries back to /etc/hosts format and write via pkexec tee
+/// Serialize entries back to /etc/hosts format and write safely as root
 #[tauri::command]
 pub async fn write_hosts(entries: Vec<HostEntry>) -> Result<(), String> {
     let content = serialize_hosts(&entries);
 
-    // Write via pkexec tee to /etc/hosts
-    let mut child = Command::new("pkexec")
-        .args(["tee", "/etc/hosts"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec tee: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(content.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("Failed to wait for pkexec: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        log_to_file("ERROR", &format!("write_hosts failed: {err}"));
-        return Err(format!("Failed to write /etc/hosts: {err}"));
-    }
+    crate::utils::privilege::write_file_as_root("/etc/hosts", &content).await?;
 
     log_to_file("INFO", "Wrote /etc/hosts");
     Ok(())

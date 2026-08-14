@@ -100,9 +100,22 @@
   $effect(() => {
     checkSudoStatus();
     loadInterfaces();
+
+    const handleReqRoot = () => {
+      if (!hasRoot) {
+        sudoPassword = '';
+        sudoError = '';
+        showRootModal = true;
+      }
+    };
+    window.addEventListener('request-root-auth', handleReqRoot);
+
     // Refresh every 30 seconds
     const interval = setInterval(loadInterfaces, 30_000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('request-root-auth', handleReqRoot);
+    };
   });
 </script>
 

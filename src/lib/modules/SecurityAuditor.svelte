@@ -1100,10 +1100,95 @@
           {/each}
 
           {#if filteredFindings.length === 0}
-            <div class="empty-state">
-              <ShieldCheck size={40} color="var(--color-success)" />
-              <div>No issues in this category</div>
-            </div>
+            {#if activeCategory === 'Runtime Threats'}
+              <div style="display:flex; flex-direction:column; gap:16px; width:100%; box-sizing:border-box; padding:4px 0;">
+                <!-- Status Banner -->
+                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:12px; padding:20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px;">
+                  <div style="display:flex; align-items:center; gap:14px;">
+                    <div style="width:44px; height:44px; border-radius:50%; background:rgba(34,197,94,0.12); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                      <ShieldCheck size={26} color="var(--color-success)" />
+                    </div>
+                    <div>
+                      <div style="font-size:15px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
+                        Zero Active Runtime Threats Detected
+                        <span style="font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; background:rgba(34,197,94,0.15); color:var(--color-success); font-family:var(--font-mono);">100% HEALTHY</span>
+                      </div>
+                      <div style="font-size:12px; color:var(--color-text-muted); margin-top:2px;">
+                        The continuous threat engine evaluated authentication logs and kernel audit activity with 0 security breaches or anomalies found.
+                      </div>
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    style="font-size:11px;"
+                    onclick={() => {
+                      uiStore.setActiveTab('journal-logs');
+                      setTimeout(() => {
+                        window.dispatchEvent(new CustomEvent('journal-tab-select', { detail: 'threats' }));
+                      }, 100);
+                    }}
+                  >
+                    View Live Threats Log
+                  </Button>
+                </div>
+
+                <!-- Active Safeguard Monitor Grid -->
+                <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
+                  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
+                    Continuous Threat Defense Monitors (6 Active)
+                  </div>
+                  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:10px;">
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Monitors and flags repeated sudo password failures (≥ 3 attempts).</div>
+                      </div>
+                    </div>
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Tracks remote IP addresses attempting brute-force SSH logins (≥ 5 attempts).</div>
+                      </div>
+                    </div>
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Alerts immediately if <code>setenforce 0</code> or permissive mode is commanded.</div>
+                      </div>
+                    </div>
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Flags malicious firewall wiping (<code>iptables -F</code>, <code>nft flush</code>).</div>
+                      </div>
+                    </div>
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Watches unauthorized modifications to <code>/etc/passwd</code>, <code>/etc/shadow</code>, and sudoers.</div>
+                      </div>
+                    </div>
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
+                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Detects elevated commands executed outside standard sudo/pkexec accountability.</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {:else}
+              <div class="empty-state">
+                <ShieldCheck size={40} color="var(--color-success)" />
+                <div>No issues in this category</div>
+              </div>
+            {/if}
           {/if}
         </div>
       </div>

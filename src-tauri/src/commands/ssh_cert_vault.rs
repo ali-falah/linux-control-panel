@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::utils::privilege::tokio::Command as PrivCommand;
+use chrono::{DateTime, Utc, NaiveDateTime};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyItem {
     pub name: String,
     pub key_type: String,
@@ -14,7 +16,27 @@ pub struct SshKeyItem {
     pub has_private: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshClientHost {
+    pub host: String,
+    pub hostname: String,
+    pub user: String,
+    pub port: String,
+    pub identity_file: String,
+    pub proxy_jump: String,
+    pub extra_config: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownHostItem {
+    pub line_number: usize,
+    pub host: String,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizedKeyItem {
     pub line_number: usize,
     pub key_type: String,
@@ -24,7 +46,7 @@ pub struct AuthorizedKeyItem {
     pub raw: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshdHardeningStatus {
     pub permit_root_login: String,
     pub password_authentication: String,
@@ -32,9 +54,11 @@ pub struct SshdHardeningStatus {
     pub x11_forwarding: String,
     pub port: String,
     pub config_path: String,
+    pub is_evaluated: bool,
+    pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SslCertItem {
     pub name: String,
     pub subject: String,
@@ -43,11 +67,12 @@ pub struct SslCertItem {
     pub not_after: String,
     pub days_valid: i64,
     pub path: String,
+    pub san_domains: Vec<String>,
     pub is_expired: bool,
     pub is_expiring_soon: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fail2banJailInfo {
     pub jail_name: String,
     pub currently_banned: usize,
@@ -55,7 +80,7 @@ pub struct Fail2banJailInfo {
     pub banned_ips: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fail2banStatus {
     pub is_installed: bool,
     pub is_active: bool,
@@ -94,7 +119,10 @@ pub fn vault_list_ssh_keys() -> Result<Vec<SshKeyItem>, String> {
                             .args(["-lf", path.to_str().unwrap_or_default()])
                             .output();
                         match output {
-                            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                            Ok(out) => {
+                                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                if s.is_empty() { "Fingerprint unavailable".to_string() } else { s }
+                            }
                             Err(_) => "Fingerprint unavailable".to_string(),
                         }
                     } else {
@@ -193,7 +221,216 @@ pub fn vault_delete_ssh_key(name: String) -> Result<String, String> {
     }
 }
 
-// ─── 2. Authorized Keys ────────────────────────────────────────────────────────
+// ─── 2. SSH Client Config (~/.ssh/config) ──────────────────────────────────────
+
+#[tauri::command]
+pub fn vault_list_ssh_client_config() -> Result<Vec<SshClientHost>, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let config_file = Path::new(&home).join(".ssh").join("config");
+
+    if !config_file.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&config_file).unwrap_or_default();
+    let mut hosts = Vec::new();
+    let mut current_host: Option<SshClientHost> = None;
+    let mut extra_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let key = parts[0].to_lowercase();
+        if key == "host" && parts.len() >= 2 {
+            if let Some(mut prev) = current_host.take() {
+                prev.extra_config = extra_lines.join("\n");
+                hosts.push(prev);
+                extra_lines.clear();
+            }
+            current_host = Some(SshClientHost {
+                host: parts[1..].join(" "),
+                hostname: String::new(),
+                user: String::new(),
+                port: String::new(),
+                identity_file: String::new(),
+                proxy_jump: String::new(),
+                extra_config: String::new(),
+            });
+        } else if let Some(ref mut host) = current_host {
+            let val = parts[1..].join(" ");
+            match key.as_str() {
+                "hostname" => host.hostname = val,
+                "user" => host.user = val,
+                "port" => host.port = val,
+                "identityfile" => host.identity_file = val,
+                "proxyjump" => host.proxy_jump = val,
+                _ => extra_lines.push(trimmed.to_string()),
+            }
+        }
+    }
+
+    if let Some(mut last) = current_host {
+        last.extra_config = extra_lines.join("\n");
+        hosts.push(last);
+    }
+
+    Ok(hosts)
+}
+
+#[tauri::command]
+pub fn vault_save_ssh_client_config(hosts: Vec<SshClientHost>) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let ssh_dir = Path::new(&home).join(".ssh");
+    if !ssh_dir.exists() {
+        let _ = fs::create_dir_all(&ssh_dir);
+    }
+    let config_file = ssh_dir.join("config");
+
+    let mut output = String::new();
+    for h in hosts {
+        if h.host.trim().is_empty() {
+            continue;
+        }
+        output.push_str(&format!("Host {}\n", h.host.trim()));
+        if !h.hostname.trim().is_empty() {
+            output.push_str(&format!("    HostName {}\n", h.hostname.trim()));
+        }
+        if !h.user.trim().is_empty() {
+            output.push_str(&format!("    User {}\n", h.user.trim()));
+        }
+        if !h.port.trim().is_empty() {
+            output.push_str(&format!("    Port {}\n", h.port.trim()));
+        }
+        if !h.identity_file.trim().is_empty() {
+            output.push_str(&format!("    IdentityFile {}\n", h.identity_file.trim()));
+        }
+        if !h.proxy_jump.trim().is_empty() {
+            output.push_str(&format!("    ProxyJump {}\n", h.proxy_jump.trim()));
+        }
+        for extra in h.extra_config.lines() {
+            let etrim = extra.trim();
+            if !etrim.is_empty() {
+                output.push_str(&format!("    {}\n", etrim));
+            }
+        }
+        output.push('\n');
+    }
+
+    fs::write(&config_file, output).map_err(|e| format!("Failed to write ~/.ssh/config: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn vault_delete_ssh_client_host(host_name: String) -> Result<(), String> {
+    let mut current_hosts = vault_list_ssh_client_config()?;
+    current_hosts.retain(|h| h.host != host_name);
+    vault_save_ssh_client_config(current_hosts)
+}
+
+// ─── 3. Known Hosts (~/.ssh/known_hosts) ───────────────────────────────────────
+
+#[tauri::command]
+pub fn vault_list_known_hosts() -> Result<Vec<KnownHostItem>, String> {
+    let mut items = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let kh_file = Path::new(&home).join(".ssh").join("known_hosts");
+
+    if !kh_file.exists() {
+        return Ok(items);
+    }
+
+    let content = fs::read_to_string(&kh_file).unwrap_or_default();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let host_raw = parts[0];
+            let key_type = parts.get(1).copied().unwrap_or("Unknown").to_string();
+            let key_data = parts.get(2).copied().unwrap_or("").to_string();
+
+            let display_host = if host_raw.starts_with("|1|") {
+                format!("[Hashed Host #{}]", idx + 1)
+            } else {
+                host_raw.to_string()
+            };
+
+            // Calculate fingerprint if key_data available
+            let fingerprint = if !key_data.is_empty() {
+                let temp_key = format!("{} {}\n", key_type, key_data);
+                let child = Command::new("ssh-keygen")
+                    .args(["-lf", "-"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+
+                match child {
+                    Ok(mut c) => {
+                        if let Some(mut sin) = c.stdin.take() {
+                            use std::io::Write;
+                            let _ = sin.write_all(temp_key.as_bytes());
+                        }
+                        match c.wait_with_output() {
+                            Ok(o) => {
+                                let res = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                if res.is_empty() { "Available".to_string() } else { res }
+                            }
+                            Err(_) => "Available".to_string(),
+                        }
+                    }
+                    Err(_) => "Available".to_string(),
+                }
+            } else {
+                "N/A".to_string()
+            };
+
+            items.push(KnownHostItem {
+                line_number: idx + 1,
+                host: display_host,
+                key_type,
+                fingerprint,
+                raw: trimmed.to_string(),
+            });
+        }
+    }
+
+    Ok(items)
+}
+
+#[tauri::command]
+pub fn vault_remove_known_host(line_number: usize) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let kh_file = Path::new(&home).join(".ssh").join("known_hosts");
+
+    if !kh_file.exists() {
+        return Err("known_hosts file does not exist".to_string());
+    }
+
+    let content = fs::read_to_string(&kh_file).map_err(|e| e.to_string())?;
+    let new_lines: Vec<&str> = content
+        .lines()
+        .enumerate()
+        .filter(|(idx, _)| idx + 1 != line_number)
+        .map(|(_, l)| l)
+        .collect();
+
+    fs::write(&kh_file, new_lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ─── 4. Authorized Keys ────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn vault_list_authorized_keys() -> Result<Vec<AuthorizedKeyItem>, String> {
@@ -215,10 +452,16 @@ pub fn vault_list_authorized_keys() -> Result<Vec<AuthorizedKeyItem>, String> {
 
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() >= 2 {
-            let (key_type, key_data, comment, options) = if parts[0].starts_with("ssh-") || parts[0].starts_with("ecdsa-") {
+            let is_key_algo = |s: &str| -> bool {
+                s.starts_with("ssh-") || s.starts_with("ecdsa-") || s.starts_with("sk-ssh-") || s.starts_with("sk-ecdsa-")
+            };
+
+            let (key_type, key_data, comment, options) = if is_key_algo(parts[0]) {
                 (parts[0].to_string(), parts[1].to_string(), parts.get(2..).map(|c| c.join(" ")).unwrap_or_default(), String::new())
+            } else if parts.len() >= 3 && is_key_algo(parts[1]) {
+                (parts[1].to_string(), parts[2].to_string(), parts.get(3..).map(|c| c.join(" ")).unwrap_or_default(), parts[0].to_string())
             } else {
-                (parts.get(1).unwrap_or(&"").to_string(), parts.get(2).unwrap_or(&"").to_string(), parts.get(3..).map(|c| c.join(" ")).unwrap_or_default(), parts[0].to_string())
+                (parts[0].to_string(), parts.get(1).unwrap_or(&"").to_string(), String::new(), String::new())
             };
 
             items.push(AuthorizedKeyItem {
@@ -281,20 +524,92 @@ pub fn vault_remove_authorized_key(line_number: usize) -> Result<String, String>
     Ok("Authorized key removed successfully".to_string())
 }
 
-// ─── 3. SSHD Hardening Audit ───────────────────────────────────────────────────
+// ─── 5. SSHD Hardening Audit ───────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
+pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
     let config_path = "/etc/ssh/sshd_config";
     let mut status = SshdHardeningStatus {
-        permit_root_login: "yes".to_string(),
+        permit_root_login: "prohibit-password".to_string(),
         password_authentication: "yes".to_string(),
         pubkey_authentication: "yes".to_string(),
-        x11_forwarding: "yes".to_string(),
+        x11_forwarding: "no".to_string(),
         port: "22".to_string(),
         config_path: config_path.to_string(),
+        is_evaluated: false,
+        error: None,
     };
 
+    let sshd_bin = if Path::new("/usr/sbin/sshd").exists() {
+        "/usr/sbin/sshd"
+    } else if Path::new("/usr/bin/sshd").exists() {
+        "/usr/bin/sshd"
+    } else {
+        "sshd"
+    };
+
+    // 1. Try evaluating active sshd daemon config directly (sshd -T)
+    let sshd_t = PrivCommand::new("pkexec")
+        .args([sshd_bin, "-T"])
+        .output()
+        .await;
+
+    if let Ok(out) = sshd_t {
+        if out.status.success() {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            for line in txt.lines() {
+                let trimmed = line.trim();
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    match parts[0].to_lowercase().as_str() {
+                        "permitrootlogin" => status.permit_root_login = parts[1].to_string(),
+                        "passwordauthentication" => status.password_authentication = parts[1].to_string(),
+                        "pubkeyauthentication" => status.pubkey_authentication = parts[1].to_string(),
+                        "x11forwarding" => status.x11_forwarding = parts[1].to_string(),
+                        "port" => status.port = parts[1].to_string(),
+                        _ => {}
+                    }
+                }
+            }
+            status.is_evaluated = true;
+            status.error = None;
+            return Ok(status);
+        }
+    }
+
+    // 2. Fallback: Cat config file with root privileges if sshd -T had an issue
+    let cat_res = PrivCommand::new("pkexec")
+        .args(["cat", config_path])
+        .output()
+        .await;
+
+    if let Ok(out) = cat_res {
+        if out.status.success() {
+            let content = String::from_utf8_lossy(&out.stdout);
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') || trimmed.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    match parts[0].to_lowercase().as_str() {
+                        "permitrootlogin" => status.permit_root_login = parts[1].to_string(),
+                        "passwordauthentication" => status.password_authentication = parts[1].to_string(),
+                        "pubkeyauthentication" => status.pubkey_authentication = parts[1].to_string(),
+                        "x11forwarding" => status.x11_forwarding = parts[1].to_string(),
+                        "port" => status.port = parts[1].to_string(),
+                        _ => {}
+                    }
+                }
+            }
+            status.is_evaluated = true;
+            status.error = None;
+            return Ok(status);
+        }
+    }
+
+    // 3. Fallback: Direct read without root
     if let Ok(content) = fs::read_to_string(config_path) {
         for line in content.lines() {
             let trimmed = line.trim();
@@ -313,79 +628,255 @@ pub fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
                 }
             }
         }
+        status.is_evaluated = true;
+        status.error = None;
+    } else {
+        status.error = Some("Root access needed to evaluate /etc/ssh/sshd_config (0600 root:root)".to_string());
     }
 
     Ok(status)
 }
 
-// ─── 4. SSL Certificates ───────────────────────────────────────────────────────
+// ─── 6. SSL Certificates & Remote Live Tester ──────────────────────────────────
+
+fn parse_openssl_date(date_str: &str) -> (i64, bool, bool) {
+    let trimmed = date_str.trim();
+    if trimmed.is_empty() {
+        return (0, false, false);
+    }
+
+    // Parse formats like "Oct 12 18:05:55 2026 GMT"
+    let clean = trimmed.replace(" GMT", " +0000").replace(" UTC", " +0000");
+    if let Ok(dt) = DateTime::parse_from_str(&clean, "%b %e %H:%M:%S %Y %z")
+        .or_else(|_| DateTime::parse_from_str(&clean, "%b %d %H:%M:%S %Y %z"))
+        .or_else(|_| DateTime::parse_from_rfc3339(trimmed))
+    {
+        let now = Utc::now();
+        let expiry = dt.with_timezone(&Utc);
+        let diff_secs = (expiry - now).num_seconds();
+        let days = diff_secs / 86400;
+        let is_expired = diff_secs <= 0;
+        let is_expiring_soon = !is_expired && days <= 30;
+        return (days, is_expired, is_expiring_soon);
+    }
+
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(trimmed, "%b %e %H:%M:%S %Y")
+        .or_else(|_| NaiveDateTime::parse_from_str(trimmed, "%b %d %H:%M:%S %Y"))
+    {
+        let now = Utc::now().naive_utc();
+        let diff_secs = (ndt - now).num_seconds();
+        let days = diff_secs / 86400;
+        let is_expired = diff_secs <= 0;
+        let is_expiring_soon = !is_expired && days <= 30;
+        return (days, is_expired, is_expiring_soon);
+    }
+
+    (0, false, false)
+}
+
+fn parse_ssl_cert_file(file_path: &Path) -> Option<SslCertItem> {
+    let path_str = file_path.to_str()?;
+    let out = Command::new("openssl")
+        .args(["x509", "-in", path_str, "-noout", "-subject", "-issuer", "-dates", "-ext", "subjectAltName"])
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let mut subject = String::new();
+    let mut issuer = String::new();
+    let mut not_after = String::new();
+    let mut not_before = String::new();
+    let mut san_domains = Vec::new();
+
+    for l in txt.lines() {
+        let trimmed = l.trim();
+        if trimmed.starts_with("subject=") {
+            subject = trimmed.trim_start_matches("subject=").trim().to_string();
+        } else if trimmed.starts_with("issuer=") {
+            issuer = trimmed.trim_start_matches("issuer=").trim().to_string();
+        } else if trimmed.starts_with("notAfter=") {
+            not_after = trimmed.trim_start_matches("notAfter=").trim().to_string();
+        } else if trimmed.starts_with("notBefore=") {
+            not_before = trimmed.trim_start_matches("notBefore=").trim().to_string();
+        } else if trimmed.starts_with("DNS:") || trimmed.contains("DNS:") {
+            for part in trimmed.split(',') {
+                let p = part.trim();
+                if let Some(dns) = p.strip_prefix("DNS:") {
+                    san_domains.push(dns.trim().to_string());
+                }
+            }
+        }
+    }
+
+    if subject.is_empty() && not_after.is_empty() {
+        return None;
+    }
+
+    let (days_valid, is_expired, is_expiring_soon) = parse_openssl_date(&not_after);
+    let name = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+    Some(SslCertItem {
+        name,
+        subject,
+        issuer,
+        not_before,
+        not_after,
+        days_valid,
+        path: path_str.to_string(),
+        san_domains,
+        is_expired,
+        is_expiring_soon,
+    })
+}
+
+fn collect_ssl_files_recursive(dir: &Path, max_depth: usize, results: &mut Vec<PathBuf>) {
+    if max_depth == 0 || !dir.exists() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_ssl_files_recursive(&p, max_depth - 1, results);
+            } else if p.is_file() {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.ends_with(".crt") || name.ends_with(".pem") || name.ends_with(".cer") {
+                    // Ignore CA symlinks/hash files e.g. 002c0b4f.0
+                    results.push(p);
+                }
+            }
+        }
+    }
+}
 
 #[tauri::command]
 pub fn vault_list_ssl_certs() -> Result<Vec<SslCertItem>, String> {
     let mut certs = Vec::new();
-    let search_paths = [
-        "/etc/pki/tls/certs",
-        "/etc/ssl/certs",
-        "/etc/nginx/ssl",
-        "/etc/letsencrypt/live",
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut search_paths = vec![
+        PathBuf::from("/etc/letsencrypt/live"),
+        PathBuf::from("/etc/nginx/ssl"),
+        PathBuf::from("/etc/ssl/certs"),
+        PathBuf::from("/etc/pki/tls/certs"),
     ];
 
-    for search_dir in search_paths {
-        let path = Path::new(search_dir);
-        if path.exists() && path.is_dir() {
-            if let Ok(entries) = fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let file_path = entry.path();
-                    if file_path.is_file() {
-                        let name = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        if name.ends_with(".crt") || name.ends_with(".pem") || name.ends_with(".cer") {
-                            // Parse cert using openssl x509
-                            let output = Command::new("openssl")
-                                .args(["x509", "-in", file_path.to_str().unwrap_or_default(), "-noout", "-subject", "-issuer", "-dates"])
-                                .output();
+    if !home.is_empty() {
+        search_paths.push(Path::new(&home).join(".local/share/mkcert"));
+    }
 
-                            if let Ok(out) = output {
-                                if out.status.success() {
-                                    let txt = String::from_utf8_lossy(&out.stdout);
-                                    let mut subject = String::new();
-                                    let mut issuer = String::new();
-                                    let mut not_after = String::new();
-                                    let mut not_before = String::new();
+    let mut found_files = Vec::new();
+    for sp in &search_paths {
+        collect_ssl_files_recursive(sp, 3, &mut found_files);
+    }
 
-                                    for l in txt.lines() {
-                                        if l.starts_with("subject=") { subject = l.trim_start_matches("subject=").to_string(); }
-                                        else if l.starts_with("issuer=") { issuer = l.trim_start_matches("issuer=").to_string(); }
-                                        else if l.starts_with("notAfter=") { not_after = l.trim_start_matches("notAfter=").to_string(); }
-                                        else if l.starts_with("notBefore=") { not_before = l.trim_start_matches("notBefore=").to_string(); }
-                                    }
-
-                                    certs.push(SslCertItem {
-                                        name,
-                                        subject,
-                                        issuer,
-                                        not_before,
-                                        not_after,
-                                        days_valid: 90, // Calculated dynamically
-                                        path: file_path.to_string_lossy().to_string(),
-                                        is_expired: false,
-                                        is_expiring_soon: false,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    for file_path in found_files {
+        // Skip ca-certificates bundles
+        let fname = file_path.to_string_lossy();
+        if fname.contains("ca-bundle") || fname.contains("ca-certificates") {
+            continue;
+        }
+        if let Some(cert) = parse_ssl_cert_file(&file_path) {
+            certs.push(cert);
         }
     }
 
     Ok(certs)
 }
 
-// ─── 5. Fail2ban Threat Defense ────────────────────────────────────────────────
+#[tauri::command]
+pub fn vault_test_remote_ssl(host: String, port: u16) -> Result<SslCertItem, String> {
+    let clean_host = host.trim().to_string();
+    if clean_host.is_empty() {
+        return Err("Host cannot be empty".to_string());
+    }
+
+    let target = format!("{}:{}", clean_host, port);
+    let s_client_out = Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            &target,
+            "-servername",
+            &clean_host,
+            "-showcerts",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to run openssl s_client: {e}"))?;
+
+    let full_txt = String::from_utf8_lossy(&s_client_out.stdout);
+    if !full_txt.contains("BEGIN CERTIFICATE") {
+        let err_txt = String::from_utf8_lossy(&s_client_out.stderr);
+        return Err(format!("Could not retrieve TLS certificate from {target}: {err_txt}"));
+    }
+
+    // Pipe certificates to openssl x509
+    let mut x509_cmd = Command::new("openssl")
+        .args(["x509", "-noout", "-subject", "-issuer", "-dates", "-ext", "subjectAltName"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn openssl x509: {e}"))?;
+
+    if let Some(mut stdin) = x509_cmd.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(full_txt.as_bytes());
+    }
+
+    let x509_out = x509_cmd.wait_with_output().map_err(|e| e.to_string())?;
+    let parsed_txt = String::from_utf8_lossy(&x509_out.stdout);
+
+    let mut subject = String::new();
+    let mut issuer = String::new();
+    let mut not_after = String::new();
+    let mut not_before = String::new();
+    let mut san_domains = Vec::new();
+
+    for l in parsed_txt.lines() {
+        let trimmed = l.trim();
+        if trimmed.starts_with("subject=") {
+            subject = trimmed.trim_start_matches("subject=").trim().to_string();
+        } else if trimmed.starts_with("issuer=") {
+            issuer = trimmed.trim_start_matches("issuer=").trim().to_string();
+        } else if trimmed.starts_with("notAfter=") {
+            not_after = trimmed.trim_start_matches("notAfter=").trim().to_string();
+        } else if trimmed.starts_with("notBefore=") {
+            not_before = trimmed.trim_start_matches("notBefore=").trim().to_string();
+        } else if trimmed.starts_with("DNS:") || trimmed.contains("DNS:") {
+            for part in trimmed.split(',') {
+                let p = part.trim();
+                if let Some(dns) = p.strip_prefix("DNS:") {
+                    san_domains.push(dns.trim().to_string());
+                }
+            }
+        }
+    }
+
+    let (days_valid, is_expired, is_expiring_soon) = parse_openssl_date(&not_after);
+
+    Ok(SslCertItem {
+        name: format!("{}:{}", clean_host, port),
+        subject,
+        issuer,
+        not_before,
+        not_after,
+        days_valid,
+        path: format!("tls://{}:{}", clean_host, port),
+        san_domains,
+        is_expired,
+        is_expiring_soon,
+    })
+}
+
+// ─── 7. Fail2ban Threat Defense ────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn vault_get_fail2ban_status() -> Result<Fail2banStatus, String> {
+pub async fn vault_get_fail2ban_status() -> Result<Fail2banStatus, String> {
     let check_inst = Command::new("which").arg("fail2ban-client").output();
     let is_installed = check_inst.map(|o| o.status.success()).unwrap_or(false);
 
@@ -398,7 +889,11 @@ pub fn vault_get_fail2ban_status() -> Result<Fail2banStatus, String> {
         });
     }
 
-    let status_out = Command::new("fail2ban-client").arg("status").output();
+    let status_out = PrivCommand::new("pkexec")
+        .args(["fail2ban-client", "status"])
+        .output()
+        .await;
+
     if let Ok(out) = status_out {
         if out.status.success() {
             let txt = String::from_utf8_lossy(&out.stdout);
@@ -416,7 +911,10 @@ pub fn vault_get_fail2ban_status() -> Result<Fail2banStatus, String> {
             let mut total_banned = 0;
 
             for j in jail_names {
-                let j_out = Command::new("fail2ban-client").args(["status", &j]).output();
+                let j_out = PrivCommand::new("pkexec")
+                    .args(["fail2ban-client", "status", &j])
+                    .output()
+                    .await;
                 let mut banned_ips = Vec::new();
                 let mut cur_banned = 0;
 
@@ -463,10 +961,11 @@ pub fn vault_get_fail2ban_status() -> Result<Fail2banStatus, String> {
 }
 
 #[tauri::command]
-pub fn vault_unban_ip(jail: String, ip: String) -> Result<String, String> {
-    let output = Command::new("fail2ban-client")
-        .args(["set", &jail, "unbanip", &ip])
+pub async fn vault_unban_ip(jail: String, ip: String) -> Result<String, String> {
+    let output = PrivCommand::new("pkexec")
+        .args(["fail2ban-client", "set", &jail, "unbanip", &ip])
         .output()
+        .await
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
@@ -474,4 +973,40 @@ pub fn vault_unban_ip(jail: String, ip: String) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
+}
+
+#[tauri::command]
+pub async fn vault_ban_ip(jail: String, ip: String) -> Result<String, String> {
+    let output = PrivCommand::new("pkexec")
+        .args(["fail2ban-client", "set", &jail, "banip", &ip])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(format!("IP {} banned in jail {}", ip, jail))
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn vault_manage_fail2ban_service(action: String) -> Result<(), String> {
+    let valid_actions = ["start", "restart", "stop", "enable", "disable"];
+    if !valid_actions.contains(&action.as_str()) {
+        return Err(format!("Invalid systemd action: {action}"));
+    }
+
+    let out = PrivCommand::new("pkexec")
+        .args(["systemctl", &action, "fail2ban"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run systemctl {action} fail2ban: {e}"))?;
+
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(format!("Failed to {action} fail2ban service: {err}"));
+    }
+
+    Ok(())
 }

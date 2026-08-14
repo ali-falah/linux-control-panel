@@ -184,29 +184,10 @@ async fn backup_file(path: &str) -> Result<String, String> {
 
 async fn write_file_content(path: &str, content: &str) -> Result<(), String> {
     if is_system_file(Path::new(path)) {
-        // Use pkexec tee to write as root
-        let mut child = Command::new("pkexec")
-            .args(["tee", path])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn pkexec: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(content.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
-        }
+        crate::utils::privilege::write_file_as_root(path, content).await
     } else {
-        std::fs::write(path, content).map_err(|e| format!("Failed to write file: {e}"))?;
+        std::fs::write(path, content).map_err(|e| format!("Failed to write file: {e}"))
     }
-    Ok(())
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────

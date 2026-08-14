@@ -296,27 +296,7 @@ pub async fn save_repo_details(
 
     let final_content = new_lines.join("\n") + "\n";
 
-    let mut child = Command::new("pkexec")
-        .args(["tee", &file_path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to run pkexec tee: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(final_content.as_bytes()).await
-            .map_err(|e| format!("Failed to write: {e}"))?;
-    }
-
-    let out = child.wait_with_output().await
-        .map_err(|e| format!("Failed to wait: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("Failed to write repo file: {err}"));
-    }
+    crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
 
     Ok(())
 }

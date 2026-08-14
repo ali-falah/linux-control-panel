@@ -412,21 +412,95 @@ systemctl enable --now auditd || systemctl restart auditd || true
 }
 
 #[tauri::command]
+pub fn decode_hex_audit_string(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Check if entire string is valid even-length hex digits
+    if s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut bytes = Vec::with_capacity(s.len() / 2);
+        let mut i = 0;
+        let s_bytes = s.as_bytes();
+        let mut is_valid_ascii = true;
+        while i < s.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&s_bytes[i..i+2]).unwrap_or(""), 16) {
+                // Must be printable ASCII or space / newline / tab
+                if (b >= 32 && b <= 126) || b == b'\t' || b == b'\n' || b == b'\r' {
+                    bytes.push(b);
+                } else if b == 0 {
+                    bytes.push(b' ');
+                } else {
+                    is_valid_ascii = false;
+                    break;
+                }
+            } else {
+                is_valid_ascii = false;
+                break;
+            }
+            i += 2;
+        }
+        if is_valid_ascii && !bytes.is_empty() {
+            if let Ok(decoded) = String::from_utf8(bytes) {
+                return decoded;
+            }
+        }
+    }
+    s.to_string()
+}
+
+fn extract_audit_arg(line: &str, i: usize) -> Option<String> {
+    let key_quoted = format!("a{}=\"", i);
+    if let Some(val) = extract_between(line, &key_quoted, "\"") {
+        return Some(val);
+    }
+    let key_unquoted = format!("a{}=", i);
+    if let Some(start_idx) = line.find(&key_unquoted) {
+        let rest = &line[start_idx + key_unquoted.len()..];
+        let token = rest.split_whitespace().next().unwrap_or("");
+        if !token.is_empty() {
+            return Some(decode_hex_audit_string(token.trim_matches('"')));
+        }
+    }
+    None
+}
+
+#[tauri::command]
 pub async fn get_command_audit_logs(
     since_days: Option<u32>,
     custom_start: Option<String>,
     custom_end: Option<String>
 ) -> Result<Vec<AuditLogEvent>, String> {
-    let script = "cat /var/log/audit/audit.log 2>/dev/null | tail -n 1000";
+    let script = "cat /var/log/audit/audit.log 2>/dev/null | tail -n 1500";
     let output = Command::new("pkexec")
         .args(["bash", "-c", script])
         .stderr(Stdio::piped())
         .output()
         .await;
 
-    let out = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return Ok(Vec::new()), // Silence errors/empty if not root or missing file
+    let stdout_str = match output {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+            String::from_utf8_lossy(&o.stdout).to_string()
+        }
+        _ => {
+            // Fall back to journalctl audit transport
+            let mut jcmd = ::tokio::process::Command::new("journalctl");
+            jcmd.args(["-n", "1500", "--no-pager", "_TRANSPORT=audit"]);
+            if let Some(days) = since_days {
+                jcmd.arg("--since").arg(format!("{} days ago", days));
+            } else {
+                if let Some(ref start) = custom_start {
+                    jcmd.arg("--since").arg(start);
+                }
+                if let Some(ref end) = custom_end {
+                    jcmd.arg("--until").arg(end);
+                }
+            }
+            match jcmd.output().await {
+                Ok(jo) if jo.status.success() => String::from_utf8_lossy(&jo.stdout).to_string(),
+                _ => String::new(),
+            }
+        }
     };
 
     let cutoff_start = if let Some(days) = since_days {
@@ -451,7 +525,6 @@ pub async fn get_command_audit_logs(
             .map(|dt| dt.and_utc().timestamp())
     });
 
-    let stdout_str = String::from_utf8_lossy(&out.stdout);
     let mut msg_map: HashMap<String, (String, String, String, String, String, String)> = HashMap::new();
     // msg_id -> (timestamp, uid, auid, exe/key, cwd, result)
 
@@ -486,7 +559,29 @@ pub async fn get_command_audit_logs(
             (ts, "unknown".to_string(), "unset".to_string(), "".to_string(), "/".to_string(), "Success".to_string())
         });
 
-        if line.contains("type=SYSCALL") {
+        if line.contains("type=USER_CMD") || line.contains("AUDIT1123") {
+            if let Some(cmd_val) = extract_between(line, "cmd=\"", "\"") {
+                entry.3 = decode_hex_audit_string(&cmd_val);
+            } else if let Some(cmd_idx) = line.find("cmd=") {
+                let rest = &line[cmd_idx + 4..];
+                let token = rest.split_whitespace().next().unwrap_or("");
+                if !token.is_empty() {
+                    entry.3 = decode_hex_audit_string(token.trim_matches('\'').trim_matches('"'));
+                }
+            }
+            if let Some(cwd_val) = extract_between(line, "cwd=\"", "\"") {
+                entry.4 = cwd_val;
+            }
+            if let Some(uid_val) = extract_between(line, "uid=", " ") {
+                entry.1 = resolve_uid(&uid_val);
+            }
+            if let Some(auid_val) = extract_between(line, "auid=", " ") {
+                entry.2 = auid_val;
+            }
+            if line.contains("res=failed") || line.contains("res=0") {
+                entry.5 = "Failure".to_string();
+            }
+        } else if line.contains("type=SYSCALL") {
             if let Some(uid) = extract_between(line, "uid=", " ") {
                 entry.1 = resolve_uid(&uid);
             }
@@ -509,9 +604,10 @@ pub async fn get_command_audit_logs(
         } else if line.contains("type=EXECVE") {
             let mut args = Vec::new();
             let mut i = 0;
-            while let Some(arg) = extract_between(line, &format!("a{}=\"", i), "\"") {
+            while let Some(arg) = extract_audit_arg(line, i) {
                 args.push(arg);
                 i += 1;
+                if i > 50 { break; }
             }
             if !args.is_empty() {
                 entry.3 = args.join(" ");
@@ -528,7 +624,7 @@ pub async fn get_command_audit_logs(
         .map(|(_, (ts, uid, auid, cmd, cwd, res))| AuditLogEvent {
             timestamp: ts,
             user: uid,
-            command: if cmd.is_empty() { "file_access".to_string() } else { cmd },
+            command: if cmd.is_empty() { "system_access".to_string() } else { cmd },
             cwd,
             result: res,
             key: "".to_string(),
@@ -537,7 +633,7 @@ pub async fn get_command_audit_logs(
         .collect();
 
     events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    events.truncate(200);
+    events.truncate(300);
 
     Ok(events)
 }
@@ -574,7 +670,28 @@ pub async fn get_runtime_threats(
         }
     }
 
-    // 2. setenforce 0 runs
+    // 2. SSH Authentication Brute-Force (5+ failures from single IP)
+    let mut ip_ssh_fails: HashMap<String, u32> = HashMap::new();
+    for ev in &auth_events {
+        if (ev.event_type.contains("SSH") || ev.event_type.contains("sshd")) && ev.result == "Failure" && !ev.source_ip.is_empty() && ev.source_ip != "-" {
+            let count = ip_ssh_fails.entry(ev.source_ip.clone()).or_insert(0);
+            *count += 1;
+        }
+    }
+    for (ip, count) in ip_ssh_fails {
+        if count >= 5 {
+            threats.push(RuntimeThreat {
+                id: format!("threat_ssh_bruteforce_{}", ip.replace('.', "_")),
+                timestamp: "Recent".to_string(),
+                title: "SSH Login Brute-Force Detected".to_string(),
+                description: format!("Remote IP address '{}' recorded {} failed SSH authentication attempts.", ip, count),
+                severity: "Critical".to_string(),
+                category: "Runtime Threats".to_string(),
+            });
+        }
+    }
+
+    // 3. SELinux Enforcement Disabling
     for ev in &audit_events {
         if ev.command.contains("setenforce 0") || ev.command.contains("setenforce Permissive") {
             threats.push(RuntimeThreat {
@@ -587,7 +704,7 @@ pub async fn get_runtime_threats(
             });
         }
 
-        // 3. iptables -F runs
+        // 4. Firewall Rules Flushed
         if ev.command.contains("iptables -F") || ev.command.contains("iptables --flush") || ev.command.contains("nft flush ruleset") {
             threats.push(RuntimeThreat {
                 id: format!("threat_iptables_flush_{}", ev.timestamp),
@@ -599,7 +716,7 @@ pub async fn get_runtime_threats(
             });
         }
 
-        // 4. sysctl writes to hardening config
+        // 5. Kernel Sysctl Configuration Modification
         if ev.command.contains("sysctl_tamper") || (ev.command.contains("/etc/sysctl.d/") && ev.command.contains("sysctl")) {
             threats.push(RuntimeThreat {
                 id: format!("threat_sysctl_tamper_{}", ev.timestamp),
@@ -611,10 +728,24 @@ pub async fn get_runtime_threats(
             });
         }
 
-        // 5. Root commands bypassing sudo
+        // 6. Identity or Sudoers File Tampering
+        if ev.command.contains("[identity]") || ev.command.contains("[sudoers_change]") || ev.command.contains("/etc/shadow") || ev.command.contains("/etc/passwd") {
+            if ev.result == "Success" && ev.user != "root" {
+                threats.push(RuntimeThreat {
+                    id: format!("threat_identity_tamper_{}", ev.timestamp),
+                    timestamp: ev.timestamp.clone(),
+                    title: "Authentication Credentials File Modification".to_string(),
+                    description: format!("User '{}' modified system identity files ({}) in working directory '{}'.", ev.user, ev.command, ev.cwd),
+                    severity: "Critical".to_string(),
+                    category: "Runtime Threats".to_string(),
+                });
+            }
+        }
+
+        // 7. Root commands bypassing sudo
         if ev.user == "root" && ev.auid != "0" && ev.auid != "4294967295" && ev.auid != "unset" {
             let cmd_base = ev.command.split_whitespace().next().unwrap_or("");
-            if !cmd_base.ends_with("sudo") && !cmd_base.ends_with("pkexec") && !cmd_base.ends_with("systemd") {
+            if !cmd_base.ends_with("sudo") && !cmd_base.ends_with("pkexec") && !cmd_base.ends_with("systemd") && !cmd_base.is_empty() {
                 threats.push(RuntimeThreat {
                     id: format!("threat_root_bypass_{}", ev.timestamp),
                     timestamp: ev.timestamp.clone(),

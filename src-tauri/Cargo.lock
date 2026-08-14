@@ -1898,6 +1898,7 @@ name = "linux-control-panel"
 version = "0.2.8"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "env_logger",
