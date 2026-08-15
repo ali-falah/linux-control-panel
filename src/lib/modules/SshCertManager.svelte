@@ -89,7 +89,14 @@
 
   // ─── State ───────────────────────────────────────────────────────────────────
 
-  let activeTab = $state<'keys' | 'client_config' | 'known_hosts' | 'authorized' | 'certs' | 'threats'>('keys');
+  let activeTab = $state<'keys' | 'client_config' | 'known_hosts' | 'authorized' | 'certs' | 'threats'>(
+    uiStore.targetSubTab && ['keys', 'client_config', 'known_hosts', 'authorized', 'certs', 'threats'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'keys'
+  );
+  if (uiStore.targetSubTab && ['keys', 'client_config', 'known_hosts', 'authorized', 'certs', 'threats'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   let loading = $state(false);
   let evaluatingSshd = $state(false);
 

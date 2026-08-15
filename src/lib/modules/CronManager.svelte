@@ -30,7 +30,14 @@
     description: string;
   }
 
-  let view = $state<'cron' | 'timers'>('cron');
+  let view = $state<'cron' | 'timers'>(
+    uiStore.targetSubTab && ['cron', 'timers'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'cron'
+  );
+  if (uiStore.targetSubTab && ['cron', 'timers'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   let jobs = $state<CronJob[]>([]);
   let timers = $state<SystemdTimer[]>([]);
   let loading = $state(true);

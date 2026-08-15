@@ -38,7 +38,14 @@
   
   let loading = $state(true);
   let loadingVpn = $state(false);
-  let activeTab = $state<'interfaces' | 'dns' | 'connections' | 'vpn' | 'speedtest'>('interfaces');
+  let activeTab = $state<'interfaces' | 'dns' | 'connections' | 'vpn' | 'speedtest'>(
+    uiStore.targetSubTab && ['interfaces', 'dns', 'connections', 'vpn', 'speedtest'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'interfaces'
+  );
+  if (uiStore.targetSubTab && ['interfaces', 'dns', 'connections', 'vpn', 'speedtest'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   
   let selectedConnectionUuid = $state<string | null>(null);
   let editConnectionData = $state<any>(null);

@@ -58,7 +58,14 @@
   let searchInputRef: HTMLInputElement;
 
   // New Tab state
-  let activeTab = $state('journal');
+  let activeTab = $state<'journal' | 'auth' | 'audit' | 'threats'>(
+    uiStore.targetSubTab && ['journal', 'auth', 'audit', 'threats'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'journal'
+  );
+  if (uiStore.targetSubTab && ['journal', 'auth', 'audit', 'threats'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
 
   // Auth Events state
   let authEvents = $state<any[]>([]);

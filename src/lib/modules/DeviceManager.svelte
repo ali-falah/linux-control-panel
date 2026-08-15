@@ -19,7 +19,14 @@
   import PageHeader from '../components/PageHeader.svelte';
 
   type ActiveTab = 'list' | 'smart' | 'topology';
-  let activeTab = $state<ActiveTab>('list');
+  let activeTab = $state<ActiveTab>(
+    uiStore.targetSubTab && ['list', 'smart', 'topology'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'list'
+  );
+  if (uiStore.targetSubTab && ['list', 'smart', 'topology'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
 
   // lshw listing variables
   let rawData = $state<any>(null);

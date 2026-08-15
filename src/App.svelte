@@ -26,6 +26,7 @@
 
   onMount(() => {
     uiStore.initTheme();
+    uiStore.initSearchHistory();
     dnfStore.initGlobalListeners();
     dnfStore.checkLockStatus();
 

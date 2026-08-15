@@ -36,7 +36,14 @@
     speed_ms: number | null;
   }
 
-  let activeTab = $state<'repos' | 'copr'>('repos');
+  let activeTab = $state<'repos' | 'copr'>(
+    uiStore.targetSubTab && ['repos', 'copr'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'repos'
+  );
+  if (uiStore.targetSubTab && ['repos', 'copr'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
 
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);

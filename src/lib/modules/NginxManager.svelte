@@ -55,7 +55,14 @@
 
   // ─── State ────────────────────────────────────────────────────────────────
 
-  let activeTab = $state<'overview'|'sites'|'editor'|'www'|'logs'|'analytics'|'ssl'>('overview');
+  let activeTab = $state<'overview'|'sites'|'editor'|'www'|'logs'|'analytics'|'ssl'>(
+    uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'overview'
+  );
+  if (uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   let installInfo = $state<NginxInstallInfo | null>(null);
   let loading = $state(true);
   let hasCertbot = $state(false);

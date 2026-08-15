@@ -77,7 +77,14 @@
 
   // ─── State ─────────────────────────────────────────────────────────────────
 
-  let activeTab = $state<'variables' | 'path' | 'files' | 'preview'>('variables');
+  let activeTab = $state<'variables' | 'path' | 'files' | 'preview'>(
+    uiStore.targetSubTab && ['variables', 'path', 'files', 'preview'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'variables'
+  );
+  if (uiStore.targetSubTab && ['variables', 'path', 'files', 'preview'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
 
   // Variables tab
   let varGroups = $state<ShellVarGroup[]>([]);

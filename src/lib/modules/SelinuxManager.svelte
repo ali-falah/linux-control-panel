@@ -35,7 +35,14 @@
   let loading = $state(true);
 
   // Tab control
-  let activeTab = $state<'status' | 'booleans'>('status');
+  let activeTab = $state<'status' | 'booleans'>(
+    uiStore.targetSubTab && ['status', 'booleans'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'status'
+  );
+  if (uiStore.targetSubTab && ['status', 'booleans'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
 
   // Booleans list
   let booleans = $state<any[]>([]);

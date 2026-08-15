@@ -83,7 +83,14 @@
   }
 
   // Phase 3 Firewall Rich Rules & Interfaces states
-  let activeSubTab = $state<'rules' | 'rich' | 'interfaces'>('rules');
+  let activeSubTab = $state<'rules' | 'rich' | 'interfaces'>(
+    uiStore.targetSubTab && ['rules', 'rich', 'interfaces'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'rules'
+  );
+  if (uiStore.targetSubTab && ['rules', 'rich', 'interfaces'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   let richRules = $state<string[]>([]);
   let zoneInterfaces = $state<string[]>([]);
   let allInterfaces = $state<string[]>([]);

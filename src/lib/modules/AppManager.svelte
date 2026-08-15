@@ -74,10 +74,17 @@
 
   type SourceFilter = 'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates';
   let sourceFilter = $state<SourceFilter>(
-    uiStore.appSourceFilter ? uiStore.appSourceFilter : 'All'
+    uiStore.appSourceFilter
+      ? uiStore.appSourceFilter
+      : (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Duplicates'].includes(uiStore.targetSubTab))
+      ? (uiStore.targetSubTab as any)
+      : 'All'
   );
   if (uiStore.appSourceFilter) {
     uiStore.appSourceFilter = null;
+  }
+  if (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Duplicates'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
   }
 
   type SortOption = 'name' | 'size' | 'date' | 'source';

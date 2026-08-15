@@ -46,7 +46,14 @@
     is_current: boolean;
   }
 
-  let view = $state<'users' | 'groups' | 'sessions'>('users');
+  let view = $state<'users' | 'groups' | 'sessions'>(
+    uiStore.targetSubTab && ['users', 'groups', 'sessions'].includes(uiStore.targetSubTab)
+      ? (uiStore.targetSubTab as any)
+      : 'users'
+  );
+  if (uiStore.targetSubTab && ['users', 'groups', 'sessions'].includes(uiStore.targetSubTab)) {
+    uiStore.targetSubTab = null;
+  }
   let users = $state<UserInfo[]>([]);
   let groupsList = $state<GroupInfo[]>([]);
   let sessions = $state<ActiveSession[]>([]);

@@ -14,7 +14,12 @@
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
 
-  let currentTab = $state<'overview' | 'processes'>('overview');
+  let currentTab = $state<'overview' | 'processes'>(
+    uiStore.targetSubTab === 'processes' ? 'processes' : 'overview'
+  );
+  if (uiStore.targetSubTab === 'processes' || uiStore.targetSubTab === 'overview') {
+    uiStore.targetSubTab = null;
+  }
   let currentUser = $state('unknown');
 
   // Overview Stats

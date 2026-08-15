@@ -46,6 +46,12 @@ class UIStore {
   tableDensity = $state<'compact' | 'spacious'>('compact');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
+  /** Target subtab to activate when navigating into a module */
+  targetSubTab = $state<string | null>(null);
+  /** Recent search queries */
+  recentSearches = $state<string[]>([]);
+  /** Recently visited pages and subtabs */
+  recentVisitedItems = $state<{ id: string; title: string; subtitle?: string; tabId: TabId; subTab?: string; category: string }[]>([]);
   version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
 
   openSettingsModal() {
@@ -66,6 +72,64 @@ class UIStore {
 
   toggleSearchModal() {
     this.searchModalOpen = !this.searchModalOpen;
+  }
+
+  navigateTo(tab: TabId, subTab?: string) {
+    if (subTab) {
+      this.targetSubTab = subTab;
+    }
+    this.setActiveTab(tab);
+  }
+
+  initSearchHistory() {
+    if (typeof window !== 'undefined') {
+      try {
+        const rawSearches = localStorage.getItem('app_recent_searches');
+        if (rawSearches) this.recentSearches = JSON.parse(rawSearches);
+        const rawVisited = localStorage.getItem('app_recent_visited_items');
+        if (rawVisited) this.recentVisitedItems = JSON.parse(rawVisited);
+      } catch {}
+    }
+  }
+
+  recordRecentSearch(query: string) {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    const filtered = this.recentSearches.filter(s => s.toLowerCase() !== trimmed.toLowerCase());
+    this.recentSearches = [trimmed, ...filtered].slice(0, 8);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('app_recent_searches', JSON.stringify(this.recentSearches));
+      } catch {}
+    }
+  }
+
+  recordVisitedItem(item: { id: string; title: string; subtitle?: string; tabId: TabId; subTab?: string; category: string }) {
+    const filtered = this.recentVisitedItems.filter(i => i.id !== item.id);
+    this.recentVisitedItems = [item, ...filtered].slice(0, 8);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('app_recent_visited_items', JSON.stringify(this.recentVisitedItems));
+      } catch {}
+    }
+  }
+
+  clearRecentSearches() {
+    this.recentSearches = [];
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('app_recent_searches');
+      } catch {}
+    }
+  }
+
+  clearRecentVisited() {
+    this.recentVisitedItems = [];
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('app_recent_visited_items');
+      } catch {}
+    }
   }
 
   initTableDensity() {

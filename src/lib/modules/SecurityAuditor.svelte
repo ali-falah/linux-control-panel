@@ -63,7 +63,11 @@
   let loading = $state(initialCache === null);
   let fixingId = $state<string | null>(null);
   let activeCategory = $state(
-    uiStore.securityCategoryFilter ? uiStore.securityCategoryFilter : 'all'
+    uiStore.securityCategoryFilter
+      ? uiStore.securityCategoryFilter
+      : uiStore.targetSubTab
+      ? uiStore.targetSubTab
+      : 'all'
   );
   let activeSeverity = $state<'Critical' | 'Warning' | 'Good' | 'all'>(
     uiStore.securitySeverityFilter ? uiStore.securitySeverityFilter : 'all'
@@ -73,6 +77,9 @@
   }
   if (uiStore.securityCategoryFilter) {
     uiStore.securityCategoryFilter = null;
+  }
+  if (uiStore.targetSubTab) {
+    uiStore.targetSubTab = null;
   }
   let scoreHistory = $state<number[]>([]);
   let expandedId = $state<string | null>(null);
