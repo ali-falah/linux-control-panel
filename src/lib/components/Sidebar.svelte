@@ -257,7 +257,7 @@
                       <div class="flyout-item-text">
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
                           <span class="flyout-item-label">{item.label}</span>
-                          {#if (item.id === 'dnf-history' || item.id === 'app-manager') && uiStore.availableUpdatesCount > 0}
+                          {#if item.id === 'dnf-history' && uiStore.availableUpdatesCount > 0}
                             <span class="nav-badge">{uiStore.availableUpdatesCount}</span>
                           {/if}
                         </div>
@@ -312,7 +312,7 @@
                     <item.icon size={16} />
                   </span>
                   <span class="nav-label">{item.label}</span>
-                  {#if (item.id === 'dnf-history' || item.id === 'app-manager') && uiStore.availableUpdatesCount > 0}
+                  {#if item.id === 'dnf-history' && uiStore.availableUpdatesCount > 0}
                     <span class="nav-badge">{uiStore.availableUpdatesCount}</span>
                   {/if}
                 </button>
@@ -854,13 +854,20 @@
     margin-left: auto;
     font-size: 10px;
     font-weight: 700;
-    padding: 1px 6px;
+    padding: 1px 7px;
     border-radius: 999px;
-    background: var(--color-accent);
-    color: #000;
+    background: #0284C7;
+    color: #FFFFFF !important;
     line-height: 1.3;
     letter-spacing: 0.02em;
     flex-shrink: 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  :global(html.light-mode) .nav-badge {
+    background: #2563EB;
+    color: #FFFFFF !important;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
   }
 
   .sidebar.collapsed .nav-item {

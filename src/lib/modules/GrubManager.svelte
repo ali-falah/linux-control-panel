@@ -13,7 +13,6 @@
   import CodeEditor from '../components/CodeEditor.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import KpiCard from '../components/ui/KpiCard.svelte';
-  import GuideBanner from '../components/ui/GuideBanner.svelte';
 
   interface GrubConfig {
     timeout: number;
@@ -182,13 +181,6 @@
         iconColor="var(--color-warning)"
       />
     </div>
-
-    <GuideBanner
-      icon={TerminalSquare}
-      title="GRUB Bootloader Configuration"
-      description="Modify boot timeouts, default kernel targets, and Linux cmdline arguments. Changes are written safely as root via base64 decoding to /etc/default/grub."
-      variant="info"
-    />
 
     {#if hasChanges}
       <div style="margin-bottom:16px; padding:12px 16px; border-radius:8px; background:rgba(255, 171, 0, 0.1); border:1px solid rgba(255, 171, 0, 0.3); display:flex; align-items:center; gap:12px">

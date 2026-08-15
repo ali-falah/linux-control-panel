@@ -15,36 +15,57 @@
 
   function goToDnfModule() {
     dnfStore.closeDrawer();
-    uiStore.setActiveTab('apps');
+    uiStore.setActiveTab('dnf-history');
   }
 </script>
 
-<!-- Floating Top-Bar Live Status Pill (always visible when upgrading or finished) -->
+<!-- Floating Live Status Pill (bottom-right floating card, never collides with header buttons) -->
 {#if dnfStore.isUpgrading || dnfStore.upgradeFinished || dnfStore.showFloatingDrawer}
-  <div class="dnf-widget-container">
-    <button
-      type="button"
+  <div class="dnf-widget-container" transition:fly={{ y: 15, duration: 250 }}>
+    <div
       class="dnf-status-pill"
       class:is-upgrading={dnfStore.isUpgrading}
       class:is-success={dnfStore.upgradeFinished && dnfStore.upgradeSuccess}
       class:is-error={dnfStore.upgradeFinished && !dnfStore.upgradeSuccess}
+      role="button"
+      tabindex="0"
       onclick={() => dnfStore.toggleDrawer()}
+      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') dnfStore.toggleDrawer(); }}
       title="Click to view live DNF upgrade terminal"
     >
       {#if dnfStore.isUpgrading}
+        <span class="pulse-dot"></span>
         <span class="spin-icon">
           <RefreshCw size={13} />
         </span>
         <span class="pill-label">DNF Upgrading ({dnfStore.packagesBeingUpgraded.length} pkgs)...</span>
+        <span class="pill-terminal-badge">
+          <Terminal size={12} /> Live Logs
+        </span>
       {:else if dnfStore.upgradeFinished && dnfStore.upgradeSuccess}
-        <CheckCircle2 size={13} color="var(--color-success)" />
+        <CheckCircle2 size={14} color="var(--color-success)" />
         <span class="pill-label">DNF Upgrade Complete</span>
+        <button
+          type="button"
+          class="pill-dismiss-btn"
+          onclick={(e) => { e.stopPropagation(); dnfStore.resetUpgradeView(); }}
+          title="Dismiss notification"
+        >
+          <X size={13} />
+        </button>
       {:else if dnfStore.upgradeFinished && !dnfStore.upgradeSuccess}
-        <AlertTriangle size={13} color="var(--color-error)" />
+        <AlertTriangle size={14} color="var(--color-error)" />
         <span class="pill-label">DNF Upgrade Failed</span>
+        <button
+          type="button"
+          class="pill-dismiss-btn"
+          onclick={(e) => { e.stopPropagation(); dnfStore.resetUpgradeView(); }}
+          title="Dismiss notification"
+        >
+          <X size={13} />
+        </button>
       {/if}
-      <Terminal size={13} style="margin-left:4px; opacity:0.8;" />
-    </button>
+    </div>
   </div>
 {/if}
 
@@ -86,8 +107,8 @@
               <OctagonX size={13} /> Cancel
             </button>
           {/if}
-          <button class="btn btn-secondary btn-sm" onclick={goToDnfModule} title="Go to DNF Package Manager page">
-            <ExternalLink size={13} /> Open DNF Page
+          <button class="btn btn-secondary btn-sm" onclick={goToDnfModule} title="Go to DNF Manager page">
+            <ExternalLink size={13} /> Open DNF Manager
           </button>
           <button class="btn btn-icon btn-ghost btn-sm" onclick={() => dnfStore.closeDrawer()}>
             <X size={16} />
@@ -98,24 +119,36 @@
       <!-- Hang Warning Alert -->
       {#if dnfStore.hangWarning}
         <div class="hang-alert">
-          <AlertTriangle size={15} />
-          <span>No terminal output received for >60s. Package download may be in progress or waiting on mirror response.</span>
+          <AlertTriangle size={16} color="var(--color-warning)" />
+          <span>No terminal activity detected for > 60 seconds. DNF may be downloading large packages or awaiting disk sync.</span>
         </div>
       {/if}
 
-      <!-- Terminal Output Window -->
-      <pre bind:this={terminalContainer} class="drawer-terminal">{dnfStore.upgradeOutput || 'Awaiting output…'}</pre>
+      <!-- Terminal Body -->
+      <div class="terminal-body">
+        <pre bind:this={terminalContainer} class="terminal-output">{dnfStore.upgradeOutput || 'Initializing DNF package manager transaction...\n'}</pre>
+      </div>
 
-      <!-- Footer -->
+      <!-- Footer / Status Bar -->
       <div class="drawer-footer">
-        <span class="status-indicator">
+        <div class="footer-status">
           {#if dnfStore.isUpgrading}
-            <span class="pulse-dot"></span> Active DNF Transaction Running
-          {:else if dnfStore.upgradeFinished}
-            Ready • {dnfStore.upgradeSuccess ? 'Success' : 'Failed'}
+            <span class="status-indicator active"></span>
+            <span>Transaction active & streaming logs</span>
+          {:else if dnfStore.upgradeFinished && dnfStore.upgradeSuccess}
+            <span class="status-indicator success"></span>
+            <span>Transaction completed with Exit Code 0</span>
+          {:else if dnfStore.upgradeFinished && !dnfStore.upgradeSuccess}
+            <span class="status-indicator error"></span>
+            <span>Transaction exited with errors</span>
           {/if}
-        </span>
-        <button class="btn btn-secondary btn-sm" onclick={() => dnfStore.closeDrawer()}>Close</button>
+        </div>
+
+        <div class="footer-actions">
+          <button class="btn btn-primary btn-sm" onclick={() => dnfStore.closeDrawer()}>
+            Dismiss
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -124,32 +157,35 @@
 <style>
   .dnf-widget-container {
     position: fixed;
-    top: 14px;
-    right: 220px;
-    z-index: 999;
+    bottom: 24px;
+    right: 28px;
+    z-index: 1500;
+    pointer-events: auto;
   }
 
   .dnf-status-pill {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    background: rgba(15, 23, 42, 0.85);
-    border: 1px solid var(--color-accent);
+    gap: 8px;
+    background: rgba(11, 23, 38, 0.92);
+    border: 1px solid rgba(0, 218, 243, 0.35);
     color: var(--color-text-primary);
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     font-family: var(--font-sans);
-    padding: 4px 10px;
-    border-radius: 20px;
+    padding: 7px 14px;
+    border-radius: 30px;
     cursor: pointer;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-    transition: all 0.2s ease;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 218, 243, 0.12);
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    user-select: none;
   }
 
   .dnf-status-pill:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(0, 218, 243, 0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 12px 28px -5px rgba(0, 0, 0, 0.6), 0 0 20px rgba(0, 218, 243, 0.25);
+    border-color: var(--color-accent);
   }
 
   .dnf-status-pill.is-upgrading {
@@ -158,24 +194,26 @@
 
   .dnf-status-pill.is-success {
     border-color: var(--color-success);
-    background: rgba(34, 197, 94, 0.12);
+    background: rgba(16, 185, 129, 0.15);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px rgba(16, 185, 129, 0.15);
   }
 
   .dnf-status-pill.is-error {
     border-color: var(--color-error);
-    background: rgba(239, 68, 68, 0.12);
+    background: rgba(239, 68, 68, 0.15);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px rgba(239, 68, 68, 0.15);
   }
 
-  /* Light Mode Status Pill Overrides */
+  /* Light Mode */
   :global(html.light-mode) .dnf-status-pill {
     background: #FFFFFF;
     border: 1px solid #CBD5E1;
     color: #0F172A;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.12), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
   }
 
   :global(html.light-mode) .dnf-status-pill:hover {
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+    box-shadow: 0 12px 28px -5px rgba(0, 0, 0, 0.18), 0 6px 10px -2px rgba(0, 0, 0, 0.08);
   }
 
   :global(html.light-mode) .dnf-status-pill.is-upgrading {
@@ -194,6 +232,59 @@
     background: #FEF2F2;
     border-color: #EF4444;
     color: #B91C1C;
+  }
+
+  .pulse-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    box-shadow: 0 0 8px var(--color-accent);
+    animation: pulse-dot-anim 1.5s infinite ease-in-out;
+  }
+
+  @keyframes pulse-dot-anim {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.4); opacity: 0.5; }
+  }
+
+  .pill-terminal-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    padding: 2px 6px;
+    border-radius: 12px;
+    background: rgba(0, 218, 243, 0.15);
+    color: var(--color-accent);
+    margin-left: 2px;
+  }
+  :global(html.light-mode) .pill-terminal-badge {
+    background: rgba(37, 99, 235, 0.12);
+    color: #1D4ED8;
+  }
+
+  .pill-dismiss-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 2px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+    margin-left: 4px;
+  }
+  .pill-dismiss-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--color-text-primary);
+  }
+  :global(html.light-mode) .pill-dismiss-btn:hover {
+    background: rgba(0, 0, 0, 0.08);
+    color: #0F172A;
   }
 
   .spin-icon {

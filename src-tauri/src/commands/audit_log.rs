@@ -105,7 +105,10 @@ async fn get_auth_events_journalctl(
         }
     }
 
-    let output = cmd.output().await.map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_millis(1500),
+        cmd.output()
+    ).await.map_err(|_| "journalctl timeout".to_string())?.map_err(|e| e.to_string())?;
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut events: Vec<AuthEvent> = Vec::new();
@@ -496,8 +499,8 @@ pub async fn get_command_audit_logs(
                     jcmd.arg("--until").arg(end);
                 }
             }
-            match jcmd.output().await {
-                Ok(jo) if jo.status.success() => String::from_utf8_lossy(&jo.stdout).to_string(),
+            match tokio::time::timeout(tokio::time::Duration::from_millis(1500), jcmd.output()).await {
+                Ok(Ok(jo)) if jo.status.success() => String::from_utf8_lossy(&jo.stdout).to_string(),
                 _ => String::new(),
             }
         }

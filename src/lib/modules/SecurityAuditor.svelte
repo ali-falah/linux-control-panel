@@ -45,9 +45,22 @@
     category_scores: CategoryScore[];
   }
 
-  // ── State ──────────────────────────────────────────────────────────────────
-  let report = $state<SecurityReport | null>(null);
-  let loading = $state(false);
+  // ── State & Cache Initialization ───────────────────────────────────────────
+  const HISTORY_KEY = 'security_score_history';
+  const CACHE_KEY = 'security_report_cache_v2';
+  const MAX_HISTORY = 12;
+
+  function getInitialCache(): SecurityReport | null {
+    try {
+      const raw = sessionStorage.getItem(CACHE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return null;
+  }
+
+  const initialCache = getInitialCache();
+  let report = $state<SecurityReport | null>(initialCache);
+  let loading = $state(initialCache === null);
   let fixingId = $state<string | null>(null);
   let activeCategory = $state(
     uiStore.securityCategoryFilter ? uiStore.securityCategoryFilter : 'all'
@@ -188,10 +201,6 @@
   let totalIssues = $derived(report ? report.findings.filter(f => !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
   let criticalCount = $derived(report ? report.findings.filter(f => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
 
-  // ── Score history (localStorage) ──────────────────────────────────────────
-  const HISTORY_KEY = 'security_score_history';
-  const MAX_HISTORY = 12;
-
   function loadHistory() {
     try {
       const raw = localStorage.getItem(HISTORY_KEY);
@@ -204,16 +213,28 @@
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(scoreHistory)); } catch {}
   }
 
+  function saveCache(rep: SecurityReport) {
+    try {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify(rep));
+    } catch {}
+  }
+
   // ── Audit ──────────────────────────────────────────────────────────────────
-  async function runAudit(forceRefresh: boolean | MouseEvent = true) {
-    loading = true;
+  async function runAudit(forceRefresh: boolean | MouseEvent = true, isBackground = false) {
+    if (!isBackground) {
+      loading = true;
+    }
     const shouldForce = typeof forceRefresh === 'boolean' ? forceRefresh : true;
     try {
-      report = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
-      saveHistory(effectiveScore);
-      statusStore.setLastCommand('security_audit_executed', 0, true);
+      const res = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
+      if (res && res.findings) {
+        report = res;
+        saveCache(res);
+        saveHistory(effectiveScore);
+        statusStore.setLastCommand('security_audit_executed', 0, true);
+      }
     } catch (e) {
-      uiStore.addToast(`Audit failed: ${e}`, 'error');
+      uiStore.addToast(`Audit scan error: ${e}`, 'error');
       statusStore.setLastCommand('security_run_audit', 1, false);
     } finally {
       loading = false;
@@ -223,9 +244,12 @@
   onMount(() => {
     loadHistory();
     loadMuted();
-    runAudit();
 
-    const handleReaudit = () => runAudit(true);
+    // If cache exists, render immediately and refresh in background; else fetch fresh
+    const hasCache = !!report;
+    runAudit(false, hasCache);
+
+    const handleReaudit = () => runAudit(true, false);
     window.addEventListener('security-audit-run', handleReaudit);
     return () => window.removeEventListener('security-audit-run', handleReaudit);
   });
@@ -706,7 +730,7 @@
 </script>
 
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
-<div class="module-container">
+<div class="module-page security-auditor">
   <PageHeader title="Security Auditor" subtitle="System Hardening &amp; Security Audit" icon={Shield}>
     {#if report}
       <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
@@ -891,20 +915,19 @@
       </div>
 
       <!-- ── Category Tabs + Findings ── -->
-      <div class="findings-section">
-        <div class="findings-header">
-          <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
-          
-          <div class="findings-header-right">
-            <span class="issue-badge" class:has-issues={totalIssues > 0}>
-              {#if activeSeverity !== 'all' || activeCategory !== 'all'}
-                {filteredFindings.length} showing ({totalIssues} unresolved total)
-              {:else}
-                {totalIssues} issue{totalIssues !== 1 ? 's' : ''} total
-              {/if}
-            </span>
-          </div>
+      <div class="findings-header">
+        <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
+        
+        <div class="findings-header-right">
+          <span class="issue-badge" class:has-issues={totalIssues > 0}>
+            {#if activeSeverity !== 'all' || activeCategory !== 'all'}
+              {filteredFindings.length} showing ({totalIssues} unresolved total)
+            {:else}
+              {totalIssues} issue{totalIssues !== 1 ? 's' : ''} total
+            {/if}
+          </span>
         </div>
+      </div>
 
         <div class="findings-list">
           {#each filteredFindings as finding (finding.id)}
@@ -1191,6 +1214,14 @@
             {/if}
           {/if}
         </div>
+    {:else}
+      <div class="center-state">
+        <ShieldAlert size={48} color="var(--color-error)" />
+        <div class="scan-label">Unable to load security audit</div>
+        <div class="scan-sublabel">The audit scan could not be completed. Click below to retry.</div>
+        <Button variant="primary" size="sm" onclick={() => runAudit(true)}>
+          <RefreshCw size={14} /> Retry Audit
+        </Button>
       </div>
     {/if}
   </div>
@@ -1200,15 +1231,18 @@
 
 <!-- ── Styles ──────────────────────────────────────────────────────────────── -->
 <style>
-  .module-container {
+  .module-page.security-auditor {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    position: absolute;
+    inset: 0;
+    padding: 0;
     overflow: hidden;
+    background: var(--color-bg-base);
   }
 
-  :global(.module-container .header-wrapper) {
-    margin: 0 0 4px 0 !important;
+  :global(.module-page.security-auditor .header-wrapper) {
+    margin: 0 !important;
     flex-shrink: 0;
   }
 
@@ -1255,11 +1289,31 @@
   .content-scroll {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
-    padding: 16px 24px 20px 24px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scroll-behavior: smooth;
+    padding: 0 24px 24px 24px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    -webkit-overflow-scrolling: touch;
+    transform: translateZ(0);
+  }
+
+  .content-scroll::-webkit-scrollbar {
+    width: 6px;
+  }
+  .content-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .content-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+  }
+  .content-scroll::-webkit-scrollbar-thumb:hover {
+    background: var(--color-accent);
+  }
+  :global(html.light-mode) .content-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.2);
   }
 
   /* ── Scan Loading ─────────────────────────────────────────────────────────── */
@@ -1359,11 +1413,13 @@
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  /* ── Top Row (Fixed) ─────────────────────────────────────────────────────── */
+  /* ── Top Row ─────────────────────────────────────────────────────────────── */
   .top-row {
+    margin-top: 4px;
+    margin-bottom: 8px;
     display: grid;
     grid-template-columns: 360px minmax(0, 1fr);
-    gap: 14px;
+    gap: 12px;
     align-items: start;
     flex-shrink: 0;
   }
@@ -1752,16 +1808,32 @@
     gap: 12px;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
   }
 
   .findings-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
     display: flex;
     justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
     flex-shrink: 0;
+    background: rgba(10, 15, 29, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    padding: 10px 0;
+    margin-bottom: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  :global(html.light-mode) .findings-header {
+    background: rgba(248, 250, 252, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+    box-shadow: none;
   }
 
   .findings-header-right {
@@ -1770,28 +1842,12 @@
     gap: 10px;
   }
 
-  .std-select-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 210px;
-  }
-
-  .std-select-label {
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    white-space: nowrap;
-  }
-
   .issue-badge {
     font-size: 11.5px;
     font-weight: 600;
-    padding: 3px 10px;
+    padding: 4px 12px;
     border-radius: 20px;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.05);
     color: var(--color-text-secondary);
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
@@ -1802,36 +1858,25 @@
     border-color: rgba(239, 68, 68, 0.25);
   }
 
-  /* ── Findings List (Only this section scrolls) ────────────────────────────── */
+  :global(html.light-mode) .issue-badge {
+    background: #FFFFFF;
+    color: #475569;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  }
+
+  :global(html.light-mode) .issue-badge.has-issues {
+    background: #FEF2F2;
+    color: #DC2626;
+    border-color: #FECACA;
+  }
+
+  /* ── Findings List ────────────────────────────────────────────────────────── */
   .findings-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 4px;
-  }
-
-  .findings-list::-webkit-scrollbar {
-    width: 6px;
-  }
-  .findings-list::-webkit-scrollbar-track {
-    background: rgba(0, 0, 0, 0.15);
-    border-radius: 4px;
-  }
-  .findings-list::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
-  }
-  .findings-list::-webkit-scrollbar-thumb:hover {
-    background: var(--color-accent);
-  }
-  :global(html.light-mode) .findings-list::-webkit-scrollbar-track {
-    background: rgba(0, 0, 0, 0.05);
-  }
-  :global(html.light-mode) .findings-list::-webkit-scrollbar-thumb {
-    background: rgba(0, 0, 0, 0.2);
+    padding-bottom: 32px;
   }
 
   /* ── Finding Card ────────────────────────────────────────────────────────── */
@@ -1841,8 +1886,8 @@
     border-left: 4px solid var(--sev-color);
     border-radius: 10px;
     overflow: hidden;
-    transition: all 0.18s ease;
-    flex-shrink: 0;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    contain: layout style;
   }
 
   .finding-card:hover {

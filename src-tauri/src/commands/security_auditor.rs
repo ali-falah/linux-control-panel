@@ -71,15 +71,15 @@ pub fn invalidate_audit_cache() {
 
 // ─── Helper macros ────────────────────────────────────────────────────────────
 
-/// Run a command with a timeout (2 s). Returns stdout string or empty on error.
+/// Run a command with a fast timeout (800 ms). Returns stdout string or empty on error.
 async fn read_cmd(args: &[&str]) -> String {
     if args.is_empty() { return String::new(); }
-    let mut cmd = Command::new(args[0]);
+    let mut cmd = tokio::process::Command::new(args[0]);
     for a in &args[1..] { cmd.arg(a); }
     cmd.stdout(std::process::Stdio::piped())
        .stderr(std::process::Stdio::piped());
     let out = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
+        tokio::time::Duration::from_millis(800),
         cmd.output(),
     ).await;
     match out {
@@ -88,23 +88,11 @@ async fn read_cmd(args: &[&str]) -> String {
     }
 }
 
-/// Read a file. Tries direct read first, then elevated read if available.
+/// Read a file safely without blocking prompts.
 async fn read_privileged_file(path: &str) -> String {
     if let Ok(content) = tokio::fs::read_to_string(path).await {
         if !content.trim().is_empty() {
             return content;
-        }
-    }
-    if crate::utils::privilege::check_sudo_status() {
-        let mut cmd = Command::new("pkexec");
-        cmd.args(["cat", path]);
-        if let Ok(out) = cmd.output().await {
-            if out.status.success() {
-                let content = String::from_utf8_lossy(&out.stdout).into_owned();
-                if !content.trim().is_empty() {
-                    return content;
-                }
-            }
         }
     }
     let out = read_cmd(&["sudo", "-n", "cat", path]).await;
@@ -205,41 +193,17 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // CATEGORY 1: SSH HARDENING
         // ═══════════════════════════════════════════════════════════════════════
         let cat_ssh = "SSH Hardening";
-        // Use `sshd -T` to dump effective parsed config. Try privilege first if authenticated, else sudo -n / local binaries.
-        let sshd_t = if crate::utils::privilege::check_sudo_status() {
-            let mut cmd = Command::new("pkexec");
-            cmd.args(["sshd", "-T"]);
-            if let Ok(out) = cmd.output().await {
-                if out.status.success() {
-                    String::from_utf8_lossy(&out.stdout).into_owned()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        } else {
-            read_cmd(&["bash", "-c",
-                "sudo -n sshd -T 2>/dev/null || \
-                 sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || \
-                 sshd -T 2>/dev/null || \
-                 /usr/sbin/sshd -T 2>/dev/null || true"]).await
-        };
+        // Use `sshd -T` or direct config parsing without blocking prompts
+        let sshd_t = read_cmd(&["bash", "-c",
+            "sudo -n sshd -T 2>/dev/null || \
+             sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || \
+             sshd -T 2>/dev/null || \
+             /usr/sbin/sshd -T 2>/dev/null || true"]).await;
         let ssh_full = if !sshd_t.trim().is_empty() {
             sshd_t
         } else {
             let ssh_cfg = read_privileged_file("/etc/ssh/sshd_config").await;
-            let ssh_cfg_d = if crate::utils::privilege::check_sudo_status() {
-                let mut cmd = Command::new("pkexec");
-                cmd.args(["bash", "-c", "cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]);
-                if let Ok(out) = cmd.output().await {
-                    String::from_utf8_lossy(&out.stdout).into_owned()
-                } else {
-                    String::new()
-                }
-            } else {
-                read_cmd(&["bash", "-c", "sudo -n cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await
-            };
+            let ssh_cfg_d = read_cmd(&["bash", "-c", "sudo -n cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await;
             format!("{}\n{}", ssh_cfg, ssh_cfg_d)
         };
 
@@ -846,14 +810,14 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 "Edit /etc/fstab and add 'nodev,nosuid,noexec' to /tmp, /var/tmp, and /dev/shm mount entries.", cat_fs, false, Some("CIS 1.1.2 - 1.1.8")));
         }
 
-        // 4f. World-Writable Files
+        // 4f. World-Writable Files in Temp Partitions
         fs_max += 5;
-        let ww_output = read_cmd(&["bash", "-c", "find /tmp /var/tmp /dev/shm /home -maxdepth 3 -type f -perm -0002 2>/dev/null | head -5"]).await;
+        let ww_output = read_cmd(&["bash", "-c", "find /tmp /var/tmp /dev/shm -maxdepth 2 -type f -perm -0002 2>/dev/null | head -5"]).await;
         let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
         if ww_files.is_empty() {
             fs_cur += 5;
             findings.push(good("fs_world_writable", "No World-Writable Files Found in Key Paths",
-                "No unexpected world-writable regular files found in /tmp, /var/tmp, /dev/shm, or /home.",
+                "No unexpected world-writable regular files found in /tmp, /var/tmp, or /dev/shm.",
                 "Maintain strict file permissions across all shared directories.", cat_fs, Some("CIS 1.1.21")));
         } else {
             findings.push(warn("fs_world_writable", "World-Writable Files Detected",
@@ -861,9 +825,9 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 "Run 'chmod o-w <file>' to remove world-write permissions on sensitive files.", cat_fs, false, Some("CIS 1.1.21")));
         }
 
-        // 4g. Unowned Files / Groups
+        // 4g. Unowned Files / Groups in Temp Partitions
         fs_max += 5;
-        let unowned_out = read_cmd(&["bash", "-c", "find /tmp /var/tmp /home -maxdepth 3 \\( -nouser -o -nogroup \\) 2>/dev/null | head -5"]).await;
+        let unowned_out = read_cmd(&["bash", "-c", "find /tmp /var/tmp -maxdepth 2 \\( -nouser -o -nogroup \\) 2>/dev/null | head -5"]).await;
         let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
         if unowned_files.is_empty() {
             fs_cur += 5;
@@ -1230,9 +1194,12 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             }
         }
 
-        // ── Load and inject Runtime Threats ─────────────────────────────────────
+        // ── Load and inject Runtime Threats (with strict 1s timeout) ───────────
         let mut threat_issues = 0;
-        if let Ok(threats) = crate::commands::audit_log::get_runtime_threats(None, None, None).await {
+        if let Ok(Ok(threats)) = tokio::time::timeout(
+            tokio::time::Duration::from_millis(1000),
+            crate::commands::audit_log::get_runtime_threats(Some(7), None, None)
+        ).await {
             for t in threats {
                 threat_issues += 1;
                 findings.push(SecurityFinding {

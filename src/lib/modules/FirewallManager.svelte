@@ -389,6 +389,7 @@
       title="Dynamic Zone Management"
       description="Firewall rules are grouped by security zones. Traffic received on interfaces bound to a zone is filtered by that zone's services and port definitions."
       variant="info"
+      style="margin-bottom: -4px;"
     />
 
     {#if state.is_panic}

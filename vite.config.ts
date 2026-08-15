@@ -11,8 +11,8 @@ export default defineConfig(async () => ({
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
   plugins: [
-    svelte(),
     tailwindcss(),
+    svelte(),
   ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
