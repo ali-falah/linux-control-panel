@@ -10,6 +10,69 @@ pub struct ServiceUnit {
     pub sub_state: String,
     pub description: String,
     pub unit_file_state: String,
+    pub is_protected: bool,
+    pub protection_level: String,
+    pub protection_reason: Option<String>,
+}
+
+pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>) {
+    let clean_name = unit_name.trim_end_matches(".service").to_lowercase();
+
+    // 1. Critical Core System Services (Immortal: Cannot Stop, Disable, or Mask)
+    let critical_services = [
+        "dbus",
+        "dbus-broker",
+        "polkit",
+        "systemd-journald",
+        "systemd-logind",
+        "systemd-udevd",
+        "systemd-sysctl",
+        "systemd-remount-fs",
+        "systemd-tmpfiles-setup",
+        "systemd-tmpfiles-setup-dev",
+        "systemd-user-sessions",
+        "systemd-modules-load",
+        "emergency",
+        "rescue",
+        "init",
+    ];
+
+    if critical_services.iter().any(|&s| clean_name == s || clean_name.starts_with("systemd-journald") || clean_name.starts_with("systemd-udevd") || clean_name.starts_with("dbus")) {
+        return (
+            true,
+            "critical".to_string(),
+            Some("Critical operating system core component. Stopping, disabling, or masking will cause system instability or lockup.".to_string())
+        );
+    }
+
+    // 2. Essential System Infrastructure (Guarded: Cannot Disable or Mask)
+    let essential_services = [
+        "networkmanager",
+        "systemd-networkd",
+        "systemd-resolved",
+        "systemd-timesyncd",
+        "sshd",
+        "firewalld",
+        "nftables",
+        "iptables",
+        "auditd",
+        "chronyd",
+        "chrony",
+        "gdm",
+        "sddm",
+        "lightdm",
+        "systemd-homed",
+    ];
+
+    if essential_services.iter().any(|&s| clean_name == s || clean_name.starts_with("networkmanager") || clean_name.starts_with("firewalld")) {
+        return (
+            true,
+            "essential".to_string(),
+            Some("Essential system infrastructure service. Masking or disabling will cause loss of network, security, or display access.".to_string())
+        );
+    }
+
+    (false, String::new(), None)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,6 +141,11 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
         }
         let name = parts[0].to_string();
         let state = parts[1].to_string();
+        let (is_protected, protection_level, protection_reason) = if !is_user {
+            get_service_protection(&name)
+        } else {
+            (false, String::new(), None)
+        };
 
         all_services.insert(
             name.clone(),
@@ -88,6 +156,9 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
                 sub_state: "dead".to_string(),
                 description: String::new(),
                 unit_file_state: state,
+                is_protected,
+                protection_level,
+                protection_reason,
             },
         );
     }
@@ -123,6 +194,12 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
             unit.sub_state = sub_state;
             unit.description = description;
         } else {
+            let (is_protected, protection_level, protection_reason) = if !is_user {
+                get_service_protection(&name)
+            } else {
+                (false, String::new(), None)
+            };
+
             all_services.insert(
                 name.clone(),
                 ServiceUnit {
@@ -132,6 +209,9 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
                     sub_state,
                     description,
                     unit_file_state: "generated".to_string(),
+                    is_protected,
+                    protection_level,
+                    protection_reason,
                 },
             );
         }
@@ -159,6 +239,24 @@ pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<
 
     let action_str = action.to_string();
     let is_user = user_mode.unwrap_or(false);
+
+    // ── Security Protection Enforcement ──────────────────────────────────────────
+    if !is_user {
+        let (is_protected, protection_level, reason) = get_service_protection(&name);
+        if is_protected {
+            if protection_level == "critical" && matches!(action, ServiceAction::Mask | ServiceAction::Disable | ServiceAction::Stop) {
+                let reason_msg = reason.unwrap_or_else(|| "This is a critical core system unit.".to_string());
+                log_to_file("WARN", &format!("Blocked destructive action {action_str} on critical unit {name}"));
+                return Err(format!("Security Protection: Action '{action_str}' is strictly blocked on critical system service '{name}'. {reason_msg}"));
+            }
+
+            if protection_level == "essential" && matches!(action, ServiceAction::Mask | ServiceAction::Disable) {
+                let reason_msg = reason.unwrap_or_else(|| "This is an essential infrastructure service.".to_string());
+                log_to_file("WARN", &format!("Blocked {action_str} on essential unit {name}"));
+                return Err(format!("Security Protection: Disabling or masking '{name}' is restricted to prevent system lockout. {reason_msg}"));
+            }
+        }
+    }
 
     let output = if is_user {
         Command::new("systemctl")
@@ -295,6 +393,13 @@ pub async fn read_unit_file(name: String, user_mode: Option<bool>) -> Result<Str
 #[tauri::command]
 pub async fn write_unit_file(name: String, content: String, user_mode: Option<bool>) -> Result<(), String> {
     let is_user = user_mode.unwrap_or(false);
+
+    if !is_user {
+        let (is_protected, protection_level, _) = get_service_protection(&name);
+        if is_protected && protection_level == "critical" && content.trim().is_empty() {
+            return Err(format!("Security Violation: Writing empty override to critical system unit '{name}' is blocked."));
+        }
+    }
 
     if is_user {
         let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;

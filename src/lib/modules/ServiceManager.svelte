@@ -8,7 +8,8 @@
   import { invoke } from '@tauri-apps/api/core';
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
-    FileText, ShieldBan, ShieldCheck, Rocket, ChevronRight, User, Server, Activity, Network, GitFork, Link2
+    FileText, ShieldBan, ShieldCheck, ShieldAlert, Rocket, ChevronRight, User, Server, Activity, Network, GitFork, Link2,
+    Copy, Edit3, Lock, Unlock
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -32,6 +33,9 @@
     sub_state: string;
     description: string;
     unit_file_state: string;
+    is_protected?: boolean;
+    protection_level?: string;
+    protection_reason?: string;
   }
 
   type ServiceAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'mask' | 'unmask' | 'reload';
@@ -58,6 +62,29 @@
   let actionInProgress = $state<string | null>(null);
   let editedContent = $state('');
   let saving = $state(false);
+
+  // Context Menu State for Services
+  let contextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    unit: ServiceUnit | null;
+  }>({ x: 0, y: 0, show: false, unit: null });
+
+  function handleServiceContextMenu(e: MouseEvent, unit: ServiceUnit) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 240),
+      y: Math.min(e.clientY, window.innerHeight - 340),
+      show: true,
+      unit
+    };
+  }
+
+  function closeContextMenu() {
+    contextMenu.show = false;
+  }
 
   // Service Dependencies State
   interface UnitDeps {
@@ -442,6 +469,24 @@
         {/if}
       {/snippet}
 
+      {#if selectedUnit?.is_protected}
+        <div class="drawer-protection-alert {selectedUnit.protection_level}">
+          {#if selectedUnit.protection_level === 'critical'}
+            <ShieldAlert size={18} class="protection-alert-icon critical" />
+            <div class="protection-alert-text">
+              <strong style="color: var(--color-error); font-size: 12.5px;">Critical Operating System Core</strong>
+              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit is critical for operating system integrity. Masking, disabling, or stopping is strictly locked.'}</span>
+            </div>
+          {:else}
+            <ShieldCheck size={18} class="protection-alert-icon essential" />
+            <div class="protection-alert-text">
+              <strong style="color: var(--color-accent); font-size: 12.5px;">Protected Infrastructure Service</strong>
+              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit provides essential security, network, or display services. Guarded against accidental masking or disablement.'}</span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
       {#if activePanel === 'logs'}
         {#if logsLoading}
           <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
@@ -578,11 +623,24 @@
           </thead>
           <tbody>
             {#each paginatedUnits as unit (unit.name)}
-              <tr class:selected-unit={selectedUnit?.name === unit.name}>
-                <td style="min-width:220px">
-                  <div style="font-weight:500;color:var(--color-text-primary);font-family:var(--font-mono);font-size:12px">{unit.name}</div>
+              <tr class:selected-unit={selectedUnit?.name === unit.name} oncontextmenu={(e) => handleServiceContextMenu(e, unit)}>
+                <td style="min-width:240px">
+                  <div style="display:flex; align-items:center; gap:6px;">
+                    <span style="font-weight:600;color:var(--color-text-primary);font-family:var(--font-mono);font-size:12px">{unit.name}</span>
+                    {#if unit.is_protected}
+                      {#if unit.protection_level === 'critical'}
+                        <span class="protection-badge critical" title={unit.protection_reason || 'Critical operating system core component. Destructive actions are strictly locked.'}>
+                          <ShieldAlert size={10} /> Core
+                        </span>
+                      {:else}
+                        <span class="protection-badge essential" title={unit.protection_reason || 'Essential infrastructure service. Guarded against masking or disabling.'}>
+                          <ShieldCheck size={10} /> Protected
+                        </span>
+                      {/if}
+                    {/if}
+                  </div>
                   {#if unit.description}
-                    <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px">{unit.description}</div>
+                    <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px">{unit.description}</div>
                   {/if}
                 </td>
                 <td>
@@ -603,7 +661,15 @@
                     {#if unit.active_state !== 'active'}
                       <button class="action-btn" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={actionInProgress === `${unit.name}-start`}><Play size={14}/></button>
                     {:else}
-                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'stop')} title="Stop" disabled={actionInProgress === `${unit.name}-stop`}><Square size={14}/></button>
+                      <button 
+                        class="action-btn" 
+                        onclick={() => confirmDoAction(unit, 'stop')} 
+                        title={unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : 'Stop'} 
+                        disabled={unit.protection_level === 'critical' || actionInProgress === `${unit.name}-stop`}
+                        style={unit.protection_level === 'critical' ? 'opacity: 0.4; cursor: not-allowed;' : ''}
+                      >
+                        <Square size={14}/>
+                      </button>
                       <button class="action-btn" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={actionInProgress === `${unit.name}-restart`}><RotateCcw size={14}/></button>
                     {/if}
                     <KebabMenu align="right">
@@ -624,12 +690,40 @@
                       </button>
                       <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
                       {#if unit.unit_file_state !== 'enabled'}
-                        <button class="menu-item" onclick={() => confirmDoAction(unit, 'enable')}>
+                        <button 
+                          class="menu-item" 
+                          onclick={() => confirmDoAction(unit, 'enable')}
+                          disabled={unit.is_protected || !!actionInProgress}
+                          title={unit.is_protected ? 'Protected system service cannot be modified' : ''}
+                        >
                           <ShieldCheck size={14} /> Enable (Autostart)
                         </button>
                       {:else}
-                        <button class="menu-item text-error" onclick={() => confirmDoAction(unit, 'disable')}>
+                        <button 
+                          class="menu-item text-error" 
+                          onclick={() => confirmDoAction(unit, 'disable')}
+                          disabled={unit.is_protected || !!actionInProgress}
+                          title={unit.is_protected ? 'Protected system service cannot be disabled' : ''}
+                        >
                           <ShieldBan size={14} /> Disable (Autostart)
+                        </button>
+                      {/if}
+                      {#if unit.unit_file_state === 'masked'}
+                        <button 
+                          class="menu-item" 
+                          onclick={() => confirmDoAction(unit, 'unmask')}
+                          disabled={!!actionInProgress}
+                        >
+                          <Unlock size={14} /> Unmask Service
+                        </button>
+                      {:else}
+                        <button 
+                          class="menu-item text-error" 
+                          onclick={() => confirmDoAction(unit, 'mask')}
+                          disabled={unit.is_protected || !!actionInProgress}
+                          title={unit.is_protected ? 'Protected system service cannot be masked' : ''}
+                        >
+                          <Lock size={14} /> Mask Service
                         </button>
                       {/if}
                     </KebabMenu>
@@ -759,6 +853,153 @@
     </div>
   {/if}
 </div>
+
+<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
+
+{#if contextMenu.show && contextMenu.unit}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div 
+    class="custom-context-menu" 
+    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000; min-width: 240px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;" title={contextMenu.unit.name}>
+          {contextMenu.unit.name}
+        </span>
+        {#if contextMenu.unit.is_protected}
+          <span class="protection-badge {contextMenu.unit.protection_level}" style="font-size: 9px; padding: 1px 4px;">
+            {contextMenu.unit.protection_level === 'critical' ? 'Core' : 'Protected'}
+          </span>
+        {/if}
+      </div>
+      <span class="badge {activeStateBadge(contextMenu.unit.active_state)}" style="font-size: 9.5px; padding: 1px 5px;">
+        {contextMenu.unit.active_state}
+      </span>
+    </div>
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'restart'); }}
+      disabled={!!actionInProgress}
+    >
+      <RotateCcw size={14} style="color: var(--color-warning);" />
+      <span>Restart Service</span>
+    </button>
+
+    {#if contextMenu.unit.active_state !== 'active'}
+      <button 
+        type="button"
+        class="context-menu-item"
+        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'start'); }}
+        disabled={!!actionInProgress}
+      >
+        <Play size={14} style="color: var(--color-success);" />
+        <span>Start Service</span>
+      </button>
+    {:else}
+      <button 
+        type="button"
+        class="context-menu-item text-danger"
+        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'stop'); }}
+        disabled={contextMenu.unit.protection_level === 'critical' || !!actionInProgress}
+        title={contextMenu.unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : ''}
+      >
+        <Square size={14} style="color: var(--color-error);" />
+        <span>{contextMenu.unit.protection_level === 'critical' ? 'Stop Service (Locked)' : 'Stop Service'}</span>
+      </button>
+    {/if}
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => { 
+        const u = contextMenu.unit!; 
+        closeContextMenu(); 
+        const nextAction = u.unit_file_state === 'enabled' ? 'disable' : 'enable';
+        confirmDoAction(u, nextAction); 
+      }}
+      disabled={contextMenu.unit.is_protected || !!actionInProgress}
+      title={contextMenu.unit.is_protected ? 'Protected system service cannot be modified' : ''}
+    >
+      <ShieldCheck size={14} style="color: var(--color-accent);" />
+      <span>{contextMenu.unit.is_protected ? 'Boot Autostart (Locked)' : (contextMenu.unit.unit_file_state === 'enabled' ? 'Disable at Boot' : 'Enable at Boot')}</span>
+    </button>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const u = contextMenu.unit!;
+        closeContextMenu();
+        uiStore.jumpToJournalService(u.name);
+        uiStore.setActiveTab('journal-logs');
+      }}
+    >
+      <Activity size={14} style="color: var(--color-info);" />
+      <span>View Service Logs (Journalctl)</span>
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openEditor(u); }}
+    >
+      <Edit3 size={14} />
+      <span>Edit Service File</span>
+    </button>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openDependencies(u); }}
+    >
+      <GitFork size={14} />
+      <span>Inspect Dependencies</span>
+    </button>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const u = contextMenu.unit!;
+        closeContextMenu();
+        const maskAction = u.unit_file_state === 'masked' ? 'unmask' : 'mask';
+        confirmDoAction(u, maskAction);
+      }}
+      disabled={contextMenu.unit.is_protected || !!actionInProgress}
+      title={contextMenu.unit.is_protected ? 'Protected system service cannot be masked' : ''}
+    >
+      {#if contextMenu.unit.unit_file_state === 'masked'}
+        <Unlock size={14} style="color: var(--color-success);" />
+        <span>Unmask Service</span>
+      {:else}
+        <Lock size={14} style="color: var(--color-warning);" />
+        <span>{contextMenu.unit.is_protected ? 'Mask Service (Locked)' : 'Mask Service Unit'}</span>
+      {/if}
+    </button>
+
+    <button 
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const name = contextMenu.unit!.name;
+        navigator.clipboard.writeText(name);
+        uiStore.addToast(`Copied unit name: ${name}`, 'info');
+        closeContextMenu();
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy Unit Name</span>
+    </button>
+  </div>
+{/if}
 
 <style>
   /* ── Header row (tabs + stats + search) ─────────────────────────────── */
@@ -1063,5 +1304,110 @@
   :global(html.light-mode) .pill-btn.active {
     background: #2563EB;
     color: #FFFFFF;
+  }
+
+  /* ── Custom Context Menu ────────────────────────────────────────── */
+  .custom-context-menu {
+    background: var(--color-bg-card, #131b26);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+
+  .context-menu-item:hover:not(:disabled) {
+    background: var(--color-bg-hover, rgba(255, 255, 255, 0.08));
+    color: var(--color-text-primary);
+  }
+
+  .context-menu-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .context-menu-item.text-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--color-error);
+  }
+
+  /* ── Security Protection Badges & Alerts ───────────────────────────── */
+  .protection-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+  .protection-badge.critical {
+    background: rgba(239, 68, 68, 0.14);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+  .protection-badge.essential {
+    background: rgba(0, 218, 243, 0.12);
+    color: var(--color-accent);
+    border: 1px solid rgba(0, 218, 243, 0.3);
+  }
+
+  .drawer-protection-alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .drawer-protection-alert.critical {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+  }
+  .drawer-protection-alert.essential {
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.25);
+  }
+
+  .protection-alert-icon.critical {
+    color: var(--color-error);
+    margin-top: 2px;
+    flex-shrink: 0;
+  }
+  .protection-alert-icon.essential {
+    color: var(--color-accent);
+    margin-top: 2px;
+    flex-shrink: 0;
+  }
+
+  .protection-alert-text {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    line-height: 1.4;
   }
 </style>

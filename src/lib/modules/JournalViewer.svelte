@@ -4,9 +4,11 @@
   import { listen } from '@tauri-apps/api/event';
   import { 
     FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, 
-    AlertTriangle, Sparkles, Copy, Download, Radio, Play, Square, Activity
+    AlertTriangle, Sparkles, Copy, Download, Radio, Play, Square, Activity, Check, Code, 
+    Sliders, Filter, Cpu, Layers, ExternalLink, ChevronRight
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
   import Select from '../components/ui/Select.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import Badge from '../components/ui/Badge.svelte';
@@ -489,7 +491,9 @@
   let logContainerHeight = $state(700);
   const LOG_OVERSCAN = 35;
 
-  let logRowHeight = $derived(uiStore.tableDensity === 'compact' ? 32 : 44);
+  let logRowHeight = $derived(
+    uiStore.tableDensity === 'compact' ? 28 : (uiStore.tableDensity === 'spacious' ? 44 : 36)
+  );
   let journalFilteredCount = $derived(filteredLogs.length);
 
   let logStartIndex = $derived.by(() => {
@@ -524,6 +528,75 @@
       logScrollTop = target.scrollTop;
       logContainerHeight = target.clientHeight || 700;
     }
+  }
+
+  // Structured Log Detail Drawer State
+  let selectedLog = $state<any | null>(null);
+  let isLogDrawerOpen = $state(false);
+  let activeDrawerTab = $state<'fields' | 'json'>('fields');
+  let copiedField = $state<string | null>(null);
+
+  function openLogDrawer(log: any) {
+    selectedLog = log;
+    isLogDrawerOpen = true;
+    activeDrawerTab = 'fields';
+  }
+
+  function copyField(name: string, value: string) {
+    navigator.clipboard.writeText(value);
+    copiedField = name;
+    uiStore.addToast(`Copied ${name} to clipboard`, 'info', 2000);
+    setTimeout(() => {
+      if (copiedField === name) copiedField = null;
+    }, 2000);
+  }
+
+  function filterByDrawerUnit(unitName: string) {
+    searchQuery = unitName;
+    isLogDrawerOpen = false;
+    uiStore.addToast(`Filtering logs by unit: ${unitName}`, 'info');
+  }
+
+  function filterByDrawerPid(pid: string) {
+    searchQuery = pid;
+    isLogDrawerOpen = false;
+    uiStore.addToast(`Filtering logs by PID: ${pid}`, 'info');
+  }
+
+  function getPriorityLabel(prio: string | number): string {
+    const p = parseInt(prio as string);
+    switch(p) {
+      case 0: return 'Emergency';
+      case 1: return 'Alert';
+      case 2: return 'Critical';
+      case 3: return 'Error';
+      case 4: return 'Warning';
+      case 5: return 'Notice';
+      case 6: return 'Info';
+      case 7: return 'Debug';
+      default: return 'Info';
+    }
+  }
+
+  function getStructuredLogFields(log: any) {
+    if (!log) return [];
+    const fields = [
+      { key: '_PID', label: 'Process ID (PID)', val: log._PID, desc: 'Target process PID' },
+      { key: '_COMM', label: 'Command Name', val: log._COMM, desc: 'Executable command name' },
+      { key: '_EXE', label: 'Executable Path', val: log._EXE, desc: 'Absolute binary path' },
+      { key: '_CMDLINE', label: 'Command Line', val: log._CMDLINE, desc: 'Full arguments string' },
+      { key: '_SYSTEMD_UNIT', label: 'Systemd Unit', val: log._SYSTEMD_UNIT, desc: 'Associated systemd service unit' },
+      { key: '_SYSTEMD_CGROUP', label: 'CGroup Path', val: log._SYSTEMD_CGROUP, desc: 'Control group hierarchy path' },
+      { key: '_TRANSPORT', label: 'Transport', val: log._TRANSPORT, desc: 'Origin transport (journal, stdout, syslog, kernel)' },
+      { key: 'SYSLOG_IDENTIFIER', label: 'Syslog Identifier', val: log.SYSLOG_IDENTIFIER, desc: 'Identifier in syslog stream' },
+      { key: '_UID', label: 'User ID (UID)', val: log._UID, desc: 'Process user ID' },
+      { key: '_GID', label: 'Group ID (GID)', val: log._GID, desc: 'Process group ID' },
+      { key: '__REALTIME_TIMESTAMP', label: 'Timestamp (μs)', val: log.__REALTIME_TIMESTAMP, desc: 'Realtime timestamp in microseconds' },
+      { key: '_HOSTNAME', label: 'Hostname', val: log._HOSTNAME, desc: 'Origin host machine' },
+      { key: '_BOOT_ID', label: 'Boot ID', val: log._BOOT_ID, desc: 'Unique system boot session ID' },
+      { key: '_MACHINE_ID', label: 'Machine ID', val: log._MACHINE_ID, desc: 'Unique OS installation machine ID' },
+    ];
+    return fields.filter(f => f.val !== undefined && f.val !== null && String(f.val).trim() !== '');
   }
 
   let filteredAuthEvents = $derived.by(() => {
@@ -791,7 +864,7 @@
               {#each visibleLogs as log (log.__REALTIME_TIMESTAMP + (log._SYSTEMD_UNIT || '') + (log.MESSAGE || ''))}
                 {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
                 {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
-                <tr class="log-row {getPriorityClass(log.PRIORITY)}">
+                <tr class="log-row {getPriorityClass(log.PRIORITY)}" onclick={() => openLogDrawer(log)} style="cursor: pointer;">
                   <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
                   <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                     {@html highlight(unit, searchQuery)}
@@ -802,12 +875,12 @@
                       <span class="repeat-badge">×{log.count}</span>
                     {/if}
                   </td>
-                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;">
+                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;" onclick={(e) => e.stopPropagation()}>
                     <div style="display: inline-flex; align-items: center; gap: 4px;">
                       <button
                         type="button"
                         class="btn btn-ghost btn-xs"
-                        onclick={() => copyLog(log)}
+                        onclick={(e) => { e.stopPropagation(); copyLog(log); }}
                         title="Copy log entry to clipboard"
                         style="padding: 2px 6px; font-size: 11px;"
                       >
@@ -818,7 +891,7 @@
                           type="button"
                           class="btn btn-outline btn-xs"
                           disabled={!hasMsg}
-                          onclick={() => hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit)}
+                          onclick={(e) => { e.stopPropagation(); hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit); }}
                           title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
                           style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
                         >
@@ -1136,6 +1209,154 @@
     </div>
   </div>
 </div>
+
+{#if selectedLog}
+  <SideDrawer bind:isOpen={isLogDrawerOpen} title="Log Entry Details" width="580px">
+    {#snippet headerActions()}
+      <div style="display: flex; align-items: center; gap: 6px; margin-right: 8px;">
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs"
+          class:active={activeDrawerTab === 'fields'}
+          onclick={() => activeDrawerTab = 'fields'}
+          style="padding: 3px 8px; font-size: 11px; background: {activeDrawerTab === 'fields' ? 'var(--color-bg-hover)' : 'transparent'};"
+        >
+          <Sliders size={12} /> Fields
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs"
+          class:active={activeDrawerTab === 'json'}
+          onclick={() => activeDrawerTab = 'json'}
+          style="padding: 3px 8px; font-size: 11px; background: {activeDrawerTab === 'json' ? 'var(--color-bg-hover)' : 'transparent'};"
+        >
+          <Code size={12} /> Raw JSON
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-xs"
+          onclick={() => copyField('Raw JSON', JSON.stringify(selectedLog, null, 2))}
+          style="padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px;"
+        >
+          {#if copiedField === 'Raw JSON'}
+            <Check size={12} style="color: var(--color-success);" /> Copied
+          {:else}
+            <Copy size={12} /> Copy JSON
+          {/if}
+        </button>
+      </div>
+    {/snippet}
+
+    <div class="log-drawer-body">
+      <!-- Top Overview Banner -->
+      <div class="drawer-overview-card {getPriorityClass(selectedLog.PRIORITY)}">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <Badge variant={selectedLog.PRIORITY <= 3 ? 'danger' : (selectedLog.PRIORITY == 4 ? 'warning' : 'info')}>
+              Priority {selectedLog.PRIORITY} ({getPriorityLabel(selectedLog.PRIORITY)})
+            </Badge>
+            <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--color-text-primary);">
+              {selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER || selectedLog._COMM || 'kernel'}
+            </span>
+          </div>
+          <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">
+            {formatTimestamp(selectedLog.__REALTIME_TIMESTAMP)}
+          </span>
+        </div>
+
+        <!-- Action Quick-Bar -->
+        <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06);">
+          {#if selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER}
+            {@const u = selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER}
+            <button
+              type="button"
+              class="drawer-action-btn"
+              onclick={() => filterByDrawerUnit(u)}
+              title="Filter journal logs by {u}"
+            >
+              <Filter size={12} /> Filter by Unit
+            </button>
+          {/if}
+          {#if selectedLog._PID}
+            <button
+              type="button"
+              class="drawer-action-btn"
+              onclick={() => filterByDrawerPid(String(selectedLog._PID))}
+              title="Filter journal logs by PID {selectedLog._PID}"
+            >
+              <Terminal size={12} /> Filter by PID ({selectedLog._PID})
+            </button>
+          {/if}
+          {#if aiStore.enabled && selectedLog.MESSAGE}
+            <button
+              type="button"
+              class="drawer-action-btn ai-btn"
+              onclick={() => aiStore.diagnoseLogError(String(selectedLog.MESSAGE), selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER || 'kernel')}
+              title="Diagnose log with AI"
+            >
+              <Sparkles size={12} style="color: var(--color-accent);" /> Diagnose with AI
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      {#if activeDrawerTab === 'fields'}
+        <!-- Message Box -->
+        <div class="drawer-section">
+          <div class="drawer-section-title">
+            <span>Log Message</span>
+            <button 
+              type="button" 
+              class="field-copy-btn"
+              onclick={() => copyField('Message', String(selectedLog.MESSAGE || ''))}
+              title="Copy message"
+            >
+              {#if copiedField === 'Message'}<Check size={11} /> Copied{:else}<Copy size={11} /> Copy{/if}
+            </button>
+          </div>
+          <div class="drawer-msg-box">
+            {selectedLog.MESSAGE || '(Empty log message)'}
+          </div>
+        </div>
+
+        <!-- Structured Metadata Table -->
+        <div class="drawer-section">
+          <div class="drawer-section-title">
+            <span>Systemd Metadata</span>
+          </div>
+
+          <div class="drawer-fields-table">
+            {#each getStructuredLogFields(selectedLog) as item}
+              <div class="drawer-field-row">
+                <div class="drawer-field-key" title={item.desc || item.key}>{item.label || item.key}</div>
+                <div class="drawer-field-val" title={String(item.val)}>
+                  <code>{String(item.val)}</code>
+                </div>
+                <button
+                  type="button"
+                  class="field-row-copy-btn"
+                  onclick={() => copyField(item.key, String(item.val))}
+                  title="Copy {item.key}"
+                >
+                  {#if copiedField === item.key}
+                    <Check size={11} style="color: var(--color-success);" />
+                  {:else}
+                    <Copy size={11} />
+                  {/if}
+                </button>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {:else}
+        <!-- Raw JSON Inspector -->
+        <div class="drawer-section">
+          <pre class="drawer-raw-json"><code>{JSON.stringify(selectedLog, null, 2)}</code></pre>
+        </div>
+      {/if}
+    </div>
+  </SideDrawer>
+{/if}
 
 <style>
   /* ── Single unified toolbar strip ───────────────────── */
@@ -1515,5 +1736,185 @@
   }
   .log-row.log-debug {
     border-left: 5px solid var(--color-border);
+  }
+
+  /* ── Log Detail Drawer Styles ─────────────────────────────────────────── */
+  .log-drawer-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px;
+  }
+
+  .drawer-overview-card {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 14px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  }
+
+  .drawer-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-raised);
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .drawer-action-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+  .drawer-action-btn.ai-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .drawer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .drawer-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .field-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: color 0.15s ease;
+  }
+  .field-copy-btn:hover {
+    color: var(--color-accent);
+  }
+
+  .drawer-msg-box {
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .drawer-fields-table {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--color-bg-card);
+  }
+
+  .drawer-field-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    font-size: 12px;
+  }
+  .drawer-field-row:last-child {
+    border-bottom: none;
+  }
+  .drawer-field-row:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .drawer-field-key {
+    width: 140px;
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drawer-field-val {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drawer-field-val code {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    font-family: inherit;
+  }
+
+  .field-row-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+  .field-row-copy-btn:hover {
+    opacity: 1;
+    color: var(--color-accent);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .drawer-raw-json {
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 500px;
+    overflow-y: auto;
+    margin: 0;
   }
 </style>

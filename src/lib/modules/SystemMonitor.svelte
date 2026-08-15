@@ -197,6 +197,14 @@
     conn: any | null;
   }>({ x: 0, y: 0, show: false, conn: null });
 
+  // Context Menu State for Process Tree
+  let procContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    proc: any | null;
+  }>({ x: 0, y: 0, show: false, proc: null });
+
   // Side Drawer details State
   let isDrawerOpen = $state(false);
   let selectedConnection = $state<any | null>(null);
@@ -205,16 +213,30 @@
 
   function closeContextMenu() {
     contextMenu.show = false;
+    procContextMenu.show = false;
   }
 
   function handleConnectionContextMenu(e: MouseEvent, conn: any) {
     e.preventDefault();
     e.stopPropagation();
+    procContextMenu.show = false;
     contextMenu = {
-      x: e.clientX,
-      y: e.clientY,
+      x: Math.min(e.clientX, window.innerWidth - 220),
+      y: Math.min(e.clientY, window.innerHeight - 180),
       show: true,
       conn
+    };
+  }
+
+  function handleProcContextMenu(e: MouseEvent, proc: any) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu.show = false;
+    procContextMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 240),
+      y: Math.min(e.clientY, window.innerHeight - 300),
+      show: true,
+      proc
     };
   }
 
@@ -525,22 +547,23 @@
     return (bytesPerSec / (1024 * 1024 * 1024)).toFixed(1) + " GB/s";
   }
 
-  function killProcess(pid: number, name: string) {
+  function killProcess(pid: number, name: string, signal: number = 15) {
+    const signalLabel = signal === 9 ? 'SIGKILL (Force Kill)' : (signal === 1 ? 'SIGHUP (Reload)' : 'SIGTERM (Terminate)');
     uiStore.confirm(
-      `Confirm Kill Process`,
-      `Kill process ${name} (PID ${pid})?`,
+      `Confirm Signal ${signalLabel}`,
+      `Send ${signalLabel} to process ${name} (PID ${pid})?`,
       async () => {
         try {
-          const res = await invoke('kill_process', { pid, signal: 15 });
-          statusStore.setLastCommand(`kill -15 ${pid}`, 0, true);
+          const res = await invoke('kill_process', { pid, signal });
+          statusStore.setLastCommand(`kill -${signal} ${pid}`, 0, true);
           uiStore.addToast(res as string, 'success');
           pollProcesses();
         } catch (e: any) {
-          statusStore.setLastCommand(`kill -15 ${pid}`, 1, false);
+          statusStore.setLastCommand(`kill -${signal} ${pid}`, 1, false);
           uiStore.addToast(e.toString(), 'error');
         }
       },
-      true
+      signal === 9
     );
   }
 
@@ -666,7 +689,9 @@
   let procContainerHeight = $state(600);
   const PROC_OVERSCAN = 15;
 
-  let procRowHeight = $derived(uiStore.tableDensity === 'compact' ? 32 : 44);
+  let procRowHeight = $derived(
+    uiStore.tableDensity === 'compact' ? 28 : (uiStore.tableDensity === 'spacious' ? 44 : 36)
+  );
   let totalProcCount = $derived(treeVisibleProcesses.length);
 
   let procStartIndex = $derived.by(() => {
@@ -1154,6 +1179,7 @@
                 class:depth-2={item.depth === 2}
                 class:depth-3={item.depth >= 3}
                 onclick={() => openProcessInspector(p)}
+                oncontextmenu={(e) => handleProcContextMenu(e, p)}
                 style="cursor: pointer;"
               >
                 <td class="col-pid" onclick={(e) => e.stopPropagation()}>
@@ -1301,6 +1327,100 @@
     >
       <TerminalSquare size={13} style="margin-right: 8px; color: var(--color-info);" />
       Show Details
+    </button>
+  </div>
+{/if}
+
+{#if procContextMenu.show && procContextMenu.proc}
+  <div 
+    class="custom-context-menu" 
+    style="position: fixed; left: {procContextMenu.x}px; top: {procContextMenu.y}px; z-index: 10000; min-width: 230px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={procContextMenu.proc.name}>
+        {procContextMenu.proc.name}
+      </span>
+      <span style="font-size: 9.5px; font-weight: 600; font-family: var(--font-mono); padding: 1px 5px; border-radius: 3px; background: rgba(0, 218, 243, 0.12); color: var(--color-accent);">
+        PID {procContextMenu.proc.pid}
+      </span>
+    </div>
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button 
+      type="button"
+      onclick={() => {
+        const p = procContextMenu.proc!;
+        closeContextMenu();
+        openProcessInspector(p);
+      }}
+    >
+      <TerminalSquare size={13} style="margin-right: 8px; color: var(--color-accent);" />
+      Inspect Details
+    </button>
+
+    <button 
+      type="button"
+      onclick={() => {
+        copyPid(procContextMenu.proc!.pid);
+        closeContextMenu();
+      }}
+    >
+      <Copy size={13} style="margin-right: 8px;" />
+      Copy PID ({procContextMenu.proc.pid})
+    </button>
+
+    <button 
+      type="button"
+      onclick={() => {
+        navigator.clipboard.writeText(procContextMenu.proc!.name);
+        uiStore.addToast(`Copied process name: ${procContextMenu.proc!.name}`, 'info');
+        closeContextMenu();
+      }}
+    >
+      <Copy size={13} style="margin-right: 8px;" />
+      Copy Name
+    </button>
+
+    <button 
+      type="button"
+      onclick={() => {
+        const p = procContextMenu.proc!;
+        closeContextMenu();
+        uiStore.jumpToJournalService(p.name);
+        uiStore.setActiveTab('journal-logs');
+      }}
+    >
+      <Activity size={13} style="margin-right: 8px; color: var(--color-info);" />
+      View Unit Logs in Journalctl
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button 
+      type="button"
+      onclick={() => {
+        const p = procContextMenu.proc!;
+        closeContextMenu();
+        killProcess(p.pid, p.name, 15);
+      }}
+      style="color: var(--color-warning);"
+    >
+      <Skull size={13} style="margin-right: 8px; color: var(--color-warning);" />
+      Send SIGTERM (Terminate)
+    </button>
+
+    <button 
+      type="button"
+      onclick={() => {
+        const p = procContextMenu.proc!;
+        closeContextMenu();
+        killProcess(p.pid, p.name, 9);
+      }}
+      style="color: var(--color-error);"
+    >
+      <Skull size={13} style="margin-right: 8px; color: var(--color-error);" />
+      Send SIGKILL (Force Kill)
     </button>
   </div>
 {/if}

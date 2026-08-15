@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
   import type { Action } from 'svelte/action';
   import { uiStore } from '../../stores/ui.svelte.ts';
-  import { Rows2, Rows3 } from '@lucide/svelte';
+  import { Rows4, Rows3, Rows2 } from '@lucide/svelte';
 
   interface Props {
     children?: Snippet;
@@ -12,7 +12,7 @@
     style?: string;
     onscroll?: (e: Event) => void;
     showDensityToggle?: boolean;
-    density?: 'compact' | 'spacious';
+    density?: 'compact' | 'normal' | 'spacious';
     [key: string]: any;
   }
 
@@ -38,17 +38,25 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'compact' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('compact')}
-        title="Compact Mode (24px line height, 11px font, power user view)"
+        title="Compact Mode (28px row height, 11px font, max data density)"
       >
-        <Rows2 size={12} />
+        <Rows4 size={12} />
+      </button>
+      <button
+        type="button"
+        class="tbl-floating-density-btn {activeDensity === 'normal' ? 'active' : ''}"
+        onclick={() => uiStore.setTableDensity('normal')}
+        title="Normal Mode (36px row height, 12px font, standard balanced view)"
+      >
+        <Rows3 size={12} />
       </button>
       <button
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'spacious' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('spacious')}
-        title="Spacious Mode (36px line height, expanded text)"
+        title="Spacious Mode (44px row height, 13px font, comfortable relaxed view)"
       >
-        <Rows3 size={12} />
+        <Rows2 size={12} />
       </button>
     </div>
   {/if}

@@ -43,7 +43,7 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
-  tableDensity = $state<'compact' | 'spacious'>('compact');
+  tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
   /** Target subtab to activate when navigating into a module */
@@ -157,14 +157,14 @@ class UIStore {
 
   initTableDensity() {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('app_table_density') as 'compact' | 'spacious';
-      if (saved === 'compact' || saved === 'spacious') {
+      const saved = localStorage.getItem('app_table_density') as 'compact' | 'normal' | 'spacious';
+      if (saved === 'compact' || saved === 'normal' || saved === 'spacious') {
         this.tableDensity = saved;
       }
     }
   }
 
-  setTableDensity(density: 'compact' | 'spacious') {
+  setTableDensity(density: 'compact' | 'normal' | 'spacious') {
     this.tableDensity = density;
     if (typeof window !== 'undefined') {
       localStorage.setItem('app_table_density', density);
@@ -172,7 +172,9 @@ class UIStore {
   }
 
   toggleTableDensity() {
-    this.setTableDensity(this.tableDensity === 'compact' ? 'spacious' : 'compact');
+    if (this.tableDensity === 'compact') this.setTableDensity('normal');
+    else if (this.tableDensity === 'normal') this.setTableDensity('spacious');
+    else this.setTableDensity('compact');
   }
 
   preAppliedJournalPriority = $state<string>('all');

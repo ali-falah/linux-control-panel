@@ -2,7 +2,11 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { Command } from '@tauri-apps/plugin-shell';
-  import { AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers } from '@lucide/svelte';
+  import { 
+    AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, 
+    HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers,
+    Play, FolderOpen, Copy, Info
+  } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -119,6 +123,61 @@
     home_files: boolean;
   }
   let flatpakPermissions = $state<FlatpakPermissions | null>(null);
+
+  // Context Menu State
+  let contextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    app: DesktopApp | null;
+  }>({ x: 0, y: 0, show: false, app: null });
+
+  function handleAppContextMenu(e: MouseEvent, app: DesktopApp) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 220),
+      y: Math.min(e.clientY, window.innerHeight - 240),
+      show: true,
+      app
+    };
+  }
+
+  function closeContextMenu() {
+    contextMenu.show = false;
+  }
+
+  async function handleLaunchApp(app: DesktopApp) {
+    closeContextMenu();
+    try {
+      uiStore.addToast(`Launching ${app.name}...`, 'info');
+      await invoke('launch_desktop_app', { exec: app.exec });
+    } catch (err: any) {
+      uiStore.addToast(`Failed to launch: ${err?.message || err}`, 'error');
+    }
+  }
+
+  async function handleOpenDesktopFile(app: DesktopApp) {
+    closeContextMenu();
+    if (app.file_path) {
+      try {
+        await invoke('reveal_in_file_manager', { path: app.file_path });
+        uiStore.addToast(`Revealed file in manager`, 'success');
+      } catch (err) {
+        navigator.clipboard.writeText(app.file_path);
+        uiStore.addToast(`Copied desktop file path`, 'info');
+      }
+    } else {
+      uiStore.addToast('No desktop file path available', 'warning');
+    }
+  }
+
+  function handleCopyAppId(app: DesktopApp) {
+    closeContextMenu();
+    const id = app.package_id || app.name;
+    navigator.clipboard.writeText(id);
+    uiStore.addToast(`Copied App ID: ${id}`, 'info');
+  }
   let loadingPermissions = $state(false);
 
   // Dependencies state
@@ -626,6 +685,7 @@
             <Card 
               class="app-card" 
               onclick={() => openDetails(app)} 
+              oncontextmenu={(e) => handleAppContextMenu(e, app)}
               style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; transition: all 0.2s ease;"
             >
               <div class="app-icon-wrapper" style="width: 36px; height: 36px; border-radius: 8px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-module-icon-border, var(--color-border)); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -906,6 +966,68 @@
     </div>
   {/if}
 </div>
+
+<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
+
+{#if contextMenu.show && contextMenu.app}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div 
+    class="custom-context-menu" 
+    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <div class="context-menu-header">
+      <span class="context-menu-title">{contextMenu.app.name}</span>
+      <span class="context-menu-badge">{contextMenu.app.source}</span>
+    </div>
+    <div class="context-menu-divider"></div>
+    <button 
+      type="button" 
+      class="context-menu-item"
+      onclick={() => handleLaunchApp(contextMenu.app!)}
+    >
+      <Play size={14} style="color: var(--color-success);" />
+      <span>Launch Application</span>
+    </button>
+    <button 
+      type="button" 
+      class="context-menu-item"
+      onclick={() => { const a = contextMenu.app!; closeContextMenu(); openDetails(a); }}
+    >
+      <Info size={14} style="color: var(--color-accent);" />
+      <span>Inspect Details</span>
+    </button>
+    <button 
+      type="button" 
+      class="context-menu-item"
+      onclick={() => handleOpenDesktopFile(contextMenu.app!)}
+      disabled={!contextMenu.app.file_path}
+    >
+      <FolderOpen size={14} style="color: var(--color-warning);" />
+      <span>Open Desktop File Location</span>
+    </button>
+    <button 
+      type="button" 
+      class="context-menu-item"
+      onclick={() => handleCopyAppId(contextMenu.app!)}
+    >
+      <Copy size={14} />
+      <span>Copy App ID / Name</span>
+    </button>
+    {#if contextMenu.app.source !== 'AppImage'}
+      <div class="context-menu-divider"></div>
+      <button 
+        type="button" 
+        class="context-menu-item text-danger"
+        onclick={() => { const a = contextMenu.app!; closeContextMenu(); confirmUninstall(a); }}
+      >
+        <Trash2 size={14} style="color: var(--color-error);" />
+        <span>Uninstall Application</span>
+      </button>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .module-page {
@@ -1201,6 +1323,87 @@
     background: rgba(16, 185, 129, 0.1);
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.2);
+  }
+
+  /* ── Custom Context Menu ────────────────────────────────────────── */
+  .custom-context-menu {
+    background: var(--color-bg-card, #131b26);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 6px;
+    min-width: 220px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .context-menu-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    gap: 8px;
+  }
+
+  .context-menu-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+  }
+
+  .context-menu-badge {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(0, 218, 243, 0.12);
+    color: var(--color-accent);
+    text-transform: uppercase;
+  }
+
+  .context-menu-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: 4px 0;
+  }
+
+  .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+
+  .context-menu-item:hover:not(:disabled) {
+    background: var(--color-bg-hover, rgba(255, 255, 255, 0.08));
+    color: var(--color-text-primary);
+  }
+
+  .context-menu-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .context-menu-item.text-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--color-error);
   }
 
   :global(html.light-mode) .side-panel {

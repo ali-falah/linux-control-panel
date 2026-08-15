@@ -694,3 +694,40 @@ pub async fn register_appimage(
 
     Ok(())
 }
+
+#[tauri::command]
+pub async fn launch_desktop_app(exec: String) -> Result<(), String> {
+    let clean_exec = exec
+        .split_whitespace()
+        .filter(|s| !s.starts_with('%'))
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    let cmd = if clean_exec.trim().is_empty() { exec } else { clean_exec };
+
+    tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} &", cmd))
+        .spawn()
+        .map_err(|e| format!("Failed to spawn process: {e}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let target = if p.is_file() {
+        p.parent().unwrap_or(p).to_string_lossy().to_string()
+    } else {
+        path
+    };
+
+    tokio::process::Command::new("xdg-open")
+        .arg(&target)
+        .spawn()
+        .map_err(|e| format!("Failed to open file manager: {e}"))?;
+
+    Ok(())
+}
+
