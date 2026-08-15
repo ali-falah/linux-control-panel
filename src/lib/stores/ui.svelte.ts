@@ -51,8 +51,31 @@ class UIStore {
   /** Recent search queries */
   recentSearches = $state<string[]>([]);
   /** Recently visited pages and subtabs */
-  recentVisitedItems = $state<{ id: string; title: string; subtitle?: string; tabId: TabId; subTab?: string; category: string }[]>([]);
   version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
+  isWindowFocused = $state(true);
+  isDocumentVisible = $state(true);
+
+  initVisibilityListener() {
+    if (typeof window !== 'undefined') {
+      this.isDocumentVisible = !document.hidden;
+      this.isWindowFocused = document.hasFocus ? document.hasFocus() : true;
+
+      document.addEventListener('visibilitychange', () => {
+        this.isDocumentVisible = !document.hidden;
+      });
+      window.addEventListener('focus', () => {
+        this.isWindowFocused = true;
+        this.isDocumentVisible = true;
+      });
+      window.addEventListener('blur', () => {
+        this.isWindowFocused = false;
+      });
+    }
+  }
+
+  get isThrottled(): boolean {
+    return !this.isDocumentVisible || !this.isWindowFocused;
+  }
 
   openSettingsModal() {
     this.settingsModalOpen = true;

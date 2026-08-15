@@ -399,7 +399,7 @@
 
   function restartTimers() {
     clearTimers();
-    if (isPaused || document.hidden) return;
+    if (isPaused || uiStore.isThrottled) return;
     if (currentTab === 'overview') {
       pollLeftAndCenter();
       pollRight();
@@ -412,7 +412,7 @@
   }
 
   function handleVisibilityChange() {
-    if (document.hidden) {
+    if (uiStore.isThrottled) {
       clearTimers();
     } else {
       restartTimers();
@@ -420,7 +420,10 @@
   }
 
   $effect(() => {
-    // React to tab switch or pause toggle
+    // React to tab switch, pause toggle, or window focus/visibility changes
+    const _throttled = uiStore.isThrottled;
+    const _tab = currentTab;
+    const _paused = isPaused;
     restartTimers();
   });
 
@@ -657,6 +660,48 @@
 
     return result;
   });
+
+  // Virtual Scrolling State for Process Table
+  let procScrollTop = $state(0);
+  let procContainerHeight = $state(600);
+  const PROC_OVERSCAN = 15;
+
+  let procRowHeight = $derived(uiStore.tableDensity === 'compact' ? 32 : 44);
+  let totalProcCount = $derived(treeVisibleProcesses.length);
+
+  let procStartIndex = $derived.by(() => {
+    if (totalProcCount <= 40) return 0;
+    const raw = Math.floor(procScrollTop / procRowHeight) - PROC_OVERSCAN;
+    return Math.max(0, Math.min(raw, Math.max(0, totalProcCount - 1)));
+  });
+
+  let procVisibleCount = $derived.by(() => {
+    if (totalProcCount <= 40) return totalProcCount;
+    return Math.ceil(procContainerHeight / procRowHeight) + 2 * PROC_OVERSCAN;
+  });
+
+  let procEndIndex = $derived(
+    totalProcCount <= 40
+      ? totalProcCount
+      : Math.min(totalProcCount, procStartIndex + procVisibleCount)
+  );
+
+  let visibleProcesses = $derived(
+    totalProcCount <= 40
+      ? treeVisibleProcesses
+      : treeVisibleProcesses.slice(procStartIndex, procEndIndex)
+  );
+
+  let procTopPadding = $derived(totalProcCount <= 40 ? 0 : procStartIndex * procRowHeight);
+  let procBottomPadding = $derived(totalProcCount <= 40 ? 0 : Math.max(0, (totalProcCount - procEndIndex) * procRowHeight));
+
+  function handleProcessScroll(e: Event) {
+    const target = e.currentTarget as HTMLElement;
+    if (target) {
+      procScrollTop = target.scrollTop;
+      procContainerHeight = target.clientHeight || 600;
+    }
+  }
 
   async function forceRefresh() {
     if (currentTab === 'overview') {
@@ -1068,7 +1113,7 @@
           </div>
         </div>
 
-        <Table class="process-table-wrap" style="flex:1; min-height:0; overflow-y:auto; border:none; border-radius:0;">
+        <Table class="process-table-wrap" onscroll={handleProcessScroll} style="flex:1; min-height:0; overflow-y:auto; border:none; border-radius:0;">
           <thead>
             <tr>
               <th class="col-pid sortable-th" onclick={() => toggleProcSort('pid')}>
@@ -1093,7 +1138,10 @@
             </tr>
           </thead>
           <tbody>
-            {#each treeVisibleProcesses as item (item.process.pid)}
+            {#if procTopPadding > 0}
+              <tr style="height: {procTopPadding}px; border: none !important; pointer-events: none;"><td colspan="7" style="padding: 0; border: none !important; height: {procTopPadding}px;"></td></tr>
+            {/if}
+            {#each visibleProcesses as item (item.process.pid)}
               {@const p = item.process}
               <tr
                 class="proc-row tree-row"
@@ -1206,6 +1254,9 @@
                 </td>
               </tr>
             {/each}
+            {#if procBottomPadding > 0}
+              <tr style="height: {procBottomPadding}px; border: none !important; pointer-events: none;"><td colspan="7" style="padding: 0; border: none !important; height: {procBottomPadding}px;"></td></tr>
+            {/if}
             {#if treeVisibleProcesses.length === 0}
               <tr>
                 <td colspan="7" style="padding:32px 16px; text-align:center; color:var(--color-text-muted); font-size:13px;">

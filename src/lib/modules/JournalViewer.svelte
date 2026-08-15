@@ -129,9 +129,12 @@
       }).filter(Boolean).reverse();
 
       setTimeout(() => {
-        if (logContainer) logContainer.scrollTop = 0;
-        const tableWrap = logContainer?.querySelector('.table-wrap');
-        if (tableWrap) tableWrap.scrollTop = 0;
+        const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
+        if (tableWrap) {
+          tableWrap.scrollTop = 0;
+          logScrollTop = 0;
+          logContainerHeight = tableWrap.clientHeight || 700;
+        }
       }, 50);
 
       statusStore.setLastCommand(
@@ -481,6 +484,48 @@
     });
   });
 
+  // Virtual Scrolling State for Journal Logs Table
+  let logScrollTop = $state(0);
+  let logContainerHeight = $state(700);
+  const LOG_OVERSCAN = 35;
+
+  let logRowHeight = $derived(uiStore.tableDensity === 'compact' ? 32 : 44);
+  let journalFilteredCount = $derived(filteredLogs.length);
+
+  let logStartIndex = $derived.by(() => {
+    if (journalFilteredCount <= 60) return 0;
+    const raw = Math.floor(logScrollTop / logRowHeight) - LOG_OVERSCAN;
+    return Math.max(0, Math.min(raw, Math.max(0, journalFilteredCount - 1)));
+  });
+
+  let logVisibleCount = $derived.by(() => {
+    if (journalFilteredCount <= 60) return journalFilteredCount;
+    return Math.ceil(logContainerHeight / logRowHeight) + 2 * LOG_OVERSCAN;
+  });
+
+  let logEndIndex = $derived(
+    journalFilteredCount <= 60
+      ? journalFilteredCount
+      : Math.min(journalFilteredCount, logStartIndex + logVisibleCount)
+  );
+
+  let visibleLogs = $derived(
+    journalFilteredCount <= 60
+      ? filteredLogs
+      : filteredLogs.slice(logStartIndex, logEndIndex)
+  );
+
+  let logTopPadding = $derived(journalFilteredCount <= 60 ? 0 : logStartIndex * logRowHeight);
+  let logBottomPadding = $derived(journalFilteredCount <= 60 ? 0 : Math.max(0, (journalFilteredCount - logEndIndex) * logRowHeight));
+
+  function handleLogScroll(e: Event) {
+    const target = e.currentTarget as HTMLElement;
+    if (target) {
+      logScrollTop = target.scrollTop;
+      logContainerHeight = target.clientHeight || 700;
+    }
+  }
+
   let filteredAuthEvents = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
     let items = q ? authEvents.filter(ev =>
@@ -730,7 +775,7 @@
             />
           {/if}
         {:else}
-          <Table class="log-table">
+          <Table class="log-table" onscroll={handleLogScroll}>
             <thead>
               <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
                 <th style="padding: 8px 12px; font-weight: 600;">Time</th>
@@ -740,7 +785,10 @@
               </tr>
             </thead>
             <tbody>
-              {#each filteredLogs as log}
+              {#if logTopPadding > 0}
+                <tr style="height: {logTopPadding}px; padding: 0; margin: 0; border: none !important; line-height: 0; font-size: 0; pointer-events: none;"><td colspan="4" style="padding: 0; margin: 0; border: none !important; height: {logTopPadding}px; line-height: 0; font-size: 0;"></td></tr>
+              {/if}
+              {#each visibleLogs as log (log.__REALTIME_TIMESTAMP + (log._SYSTEMD_UNIT || '') + (log.MESSAGE || ''))}
                 {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
                 {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
                 <tr class="log-row {getPriorityClass(log.PRIORITY)}">
@@ -781,6 +829,9 @@
                   </td>
                 </tr>
               {/each}
+              {#if logBottomPadding > 0}
+                <tr style="height: {logBottomPadding}px; padding: 0; margin: 0; border: none !important; line-height: 0; font-size: 0; pointer-events: none;"><td colspan="4" style="padding: 0; margin: 0; border: none !important; height: {logBottomPadding}px; line-height: 0; font-size: 0;"></td></tr>
+              {/if}
             </tbody>
           </Table>
         {/if}

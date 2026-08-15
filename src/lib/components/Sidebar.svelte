@@ -165,12 +165,7 @@
   <!-- Logo -->
   <button class="sidebar-logo" onclick={() => uiStore.toggleSidebar()} title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
     <div class="logo-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="2" y="3" width="20" height="14" rx="2"/>
-        <path d="M8 21h8M12 17v4"/>
-        <circle cx="12" cy="10" r="2" fill="currentColor" stroke="none" opacity="0.6"/>
-        <path d="M7 10h1M16 10h1" stroke-linecap="round"/>
-      </svg>
+      <img src="/app-icon.png" alt="Control Panel" class="logo-img" />
     </div>
     {#if !uiStore.sidebarCollapsed}
       <div class="logo-text">
@@ -617,20 +612,30 @@
   }
 
   .logo-icon {
-    width: 30px;
-    height: 30px;
-    border-radius: 6px;
-    background: rgba(0, 218, 243, 0.08);
-    border: 1px solid rgba(0, 218, 243, 0.22);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--color-accent);
     flex-shrink: 0;
-    box-shadow: 0 0 10px rgba(0, 218, 243, 0.10);
+    overflow: hidden;
+    background: transparent;
+    border: none;
+    box-shadow: 0 0 10px rgba(0, 218, 243, 0.20);
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .sidebar-logo:hover .logo-icon {
+    transform: scale(1.05);
+    box-shadow: 0 0 14px rgba(0, 218, 243, 0.40);
   }
 
-  .logo-icon svg { width: 16px; height: 16px; }
+  .logo-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+  }
 
   .logo-text {
     display: flex;

@@ -391,30 +391,38 @@
 
   let pollInterval: any = null;
 
-  function handleVisibilityChange() {
-    if (document.hidden) {
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
-    } else {
-      if (!pollInterval) {
-        fetchData();
-        pollInterval = setInterval(fetchData, 4000);
-      }
+  function stopPolling() {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
     }
   }
+
+  function startPolling() {
+    if (!pollInterval && !uiStore.isThrottled) {
+      fetchData();
+      pollInterval = setInterval(fetchData, 4000);
+    }
+  }
+
+  $effect(() => {
+    if (uiStore.isThrottled) {
+      stopPolling();
+    } else {
+      startPolling();
+    }
+  });
 
   onMount(() => {
     fetchData();
     fetchSecurityReport();
-    pollInterval = setInterval(fetchData, 4000);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    if (!uiStore.isThrottled) {
+      pollInterval = setInterval(fetchData, 4000);
+    }
   });
 
   onDestroy(() => {
-    if (pollInterval) clearInterval(pollInterval);
-    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    stopPolling();
   });
 </script>
 
