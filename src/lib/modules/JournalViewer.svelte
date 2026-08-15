@@ -1454,15 +1454,15 @@
   }
 
   .log-row.log-error {
-    border-left: 3px solid var(--color-error);
+    border-left: 5px solid var(--color-error);
   }
   .log-row.log-warn {
-    border-left: 3px solid var(--color-warning);
+    border-left: 5px solid var(--color-warning);
   }
   .log-row.log-info {
-    border-left: 3px solid var(--color-accent);
+    border-left: 5px solid var(--color-accent);
   }
   .log-row.log-debug {
-    border-left: 3px solid var(--color-border);
+    border-left: 5px solid var(--color-border);
   }
 </style>

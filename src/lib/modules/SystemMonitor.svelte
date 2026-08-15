@@ -1619,7 +1619,7 @@
   /* 2-column layout */
   .monitor-layout {
     display: grid;
-    grid-template-columns: 3.5fr 10.5fr;
+    grid-template-columns: 4fr 10fr;
     gap: 10px;
     align-items: stretch;
     height: 100%;

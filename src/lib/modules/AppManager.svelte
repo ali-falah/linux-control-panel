@@ -72,18 +72,18 @@
   let loading = $state(false);
   let filter = $state('');
 
-  type SourceFilter = 'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates';
+  type SourceFilter = 'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Waydroid' | 'Duplicates';
   let sourceFilter = $state<SourceFilter>(
     uiStore.appSourceFilter
-      ? uiStore.appSourceFilter
-      : (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Duplicates'].includes(uiStore.targetSubTab))
+      ? (uiStore.appSourceFilter as SourceFilter)
+      : (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Waydroid', 'Duplicates'].includes(uiStore.targetSubTab))
       ? (uiStore.targetSubTab as any)
       : 'All'
   );
   if (uiStore.appSourceFilter) {
     uiStore.appSourceFilter = null;
   }
-  if (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Duplicates'].includes(uiStore.targetSubTab)) {
+  if (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Waydroid', 'Duplicates'].includes(uiStore.targetSubTab)) {
     uiStore.targetSubTab = null;
   }
 
@@ -147,7 +147,7 @@
 
   function formatBytes(bytes?: number) {
     if (bytes === undefined) return '';
-    if (bytes === 0) return 'Unknown Size';
+    if (bytes === 0) return '—';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -174,13 +174,25 @@
       
       // Async size fetching
       for (let i = 0; i < apps.length; i++) {
-        if (apps[i].package_id && apps[i].source !== 'AppImage') {
+        const app = apps[i];
+        if (app.source === 'AppImage') {
+          if (app.sizeBytes === undefined) {
+            apps[i] = { ...app, sizeBytes: 0 };
+          }
+          continue;
+        }
+        if (app.package_id && (app.source === 'RPM' || app.source === 'Flatpak')) {
           invoke<{size_bytes: number, install_date: number}>('get_app_meta', { 
-            packageId: apps[i].package_id, 
-            source: apps[i].source 
+            packageId: app.package_id, 
+            source: app.source 
           }).then(meta => {
             apps[i] = { ...apps[i], sizeBytes: meta.size_bytes, installDate: meta.install_date };
-          }).catch(() => {});
+          }).catch(() => {
+            apps[i] = { ...apps[i], sizeBytes: 0 };
+          });
+        } else {
+          // For Waydroid, Local apps or apps without package_id, resolve size immediately
+          apps[i] = { ...apps[i], sizeBytes: 0 };
         }
       }
     } catch (e) {
@@ -485,6 +497,7 @@
           {id: 'RPM', label: 'RPM'},
           {id: 'Flatpak', label: 'Flatpak'},
           {id: 'AppImage', label: 'AppImage'},
+          ...(apps.some(a => a.source === 'Waydroid') ? [{id: 'Waydroid', label: 'Waydroid'}] : []),
           {id: 'Duplicates', label: `Duplicates (${duplicates.length})`}
         ]}
         bind:activeTab={sourceFilter}
@@ -613,22 +626,22 @@
             <Card 
               class="app-card" 
               onclick={() => openDetails(app)} 
-              style="display: flex; align-items: center; gap: 16px; padding: 16px; cursor: pointer; transition: all 0.2s ease;"
+              style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; transition: all 0.2s ease;"
             >
-              <div class="app-icon-wrapper" style="width: 48px; height: 48px; border-radius: 12px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-module-icon-border, var(--color-border)); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                <AppIcon size={22} style="color: var(--color-accent);" />
+              <div class="app-icon-wrapper" style="width: 36px; height: 36px; border-radius: 8px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-module-icon-border, var(--color-border)); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                <AppIcon size={18} style="color: var(--color-accent);" />
               </div>
-              <div class="app-info" style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">
+              <div class="app-info" style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
                 <div 
                   class="app-name"
-                  style="font-size: 14px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                  style="font-size: 13.5px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
                   onmouseenter={(e) => { if (app.package_id) onMouseEnter(e, app.package_id); }}
                   onmouseleave={onMouseLeave}
                 >
                   {app.name}
                 </div>
-                <div class="app-meta" style="display: flex; align-items: center; gap: 10px;">
-                  <span class="badge" class:flatpak={app.source === 'Flatpak'} class:rpm={app.source === 'RPM'} class:appimage={app.source === 'AppImage'} style="font-size: 10px;">
+                <div class="app-meta" style="display: flex; align-items: center; gap: 8px;">
+                  <span class="badge" class:flatpak={app.source === 'Flatpak'} class:rpm={app.source === 'RPM'} class:appimage={app.source === 'AppImage'} class:waydroid={app.source === 'Waydroid'} class:local={app.source === 'Local'} style="font-size: 9.5px;">
                     {app.source}
                   </span>
                   
@@ -636,11 +649,24 @@
                     <span style="font-size: 11px; color: var(--color-text-muted);">
                       Local Binary
                     </span>
+                  {:else if app.source === 'Waydroid'}
+                    <span style="font-size: 11px; color: var(--color-text-muted);">
+                      Waydroid App
+                    </span>
+                  {:else if app.source === 'Local'}
+                    <span style="font-size: 11px; color: var(--color-text-muted);">
+                      Local App
+                    </span>
                   {:else if app.sizeBytes === undefined}
                     <div class="skeleton-text" style="width: 60px; height: 12px;"></div>
+                  {:else if app.sizeBytes === 0}
+                    <span class="size-text" style="font-size: 11px; color: var(--color-text-muted); display: flex; align-items: center; gap: 4px;">
+                      <HardDrive size={11} style="opacity: 0.7;" />
+                      —
+                    </span>
                   {:else}
                     <span class="size-text" style="font-size: 11px; color: var(--color-text-muted); display: flex; align-items: center; gap: 4px;">
-                      <HardDrive size={12} style="opacity: 0.7;" />
+                      <HardDrive size={11} style="opacity: 0.7;" />
                       {formatBytes(app.sizeBytes)}
                     </span>
                   {/if}
@@ -650,12 +676,12 @@
                 <Button 
                   variant="ghost" 
                   class="trash-action-btn" 
-                  style="color: var(--color-text-muted); padding: 6px;"
+                  style="color: var(--color-text-muted); padding: 4px;"
                   disabled={!app.package_id} 
                   onclick={(e: any) => { e.stopPropagation(); confirmUninstall(app); }} 
                   title="Uninstall"
                 >
-                  <Trash2 size={16} />
+                  <Trash2 size={15} />
                 </Button>
               </div>
             </Card>
@@ -909,8 +935,8 @@
 
   .app-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
   }
 
   .app-card:hover {
@@ -938,6 +964,24 @@
     background: rgba(0, 218, 243, 0.1);
     color: var(--color-accent);
     border: 1px solid rgba(0, 218, 243, 0.2);
+  }
+
+  .badge.waydroid {
+    background: rgba(34, 197, 94, 0.1);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.25);
+  }
+
+  .badge.local {
+    background: rgba(168, 85, 247, 0.1);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.25);
+  }
+
+  .badge.appimage {
+    background: rgba(234, 179, 8, 0.1);
+    color: #facc15;
+    border: 1px solid rgba(234, 179, 8, 0.25);
   }
 
   .app-actions {

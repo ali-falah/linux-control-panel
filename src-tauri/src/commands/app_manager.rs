@@ -97,8 +97,12 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                     if let Some(stem) = path.file_stem() {
                         package_id = Some(stem.to_string_lossy().to_string());
                     }
+                } else if e.starts_with("waydroid ") || path_str.contains("waydroid") || content.contains("X-WayDroid") || content.contains("waydroid") {
+                    source = "Waydroid".to_string();
+                    if let Some(stem) = path.file_stem() {
+                        package_id = Some(stem.to_string_lossy().to_string());
+                    }
                 } else {
-                    source = "RPM".to_string();
                     if let Ok(output) = Command::new("rpm")
                         .arg("-qf")
                         .arg(&path)
@@ -109,6 +113,14 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                             if !pkg.contains("is not owned") && !pkg.is_empty() {
                                 package_id = Some(pkg);
                             }
+                        }
+                    }
+                    if package_id.is_some() {
+                        source = "RPM".to_string();
+                    } else {
+                        source = "Local".to_string();
+                        if let Some(stem) = path.file_stem() {
+                            package_id = Some(stem.to_string_lossy().to_string());
                         }
                     }
                 }
@@ -127,12 +139,12 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
     // Sort alphabetically by name
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     
-    // Deduplicate by package_id if we have multiple desktop files for the same package
+    // Deduplicate by package_id / name
     apps.dedup_by(|a, b| {
         if let (Some(pid_a), Some(pid_b)) = (&a.package_id, &b.package_id) {
-            pid_a == pid_b
+            pid_a == pid_b && a.source == b.source
         } else {
-            false
+            a.name == b.name && a.source == b.source
         }
     });
 
@@ -168,7 +180,7 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
             size_bytes,
             install_date: 0,
         })
-    } else {
+    } else if source == "RPM" {
         // RPM
         if let Ok(output) = Command::new("rpm").arg("-q").arg("--queryformat").arg("%{SIZE}|%{INSTALLTIME}").arg(&package_id).output().await {
             if output.status.success() {
@@ -181,6 +193,8 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
                 }
             }
         }
+        Ok(AppMeta { size_bytes: 0, install_date: 0 })
+    } else {
         Ok(AppMeta { size_bytes: 0, install_date: 0 })
     }
 }
@@ -208,6 +222,19 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
         Ok(AppDetails {
             version,
             description,
+            files: Vec::new(),
+        })
+    } else if source == "Waydroid" {
+        let pkg = package_id.trim_start_matches("waydroid.");
+        Ok(AppDetails {
+            version: "Android App".to_string(),
+            description: format!("Waydroid Android package ({})", pkg),
+            files: Vec::new(),
+        })
+    } else if source == "Local" {
+        Ok(AppDetails {
+            version: "Local Application".to_string(),
+            description: "Desktop launcher / user-installed local program.".to_string(),
             files: Vec::new(),
         })
     } else {
@@ -255,13 +282,28 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
 
 #[tauri::command]
 pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: String) -> Result<(), String> {
-    if source != "Flatpak" && crate::commands::flatpak_rpm::is_protected_package(&package_id) {
+    if source != "Flatpak" && source != "Waydroid" && source != "Local" && crate::commands::flatpak_rpm::is_protected_package(&package_id) {
         return Err(format!("Action blocked: '{}' is a vital system package and cannot be uninstalled.", package_id));
+    }
+
+    if source == "Local" {
+        let home = dirs::home_dir().unwrap_or_default();
+        let local_path = home.join(".local/share/applications").join(format!("{}.desktop", package_id));
+        if local_path.exists() {
+            let _ = fs::remove_file(local_path);
+        }
+        let _ = app_handle.emit("uninstall-log", "Removed local application desktop entry.");
+        return Ok(());
     }
 
     let mut cmd = if source == "Flatpak" {
         let mut c = Command::new("pkexec");
         c.args(&["flatpak", "uninstall", "-y", &package_id]);
+        c
+    } else if source == "Waydroid" {
+        let mut c = Command::new("waydroid");
+        let pkg = package_id.trim_start_matches("waydroid.");
+        c.args(&["app", "remove", pkg]);
         c
     } else {
         let mut c = Command::new("pkexec");
