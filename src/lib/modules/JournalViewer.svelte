@@ -298,15 +298,19 @@
     searchQuery = '';
   }
 
-  onMount(() => {
+  $effect(() => {
     if (uiStore.preAppliedJournalPriority && uiStore.preAppliedJournalPriority !== 'all') {
       filterPriority = uiStore.preAppliedJournalPriority;
-      uiStore.preAppliedJournalPriority = 'all';
     }
-    if (uiStore.preAppliedJournalSearch) {
+    if (uiStore.preAppliedJournalSearch !== undefined && uiStore.preAppliedJournalSearch !== null) {
       searchQuery = uiStore.preAppliedJournalSearch;
-      uiStore.preAppliedJournalSearch = '';
     }
+    if (uiStore.preAppliedJournalUnit !== undefined && uiStore.preAppliedJournalUnit !== null) {
+      currentUnitFilter = uiStore.preAppliedJournalUnit;
+    }
+  });
+
+  onMount(() => {
     fetchLogs();
     fetchAuthEvents();
     fetchAuditLogs();

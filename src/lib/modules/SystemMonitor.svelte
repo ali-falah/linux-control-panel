@@ -17,9 +17,6 @@
   let currentTab = $state<'overview' | 'processes'>(
     uiStore.targetSubTab === 'processes' ? 'processes' : 'overview'
   );
-  if (uiStore.targetSubTab === 'processes' || uiStore.targetSubTab === 'overview') {
-    uiStore.targetSubTab = null;
-  }
   let currentUser = $state('unknown');
 
   // Overview Stats
@@ -48,7 +45,20 @@
 
   // Processes & Tree State
   let processes = $state<any[]>([]);
-  let processSearch = $state('');
+  let processSearch = $state(uiStore.processSearchQuery || '');
+
+  $effect(() => {
+    if (uiStore.targetSubTab === 'processes' || uiStore.targetSubTab === 'overview') {
+      currentTab = uiStore.targetSubTab;
+    }
+    if (uiStore.processSearchQuery !== undefined && uiStore.processSearchQuery !== null) {
+      processSearch = uiStore.processSearchQuery;
+      if (uiStore.processSearchQuery !== '') {
+        currentTab = 'processes';
+      }
+    }
+  });
+
   let isRefreshing = $state(false);
   let isPaused = $state(false);
   let processCategoryFilter = $state<'all' | 'user' | 'cpu' | 'mem'>('all');

@@ -189,6 +189,8 @@ class UIStore {
   }
 
   serviceFilter = $state<string | null>(null);
+  serviceSearchQuery = $state<string>('');
+  processSearchQuery = $state<string>('');
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);
   /** Category to pre-select in SecurityAuditor (set by deep-links from other modules) */

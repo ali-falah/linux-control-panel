@@ -211,9 +211,9 @@
 
   async function fetchRecentLogs() {
     try {
-      const rawLogs: string[] = await invoke('get_journal_logs', { limit: 10 });
+      const rawLogs: string[] = await invoke('get_journal_logs', { limit: 15 });
       if (Array.isArray(rawLogs) && rawLogs.length > 0) {
-        recentLogStream = rawLogs.slice(0, 6).map(line => {
+        recentLogStream = rawLogs.slice(0, 10).map(line => {
           try {
             const obj = JSON.parse(line);
             const ts = obj.__REALTIME_TIMESTAMP ? new Date(parseInt(obj.__REALTIME_TIMESTAMP) / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '15:52';
@@ -453,16 +453,23 @@
 </script>
 
 <div class="dashboard-page">
-  <!-- ── Top Header Toolbar ── -->
-  <PageHeader title="Dashboard" subtitle="System Telemetry & Overview" />
+  <!-- ── Top Header Toolbar (Fixed) ── -->
+  <div class="dashboard-header-fixed">
+    <PageHeader title="Dashboard" subtitle="System Telemetry & Overview" />
+  </div>
 
-  <!-- ── HERO TELEMETRY RIBBON (Top KPI Row) ── -->
-  <div class="hero-kpi-ribbon">
+  <!-- ── Scrollable Dashboard Content ── -->
+  <div class="dashboard-scrollable-content">
+    <!-- ── HERO TELEMETRY RIBBON (Top KPI Row) ── -->
+    <div class="hero-kpi-ribbon">
     <!-- KPI 1: CPU Load & Temperature -->
     <button
       type="button"
       class="kpi-card"
-      onclick={() => uiStore.navigateTo('system-monitor', 'overview')}
+      onclick={() => {
+        uiStore.processSearchQuery = '';
+        uiStore.navigateTo('system-monitor', 'overview');
+      }}
       title="Click to inspect real-time CPU & Resource Monitor"
     >
       <div class="kpi-top-row">
@@ -492,7 +499,10 @@
     <button
       type="button"
       class="kpi-card"
-      onclick={() => uiStore.navigateTo('system-monitor', 'overview')}
+      onclick={() => {
+        uiStore.processSearchQuery = '';
+        uiStore.navigateTo('system-monitor', 'overview');
+      }}
       title="Click to view memory usage breakdown"
     >
       <div class="kpi-top-row">
@@ -649,7 +659,10 @@
         <button
           type="button"
           class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('system-monitor', 'processes')}
+          onclick={() => {
+            uiStore.processSearchQuery = '';
+            uiStore.navigateTo('system-monitor', 'processes');
+          }}
           title="Open Full Process Tree"
         >
           <ArrowUpRight size={15} />
@@ -661,8 +674,11 @@
           <button
             type="button"
             class="process-row-item clickable-row"
-            onclick={() => uiStore.navigateTo('system-monitor', 'processes')}
-            title="Inspect PID {proc.pid} in System Monitor"
+            onclick={() => {
+              uiStore.processSearchQuery = proc.name;
+              uiStore.navigateTo('system-monitor', 'processes');
+            }}
+            title="Inspect PID {proc.pid} ({proc.name}) in System Monitor"
           >
             <div class="proc-left-info">
               <span class="proc-name">{proc.name}</span>
@@ -685,7 +701,10 @@
         <button
           type="button"
           class="footer-jump-link"
-          onclick={() => uiStore.navigateTo('system-monitor', 'processes')}
+          onclick={() => {
+            uiStore.processSearchQuery = '';
+            uiStore.navigateTo('system-monitor', 'processes');
+          }}
         >
           <span>View All Running Processes ({topProcesses.length > 0 ? '140+' : '0'})</span>
           <ChevronRight size={13} />
@@ -778,7 +797,11 @@
         <button
           type="button"
           class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('service-manager')}
+          onclick={() => {
+            uiStore.serviceSearchQuery = '';
+            uiStore.serviceFilter = 'all';
+            uiStore.navigateTo('service-manager');
+          }}
           title="Open Service Manager"
         >
           <ArrowUpRight size={15} />
@@ -793,7 +816,8 @@
             class:is-active={svc.status === 'active'}
             class:is-failed={svc.status === 'failed'}
             onclick={() => {
-              if (svc.status === 'failed') uiStore.serviceFilter = 'failed';
+              uiStore.serviceFilter = svc.status === 'failed' ? 'failed' : 'all';
+              uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, '');
               uiStore.navigateTo('service-manager');
             }}
             title="Inspect {svc.name} in Service Manager"
@@ -819,7 +843,11 @@
         <button
           type="button"
           class="footer-jump-link"
-          onclick={() => uiStore.navigateTo('service-manager')}
+          onclick={() => {
+            uiStore.serviceSearchQuery = '';
+            uiStore.serviceFilter = 'all';
+            uiStore.navigateTo('service-manager');
+          }}
         >
           <span>Open Full Systemd Unit Manager</span>
           <ChevronRight size={13} />
@@ -837,7 +865,11 @@
         <button
           type="button"
           class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('journal-logs', 'journal')}
+          onclick={() => {
+            uiStore.preAppliedJournalPriority = 'all';
+            uiStore.preAppliedJournalSearch = '';
+            uiStore.navigateTo('journal-logs', 'journal');
+          }}
           title="Open Journal Viewer"
         >
           <ArrowUpRight size={15} />
@@ -857,7 +889,11 @@
           <button
             type="button"
             class="metric-btn"
-            onclick={() => { uiStore.preAppliedJournalPriority = '3'; uiStore.navigateTo('journal-logs', 'journal'); }}
+            onclick={() => {
+              uiStore.preAppliedJournalPriority = '3';
+              uiStore.preAppliedJournalSearch = '';
+              uiStore.navigateTo('journal-logs', 'journal');
+            }}
             title="Click to view Critical Errors in Journal Logs"
           >
             <div class="metric-num text-danger">{systemEvents ? systemEvents.error_count || 12 : 12}</div>
@@ -867,7 +903,11 @@
           <button
             type="button"
             class="metric-btn"
-            onclick={() => { uiStore.preAppliedJournalPriority = '4'; uiStore.navigateTo('journal-logs', 'journal'); }}
+            onclick={() => {
+              uiStore.preAppliedJournalPriority = '4';
+              uiStore.preAppliedJournalSearch = '';
+              uiStore.navigateTo('journal-logs', 'journal');
+            }}
             title="Click to view Warnings in Journal Logs"
           >
             <div class="metric-num text-warn">{systemEvents ? systemEvents.warning_count || 210 : 210}</div>
@@ -877,7 +917,11 @@
           <button
             type="button"
             class="metric-btn"
-            onclick={() => { uiStore.preAppliedJournalPriority = 'all'; uiStore.navigateTo('journal-logs', 'journal'); }}
+            onclick={() => {
+              uiStore.preAppliedJournalPriority = 'all';
+              uiStore.preAppliedJournalSearch = '';
+              uiStore.navigateTo('journal-logs', 'journal');
+            }}
             title="Click to view all System Logs"
           >
             <div class="metric-num text-success">98.5%</div>
@@ -889,7 +933,15 @@
         <div class="log-stream-box">
           <div class="log-stream-header">
             <span>Live Journal Ticker</span>
-            <button type="button" class="view-all-link" onclick={() => uiStore.navigateTo('journal-logs', 'journal')}>
+            <button
+              type="button"
+              class="view-all-link"
+              onclick={() => {
+                uiStore.preAppliedJournalPriority = 'all';
+                uiStore.preAppliedJournalSearch = '';
+                uiStore.navigateTo('journal-logs', 'journal');
+              }}
+            >
               Full Logs &rarr;
             </button>
           </div>
@@ -899,7 +951,8 @@
                 type="button"
                 class="log-item-line clickable clickable-row"
                 onclick={() => {
-                  if (log.service) uiStore.preAppliedJournalSearch = log.service;
+                  uiStore.preAppliedJournalPriority = 'all';
+                  uiStore.preAppliedJournalSearch = log.service || '';
                   uiStore.navigateTo('journal-logs', 'journal');
                 }}
                 title="Click to inspect '{log.service}' logs in Journal Viewer"
@@ -1017,6 +1070,48 @@
             <div class="progress-bar-fill" style="width: 30%; background: #a855f7;"></div>
           </div>
         </button>
+
+        <!-- Item 5: System Logs -->
+        <button
+          type="button"
+          class="footprint-row-item clickable-row"
+          onclick={() => openStoragePathModal('/var/log', '/dev/sda3', 1.4, 235.9, 'btrfs')}
+          title="Inspect /var/log System & Journal Logs storage breakdown"
+        >
+          <div class="footprint-label-row">
+            <div class="row-name-group">
+              <span class="footprint-name">/var/log System Logs</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">1.4 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar-fill" style="width: 14%; background: #ec4899;"></div>
+          </div>
+        </button>
+
+        <!-- Item 6: Package & App Caches -->
+        <button
+          type="button"
+          class="footprint-row-item clickable-row"
+          onclick={() => openStoragePathModal('/var/cache', '/dev/sda3', 2.1, 235.9, 'btrfs')}
+          title="Inspect /var/cache DNF & Application Caches storage breakdown"
+        >
+          <div class="footprint-label-row">
+            <div class="row-name-group">
+              <span class="footprint-name">/var/cache DNF Caches</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">2.1 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar-fill" style="width: 20%; background: #14b8a6;"></div>
+          </div>
+        </button>
       </div>
 
       <div class="card-footer-action">
@@ -1030,8 +1125,8 @@
         </button>
       </div>
     </div>
-
   </div>
+</div>
 </div>
 
 <!-- Storage Details Modal -->
@@ -1057,13 +1152,8 @@
         <div class="info-row"><span>Available Free</span><strong style="color:var(--color-success); font-family:var(--font-mono);">{formatStorageBytes(selectedStorageDetail.free_gb)}</strong></div>
       </div>
 
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:16px;">
-        {#if selectedStorageDetail.mount}
-          <Button variant="primary" size="sm" onclick={() => handleOpenInFileManager(selectedStorageDetail?.mount)} style="display:flex; align-items:center; gap:6px; font-size:12px;">
-            <ExternalLink size={14} /> Open Folder in File Manager
-          </Button>
-        {/if}
-        <Button variant="outline" size="sm" onclick={() => selectedStorageDetail = null}>Close</Button>
+      <div style="margin-top:20px; display:flex; justify-content:flex-end;">
+        <button type="button" class="modal-action-btn" onclick={() => selectedStorageDetail = null}>Close</button>
       </div>
     </div>
   </div>
@@ -1074,11 +1164,35 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+
+  .dashboard-header-fixed {
+    flex-shrink: 0;
+    padding: 10px 20px 0 20px;
+    background: var(--color-bg-base);
+    z-index: 20;
+  }
+
+  :global(.dashboard-page .header-wrapper) {
+    margin: 0;
+  }
+
+  :global(.dashboard-page .page-header) {
+    padding: 8px 0;
+  }
+
+  .dashboard-scrollable-content {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px 20px 32px 20px;
+    padding: 6px 20px 32px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
     box-sizing: border-box;
-    gap: 16px;
   }
 
   /* ── Header Actions Dock ── */

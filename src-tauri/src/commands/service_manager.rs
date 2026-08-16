@@ -103,11 +103,43 @@ impl std::fmt::Display for ServiceAction {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlameEntry {
     pub time_ms: u64,
     pub time_str: String,
     pub name: String,
+    pub unit_type: String,
+    pub is_service: bool,
+    pub is_protected: bool,
+    pub protection_level: String,
+    pub protection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootTimeBreakdown {
+    pub firmware_ms: u64,
+    pub firmware_str: String,
+    pub loader_ms: u64,
+    pub loader_str: String,
+    pub kernel_ms: u64,
+    pub kernel_str: String,
+    pub initrd_ms: u64,
+    pub initrd_str: String,
+    pub userspace_ms: u64,
+    pub userspace_str: String,
+    pub total_ms: u64,
+    pub total_str: String,
+    pub target_reached_str: String,
+    pub raw_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CriticalChainEntry {
+    pub line: String,
+    pub unit: String,
+    pub active_at: String,
+    pub duration: String,
+    pub depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,29 +620,150 @@ pub async fn write_unit_file(name: String, content: String, user_mode: Option<bo
     }
 }
 
+static BOOT_BLAME_CACHE: Mutex<Option<Vec<BlameEntry>>> = Mutex::new(None);
+static BOOT_TIMES_CACHE: Mutex<Option<BootTimeBreakdown>> = Mutex::new(None);
+static BOOT_CHAIN_CACHE: Mutex<Option<Vec<CriticalChainEntry>>> = Mutex::new(None);
+
+fn get_current_boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn load_disk_boot_blame() -> Option<Vec<BlameEntry>> {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() {
+        return None;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_blame_{}.json", boot_id));
+    if let Ok(data) = std::fs::read_to_string(&cache_file) {
+        if let Ok(entries) = serde_json::from_str::<Vec<BlameEntry>>(&data) {
+            if !entries.is_empty() {
+                return Some(entries);
+            }
+        }
+    }
+    None
+}
+
+fn save_disk_boot_blame(entries: &[BlameEntry]) {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() || entries.is_empty() {
+        return;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_blame_{}.json", boot_id));
+    if let Ok(json) = serde_json::to_string(entries) {
+        let _ = std::fs::write(&cache_file, json);
+    }
+}
+
+fn load_disk_boot_times() -> Option<BootTimeBreakdown> {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() {
+        return None;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_times_{}.json", boot_id));
+    if let Ok(data) = std::fs::read_to_string(&cache_file) {
+        return serde_json::from_str(&data).ok();
+    }
+    None
+}
+
+fn save_disk_boot_times(times: &BootTimeBreakdown) {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() {
+        return;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_times_{}.json", boot_id));
+    if let Ok(json) = serde_json::to_string(times) {
+        let _ = std::fs::write(&cache_file, json);
+    }
+}
+
+fn load_disk_boot_chain() -> Option<Vec<CriticalChainEntry>> {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() {
+        return None;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_chain_{}.json", boot_id));
+    if let Ok(data) = std::fs::read_to_string(&cache_file) {
+        return serde_json::from_str(&data).ok();
+    }
+    None
+}
+
+fn save_disk_boot_chain(chain: &[CriticalChainEntry]) {
+    let boot_id = get_current_boot_id();
+    if boot_id.is_empty() || chain.is_empty() {
+        return;
+    }
+    let cache_file = std::env::temp_dir().join(format!("lcp_chain_{}.json", boot_id));
+    if let Ok(json) = serde_json::to_string(chain) {
+        let _ = std::fs::write(&cache_file, json);
+    }
+}
+
+pub fn invalidate_boot_cache() {
+    if let Ok(mut g) = BOOT_BLAME_CACHE.lock() { *g = None; }
+    if let Ok(mut g) = BOOT_TIMES_CACHE.lock() { *g = None; }
+    if let Ok(mut g) = BOOT_CHAIN_CACHE.lock() { *g = None; }
+}
+
 /// Fetch boot latency profiling data using systemd-analyze blame
 #[tauri::command]
-pub async fn get_boot_blame() -> Result<Vec<BlameEntry>, String> {
+pub async fn get_boot_blame(force: Option<bool>) -> Result<Vec<BlameEntry>, String> {
+    let is_force = force.unwrap_or(false);
+    if !is_force {
+        if let Ok(guard) = BOOT_BLAME_CACHE.lock() {
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        if let Some(disk_cached) = load_disk_boot_blame() {
+            if let Ok(mut guard) = BOOT_BLAME_CACHE.lock() {
+                *guard = Some(disk_cached.clone());
+            }
+            return Ok(disk_cached);
+        }
+    } else {
+        if let Ok(mut g) = BOOT_BLAME_CACHE.lock() { *g = None; }
+    }
+
     if !crate::binary_exists("systemd-analyze").await {
         return Err("systemd-analyze is not available on this system".to_string());
     }
 
-    let output = Command::new("systemd-analyze")
-        .arg("blame")
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let cmd_future = async {
+        Command::new("systemd-analyze")
+            .arg("--no-pager")
+            .arg("blame")
+            .output()
+            .await
+    };
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    let output = match ::tokio::time::timeout(std::time::Duration::from_secs(90), cmd_future).await {
+        Ok(res) => res.map_err(|e| e.to_string())?,
+        Err(_) => {
+            // Fallback to disk or in-memory cache if timeout occurred
+            if let Some(disk_cached) = load_disk_boot_blame() {
+                return Ok(disk_cached);
+            }
+            if let Ok(guard) = BOOT_BLAME_CACHE.lock() {
+                if let Some(ref cached) = *guard {
+                    return Ok(cached.clone());
+                }
+            }
+            return Err("systemd-analyze blame command timed out. Please try refreshing again.".to_string());
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut entries = Vec::new();
 
     for line in stdout.lines() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with("Failed to") || line.starts_with("Warning:") {
             continue;
         }
 
@@ -623,11 +776,306 @@ pub async fn get_boot_blame() -> Result<Vec<BlameEntry>, String> {
         let time_part = parts[..parts.len() - 1].join(" ");
         let time_ms = parse_blame_time(&time_part);
 
+        // Skip non-time lines that might be error outputs
+        if time_ms == 0 && !time_part.contains("ms") && !time_part.contains('s') {
+            continue;
+        }
+
+        // Determine unit type
+        let unit_type = if name.ends_with(".service") {
+            "service".to_string()
+        } else if name.ends_with(".device") {
+            "device".to_string()
+        } else if name.ends_with(".mount") {
+            "mount".to_string()
+        } else if name.ends_with(".target") {
+            "target".to_string()
+        } else if name.ends_with(".socket") {
+            "socket".to_string()
+        } else if name.ends_with(".slice") {
+            "slice".to_string()
+        } else {
+            "other".to_string()
+        };
+
+        let is_service = unit_type == "service";
+
+        // Determine protection level
+        let (is_protected, protection_level, protection_reason) = if !is_service {
+            (
+                true,
+                "critical".to_string(),
+                Some(format!("System {} unit. Core infrastructure cannot be disabled.", unit_type))
+            )
+        } else {
+            get_service_protection(&name)
+        };
+
         entries.push(BlameEntry {
             time_ms,
             time_str: time_part,
             name,
+            unit_type,
+            is_service,
+            is_protected,
+            protection_level,
+            protection_reason,
         });
+    }
+
+    if entries.is_empty() && !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        // Fallback to cache if available
+        if let Some(disk_cached) = load_disk_boot_blame() {
+            return Ok(disk_cached);
+        }
+        if let Ok(guard) = BOOT_BLAME_CACHE.lock() {
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        return Err(if err_msg.is_empty() { "systemd-analyze blame returned empty output".to_string() } else { err_msg.to_string() });
+    }
+
+    save_disk_boot_blame(&entries);
+
+    if let Ok(mut guard) = BOOT_BLAME_CACHE.lock() {
+        *guard = Some(entries.clone());
+    }
+
+    Ok(entries)
+}
+
+/// Fetch boot time breakdown from systemd-analyze time
+#[tauri::command]
+pub async fn get_boot_times(force: Option<bool>) -> Result<BootTimeBreakdown, String> {
+    let is_force = force.unwrap_or(false);
+    if !is_force {
+        if let Ok(guard) = BOOT_TIMES_CACHE.lock() {
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        if let Some(disk_cached) = load_disk_boot_times() {
+            if let Ok(mut guard) = BOOT_TIMES_CACHE.lock() {
+                *guard = Some(disk_cached.clone());
+            }
+            return Ok(disk_cached);
+        }
+    } else {
+        if let Ok(mut g) = BOOT_TIMES_CACHE.lock() { *g = None; }
+    }
+
+    if !crate::binary_exists("systemd-analyze").await {
+        return Err("systemd-analyze is not available".to_string());
+    }
+
+    let cmd_future = async {
+        Command::new("systemd-analyze")
+            .arg("--no-pager")
+            .arg("time")
+            .output()
+            .await
+    };
+
+    let output = match ::tokio::time::timeout(std::time::Duration::from_secs(12), cmd_future).await {
+        Ok(res) => res.map_err(|e| e.to_string())?,
+        Err(_) => {
+            if let Some(disk_cached) = load_disk_boot_times() {
+                return Ok(disk_cached);
+            }
+            if let Ok(guard) = BOOT_TIMES_CACHE.lock() {
+                if let Some(ref cached) = *guard {
+                    return Ok(cached.clone());
+                }
+            }
+            return Err("systemd-analyze time command timed out".to_string());
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut firmware_ms = 0;
+    let mut firmware_str = "0ms".to_string();
+    let mut loader_ms = 0;
+    let mut loader_str = "0ms".to_string();
+    let mut kernel_ms = 0;
+    let mut kernel_str = "0ms".to_string();
+    let mut initrd_ms = 0;
+    let mut initrd_str = "0ms".to_string();
+    let mut userspace_ms = 0;
+    let mut userspace_str = "0ms".to_string();
+    let mut total_ms = 0;
+    let mut total_str = "0ms".to_string();
+    let mut target_reached_str = String::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Startup finished in") {
+            if let Some((_, rest)) = trimmed.split_once("Startup finished in ") {
+                if let Some((phases, total_part)) = rest.split_once(" = ") {
+                    total_str = total_part.trim().to_string();
+                    total_ms = parse_blame_time(&total_str);
+
+                    for phase in phases.split('+') {
+                        let p = phase.trim();
+                        if p.contains("(firmware)") {
+                            let val = p.replace("(firmware)", "").trim().to_string();
+                            firmware_ms = parse_blame_time(&val);
+                            firmware_str = val;
+                        } else if p.contains("(loader)") {
+                            let val = p.replace("(loader)", "").trim().to_string();
+                            loader_ms = parse_blame_time(&val);
+                            loader_str = val;
+                        } else if p.contains("(kernel)") {
+                            let val = p.replace("(kernel)", "").trim().to_string();
+                            kernel_ms = parse_blame_time(&val);
+                            kernel_str = val;
+                        } else if p.contains("(initrd)") {
+                            let val = p.replace("(initrd)", "").trim().to_string();
+                            initrd_ms = parse_blame_time(&val);
+                            initrd_str = val;
+                        } else if p.contains("(userspace)") {
+                            let val = p.replace("(userspace)", "").trim().to_string();
+                            userspace_ms = parse_blame_time(&val);
+                            userspace_str = val;
+                        }
+                    }
+                }
+            }
+        } else if trimmed.contains("target reached after") || trimmed.contains("reached after") {
+            target_reached_str = trimmed.to_string();
+        }
+    }
+
+    let res = BootTimeBreakdown {
+        firmware_ms,
+        firmware_str,
+        loader_ms,
+        loader_str,
+        kernel_ms,
+        kernel_str,
+        initrd_ms,
+        initrd_str,
+        userspace_ms,
+        userspace_str,
+        total_ms,
+        total_str,
+        target_reached_str,
+        raw_summary: stdout.trim().to_string(),
+    };
+
+    save_disk_boot_times(&res);
+
+    if let Ok(mut guard) = BOOT_TIMES_CACHE.lock() {
+        *guard = Some(res.clone());
+    }
+
+    Ok(res)
+}
+
+/// Fetch critical chain dependency breakdown
+#[tauri::command]
+pub async fn get_boot_critical_chain(force: Option<bool>) -> Result<Vec<CriticalChainEntry>, String> {
+    let is_force = force.unwrap_or(false);
+    if !is_force {
+        if let Ok(guard) = BOOT_CHAIN_CACHE.lock() {
+            if let Some(ref cached) = *guard {
+                return Ok(cached.clone());
+            }
+        }
+        if let Some(disk_cached) = load_disk_boot_chain() {
+            if let Ok(mut guard) = BOOT_CHAIN_CACHE.lock() {
+                *guard = Some(disk_cached.clone());
+            }
+            return Ok(disk_cached);
+        }
+    } else {
+        if let Ok(mut g) = BOOT_CHAIN_CACHE.lock() { *g = None; }
+    }
+
+    if !crate::binary_exists("systemd-analyze").await {
+        return Err("systemd-analyze is not available".to_string());
+    }
+
+    let cmd_future = async {
+        Command::new("systemd-analyze")
+            .arg("--no-pager")
+            .arg("critical-chain")
+            .output()
+            .await
+    };
+
+    let output = match ::tokio::time::timeout(std::time::Duration::from_secs(15), cmd_future).await {
+        Ok(res) => res.map_err(|e| e.to_string())?,
+        Err(_) => {
+            if let Some(disk_cached) = load_disk_boot_chain() {
+                return Ok(disk_cached);
+            }
+            if let Ok(guard) = BOOT_CHAIN_CACHE.lock() {
+                if let Some(ref cached) = *guard {
+                    return Ok(cached.clone());
+                }
+            }
+            return Err("systemd-analyze critical-chain timed out".to_string());
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("The time") || trimmed.is_empty() || trimmed.starts_with("Failed to") {
+            continue;
+        }
+
+        // Count leading indentation / tree symbols
+        let mut depth = 0;
+        let mut idx = 0;
+        let chars: Vec<char> = line.chars().collect();
+        while idx < chars.len() {
+            if chars[idx] == ' ' || chars[idx] == '│' || chars[idx] == '└' || chars[idx] == '─' || chars[idx] == '├' {
+                if chars[idx] == '└' || chars[idx] == '├' {
+                    depth += 1;
+                }
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        let content = line[idx..].trim();
+        if content.is_empty() {
+            continue;
+        }
+
+        let mut unit = content.to_string();
+        let mut active_at = String::new();
+        let mut duration = String::new();
+
+        if let Some((u, rest)) = content.split_once('@') {
+            unit = u.trim().to_string();
+            if let Some((act, dur)) = rest.split_once('+') {
+                active_at = act.trim().to_string();
+                duration = dur.trim().to_string();
+            } else {
+                active_at = rest.trim().to_string();
+            }
+        }
+
+        entries.push(CriticalChainEntry {
+            line: line.to_string(),
+            unit,
+            active_at,
+            duration,
+            depth,
+        });
+    }
+
+    save_disk_boot_chain(&entries);
+
+    if let Ok(mut guard) = BOOT_CHAIN_CACHE.lock() {
+        *guard = Some(entries.clone());
     }
 
     Ok(entries)

@@ -23,16 +23,16 @@ use commands::{
         firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
-    grub_manager::{read_grub_config, rebuild_grub, write_grub_config},
+    grub_manager::{read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
     hosts_manager::{read_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds},
     selinux_manager::{
-        get_selinux_denials, get_selinux_status, set_selinux_state,
-        selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override,
+        get_selinux_denials, get_selinux_status, set_selinux_state, set_selinux_mode,
+        selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override, selinux_apply_audit2allow,
     },
     service_manager::{
         get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
-        get_unit_dependencies, get_services_status,
+        get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
         list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
@@ -221,6 +221,8 @@ pub fn run() {
             read_unit_file,
             write_unit_file,
             get_boot_blame,
+            get_boot_times,
+            get_boot_critical_chain,
             get_unit_dependencies,
             get_services_status,
             // Hosts Manager
@@ -256,14 +258,19 @@ pub fn run() {
             read_grub_config,
             write_grub_config,
             rebuild_grub,
+            validate_grub_config,
+            grub_has_backup,
+            grub_restore_backup,
             // SELinux Manager
             get_selinux_status,
             set_selinux_state,
+            set_selinux_mode,
             get_selinux_denials,
             selinux_get_booleans,
             selinux_set_boolean,
             selinux_explain_denial,
             selinux_apply_policy_override,
+            selinux_apply_audit2allow,
             // Cron Manager
             list_cron_jobs,
             add_cron_job,
@@ -443,6 +450,14 @@ pub fn run() {
             ai_test_cloud_connection,
             open_system_config_file,
         ])
+        .setup(|_app| {
+            tauri::async_runtime::spawn(async {
+                let _ = commands::service_manager::get_boot_times(Some(false)).await;
+                let _ = commands::service_manager::get_boot_blame(Some(false)).await;
+                let _ = commands::service_manager::get_boot_critical_chain(Some(false)).await;
+            });
+            Ok(())
+        })
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // Ensure immediate clean exit without hanging on background threads or WebKit IPC

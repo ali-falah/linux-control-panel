@@ -111,7 +111,29 @@
     }
   }
 
-  async function toggleBoolean(name: string, currentValue: boolean) {
+  function toggleBoolean(bool: any) {
+    const nextState = !bool.value;
+    const actionStr = nextState ? 'ON (Enable)' : 'OFF (Disable)';
+    const scopeStr = permanentChange ? 'Persistent (saved permanently with -P)' : 'Runtime only (will reset after reboot)';
+
+    if (bool.is_critical) {
+      uiStore.confirm(
+        '⚠️ Critical SELinux Boolean Warning',
+        `You are changing critical boolean '${bool.name}' to ${actionStr}.\n\nImpact:\n${bool.risk_description || 'This boolean controls core system daemon privileges or user authentication.'}\n\nPersistence: ${scopeStr}\n\nDo you want to proceed?`,
+        () => executeToggleBoolean(bool.name, bool.value),
+        true
+      );
+    } else {
+      uiStore.confirm(
+        'Confirm SELinux Boolean Change',
+        `Are you sure you want to change '${bool.name}' to ${actionStr}?\n\nPersistence: ${scopeStr}`,
+        () => executeToggleBoolean(bool.name, bool.value),
+        !nextState
+      );
+    }
+  }
+
+  async function executeToggleBoolean(name: string, currentValue: boolean) {
     const newValue = !currentValue;
     statusStore.setBusy(`Updating boolean ${name}…`);
     try {
@@ -137,7 +159,7 @@
     
     const parts = denial.tcontext.split(':');
     const targetType = parts.length > 2 ? parts[2] : 'custom';
-    customModuleName = `allow_${targetType}_${denial.tclass}`;
+    customModuleName = `allow_${targetType}_${denial.tclass}`.replace(/[^a-zA-Z0-9_]/g, '_');
     
     try {
       audit2allowExplanation = await invoke<string>('selinux_explain_denial', {
@@ -151,14 +173,21 @@
     }
   }
 
+  let isModuleNameValid = $derived.by(() => {
+    return /^[a-zA-Z][a-zA-Z0-9_]{1,63}$/.test(customModuleName.trim());
+  });
+
   async function applyPolicyOverride() {
-    if (!selectedDenial || !customModuleName.trim()) return;
+    if (!selectedDenial || !isModuleNameValid) {
+      uiStore.addToast('Please provide a valid policy module name (alphanumeric and underscores, starting with a letter).', 'warning');
+      return;
+    }
     applyingOverride = true;
     statusStore.setBusy(`Compiling and installing SELinux module '${customModuleName}'…`);
     try {
-      const msg = await invoke<string>('selinux_apply_audit2allow', {
-        rawLog: selectedDenial.raw,
-        moduleName: customModuleName.trim()
+      const msg = await invoke<string>('selinux_apply_policy_override', {
+        name: customModuleName.trim(),
+        rawLog: selectedDenial.raw
       });
       uiStore.addToast(msg, 'success');
       showTroubleshooter = false;
@@ -363,7 +392,19 @@
                 {#each paginatedBooleans as bool (bool.name)}
                   <tr>
                     <td style="font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary); font-weight:500;">
-                      {bool.name}
+                      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        <span>{bool.name}</span>
+                        {#if bool.is_critical}
+                          <span class="badge badge-warning" style="font-size:9.5px; padding:1px 6px; display:inline-flex; align-items:center; gap:3px;" title={bool.risk_description || 'Critical system boolean'}>
+                            <ShieldAlert size={10} /> CRITICAL
+                          </span>
+                        {/if}
+                      </div>
+                      {#if bool.risk_description}
+                        <div style="font-size:11px; font-family:var(--font-sans, system-ui); color:var(--color-text-muted); margin-top:2px; font-weight:400;">
+                          {bool.risk_description}
+                        </div>
+                      {/if}
                     </td>
                     <td style="text-align:center;">
                       <span class="badge {bool.value ? 'badge-success' : 'badge-muted'}">
@@ -371,7 +412,7 @@
                       </span>
                     </td>
                     <td style="text-align:center;">
-                      <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" onclick={() => toggleBoolean(bool.name, bool.value)}>
+                      <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" onclick={() => toggleBoolean(bool)}>
                         Toggle {bool.value ? 'OFF' : 'ON'}
                       </Button>
                     </td>
@@ -422,7 +463,7 @@
                     Enable the <code>{suggestedBool}</code> boolean to allow this activity.
                   </span>
                   <div style="display:flex; justify-content:flex-end;">
-                    <Button variant="primary" style="padding: 4px 10px; font-size:12px;" onclick={() => { toggleBoolean(suggestedBool, false); showTroubleshooter = false; }}>
+                    <Button variant="primary" style="padding: 4px 10px; font-size:12px;" onclick={() => { toggleBoolean({ name: suggestedBool, value: false, is_critical: false }); showTroubleshooter = false; }}>
                       Enable Boolean
                     </Button>
                   </div>
@@ -442,9 +483,12 @@
             <div style="display:flex; flex-direction:column; gap:4px;">
               <label for="policy-mod-name" style="font-size:11.5px; color:var(--color-text-muted);">Policy Module Name</label>
               <input id="policy-mod-name" type="text" class="input" bind:value={customModuleName} placeholder="e.g. allow_http_read" />
+              {#if !isModuleNameValid && customModuleName}
+                <span style="font-size:11px; color:var(--color-danger);">Must start with a letter and contain only alphanumeric characters and underscores (2-64 chars).</span>
+              {/if}
             </div>
             <div style="display:flex; justify-content:flex-end;">
-              <Button variant="primary" disabled={applyingOverride || loadingExplanation} onclick={applyPolicyOverride}>
+              <Button variant="primary" disabled={applyingOverride || loadingExplanation || !isModuleNameValid} onclick={applyPolicyOverride}>
                 {applyingOverride ? 'Installing Module...' : 'Install Policy Override'}
               </Button>
             </div>

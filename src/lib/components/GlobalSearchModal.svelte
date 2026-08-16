@@ -4,7 +4,7 @@
     ShieldAlert, FileText, HardDrive, Terminal, Sliders, Lock, Cpu, User, FolderLock, 
     Settings, Sparkles, Sun, Moon, ArrowRight, Zap, RefreshCw, Clock, History,
     CheckCircle2, AlertTriangle, Play, Flame, CornerDownLeft, Trash2, Key, Database,
-    SlidersHorizontal, Compass
+    SlidersHorizontal, Compass, Timer
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
@@ -103,159 +103,159 @@
     },
     {
       id: 'page-dnf-history',
-      title: 'DNF Package History & Transactions',
-      description: 'Audit DNF package install/update history and undo transactions',
+      title: 'DNF Package Transaction History',
+      description: 'Review installed, updated, or removed packages and undo/rollback transactions',
       category: 'Pages',
-      icon: Package,
-      keywords: 'dnf history transaction undo rollback update install upgrade audit',
+      icon: History,
+      keywords: 'history dnf rpm rollback undo transaction packages audit install log',
       tabId: 'dnf-history',
       action: () => { uiStore.navigateTo('dnf-history'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-copr-browser',
-      title: 'COPR Repositories Browser',
-      description: 'Discover and enable Fedora COPR community package builds',
+      title: 'Fedora COPR Repositories Browser',
+      description: 'Search, explore, and enable community-built COPR repositories',
       category: 'Pages',
-      icon: Globe,
-      keywords: 'copr fedora community repository search build copr.fedorainfracloud.org',
+      icon: Compass,
+      keywords: 'copr community repos packages extra builds build system third-party',
       tabId: 'copr-browser',
       action: () => { uiStore.navigateTo('copr-browser'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-network-manager',
-      title: 'Network & Interfaces',
-      description: 'Network interfaces, IP addresses, ping test, DNS, and VPN profiles',
+      title: 'Network & Interfaces Manager',
+      description: 'Configure network adapters, Wi-Fi connections, DNS, routes, and active sockets',
       category: 'Pages',
       icon: Globe,
-      keywords: 'network interface ip address ethernet wifi vpn ping dns speedtest',
+      keywords: 'network wifi ethernet ip dns gateway interface routing connections nmcli',
       tabId: 'network-manager',
       action: () => { uiStore.navigateTo('network-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-nginx-manager',
-      title: 'NGINX Web Server Manager',
-      description: 'Manage virtual hosts, reverse proxies, SSL certs, and access logs',
+      title: 'NGINX Reverse Proxy & VHosts',
+      description: 'Manage virtual hosts, upstream proxy passes, SSL certificates, and config tests',
       category: 'Pages',
       icon: Server,
-      keywords: 'nginx web server virtualhost reverse proxy ssl certbot log vhost',
+      keywords: 'nginx vhost server web proxy ssl upstream reverse proxy config reload',
       tabId: 'nginx-manager',
       action: () => { uiStore.navigateTo('nginx-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-firewall-manager',
-      title: 'Firewall & Firewalld Rules',
-      description: 'Firewalld zones, open ports, rich rules, and emergency panic mode',
+      title: 'Firewalld Rules & Zones',
+      description: 'Configure active firewall zones, allowed ports, rich rules, and interface bindings',
       category: 'Pages',
       icon: Shield,
-      keywords: 'firewall firewalld port zone rich rule panic block iptables',
+      keywords: 'firewall firewalld ports zones security rich rules allow block traffic',
       tabId: 'firewall-manager',
       action: () => { uiStore.navigateTo('firewall-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-selinux-manager',
-      title: 'SELinux Security Policy',
-      description: 'SELinux mode (Enforcing/Permissive), booleans, and denial audits',
+      title: 'SELinux Security Policy & Booleans',
+      description: 'Enforcing / Permissive mode toggle, SELinux booleans, file contexts, and AVC denials',
       category: 'Pages',
-      icon: ShieldAlert,
-      keywords: 'selinux security enforcing permissive boolean denial audit avc setenforce',
+      icon: Lock,
+      keywords: 'selinux security booleans enforcing permissive context avc denials audit2allow',
       tabId: 'selinux-manager',
       action: () => { uiStore.navigateTo('selinux-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-security-auditor',
-      title: 'Security Auditor & CIS Hardening',
-      description: 'System security audit checks, compliance score, and AI 1-click remediation',
+      title: 'CIS Hardening & Security Auditor',
+      description: 'Run automated Linux security benchmark scans, CIS checks, and fix vulnerabilities',
       category: 'Pages',
       icon: ShieldAlert,
-      keywords: 'security audit cis compliance score hardening check fix ai vulnerability report',
+      keywords: 'security audit cis hardening compliance vulnerability scan report check',
       tabId: 'security-auditor',
       action: () => { uiStore.navigateTo('security-auditor'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-journal-logs',
-      title: 'System Journal & Audit Logs',
-      description: 'Live systemd journalctl viewer, auth events, and threat monitoring',
+      title: 'Systemd Journal & Audit Logs',
+      description: 'Live streaming system logs, authentication events, auditd logs, and runtime threats',
       category: 'Pages',
       icon: FileText,
-      keywords: 'log journal journalctl audit auth login fail2ban error stream logs viewer',
+      keywords: 'logs journal journalctl errors auth sudo threats audit tail stream',
       tabId: 'journal-logs',
       action: () => { uiStore.navigateTo('journal-logs'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-hosts-manager',
-      title: 'Hosts File Manager',
-      description: 'Manage /etc/hosts domain mappings and IP overrides',
+      title: 'Local DNS & /etc/hosts Manager',
+      description: 'Manage IP domain mappings, local aliases, and ad-blocking blocklists',
       category: 'Pages',
-      icon: FileText,
-      keywords: 'hosts domain ip DNS mapping override resolve /etc/hosts localhost',
+      icon: Globe,
+      keywords: 'hosts dns domain ip address mapping etc hosts alias loopback blocklist',
       tabId: 'hosts-manager',
       action: () => { uiStore.navigateTo('hosts-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-user-manager',
-      title: 'User Accounts & Privileges',
-      description: 'Local system users, groups, sudo privileges, and active sessions',
+      title: 'User Accounts & Groups',
+      description: 'Create and edit user accounts, sudo/wheel permissions, groups, and SSH keys',
       category: 'Pages',
       icon: User,
-      keywords: 'user group sudo passwd root account permission login session uid gid',
+      keywords: 'users accounts groups sudo wheel root password shell permissions',
       tabId: 'user-manager',
       action: () => { uiStore.navigateTo('user-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-cron-manager',
-      title: 'Cron Jobs & Systemd Timers',
-      description: 'Scheduled crontab tasks and systemd timer units',
+      title: 'Cron & Systemd Timers',
+      description: 'Scheduled cron jobs, crontab entries, and recurring systemd timers',
       category: 'Pages',
-      icon: Sliders,
-      keywords: 'cron crontab schedule timer task recurring job periodic automated',
+      icon: Clock,
+      keywords: 'cron crontab schedule timers automation periodic recurring tasks job',
       tabId: 'cron-manager',
       action: () => { uiStore.navigateTo('cron-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-shell-env',
       title: 'Shell Environment & Variables',
-      description: 'PATH entries, environment variables, export profiles, and sourcing',
+      description: 'Inspect $PATH entries, environment variables, login shell, and terminal profiles',
       category: 'Pages',
       icon: Terminal,
-      keywords: 'shell env environment variable path profile export bash zsh .bashrc profile',
+      keywords: 'env environment variables path shell bash zsh profile exports',
       tabId: 'shell-env',
       action: () => { uiStore.navigateTo('shell-env'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-device-manager',
-      title: 'Storage & Disk Devices',
-      description: 'Block devices, disk partitions, mount points, and SMART disk health',
+      title: 'Hardware Devices & Storage',
+      description: 'Storage disks, partitions, PCI devices, USB peripherals, and GPU info',
       category: 'Pages',
       icon: HardDrive,
-      keywords: 'disk storage device partition mount smart nvme hdd ssd drive volume lshw',
+      keywords: 'devices hardware disk partition storage pci usb gpu cpu smart',
       tabId: 'device-manager',
       action: () => { uiStore.navigateTo('device-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-ssh-cert-manager',
-      title: 'SSH Keys & SSL Certificates Vault',
-      description: 'Generate SSH keys, SSHD hardening, authorized keys, and SSL certificates',
+      title: 'SSH & SSL Certificate Vault',
+      description: 'Manage SSH key pairs, authorized keys, and SSL/TLS certificates',
       category: 'Pages',
-      icon: Lock,
-      keywords: 'ssh key ssl tls cert vault sshd security authorized_keys fail2ban certificates',
+      icon: Key,
+      keywords: 'ssh ssl tls cert certificate keys authorized_keys vault encryption crypto',
       tabId: 'ssh-cert-manager',
       action: () => { uiStore.navigateTo('ssh-cert-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-grub-manager',
-      title: 'GRUB Boot Configurator',
-      description: 'Default boot kernel, timeout, and kernel command-line arguments',
+      title: 'GRUB Bootloader & Kernels',
+      description: 'Installed kernel boot entries, default boot kernel, timeout, and boot parameters',
       category: 'Pages',
       icon: Cpu,
-      keywords: 'grub boot kernel cmdline timeout default fedora bootloader menu',
+      keywords: 'grub bootloader kernel boot timeout parameters uefi initrd efiboot',
       tabId: 'grub-manager',
       action: () => { uiStore.navigateTo('grub-manager'); uiStore.closeSearchModal(); }
     },
 
     // ═════════════════════════════════════════════════════════════════════════════
-    // 2. GRANULAR INTERNAL TABS & SUB-SECTIONS (Deep-linked)
+    // 2. SUB-TABS & VIEWS WITHIN PAGES
     // ═════════════════════════════════════════════════════════════════════════════
-    // ── Monitoring Tabs ──
+    // ── System Monitor Tabs ──
     {
       id: 'tab-monitor-processes',
       title: 'Processes & Process Tree',
@@ -279,6 +279,44 @@
       tabId: 'system-monitor',
       subTab: 'overview',
       action: () => { uiStore.navigateTo('system-monitor', 'overview'); uiStore.closeSearchModal(); }
+    },
+
+    // ── Services Manager Tabs ──
+    {
+      id: 'tab-services-systemd',
+      title: 'System Services & Daemons',
+      description: 'Manage active, failed, and enabled systemd service units',
+      category: 'Tabs',
+      breadcrumb: 'Services Manager › Services',
+      icon: Server,
+      keywords: 'services systemd daemons active failed units start stop restart enable mask',
+      tabId: 'service-manager',
+      subTab: 'services',
+      action: () => { uiStore.navigateTo('service-manager', 'services'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-services-autostart',
+      title: 'Desktop Autostart Applications',
+      description: 'Manage user and system session startup desktop entry files',
+      category: 'Tabs',
+      breadcrumb: 'Services Manager › Autostart',
+      icon: Play,
+      keywords: 'autostart startup desktop applications session login xdg entries',
+      tabId: 'service-manager',
+      subTab: 'autostart',
+      action: () => { uiStore.navigateTo('service-manager', 'autostart'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-services-boot-analyzer',
+      title: 'Boot Latency Analyzer & Critical Chain',
+      description: 'Analyze systemd startup timings, firmware/kernel/userspace phases, and unit bottlenecks',
+      category: 'Tabs',
+      breadcrumb: 'Services Manager › Boot Analyzer',
+      icon: Timer,
+      keywords: 'boot analyzer latency blame critical chain startup speed bootloader uefi grub kernel time breakdown bottlenecks systemd-analyze',
+      tabId: 'service-manager',
+      subTab: 'boot_analyzer',
+      action: () => { uiStore.navigateTo('service-manager', 'boot_analyzer'); uiStore.closeSearchModal(); }
     },
 
     // ── App Manager Tabs ──

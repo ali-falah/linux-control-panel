@@ -17,6 +17,44 @@ pub struct Denial {
     pub tclass: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelinuxBoolean {
+    pub name: String,
+    pub value: bool,
+    pub is_critical: bool,
+    pub risk_description: Option<String>,
+}
+
+fn get_boolean_criticality(name: &str) -> (bool, Option<String>) {
+    match name {
+        "ssh_sysadm_login" | "allow_ssh_keysign" => (
+            true,
+            Some("Restricts OpenSSH administrative or key authentication. Disabling may lock out remote SSH access.".to_string())
+        ),
+        "login_user_exec" | "authlogin_nsswitch_use_ldap" => (
+            true,
+            Some("Controls core user login and authentication execution. Changing may block PAM user logins.".to_string())
+        ),
+        "dbus_system_bus" | "systemd_homed" => (
+            true,
+            Some("Controls core systemd and D-Bus IPC transitions. Changing may disrupt desktop and system services.".to_string())
+        ),
+        "domain_can_mmap_files" => (
+            true,
+            Some("Controls memory file mapping across domains. Disabling may cause widespread application crashes.".to_string())
+        ),
+        "cron_userdomain_transition" => (
+            true,
+            Some("Controls scheduled cron execution domains. Disabling may silently break system cron jobs.".to_string())
+        ),
+        "selinuxuser_ping" => (
+            false,
+            Some("Controls whether standard unprivileged users can execute the ping binary.".to_string())
+        ),
+        _ => (false, None),
+    }
+}
+
 #[tauri::command]
 pub async fn get_selinux_status() -> Result<SelinuxStatus, String> {
     if !crate::binary_exists("sestatus").await {
@@ -56,22 +94,36 @@ pub async fn get_selinux_status() -> Result<SelinuxStatus, String> {
 
 #[tauri::command]
 pub async fn set_selinux_state(mode: String) -> Result<String, String> {
-    // mode should be "enforcing", "permissive", or "disabled"
+    let mode_lower = mode.trim().to_lowercase();
+    if mode_lower != "enforcing" && mode_lower != "permissive" && mode_lower != "disabled" {
+        return Err(format!("Invalid SELinux mode '{}'. Only 'enforcing', 'permissive', or 'disabled' are permitted.", mode));
+    }
 
-    // Set runtime state if possible
-    if mode == "enforcing" || mode == "permissive" {
-        let setenforce_val = if mode == "enforcing" { "1" } else { "0" };
-        Command::new("pkexec")
+    // 1. Safety Backup of existing /etc/selinux/config
+    if let Ok(existing_cfg) = std::fs::read_to_string("/etc/selinux/config") {
+        if !existing_cfg.trim().is_empty() {
+            let _ = crate::utils::privilege::write_file_as_root("/etc/selinux/config.bak", &existing_cfg).await;
+        }
+    }
+
+    // 2. Set runtime state if possible
+    if mode_lower == "enforcing" || mode_lower == "permissive" {
+        let setenforce_val = if mode_lower == "enforcing" { "1" } else { "0" };
+        let output = Command::new("pkexec")
             .args(["/usr/sbin/setenforce", setenforce_val])
             .output()
             .await
             .map_err(|e| format!("pkexec setenforce failed: {}", e))?;
+        
+        if !output.status.success() {
+            return Err(format!("Failed to set runtime mode: {}", String::from_utf8_lossy(&output.stderr)));
+        }
     }
 
-    // Set permanent state in /etc/selinux/config
+    // 3. Set permanent state in /etc/selinux/config
     let script = format!(
         "sed -i 's/^SELINUX=.*/SELINUX={}/' /etc/selinux/config",
-        mode
+        mode_lower
     );
     let output = Command::new("pkexec")
         .args(["bash", "-c", &script])
@@ -83,12 +135,16 @@ pub async fn set_selinux_state(mode: String) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    Ok(format!("Successfully set SELinux to {}", mode))
+    Ok(format!("Successfully set SELinux to {}", mode_lower))
+}
+
+#[tauri::command]
+pub async fn set_selinux_mode(mode: String) -> Result<String, String> {
+    set_selinux_state(mode).await
 }
 
 #[tauri::command]
 pub async fn get_selinux_denials() -> Result<Vec<Denial>, String> {
-    // Use ausearch to get AVCs.
     let output = Command::new("pkexec")
         .args(["/usr/sbin/ausearch", "-m", "AVC", "-ts", "recent"])
         .output()
@@ -98,7 +154,6 @@ pub async fn get_selinux_denials() -> Result<Vec<Denial>, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut denials = Vec::new();
 
-    // Very naive parsing of ausearch output. Each event is separated by "----"
     for event in stdout.split("----") {
         let event = event.trim();
         if event.is_empty() || event == "<no matches>" {
@@ -156,12 +211,6 @@ pub async fn get_selinux_denials() -> Result<Vec<Denial>, String> {
     Ok(denials)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelinuxBoolean {
-    pub name: String,
-    pub value: bool,
-}
-
 #[tauri::command]
 pub async fn selinux_get_booleans() -> Result<Vec<SelinuxBoolean>, String> {
     if !crate::binary_exists("getsebool").await {
@@ -188,7 +237,8 @@ pub async fn selinux_get_booleans() -> Result<Vec<SelinuxBoolean>, String> {
         if let Some((k, v)) = line.split_once(" --> ") {
             let name = k.trim().to_string();
             let value = v.trim() == "on";
-            booleans.push(SelinuxBoolean { name, value });
+            let (is_critical, risk_description) = get_boolean_criticality(&name);
+            booleans.push(SelinuxBoolean { name, value, is_critical, risk_description });
         }
     }
     Ok(booleans)
@@ -200,12 +250,17 @@ pub async fn selinux_set_boolean(
     value: bool,
     permanent: bool,
 ) -> Result<String, String> {
+    let name_clean = name.trim();
+    if !name_clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name_clean.is_empty() {
+        return Err("Invalid boolean name. Only alphanumeric characters and underscores are permitted.".to_string());
+    }
+
     let value_str = if value { "1" } else { "0" };
     let mut args = Vec::new();
     if permanent {
         args.push("-P");
     }
-    args.push(&name);
+    args.push(name_clean);
     args.push(value_str);
 
     let output = Command::new("pkexec")
@@ -221,7 +276,7 @@ pub async fn selinux_set_boolean(
 
     Ok(format!(
         "Successfully set boolean {} to {} ({})",
-        name,
+        name_clean,
         if value { "on" } else { "off" },
         if permanent { "permanent" } else { "runtime" }
     ))
@@ -268,8 +323,12 @@ pub async fn selinux_apply_policy_override(name: String, raw_log: String) -> Res
         .filter(|c| c.is_alphanumeric() || *c == '_')
         .collect();
 
-    if module_name.is_empty() {
-        return Err("Invalid module name".to_string());
+    if module_name.len() < 2 || module_name.len() > 64 || !module_name.chars().next().unwrap_or('0').is_alphabetic() {
+        return Err("Invalid module name. Name must start with a letter, contain only alphanumeric and underscores, and be between 2-64 characters.".to_string());
+    }
+
+    if raw_log.trim().is_empty() {
+        return Err("Cannot generate policy override: raw AVC log is empty.".to_string());
     }
 
     let temp_dir = std::env::temp_dir();
@@ -312,3 +371,9 @@ pub async fn selinux_apply_policy_override(name: String, raw_log: String) -> Res
 
     Ok(format!("Successfully compiled and installed policy module '{}'", module_name))
 }
+
+#[tauri::command]
+pub async fn selinux_apply_audit2allow(module_name: String, raw_log: String) -> Result<String, String> {
+    selinux_apply_policy_override(module_name, raw_log).await
+}
+

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
@@ -9,7 +10,7 @@
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
     FileText, ShieldBan, ShieldCheck, ShieldAlert, Rocket, ChevronRight, User, Server, Activity, Network, GitFork, Link2,
-    Copy, Edit3, Lock, Unlock
+    Copy, Edit3, Lock, Unlock, Clock, Cpu, HardDrive, Layers, ArrowUpRight, GitBranch, ListOrdered, Timer
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -20,10 +21,15 @@
   import Skeleton from '../components/Skeleton.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Card from '../components/ui/Card.svelte';
+  import KpiCard from '../components/ui/KpiCard.svelte';
 
   // ─── Tab ──────────────────────────────────────────────────────────────────
   type MainTab = 'services' | 'autostart' | 'boot_analyzer';
-  let mainTab = $state<MainTab>('services');
+  let mainTab = $state<MainTab>(
+    (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart')
+      ? uiStore.targetSubTab
+      : 'services'
+  );
 
   // ─── Service Manager state ─────────────────────────────────────────────────
   interface ServiceUnit {
@@ -42,15 +48,28 @@
 
   let units = $state<ServiceUnit[]>([]);
   let loading = $state(false);
-  let filter = $state('');
-  
-  // Read and consume deep-linked filter from Dashboard synchronously
+  let filter = $state(uiStore.serviceSearchQuery || '');
   let statusFilter = $state<'active' | 'failed' | 'all'>(
     uiStore.serviceFilter === 'failed' ? 'failed' : 'all'
   );
-  if (uiStore.serviceFilter === 'failed') {
-    uiStore.serviceFilter = null;
-  }
+
+  $effect(() => {
+    if (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services') {
+      mainTab = uiStore.targetSubTab;
+    }
+    if (uiStore.serviceSearchQuery !== undefined && uiStore.serviceSearchQuery !== null) {
+      filter = uiStore.serviceSearchQuery;
+      if (uiStore.serviceSearchQuery !== '') {
+        mainTab = 'services';
+      }
+    }
+    if (uiStore.serviceFilter) {
+      if (uiStore.serviceFilter === 'failed') statusFilter = 'failed';
+      else if (uiStore.serviceFilter === 'active') statusFilter = 'active';
+      else if (uiStore.serviceFilter === 'all') statusFilter = 'all';
+      mainTab = 'services';
+    }
+  });
 
   let selectedUnit = $state<ServiceUnit | null>(null);
   let activePanel = $state<'logs' | 'editor' | 'dependencies' | null>(null);
@@ -104,9 +123,79 @@
     time_ms: number;
     time_str: string;
     name: string;
+    unit_type: string;
+    is_service: boolean;
+    is_protected: boolean;
+    protection_level: string;
+    protection_reason: string | null;
   }
+
+  interface BootTimeBreakdown {
+    firmware_ms: number;
+    firmware_str: string;
+    loader_ms: number;
+    loader_str: string;
+    kernel_ms: number;
+    kernel_str: string;
+    initrd_ms: number;
+    initrd_str: string;
+    userspace_ms: number;
+    userspace_str: string;
+    total_ms: number;
+    total_str: string;
+    target_reached_str: string;
+    raw_summary: string;
+  }
+
+  interface CriticalChainEntry {
+    line: string;
+    unit: string;
+    active_at: string;
+    duration: string;
+    depth: number;
+  }
+
   let blameEntries = $state<BlameEntry[]>([]);
+  let bootTimes = $state<BootTimeBreakdown | null>(null);
+  let criticalChain = $state<CriticalChainEntry[]>([]);
   let loadingBlame = $state(false);
+  let blameViewMode = $state<'blame' | 'critical-chain'>('blame');
+  let blameFilter = $state<'all' | 'services' | 'slow' | 'critical'>('all');
+  let blameSearch = $state('');
+
+  // Boot Logs Drawer State
+  let bootLogsUnit = $state<string | null>(null);
+  let bootLogsOpen = $state(false);
+  let bootLogsLoading = $state(false);
+  let bootLogsContent = $state('');
+
+  const filteredBlame = $derived.by(() => {
+    let list = blameEntries;
+    if (blameFilter === 'services') {
+      list = list.filter(b => b.is_service);
+    } else if (blameFilter === 'slow') {
+      list = list.filter(b => b.time_ms >= 2000);
+    } else if (blameFilter === 'critical') {
+      list = list.filter(b => b.time_ms >= 5000);
+    }
+
+    if (blameSearch.trim()) {
+      const q = blameSearch.toLowerCase().trim();
+      list = list.filter(b => b.name.toLowerCase().includes(q));
+    }
+    return list;
+  });
+
+  let blamePage = $state(1);
+  const blameItemsPerPage = 30;
+  const blameTotalPages = $derived(Math.ceil(filteredBlame.length / blameItemsPerPage) || 1);
+  const paginatedBlame = $derived(filteredBlame.slice((blamePage - 1) * blameItemsPerPage, blamePage * blameItemsPerPage));
+
+  $effect(() => {
+    blameSearch;
+    blameFilter;
+    blamePage = 1;
+  });
 
   const filteredUnits = $derived(
     units.filter(u => {
@@ -316,18 +405,109 @@
     }
   }
 
-  async function loadBlame() {
-    loadingBlame = true;
+  let isRefreshing = $state(false);
+
+  async function handleRefresh() {
+    if (isRefreshing) return;
+    isRefreshing = true;
     try {
-      blameEntries = await invoke<BlameEntry[]>('get_boot_blame');
-      statusStore.setLastCommand('systemd-analyze blame', 0, true);
-    } catch (e) {
-      console.error(e);
-      uiStore.addToast(`Failed to load boot latency: ${e}`, 'error');
-      statusStore.setLastCommand('systemd-analyze blame', 1, false);
+      if (mainTab === 'services') {
+        await load();
+      } else if (mainTab === 'autostart') {
+        await loadAutostart();
+      } else {
+        await loadBlame(true);
+      }
+    } finally {
+      isRefreshing = false;
+    }
+  }
+
+  async function loadBlame(force = false) {
+    if (blameEntries.length === 0 || force) {
+      loadingBlame = true;
+    }
+    if (force) {
+      statusStore.setBusy('Refreshing boot latency and critical chain…');
+    }
+    
+    try {
+      // 1. Fetch boot breakdown times first (14ms ultra fast - renders KPI cards immediately)
+      invoke<BootTimeBreakdown>('get_boot_times', { force })
+        .then(res => {
+          bootTimes = res;
+        })
+        .catch(e => console.warn('get_boot_times error:', e));
+
+      // 2. Fetch ranked blame entries (fast ~1s)
+      const blamePromise = invoke<BlameEntry[]>('get_boot_blame', { force })
+        .then(res => {
+          blameEntries = res;
+          statusStore.setLastCommand('systemd-analyze blame', 0, true);
+          if (force) {
+            uiStore.addToast(`Boot latency refreshed (${res.length} units)`, 'success');
+          }
+        })
+        .catch(e => {
+          console.error('get_boot_blame error:', e);
+          if (blameEntries.length === 0) {
+            uiStore.addToast(`Boot latency: ${e}`, 'warning');
+          }
+        });
+
+      // 3. Fetch critical chain in parallel background
+      const chainPromise = invoke<CriticalChainEntry[]>('get_boot_critical_chain', { force })
+        .then(res => {
+          criticalChain = res;
+        })
+        .catch(e => console.warn('get_boot_critical_chain error:', e));
+
+      await Promise.allSettled([blamePromise, chainPromise]);
     } finally {
       loadingBlame = false;
     }
+  }
+
+  async function openBootLogs(unitName: string) {
+    bootLogsUnit = unitName;
+    bootLogsOpen = true;
+    bootLogsLoading = true;
+    bootLogsContent = '';
+    try {
+      bootLogsContent = await invoke<string>('get_service_logs', { name: unitName, lines: 150, userMode: false });
+      statusStore.setLastCommand(`journalctl -b -u ${unitName} -n 150`, 0, true);
+    } catch (e) {
+      bootLogsContent = `Failed to load logs: ${e}`;
+    } finally {
+      bootLogsLoading = false;
+    }
+  }
+
+  function jumpToService(unitName: string) {
+    mainTab = 'services';
+    filter = unitName;
+    const found = units.find(u => u.name === unitName);
+    if (found) {
+      selectedUnit = found;
+    }
+  }
+
+  function parseBlameTime(s: string): number {
+    if (!s) return 0;
+    let totalMs = 0;
+    for (const part of s.split(/\s+/)) {
+      if (part.endsWith('min')) {
+        const val = parseFloat(part.replace('min', ''));
+        if (!isNaN(val)) totalMs += val * 60000;
+      } else if (part.endsWith('ms')) {
+        const val = parseFloat(part.replace('ms', ''));
+        if (!isNaN(val)) totalMs += val;
+      } else if (part.endsWith('s')) {
+        const val = parseFloat(part.replace('s', ''));
+        if (!isNaN(val)) totalMs += val * 1000;
+      }
+    }
+    return totalMs;
   }
 
   function closePanel() {
@@ -402,6 +582,7 @@
   }
 
   // ─── Init ──────────────────────────────────────────────────────────────────
+
   $effect(() => {
     if (mainTab === 'services') {
       load();
@@ -415,7 +596,7 @@
 
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
-    <div style="display:flex; align-items:center; gap:8px;">
+    <div style="display:flex; align-items:center; gap:10px;">
       {#if mainTab === 'services'}
         <!-- Single Toggleable Scope Button -->
         <button 
@@ -451,14 +632,17 @@
         </button>
       </div>
 
-      <Button variant="ghost" size="sm" onclick={() => {
-        if (mainTab === 'services') load();
-        else if (mainTab === 'autostart') loadAutostart();
-        else loadBlame();
-      }}
-        disabled={mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame}>
-        <RefreshCw size={13} class={(mainTab === 'services' ? loading : mainTab === 'autostart' ? autostartLoading : loadingBlame) ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      <button 
+        type="button"
+        class="header-refresh-btn" 
+        class:refreshing={isRefreshing || loading || autostartLoading || loadingBlame}
+        disabled={isRefreshing || loading || autostartLoading || loadingBlame}
+        onclick={handleRefresh}
+        title={(isRefreshing || loading || autostartLoading || loadingBlame) ? "Refreshing data…" : "Refresh"}
+      >
+        <RefreshCw size={13} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
+        <span>{(isRefreshing || loading || autostartLoading || loadingBlame) ? 'Refreshing…' : 'Refresh'}</span>
+      </button>
     </div>
   </PageHeader>
 
@@ -487,6 +671,7 @@
       </div>
 
       <div class="header-spacer"></div>
+
       <SearchBar 
         bind:value={filter} 
         count={filteredUnits.length} 
@@ -505,6 +690,70 @@
         placeholder="Filter autostart entries…" 
         style="min-width:240px; max-width:340px; margin:0;" 
       />
+    </div>
+  {:else if mainTab === 'boot_analyzer'}
+    <div class="header-row">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <!-- View switch -->
+        <div class="filter-pills">
+          <button 
+            class="pill-btn {blameViewMode === 'blame' ? 'active' : ''}" 
+            onclick={() => blameViewMode = 'blame'}
+            title="Ranked Blame List"
+          >
+            Ranked Blame
+          </button>
+          <button 
+            class="pill-btn {blameViewMode === 'critical-chain' ? 'active' : ''}" 
+            onclick={() => blameViewMode = 'critical-chain'}
+            title="Critical Chain Dependency Hierarchy"
+          >
+            Critical Chain
+          </button>
+        </div>
+
+        {#if blameViewMode === 'blame'}
+          <!-- Filter pills -->
+          <div class="filter-pills">
+            <button 
+              class="pill-btn {blameFilter === 'all' ? 'active' : ''}" 
+              onclick={() => blameFilter = 'all'}
+            >
+              All ({blameEntries.length})
+            </button>
+            <button 
+              class="pill-btn {blameFilter === 'services' ? 'active' : ''}" 
+              onclick={() => blameFilter = 'services'}
+            >
+              Services ({blameEntries.filter(b => b.is_service).length})
+            </button>
+            <button 
+              class="pill-btn {blameFilter === 'slow' ? 'active' : ''}" 
+              onclick={() => blameFilter = 'slow'}
+            >
+              Slow &gt;2s ({blameEntries.filter(b => b.time_ms >= 2000).length})
+            </button>
+            <button 
+              class="pill-btn {blameFilter === 'critical' ? 'active' : ''}" 
+              onclick={() => blameFilter = 'critical'}
+            >
+              Critical &gt;5s ({blameEntries.filter(b => b.time_ms >= 5000).length})
+            </button>
+          </div>
+        {/if}
+      </div>
+
+      <div class="header-spacer"></div>
+
+      {#if blameViewMode === 'blame'}
+        <SearchBar 
+          bind:value={blameSearch} 
+          count={filteredBlame.length} 
+          total={blameEntries.length} 
+          placeholder="Filter boot units…" 
+          style="min-width:240px; max-width:340px; margin:0;" 
+        />
+      {/if}
     </div>
   {/if}
 
@@ -882,58 +1131,242 @@
       {/if}
     </div>
   {:else if mainTab === 'boot_analyzer'}
-    <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:16px;">
-      {#if loadingBlame}
-        <div class="card" style="display:flex;align-items:center;justify-content:center;padding:40px;color:var(--color-text-muted)">
-          <RefreshCw size={24} class="animate-spin-slow" />
+    <div class="module-content-scroll" style="display:flex; flex-direction:column; gap:12px;">
+      <!-- KPI Row -->
+      {#if bootTimes}
+        <div class="boot-kpi-grid">
+          <KpiCard
+            icon={Timer}
+            value={bootTimes.total_str || '—'}
+            label="Total Boot Time"
+            subtext={bootTimes.target_reached_str || 'Firmware to desktop target'}
+            title={`Total Boot Time: ${bootTimes.total_str || '—'} — ${bootTimes.target_reached_str || 'Firmware to desktop target reached'}`}
+            statusText="Complete"
+            statusType="success"
+          />
+          <KpiCard
+            icon={Cpu}
+            value={bootTimes.firmware_str || '—'}
+            label="Firmware / UEFI"
+            subtext="Hardware POST & EFI init"
+            title={`Firmware / UEFI Time: ${bootTimes.firmware_str || '—'} — Hardware POST, EFI setup, and motherboard ACPI initialization`}
+            iconBg="rgba(0, 218, 243, 0.12)"
+            iconColor="var(--color-accent)"
+          />
+          <KpiCard
+            icon={Layers}
+            value={bootTimes.loader_str || '—'}
+            label="Loader / GRUB"
+            subtext="Bootloader & kernel handoff"
+            title={`Loader / GRUB Time: ${bootTimes.loader_str || '—'} — Bootloader menu selection, kernel decompression & handoff`}
+            iconBg="rgba(245, 158, 11, 0.12)"
+            iconColor="var(--color-warning)"
+          />
+          <KpiCard
+            icon={HardDrive}
+            value={bootTimes.kernel_str || '—'}
+            label="Kernel & Initrd"
+            subtext={`Initrd: ${bootTimes.initrd_str || '0s'}`}
+            title={`Kernel & Initrd Time: ${bootTimes.kernel_str || '—'} — Linux kernel initialization & drivers (Initrd: ${bootTimes.initrd_str || '0s'})`}
+            iconBg="rgba(16, 185, 129, 0.12)"
+            iconColor="var(--color-success)"
+          />
+          <KpiCard
+            icon={Rocket}
+            value={bootTimes.userspace_str || '—'}
+            label="Userspace Services"
+            subtext="Systemd daemons & login"
+            title={`Userspace Services Time: ${bootTimes.userspace_str || '—'} — Systemd units, background services, graphical desktop & login manager`}
+            iconBg="rgba(239, 68, 68, 0.12)"
+            iconColor="var(--color-danger)"
+          />
         </div>
-      {:else if blameEntries.length === 0}
-        <div class="card empty-state" style="padding: 64px 32px;">
-          <Rocket size={32} class="empty-state-icon" style="margin:0 0 16px;" />
-          <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No boot latency data</span>
-          <span style="color:var(--color-text-muted); margin-top:8px;">Ensure systemd is running and supports analysis blame.</span>
+      {/if}
+
+      {#if loadingBlame && blameEntries.length === 0}
+        <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
+          <div class="cyber-loading-matrix">
+            <div class="cyber-scanner-hero">
+              <div class="cyber-radar-orb">
+                <div class="radar-sweep"></div>
+                <Rocket size={24} class="radar-core-icon" />
+              </div>
+              <div class="cyber-scan-text">
+                <div class="cyber-scan-title">Profiling Boot Latency & Critical Chain</div>
+                <div class="cyber-scan-sub">Analyzing systemd startup timings, unit bottlenecks, and initialization stages…</div>
+              </div>
+            </div>
+            <div class="cyber-skeleton-rows">
+              {#each [1, 2, 3, 4, 5, 6, 7] as _idx}
+                <div class="cyber-shimmer-row" style="animation-delay: {_idx * 0.12}s">
+                  <div class="shimmer-col-name">
+                    <div class="shimmer-pill-title"></div>
+                    <div class="shimmer-pill-sub"></div>
+                  </div>
+                  <div class="shimmer-col-badge"></div>
+                  <div class="shimmer-col-state"></div>
+                  <div class="shimmer-col-actions"></div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {:else if blameViewMode === 'blame'}
+        <!-- Ranked Blame Table -->
+        <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
+          <div style="flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;">
+            {#if filteredBlame.length === 0}
+              <div class="empty-state" style="padding: 48px 32px;">
+                <Settings size={28} class="empty-state-icon" style="margin:0 auto 12px;" />
+                <span style="font-size:14px; font-weight:600; color:var(--color-text-primary)">No boot units matched</span>
+                <span style="color:var(--color-text-muted); font-size:12px; margin-top:4px;">Try clearing your search query or filter.</span>
+              </div>
+            {:else}
+              <Table tableAction={tableFeatures} style="overflow-y:auto; border:none; border-radius:0;">
+                <thead>
+                  <tr>
+                    <th style="width:130px;">Startup Time</th>
+                    <th>Unit / Service</th>
+                    <th style="width:100px; text-align:center;">Severity</th>
+                    <th style="width:180px; text-align:right;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each paginatedBlame as entry (entry.name)}
+                    <tr>
+                      <td>
+                        <code style="font-family:var(--font-mono); font-weight:700; font-size:12px; color:var(--color-text-primary);">
+                          {entry.time_str}
+                        </code>
+                      </td>
+                      <td>
+                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                          <span style="font-family:var(--font-mono); font-weight:600; font-size:12.5px; color:var(--color-text-primary);">{entry.name}</span>
+                          <span class="badge badge-muted" style="font-size:9.5px; text-transform:uppercase;">{entry.unit_type}</span>
+                          {#if entry.is_protected}
+                            <span 
+                              class="badge badge-warning" 
+                              style="font-size:9.5px; display:inline-flex; align-items:center; gap:3px;"
+                              title={entry.protection_reason || 'Protected core system component'}
+                            >
+                              <Lock size={10} /> PROTECTED
+                            </span>
+                          {/if}
+                        </div>
+                      </td>
+                      <td style="text-align:center;">
+                        {#if entry.time_ms >= 5000}
+                          <span class="badge badge-danger">CRITICAL</span>
+                        {:else if entry.time_ms >= 2000}
+                          <span class="badge badge-warning">SLOW</span>
+                        {:else}
+                          <span class="badge badge-success">FAST</span>
+                        {/if}
+                      </td>
+                      <td style="text-align:right;">
+                        <div style="display:inline-flex; align-items:center; gap:6px;">
+                          {#if entry.is_service}
+                            <Button 
+                              variant="ghost" 
+                              style="padding:2px 8px; height:24px; font-size:11px;"
+                              onclick={() => jumpToService(entry.name)}
+                              title="Inspect service details and dependencies in Services tab"
+                            >
+                              <ArrowUpRight size={12} /> Inspect
+                            </Button>
+                          {/if}
+                          <Button 
+                            variant="outline" 
+                            style="padding:2px 8px; height:24px; font-size:11px;"
+                            onclick={() => openBootLogs(entry.name)}
+                            title="View boot startup journal logs"
+                          >
+                            <FileText size={12} /> Logs
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </Table>
+            {/if}
+          </div>
+
+          {#if filteredBlame.length > 0 && blameTotalPages > 1}
+            <div style="display:flex; justify-content:center; align-items:center; gap:16px; padding:10px; border-top:1px solid var(--color-border); flex-shrink:0; background:var(--color-bg-base);">
+              <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" disabled={blamePage === 1} onclick={() => blamePage--}>Previous</Button>
+              <span style="font-size:12px; color:var(--color-text-secondary);">Page {blamePage} of {blameTotalPages} ({filteredBlame.length} items)</span>
+              <Button variant="outline" style="padding:2px 10px; height:26px; font-size:11.5px;" disabled={blamePage === blameTotalPages} onclick={() => blamePage++}>Next</Button>
+            </div>
+          {/if}
         </div>
       {:else}
-        <Card title="System Boot Startup Latencies (systemd-analyze blame)" icon={Rocket}>
-          <div style="font-size:12px; color:var(--color-text-muted); margin-bottom:16px; line-height:1.5;">
-            Below is a ranked list of services causing boot latency, ordered from slowest to fastest. Services starting in more than 2 seconds are flagged for inspection.
+        <!-- Critical Chain View -->
+        <div class="card" style="padding:16px; display:flex; flex-direction:column; gap:12px; overflow-y:auto; max-height:calc(100vh - 280px);">
+          <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--color-border); padding-bottom:8px;">
+            <div style="font-size:13px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
+              <GitBranch size={16} class="text-accent" /> Bootloader Critical Dependency Chain
+            </div>
+            <span style="font-size:11.5px; color:var(--color-text-muted);">
+              @ = activated at time | + = startup duration
+            </span>
           </div>
-          
-          <Table tableAction={tableFeatures} style="max-height: calc(100vh - 280px); overflow-y:auto; border:none; border-radius:0;">
-            <thead>
-              <tr>
-                <th style="width:140px;">Startup Time</th>
-                <th>Service Unit</th>
-                <th style="width:120px; text-align:center;">Severity</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each blameEntries as entry}
-                <tr>
-                  <td>
-                    <code style="font-family:var(--font-mono); font-weight:700; color:var(--color-text-primary);">
-                      {entry.time_str}
-                    </code>
-                  </td>
-                  <td style="font-family:var(--font-mono); color:var(--color-text-secondary);">{entry.name}</td>
-                  <td style="text-align:center;">
-                    {#if entry.time_ms > 5000}
-                      <span class="badge badge-danger">CRITICAL</span>
-                    {:else if entry.time_ms > 2000}
-                      <span class="badge badge-warning">SLOW</span>
-                    {:else}
-                      <span class="badge badge-success">FAST</span>
-                    {/if}
-                  </td>
-                </tr>
+
+          {#if criticalChain.length === 0}
+            <div class="empty-state" style="padding:32px;">No critical chain data returned.</div>
+          {:else}
+            <div style="display:flex; flex-direction:column; gap:4px; font-family:var(--font-mono); font-size:12px;">
+              {#each criticalChain as node}
+                <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:6px; background:rgba(0,0,0,0.15); border:1px solid var(--color-border);">
+                  <span style="color:var(--color-text-muted);">{node.line.replace(node.unit, '').replace(`@${node.active_at}`, '').replace(`+${node.duration}`, '')}</span>
+                  <span style="font-weight:600; color:var(--color-text-primary); flex:1;">{node.unit}</span>
+                  {#if node.active_at}
+                    <span class="badge badge-muted" style="font-size:10px;">@{node.active_at}</span>
+                  {/if}
+                  {#if node.duration}
+                    <span class="badge badge-warning" style="font-size:10px;">
+                      +{node.duration}
+                    </span>
+                  {/if}
+                  {#if node.unit.endsWith('.service')}
+                    <Button variant="ghost" style="padding:1px 6px; height:20px; font-size:10px;" onclick={() => jumpToService(node.unit)}>
+                      Inspect
+                    </Button>
+                  {/if}
+                </div>
               {/each}
-            </tbody>
-          </Table>
-        </Card>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
 </div>
+
+<!-- Boot Logs Drawer -->
+<SideDrawer
+  bind:isOpen={bootLogsOpen}
+  title={`Boot Startup Journal — ${bootLogsUnit || ''}`}
+  width="640px"
+>
+  {#snippet headerActions()}
+    {#if bootLogsUnit}
+      <Button variant="outline" class="btn-sm" onclick={() => uiStore.jumpToJournalService(bootLogsUnit!)}>
+        <FileText size={13} /> Full Journal ↗
+      </Button>
+    {/if}
+  {/snippet}
+
+  {#if bootLogsLoading}
+    <div style="padding:32px; text-align:center; color:var(--color-text-muted);">
+      <RefreshCw size={20} class="animate-spin-slow" /> Loading boot logs…
+    </div>
+  {:else}
+    <div style="height:calc(100vh - 120px); overflow:auto; background:var(--color-bg-base); padding:12px; border-radius:6px; border:1px solid var(--color-border);">
+      <pre style="margin:0; font-family:var(--font-mono); font-size:11.5px; color:var(--color-text-primary); white-space:pre-wrap; line-height:1.4;">{bootLogsContent || 'No boot log events recorded for this unit.'}</pre>
+    </div>
+  {/if}
+</SideDrawer>
 
 <svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
 
@@ -1304,20 +1737,20 @@
     align-items: center;
     background: var(--color-tab-bar-bg, rgba(0, 0, 0, 0.2));
     border: 1px solid var(--color-border);
-    border-radius: 6px;
-    padding: 2px;
-    gap: 2px;
+    border-radius: 8px;
+    padding: 3px;
+    gap: 3px;
   }
   .header-tab-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 24px;
-    padding: 0 8px;
-    font-size: 11px;
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11.5px;
     font-weight: 500;
     white-space: nowrap;
-    border-radius: 4px;
+    border-radius: 6px;
     border: none;
     background: transparent;
     color: var(--color-text-muted);
@@ -1643,5 +2076,70 @@
     height: 24px;
     border-radius: 6px;
     background: var(--color-bg-raised);
+  }
+
+  .boot-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 2px;
+  }
+
+  .header-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    height: 30px;
+    border-radius: var(--radius-md, 6px);
+    font-size: 12px;
+    font-family: var(--font-sans);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .header-refresh-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--color-text-primary);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .header-refresh-btn:disabled,
+  .header-refresh-btn.refreshing {
+    pointer-events: none !important;
+    cursor: not-allowed !important;
+    opacity: 0.8 !important;
+    background: rgba(0, 218, 243, 0.1) !important;
+    border-color: rgba(0, 218, 243, 0.45) !important;
+    color: var(--color-accent) !important;
+    box-shadow: 0 0 16px rgba(0, 218, 243, 0.3) !important;
+    animation: cyber-pulse-glow 1.1s ease-in-out infinite alternate !important;
+  }
+
+  @keyframes cyber-pulse-glow {
+    0% {
+      box-shadow: 0 0 4px rgba(0, 218, 243, 0.2);
+      border-color: rgba(0, 218, 243, 0.3);
+      transform: scale(0.98);
+    }
+    100% {
+      box-shadow: 0 0 18px rgba(0, 218, 243, 0.5);
+      border-color: rgba(0, 218, 243, 0.85);
+      transform: scale(1);
+    }
+  }
+
+  .spin-refresh {
+    animation: spin-cw 0.75s linear infinite !important;
+    color: var(--color-accent) !important;
+  }
+
+  @keyframes spin-cw {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 </style>

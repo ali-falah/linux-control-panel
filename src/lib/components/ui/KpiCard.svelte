@@ -14,6 +14,7 @@
     onclick?: () => void;
     class?: string;
     style?: string;
+    title?: string;
   }
 
   let {
@@ -28,8 +29,13 @@
     active = false,
     onclick,
     class: className = '',
-    style = ''
+    style = '',
+    title = ''
   }: Props = $props();
+
+  const cardTooltip = $derived(
+    title || (subtext ? `${label}: ${subtext}` : `${label}: ${value}`)
+  );
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -37,6 +43,7 @@
 <div 
   class="kpi-card {active ? 'active' : ''} {className}" 
   {style}
+  title={cardTooltip}
   role={onclick ? 'button' : undefined}
   tabindex={onclick ? 0 : undefined}
   {onclick}
@@ -56,9 +63,9 @@
       {/if}
     </div>
     <div class="kpi-label-row">
-      <span class="kpi-label">{label}</span>
+      <span class="kpi-label" title={label}>{label}</span>
       {#if subtext}
-        <span class="kpi-subtext">· {subtext}</span>
+        <span class="kpi-subtext" title={subtext}>· {subtext}</span>
       {/if}
     </div>
   </div>
