@@ -4,17 +4,6 @@
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
-  import RepoManager from './lib/modules/RepoManager.svelte';
-  import DnfHistory from './lib/modules/DnfHistory.svelte';
-  import CoprBrowser from './lib/modules/CoprBrowser.svelte';
-  import ServiceManager from './lib/modules/ServiceManager.svelte';
-  import HostsManager from './lib/modules/HostsManager.svelte';
-  import UserManager from './lib/modules/UserManager.svelte';
-  import FirewallManager from './lib/modules/FirewallManager.svelte';
-  import GrubManager from './lib/modules/GrubManager.svelte';
-  import SelinuxManager from './lib/modules/SelinuxManager.svelte';
-  import CronManager from './lib/modules/CronManager.svelte';
-  import EnvManager from './lib/modules/EnvManager.svelte';
 
   import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
   import AiUniversalModal from './lib/components/AiUniversalModal.svelte';
@@ -78,83 +67,190 @@
       {#key uiStore.activeTab}
         {#if uiStore.activeTab === 'system-dashboard'}
           {#await import('./lib/modules/Dashboard.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Dashboard...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Dashboard…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'system-monitor'}
           {#await import('./lib/modules/SystemMonitor.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading System Monitor...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Monitoring…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'journal-logs'}
           {#await import('./lib/modules/JournalViewer.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Journal Logs...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Journal Logs…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'repo-manager'}
-          <RepoManager />
+          {#await import('./lib/modules/RepoManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Repositories…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'dnf-history'}
-          <DnfHistory />
+          {#await import('./lib/modules/DnfHistory.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading DNF Packages…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'copr-browser'}
-          <CoprBrowser />
+          {#await import('./lib/modules/CoprBrowser.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading COPR Repositories…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'service-manager'}
-          <ServiceManager />
+          {#await import('./lib/modules/ServiceManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Service Manager…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'hosts-manager'}
-          <HostsManager />
+          {#await import('./lib/modules/HostsManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Hosts Manager…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'user-manager'}
-          <UserManager />
+          {#await import('./lib/modules/UserManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Users & Groups…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'firewall-manager'}
-          <FirewallManager />
+          {#await import('./lib/modules/FirewallManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Firewall Manager…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'grub-manager'}
-          <GrubManager />
+          {#await import('./lib/modules/GrubManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading GRUB Bootloader…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'selinux-manager'}
-          <SelinuxManager />
+          {#await import('./lib/modules/SelinuxManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading SELinux Manager…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'cron-manager'}
-          <CronManager />
+          {#await import('./lib/modules/CronManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Scheduled Tasks…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'env-manager'}
-          <EnvManager />
+          {#await import('./lib/modules/EnvManager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Environment…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {/await}
         {:else if uiStore.activeTab === 'nginx-manager'}
           {#await import('./lib/modules/NginxManager.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Nginx Manager...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Nginx Manager…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'shell-env'}
           {#await import('./lib/modules/ShellEnv.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Shell Environment...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Shell Environment…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'security-auditor'}
           {#await import('./lib/modules/SecurityAuditor.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Security Auditor...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Security Auditor…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'ssh-cert-manager'}
           {#await import('./lib/modules/SshCertManager.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading SSH & SSL Vault...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading SSH & SSL Vault…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'network-manager'}
           {#await import('./lib/modules/NetworkManager.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Network Manager...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Network Manager…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'device-manager'}
           {#await import('./lib/modules/DeviceManager.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading Device Manager...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading Device Manager…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
         {:else if uiStore.activeTab === 'app-manager'}
           {#await import('./lib/modules/AppManager.svelte')}
-            <div style="display:flex; align-items:center; justify-content:center; height:250px; color:var(--color-text-muted); font-size:13px;">Loading App Manager...</div>
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading App Manager…</span>
+            </div>
           {:then module}
             <module.default />
           {/await}
@@ -196,6 +292,28 @@
   }
 
   .content-area :global(.module-page) {
-    animation: fadeSlideIn 0.25s ease both;
+    animation: fadeSlideIn 0.18s ease both;
+  }
+
+  .module-lazy-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 280px;
+    gap: 12px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .module-lazy-spinner {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 218, 243, 0.15);
+    border-top-color: var(--color-accent);
+    animation: spin 0.7s linear infinite;
   }
 </style>

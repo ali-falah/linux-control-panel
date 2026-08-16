@@ -595,13 +595,25 @@
 
     // ── NGINX Tabs ──
     {
-      id: 'tab-nginx-sites',
-      title: 'Virtual Hosts & Reverse Proxies',
-      description: 'Manage NGINX server blocks, reverse proxy routes, and domain mappings',
+      id: 'tab-nginx-overview',
+      title: 'NGINX Overview & Service Status',
+      description: 'Web server daemon status, active worker processes, uptime, and quick actions',
       category: 'Tabs',
-      breadcrumb: 'NGINX Manager › Virtual Hosts',
+      breadcrumb: 'NGINX Manager › Overview',
       icon: Server,
-      keywords: 'vhosts virtual hosts server blocks reverse proxy sites-enabled proxy_pass domain',
+      keywords: 'nginx overview status service daemon reload restart test config web server',
+      tabId: 'nginx-manager',
+      subTab: 'overview',
+      action: () => { uiStore.navigateTo('nginx-manager', 'overview'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-nginx-sites',
+      title: 'NGINX Virtual Hosts & Sites',
+      description: 'Manage NGINX server blocks, virtual hosts, and reverse proxy routes',
+      category: 'Tabs',
+      breadcrumb: 'NGINX Manager › Sites',
+      icon: Globe,
+      keywords: 'nginx sites vhosts virtual hosts server blocks reverse proxy sites-enabled proxy_pass domain',
       tabId: 'nginx-manager',
       subTab: 'sites',
       action: () => { uiStore.navigateTo('nginx-manager', 'sites'); uiStore.closeSearchModal(); }
@@ -609,26 +621,50 @@
     {
       id: 'tab-nginx-editor',
       title: 'NGINX Config File Editor',
-      description: 'Directly edit nginx.conf configuration files with syntax checking',
+      description: 'Directly edit nginx.conf configuration files with syntax checking and diff',
       category: 'Tabs',
       breadcrumb: 'NGINX Manager › Config Editor',
       icon: FileText,
-      keywords: 'editor nginx.conf configuration syntax check test reload',
+      keywords: 'nginx config editor nginx.conf configuration syntax check test reload backups diff',
       tabId: 'nginx-manager',
       subTab: 'editor',
       action: () => { uiStore.navigateTo('nginx-manager', 'editor'); uiStore.closeSearchModal(); }
     },
     {
-      id: 'tab-nginx-ssl',
-      title: 'Certbot SSL Certificate Issuance',
-      description: 'Automated HTTPS setup with Let\'s Encrypt Certbot for NGINX domains',
+      id: 'tab-nginx-www',
+      title: 'NGINX WWW Web Root Files',
+      description: 'Browse, manage, view, and organize static HTML/JS web files in /var/www',
       category: 'Tabs',
-      breadcrumb: 'NGINX Manager › Certbot SSL',
-      icon: Lock,
-      keywords: 'certbot ssl https let\'s encrypt tls renew certificate nginx domain',
+      breadcrumb: 'NGINX Manager › WWW Files',
+      icon: FolderLock,
+      keywords: 'nginx www web root html files /var/www document root static assets website files',
       tabId: 'nginx-manager',
-      subTab: 'ssl',
-      action: () => { uiStore.navigateTo('nginx-manager', 'ssl'); uiStore.closeSearchModal(); }
+      subTab: 'www',
+      action: () => { uiStore.navigateTo('nginx-manager', 'www'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-nginx-logs',
+      title: 'NGINX Access & Error Logs',
+      description: 'Real-time structured HTTP access logs, status codes, and error diagnostics',
+      category: 'Tabs',
+      breadcrumb: 'NGINX Manager › Logs',
+      icon: Terminal,
+      keywords: 'nginx logs access.log error.log http requests status 404 500 visitor traffic stream',
+      tabId: 'nginx-manager',
+      subTab: 'logs',
+      action: () => { uiStore.navigateTo('nginx-manager', 'logs'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-nginx-analytics',
+      title: 'NGINX Traffic & Request Analytics',
+      description: 'HTTP status codes breakdown (2xx, 3xx, 4xx, 5xx), top client IPs, and metrics',
+      category: 'Tabs',
+      breadcrumb: 'NGINX Manager › Analytics',
+      icon: Activity,
+      keywords: 'nginx analytics stats requests unique ips traffic bandwidth chart top clients hits',
+      tabId: 'nginx-manager',
+      subTab: 'analytics',
+      action: () => { uiStore.navigateTo('nginx-manager', 'analytics'); uiStore.closeSearchModal(); }
     },
 
     // ── Security Auditor Categories ──

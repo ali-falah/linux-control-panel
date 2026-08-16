@@ -32,7 +32,7 @@ use commands::{
     },
     service_manager::{
         get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
-        get_unit_dependencies,
+        get_unit_dependencies, get_services_status,
     },
     startup_manager::{
         list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
@@ -75,7 +75,7 @@ use commands::{
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_advanced_health_alerts, get_storage_distribution, open_folder, get_app_version},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream},
     security_auditor::{
         security_run_audit,
@@ -135,10 +135,27 @@ pub fn log_to_file(level: &str, message: &str) {
         });
 }
 
-/// Check if a binary exists in PATH.
+/// Check if a binary exists in PATH with fast-path filesystem lookup and fallback.
 pub async fn binary_exists(name: &str) -> bool {
+    let standard_dirs = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"];
+    for dir in &standard_dirs {
+        let p = std::path::Path::new(dir).join(name);
+        if p.exists() {
+            return true;
+        }
+    }
+    
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let p = std::path::Path::new(dir).join(name);
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+
     let out = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
+        tokio::time::Duration::from_millis(500),
         crate::utils::privilege::tokio::Command::new("which")
             .arg(name)
             .output()
@@ -205,6 +222,7 @@ pub fn run() {
             write_unit_file,
             get_boot_blame,
             get_unit_dependencies,
+            get_services_status,
             // Hosts Manager
             read_hosts,
             write_hosts,
@@ -355,7 +373,6 @@ pub fn run() {
             get_cpu_temperature,
             get_last_system_update,
             get_failed_services_count,
-            get_advanced_health_alerts,
             open_folder,
             get_app_version,
             // Privilege Manager
@@ -426,6 +443,13 @@ pub fn run() {
             ai_test_cloud_connection,
             open_system_config_file,
         ])
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Ensure immediate clean exit without hanging on background threads or WebKit IPC
+                commands::journal_viewer::stop_journal_live_stream();
+                std::process::exit(0);
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

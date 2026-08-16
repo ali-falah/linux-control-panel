@@ -1200,10 +1200,11 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             tokio::time::Duration::from_millis(1000),
             crate::commands::audit_log::get_runtime_threats(Some(7), None, None)
         ).await {
-            for t in threats {
+            for (t_idx, t) in threats.into_iter().enumerate() {
                 threat_issues += 1;
+                let id = if t.id.ends_with(&format!("_{}", t_idx)) { t.id } else { format!("{}_{}", t.id, t_idx) };
                 findings.push(SecurityFinding {
-                    id: t.id,
+                    id,
                     title: t.title,
                     description: t.description,
                     severity: t.severity,

@@ -14,7 +14,7 @@
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield } from '@lucide/svelte';
   import { Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle } from '@lucide/svelte';
-  import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download } from '@lucide/svelte';
+  import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download, Copy, ListFilter } from '@lucide/svelte';
   import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2 } from '@lucide/svelte';
   import { TerminalSquare, Filter, Search, Sparkles, Bot } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -131,6 +131,197 @@
   let logFilter = $state('');
   let logAutoRefresh = $state(false);
   let logInterval: ReturnType<typeof setInterval> | null = null;
+  let logViewMode = $state<'structured' | 'raw'>('structured');
+  let logStatusFilter = $state<'all' | '2xx' | '3xx' | '4xx' | '5xx'>('all');
+  let expandedLogIndex = $state<number | null>(null);
+
+  interface ParsedLogEntry {
+    raw: string;
+    type: 'access' | 'error' | 'generic';
+    ip?: string;
+    timestamp?: string;
+    formattedTime?: string;
+    method?: string;
+    path?: string;
+    httpVersion?: string;
+    status?: number;
+    statusCategory?: '2xx' | '3xx' | '4xx' | '5xx' | 'other';
+    statusText?: string;
+    bytes?: number;
+    formattedSize?: string;
+    referer?: string;
+    userAgent?: string;
+    clientBrowser?: string;
+    logLevel?: 'error' | 'warn' | 'crit' | 'notice' | 'info' | 'alert' | 'emerg';
+    errorMessage?: string;
+    pid?: string;
+  }
+
+  function parseLogLine(line: string): ParsedLogEntry {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return { raw: line, type: 'generic' };
+    }
+
+    // Access Log Regex: Combined & Standard Nginx log format
+    const accessMatch = trimmed.match(/^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"([A-Z]+)\s+([^"\s]+)(?:\s+([^"]*))?"\s+(\d{3})\s+(\d+|-)(?:\s+"([^"]*)"\s*"([^"]*)")?/);
+    if (accessMatch) {
+      const ip = accessMatch[1];
+      const rawTime = accessMatch[2];
+      const method = accessMatch[3];
+      const path = accessMatch[4];
+      const httpVer = accessMatch[5] || 'HTTP/1.1';
+      const status = parseInt(accessMatch[6], 10);
+      const rawBytes = accessMatch[7] === '-' ? 0 : parseInt(accessMatch[7], 10);
+      const referer = accessMatch[8] && accessMatch[8] !== '-' ? accessMatch[8] : undefined;
+      const userAgent = accessMatch[9] && accessMatch[9] !== '-' ? accessMatch[9] : undefined;
+
+      let statusCategory: '2xx' | '3xx' | '4xx' | '5xx' | 'other' = 'other';
+      if (status >= 200 && status < 300) statusCategory = '2xx';
+      else if (status >= 300 && status < 400) statusCategory = '3xx';
+      else if (status >= 400 && status < 500) statusCategory = '4xx';
+      else if (status >= 500 && status < 600) statusCategory = '5xx';
+
+      let statusText = '';
+      if (status === 200) statusText = 'OK';
+      else if (status === 201) statusText = 'Created';
+      else if (status === 204) statusText = 'No Content';
+      else if (status === 301) statusText = 'Moved';
+      else if (status === 302) statusText = 'Found';
+      else if (status === 304) statusText = 'Cached';
+      else if (status === 400) statusText = 'Bad Request';
+      else if (status === 401) statusText = 'Unauthorized';
+      else if (status === 403) statusText = 'Forbidden';
+      else if (status === 404) statusText = 'Not Found';
+      else if (status === 405) statusText = 'Method Denied';
+      else if (status === 429) statusText = 'Rate Limited';
+      else if (status === 500) statusText = 'Server Error';
+      else if (status === 502) statusText = 'Bad Gateway';
+      else if (status === 503) statusText = 'Unavailable';
+      else if (status === 504) statusText = 'Timeout';
+
+      let formattedTime = rawTime;
+      const timeParts = rawTime.split(':');
+      if (timeParts.length >= 4) {
+        formattedTime = `${timeParts[1]}:${timeParts[2]}:${timeParts[3].split(' ')[0]}`;
+      }
+
+      let clientBrowser = '';
+      if (userAgent) {
+        if (userAgent.includes('Firefox')) clientBrowser = 'Firefox';
+        else if (userAgent.includes('Chrome') || userAgent.includes('CriOS')) clientBrowser = 'Chrome';
+        else if (userAgent.includes('Safari')) clientBrowser = 'Safari';
+        else if (userAgent.includes('Edge')) clientBrowser = 'Edge';
+        else if (userAgent.includes('curl')) clientBrowser = 'curl';
+        else if (userAgent.includes('Postman')) clientBrowser = 'Postman';
+        else if (userAgent.includes('bot') || userAgent.includes('Spider') || userAgent.includes('Crawler')) clientBrowser = 'Bot';
+        else clientBrowser = userAgent.split(' ')[0].substring(0, 15);
+      }
+
+      return {
+        raw: line,
+        type: 'access',
+        ip,
+        timestamp: rawTime,
+        formattedTime,
+        method,
+        path,
+        httpVersion: httpVer,
+        status,
+        statusCategory,
+        statusText,
+        bytes: rawBytes,
+        formattedSize: formatSize(rawBytes),
+        referer,
+        userAgent,
+        clientBrowser
+      };
+    }
+
+    // Error Log Regex
+    const errorMatch = trimmed.match(/^(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[([a-z]+)\]\s+(?:(\d+)#\d+:\s+)?(.*)$/i);
+    if (errorMatch) {
+      const timestamp = errorMatch[1];
+      const level = errorMatch[2].toLowerCase() as any;
+      const pid = errorMatch[3];
+      const message = errorMatch[4];
+
+      let clientIp = '';
+      const clientMatch = message.match(/client:\s+([^,\s]+)/);
+      if (clientMatch) clientIp = clientMatch[1];
+
+      let req = '';
+      const reqMatch = message.match(/request:\s+"([^"]+)"/);
+      if (reqMatch) req = reqMatch[1];
+
+      return {
+        raw: line,
+        type: 'error',
+        timestamp,
+        formattedTime: timestamp.split(' ')[1] || timestamp,
+        logLevel: level,
+        errorMessage: message,
+        ip: clientIp || undefined,
+        path: req || undefined,
+        pid
+      };
+    }
+
+    return {
+      raw: line,
+      type: 'generic'
+    };
+  }
+
+  const parsedLogEntries = $derived.by(() => {
+    if (!logContent || !logContent.trim()) return [];
+    return logContent
+      .split('\n')
+      .filter(l => l.trim().length > 0)
+      .map(parseLogLine)
+      .reverse();
+  });
+
+  const filteredLogEntries = $derived.by(() => {
+    let list = parsedLogEntries;
+    if (logStatusFilter !== 'all') {
+      list = list.filter(e => e.statusCategory === logStatusFilter);
+    }
+    if (logFilter.trim()) {
+      const q = logFilter.toLowerCase();
+      list = list.filter(e => 
+        e.raw.toLowerCase().includes(q) ||
+        (e.path && e.path.toLowerCase().includes(q)) ||
+        (e.ip && e.ip.toLowerCase().includes(q)) ||
+        (e.method && e.method.toLowerCase().includes(q)) ||
+        (e.status && String(e.status).includes(q)) ||
+        (e.errorMessage && e.errorMessage.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  });
+
+  const logStats = $derived.by(() => {
+    let count2xx = 0, count3xx = 0, count4xx = 0, count5xx = 0;
+    for (const e of parsedLogEntries) {
+      if (e.statusCategory === '2xx') count2xx++;
+      else if (e.statusCategory === '3xx') count3xx++;
+      else if (e.statusCategory === '4xx') count4xx++;
+      else if (e.statusCategory === '5xx') count5xx++;
+    }
+    return {
+      total: parsedLogEntries.length,
+      count2xx,
+      count3xx,
+      count4xx,
+      count5xx
+    };
+  });
+
+  function copyLogLine(text: string) {
+    navigator.clipboard.writeText(text);
+    uiStore.addToast('Copied to clipboard', 'info');
+  }
 
   // SSL
   let sslCerts = $state<SslCert[]>([]);
@@ -774,6 +965,13 @@
   ] as { id: typeof activeTab; label: string; icon: any }[]);
 
   $effect(() => {
+    if (uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)) {
+      activeTab = uiStore.targetSubTab as any;
+      uiStore.targetSubTab = null;
+    }
+  });
+
+  $effect(() => {
     if (activeTab === 'editor' && configs.length === 0) loadConfigs();
     if (activeTab === 'sites' && sites.length === 0) loadSites();
     if (activeTab === 'www' && wwwEntries.length === 0) loadWww();
@@ -895,24 +1093,30 @@
             <FolderPlus size={13} /> New Dir
           </Button>
         {:else if activeTab === 'logs'}
-          <Select bind:value={selectedLog} onchange={loadLog}  id="nginx-log-select">
-            {#each logFiles as lf}
-              <option value={lf}>{lf}</option>
-            {/each}
-          </Select>
-          <SearchBar bind:value={logFilter} placeholder="Filter…" style="margin:0; width: 200px;" />
-          <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
-            <RefreshCw size={13} /> Refresh
-          </Button>
-          <Button class="btn-sm {logAutoRefresh ? 'btn-primary' : '-outline'}" onclick={toggleAutoRefresh} id="nginx-log-auto">
-            <Clock size={13} /> {logAutoRefresh ? 'Auto: On' : 'Auto: Off'}
-          </Button>
-          <Button variant="outline" class="btn-sm" onclick={exportLog} id="nginx-log-export">
-            <Download size={13} /> Export
-          </Button>
-          <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
-            <Trash2 size={13} /> Clear
-          </Button>
+          <div style="width: 220px; max-width: 220px; flex-shrink: 0;">
+            <Select bind:value={selectedLog} onchange={loadLog} id="nginx-log-select">
+              {#each logFiles as lf}
+                <option value={lf}>{lf.split('/').pop() || lf}</option>
+              {/each}
+            </Select>
+          </div>
+          <div style="flex: 1; min-width: 200px;">
+            <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
+            <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
+              <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
+            </Button>
+            <Button class="btn-sm {logAutoRefresh ? 'btn-primary' : '-outline'}" onclick={toggleAutoRefresh} id="nginx-log-auto">
+              <Clock size={13} /> {logAutoRefresh ? 'Live: On' : 'Live: Off'}
+            </Button>
+            <Button variant="outline" class="btn-sm" onclick={exportLog} id="nginx-log-export">
+              <Download size={13} /> Export
+            </Button>
+            <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
+              <Trash2 size={13} /> Clear
+            </Button>
+          </div>
         {:else if activeTab === 'ssl'}
           <Button variant="outline" class="btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
             <RefreshCw size={13} /> Refresh
@@ -1361,12 +1565,222 @@
 
       <!-- ══ LOGS ══════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'logs'}
-        <div class="tab-section">
+        <div class="tab-section log-tab-container">
+          <!-- Log Filter Bar & View Toggle -->
+          <div class="log-control-ribbon">
+            <div class="log-status-pills">
+              <button 
+                class="log-pill-btn" 
+                class:active={logStatusFilter === 'all'} 
+                onclick={() => logStatusFilter = 'all'}
+              >
+                All <span class="pill-badge">{logStats.total}</span>
+              </button>
+              {#if logStats.count2xx > 0}
+                <button 
+                  class="log-pill-btn status-2xx-pill" 
+                  class:active={logStatusFilter === '2xx'} 
+                  onclick={() => logStatusFilter = '2xx'}
+                >
+                  <span class="pill-dot green"></span> 2xx OK <span class="pill-badge">{logStats.count2xx}</span>
+                </button>
+              {/if}
+              {#if logStats.count3xx > 0}
+                <button 
+                  class="log-pill-btn status-3xx-pill" 
+                  class:active={logStatusFilter === '3xx'} 
+                  onclick={() => logStatusFilter = '3xx'}
+                >
+                  <span class="pill-dot blue"></span> 3xx Redirect <span class="pill-badge">{logStats.count3xx}</span>
+                </button>
+              {/if}
+              {#if logStats.count4xx > 0}
+                <button 
+                  class="log-pill-btn status-4xx-pill" 
+                  class:active={logStatusFilter === '4xx'} 
+                  onclick={() => logStatusFilter = '4xx'}
+                >
+                  <span class="pill-dot amber"></span> 4xx Client Err <span class="pill-badge">{logStats.count4xx}</span>
+                </button>
+              {/if}
+              {#if logStats.count5xx > 0}
+                <button 
+                  class="log-pill-btn status-5xx-pill" 
+                  class:active={logStatusFilter === '5xx'} 
+                  onclick={() => logStatusFilter = '5xx'}
+                >
+                  <span class="pill-dot red"></span> 5xx Server Err <span class="pill-badge">{logStats.count5xx}</span>
+                </button>
+              {/if}
+            </div>
+
+            <div class="log-view-toggle">
+              <button 
+                class="view-mode-btn" 
+                class:active={logViewMode === 'structured'} 
+                onclick={() => logViewMode = 'structured'}
+                title="Structured Human-Readable Stream"
+              >
+                <ListFilter size={13} /> Structured
+              </button>
+              <button 
+                class="view-mode-btn" 
+                class:active={logViewMode === 'raw'} 
+                onclick={() => logViewMode = 'raw'}
+                title="Raw Monospace Console"
+              >
+                <TerminalSquare size={13} /> Raw
+              </button>
+            </div>
+          </div>
 
           {#if logLoading}
             <div class="center-state"><div class="spinner"></div></div>
+          {:else if filteredLogEntries.length === 0}
+            <div class="editor-empty" style="min-height: 280px;">
+              <FileText size={36} style="color: var(--color-text-muted);" />
+              <p style="font-size: 14px; font-weight: 600; margin-top: 8px;">No log entries found</p>
+              <p class="ov-since">Try changing your search query or status filter.</p>
+            </div>
+          {:else if logViewMode === 'structured'}
+            <div class="structured-log-stream">
+              {#each filteredLogEntries as entry, idx}
+                {#if entry.type === 'access'}
+                  <div 
+                    class="log-row-card access-card"
+                    class:expanded={expandedLogIndex === idx}
+                    onclick={() => expandedLogIndex = expandedLogIndex === idx ? null : idx}
+                    role="button"
+                    tabindex="0"
+                    onkeydown={(e) => { if (e.key === 'Enter') expandedLogIndex = expandedLogIndex === idx ? null : idx; }}
+                  >
+                    <div class="log-row-main">
+                      <!-- Status Code Badge -->
+                      <span class="status-code-badge status-{entry.statusCategory}">
+                        {entry.status} {entry.statusText}
+                      </span>
+
+                      <!-- HTTP Method -->
+                      <span class="method-badge method-{entry.method?.toLowerCase()}">
+                        {entry.method}
+                      </span>
+
+                      <!-- Path -->
+                      <span class="log-path" title={entry.path}>
+                        {entry.path}
+                      </span>
+
+                      <!-- IP & Client -->
+                      <div class="log-client-group">
+                        <span class="log-ip">{entry.ip}</span>
+                        {#if entry.clientBrowser}
+                          <span class="client-badge">{entry.clientBrowser}</span>
+                        {/if}
+                      </div>
+
+                      <!-- Size -->
+                      <span class="log-size">{entry.formattedSize}</span>
+
+                      <!-- Time -->
+                      <span class="log-time" title={entry.timestamp}>{entry.formattedTime}</span>
+
+                      <ChevronDown size={14} class="log-expand-icon" style={expandedLogIndex === idx ? 'transform: rotate(180deg);' : ''} />
+                    </div>
+
+                    <!-- Expanded Detailed View -->
+                    {#if expandedLogIndex === idx}
+                      <div class="log-row-expanded" onclick={(e) => e.stopPropagation()}>
+                        <div class="expanded-grid">
+                          <div class="exp-item">
+                            <span class="exp-label">Request URI:</span>
+                            <span class="exp-value font-mono">{entry.path}</span>
+                          </div>
+                          <div class="exp-item">
+                            <span class="exp-label">Remote Client IP:</span>
+                            <span class="exp-value font-mono">{entry.ip}</span>
+                          </div>
+                          {#if entry.referer}
+                            <div class="exp-item full-width">
+                              <span class="exp-label">Referer:</span>
+                              <span class="exp-value">{entry.referer}</span>
+                            </div>
+                          {/if}
+                          {#if entry.userAgent}
+                            <div class="exp-item full-width">
+                              <span class="exp-label">User-Agent:</span>
+                              <span class="exp-value">{entry.userAgent}</span>
+                            </div>
+                          {/if}
+                          <div class="exp-item full-width raw-line-box">
+                            <span class="exp-label">Raw Entry:</span>
+                            <div class="raw-copy-row">
+                              <code>{entry.raw}</code>
+                              <button class="raw-copy-btn" onclick={() => copyLogLine(entry.raw)} title="Copy raw line">
+                                <Copy size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {:else if entry.type === 'error'}
+                  <div 
+                    class="log-row-card error-card"
+                    class:expanded={expandedLogIndex === idx}
+                    onclick={() => expandedLogIndex = expandedLogIndex === idx ? null : idx}
+                    role="button"
+                    tabindex="0"
+                    onkeydown={(e) => { if (e.key === 'Enter') expandedLogIndex = expandedLogIndex === idx ? null : idx; }}
+                  >
+                    <div class="log-row-main">
+                      <span class="status-code-badge status-5xx">
+                        [{entry.logLevel?.toUpperCase()}]
+                      </span>
+                      <span class="log-error-msg" title={entry.errorMessage}>
+                        {entry.errorMessage}
+                      </span>
+                      {#if entry.ip}
+                        <span class="log-ip">{entry.ip}</span>
+                      {/if}
+                      <span class="log-time" title={entry.timestamp}>{entry.formattedTime}</span>
+                      <ChevronDown size={14} class="log-expand-icon" style={expandedLogIndex === idx ? 'transform: rotate(180deg);' : ''} />
+                    </div>
+
+                    {#if expandedLogIndex === idx}
+                      <div class="log-row-expanded" onclick={(e) => e.stopPropagation()}>
+                        <div class="raw-copy-row">
+                          <code>{entry.raw}</code>
+                          <button class="raw-copy-btn" onclick={() => copyLogLine(entry.raw)} title="Copy raw line">
+                            <Copy size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <div class="log-row-card generic-card">
+                    <div class="raw-copy-row">
+                      <code>{entry.raw}</code>
+                      <button class="raw-copy-btn" onclick={() => copyLogLine(entry.raw)} title="Copy raw line">
+                        <Copy size={12} />
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
           {:else}
-            <pre class="log-view">{logContent || '(empty)'}</pre>
+            <!-- Raw Mode -->
+            <div class="raw-terminal-view">
+              <div class="raw-terminal-header">
+                <span>{selectedLog} — {filteredLogEntries.length} entries</span>
+                <Button variant="outline" class="btn-sm" onclick={() => copyLogLine(logContent)}>
+                  <Copy size={12} /> Copy All
+                </Button>
+              </div>
+              <pre class="log-view raw-code-body">{logContent || '(empty)'}</pre>
+            </div>
           {/if}
         </div>
 
@@ -2140,15 +2554,595 @@
 
   .log-view {
     flex: 1;
-    font-size: 11px;
+    font-size: 11.5px;
     line-height: 1.5;
     background: rgba(0,0,0,0.3);
-    border-radius: 12px;
+    border-radius: 8px;
     border: 1px solid var(--color-border);
     padding: 12px 16px;
     overflow: auto;
     max-height: calc(100vh - 280px);
     color: var(--color-text-secondary);
+  }
+
+  /* ─── Modern Human-Readable Log Viewer ────────────────────────────── */
+  .log-tab-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .log-control-ribbon {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding-bottom: 2px;
+  }
+
+  .log-status-pills {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .log-pill-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-raised);
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .log-pill-btn:hover {
+    border-color: var(--color-border-hover);
+    color: var(--color-text-primary);
+  }
+
+  .log-pill-btn.active {
+    background: var(--color-bg-card);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    box-shadow: 0 0 10px rgba(0, 218, 243, 0.15);
+  }
+
+  .pill-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+  .pill-dot.green { background: var(--color-success); }
+  .pill-dot.blue { background: var(--color-info); }
+  .pill-dot.amber { background: var(--color-warning); }
+  .pill-dot.red { background: var(--color-error); }
+
+  .pill-badge {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .log-view-toggle {
+    display: flex;
+    align-items: center;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .view-mode-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .view-mode-btn:hover {
+    color: var(--color-text-primary);
+  }
+
+  .view-mode-btn.active {
+    background: var(--color-bg-card);
+    color: var(--color-text-primary);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  }
+
+  .structured-log-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    max-height: calc(100vh - 280px);
+    padding-right: 4px;
+    padding-bottom: 24px;
+  }
+
+  .log-row-card {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    min-height: 40px;
+    background: var(--color-bg-card, #0f172a);
+    border: 1px solid var(--color-border, #1e293b);
+    border-radius: 8px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    overflow: hidden;
+  }
+
+  .log-row-card:hover {
+    border-color: var(--color-border-hover, #334155);
+    background: var(--color-bg-hover, rgba(255, 255, 255, 0.03));
+  }
+
+  .log-row-card.expanded {
+    border-color: var(--color-accent, #00daf3);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  }
+
+  .log-row-main {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-size: 12px;
+    min-height: 40px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+  }
+
+  .status-code-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 8px;
+    border-radius: 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    min-width: 68px;
+    flex-shrink: 0;
+  }
+
+  .status-code-badge.status-2xx {
+    background: rgba(34, 197, 94, 0.14);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.35);
+  }
+
+  .status-code-badge.status-3xx {
+    background: rgba(14, 165, 233, 0.14);
+    color: #38bdf8;
+    border: 1px solid rgba(14, 165, 233, 0.35);
+  }
+
+  .status-code-badge.status-4xx {
+    background: rgba(245, 158, 11, 0.14);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+  }
+
+  .status-code-badge.status-5xx {
+    background: rgba(239, 68, 68, 0.14);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+  }
+
+  .status-code-badge.status-other {
+    background: rgba(148, 163, 184, 0.14);
+    color: #cbd5e1;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+  }
+
+  .method-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    min-width: 46px;
+    flex-shrink: 0;
+    background: var(--color-bg-raised, #1e293b);
+    color: var(--color-text-secondary, #94a3b8);
+    border: 1px solid var(--color-border, #334155);
+  }
+
+  .method-badge.method-get { color: #00daf3; border-color: rgba(0, 218, 243, 0.35); background: rgba(0, 218, 243, 0.08); }
+  .method-badge.method-post { color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); background: rgba(96, 165, 250, 0.08); }
+  .method-badge.method-put, .method-badge.method-patch { color: #fbbf24; border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08); }
+  .method-badge.method-delete { color: #f87171; border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); }
+
+  .log-path {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-primary, #f8fafc);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .log-error-msg {
+    flex: 1;
+    color: var(--color-text-secondary, #cbd5e1);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .log-client-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .log-ip {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--color-text-secondary, #94a3b8);
+    background: var(--color-bg-raised, #1e293b);
+    border: 1px solid var(--color-border, #334155);
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  .client-badge {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--color-text-muted, #64748b);
+    background: var(--color-bg-raised, #1e293b);
+    border: 1px solid var(--color-border, #334155);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .log-size {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--color-text-muted, #94a3b8);
+    min-width: 55px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .log-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-muted, #94a3b8);
+    min-width: 60px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .log-expand-icon {
+    color: var(--color-text-muted, #64748b);
+    transition: transform 0.18s ease;
+    flex-shrink: 0;
+  }
+
+  .log-row-expanded {
+    padding: 12px 14px;
+    background: rgba(0, 0, 0, 0.25);
+    border-top: 1px solid var(--color-border, #1e293b);
+    animation: fadeIn 0.15s ease both;
+  }
+
+  .expanded-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    font-size: 12px;
+  }
+
+  .exp-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .exp-item.full-width {
+    grid-column: 1 / -1;
+  }
+
+  .exp-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--color-text-muted, #64748b);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .exp-value {
+    color: var(--color-text-secondary, #cbd5e1);
+    word-break: break-all;
+  }
+
+  .raw-copy-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border, #334155);
+    margin-top: 4px;
+  }
+
+  .raw-copy-row code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: #94a3b8;
+    word-break: break-all;
+    white-space: pre-wrap;
+    flex: 1;
+  }
+
+  .raw-copy-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    border: 1px solid var(--color-border, #334155);
+    background: var(--color-bg-raised, #1e293b);
+    color: var(--color-text-muted, #94a3b8);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .raw-copy-btn:hover {
+    color: var(--color-text-primary, #ffffff);
+    border-color: var(--color-accent, #00daf3);
+  }
+
+  .raw-terminal-view {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+  }
+
+  .raw-terminal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .raw-code-body {
+    margin: 0;
+    height: 100%;
+    min-height: 350px;
+  }
+
+  /* ── Explicit Light Mode High-Contrast Overrides ── */
+  :global(html.light-mode) .log-row-card,
+  :global([data-theme="light"]) .log-row-card {
+    background: #FFFFFF !important;
+    border: 1px solid #CBD5E1 !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  }
+
+  :global(html.light-mode) .log-row-card:hover,
+  :global([data-theme="light"]) .log-row-card:hover {
+    background: #F8FAFC !important;
+    border-color: #94A3B8 !important;
+  }
+
+  :global(html.light-mode) .log-path,
+  :global([data-theme="light"]) .log-path {
+    color: #0F172A !important;
+  }
+
+  :global(html.light-mode) .log-error-msg,
+  :global([data-theme="light"]) .log-error-msg {
+    color: #991B1B !important;
+  }
+
+  :global(html.light-mode) .log-ip,
+  :global([data-theme="light"]) .log-ip {
+    background: #F1F5F9 !important;
+    color: #0F172A !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .client-badge,
+  :global([data-theme="light"]) .client-badge {
+    background: #F1F5F9 !important;
+    color: #334155 !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .log-size,
+  :global([data-theme="light"]) .log-size {
+    color: #334155 !important;
+  }
+
+  :global(html.light-mode) .log-time,
+  :global([data-theme="light"]) .log-time {
+    color: #475569 !important;
+  }
+
+  :global(html.light-mode) .log-expand-icon,
+  :global([data-theme="light"]) .log-expand-icon {
+    color: #64748B !important;
+  }
+
+  :global(html.light-mode) .status-code-badge.status-2xx,
+  :global([data-theme="light"]) .status-code-badge.status-2xx {
+    background: #DCFCE7 !important;
+    color: #15803D !important;
+    border: 1px solid #86EFAC !important;
+  }
+
+  :global(html.light-mode) .status-code-badge.status-3xx,
+  :global([data-theme="light"]) .status-code-badge.status-3xx {
+    background: #E0F2FE !important;
+    color: #0369A1 !important;
+    border: 1px solid #7DD3FC !important;
+  }
+
+  :global(html.light-mode) .status-code-badge.status-4xx,
+  :global([data-theme="light"]) .status-code-badge.status-4xx {
+    background: #FEF3C7 !important;
+    color: #B45309 !important;
+    border: 1px solid #FCD34D !important;
+  }
+
+  :global(html.light-mode) .status-code-badge.status-5xx,
+  :global([data-theme="light"]) .status-code-badge.status-5xx {
+    background: #FEE2E2 !important;
+    color: #B91C1C !important;
+    border: 1px solid #FCA5A5 !important;
+  }
+
+  :global(html.light-mode) .status-code-badge.status-other,
+  :global([data-theme="light"]) .status-code-badge.status-other {
+    background: #F1F5F9 !important;
+    color: #334155 !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .method-badge,
+  :global([data-theme="light"]) .method-badge {
+    background: #F8FAFC !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .method-badge.method-get,
+  :global([data-theme="light"]) .method-badge.method-get { color: #0284C7 !important; border-color: #7DD3FC !important; background: #F0F9FF !important; }
+  :global(html.light-mode) .method-badge.method-post,
+  :global([data-theme="light"]) .method-badge.method-post { color: #2563EB !important; border-color: #93C5FD !important; background: #EFF6FF !important; }
+  :global(html.light-mode) .method-badge.method-put,
+  :global(html.light-mode) .method-badge.method-patch,
+  :global([data-theme="light"]) .method-badge.method-put,
+  :global([data-theme="light"]) .method-badge.method-patch { color: #D97706 !important; border-color: #FCD34D !important; background: #FFFBEB !important; }
+  :global(html.light-mode) .method-badge.method-delete,
+  :global([data-theme="light"]) .method-badge.method-delete { color: #DC2626 !important; border-color: #FCA5A5 !important; background: #FEF2F2 !important; }
+
+  :global(html.light-mode) .log-pill-btn,
+  :global([data-theme="light"]) .log-pill-btn {
+    background: #FFFFFF !important;
+    border: 1px solid #CBD5E1 !important;
+    color: #334155 !important;
+  }
+
+  :global(html.light-mode) .log-pill-btn:hover,
+  :global([data-theme="light"]) .log-pill-btn:hover {
+    background: #F8FAFC !important;
+    color: #0F172A !important;
+    border-color: #94A3B8 !important;
+  }
+
+  :global(html.light-mode) .log-pill-btn.active,
+  :global([data-theme="light"]) .log-pill-btn.active {
+    background: #EFF6FF !important;
+    border-color: #2563EB !important;
+    color: #1D4ED8 !important;
+  }
+
+  :global(html.light-mode) .pill-badge,
+  :global([data-theme="light"]) .pill-badge {
+    background: #F1F5F9 !important;
+    color: #0F172A !important;
+  }
+
+  :global(html.light-mode) .log-view-toggle,
+  :global([data-theme="light"]) .log-view-toggle {
+    background: #F1F5F9 !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .view-mode-btn,
+  :global([data-theme="light"]) .view-mode-btn {
+    color: #475569 !important;
+  }
+
+  :global(html.light-mode) .view-mode-btn.active,
+  :global([data-theme="light"]) .view-mode-btn.active {
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+  }
+
+  :global(html.light-mode) .log-row-expanded,
+  :global([data-theme="light"]) .log-row-expanded {
+    background: #F8FAFC !important;
+    border-top: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .exp-label,
+  :global([data-theme="light"]) .exp-label {
+    color: #64748B !important;
+  }
+
+  :global(html.light-mode) .exp-value,
+  :global([data-theme="light"]) .exp-value {
+    color: #0F172A !important;
+  }
+
+  :global(html.light-mode) .raw-copy-row,
+  :global([data-theme="light"]) .raw-copy-row {
+    background: #F1F5F9 !important;
+    border: 1px solid #CBD5E1 !important;
+  }
+
+  :global(html.light-mode) .raw-copy-row code,
+  :global([data-theme="light"]) .raw-copy-row code {
+    color: #0F172A !important;
+  }
+
+  :global(html.light-mode) .raw-copy-btn,
+  :global([data-theme="light"]) .raw-copy-btn {
+    background: #FFFFFF !important;
+    border: 1px solid #CBD5E1 !important;
+    color: #475569 !important;
+  }
+
+  :global(html.light-mode) .raw-copy-btn:hover,
+  :global([data-theme="light"]) .raw-copy-btn:hover {
+    border-color: #2563EB !important;
+    color: #1D4ED8 !important;
   }
 
   /* ─── SSL ────────────────────────────────────────────────────────────── */

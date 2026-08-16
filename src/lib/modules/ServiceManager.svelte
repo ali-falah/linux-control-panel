@@ -164,12 +164,71 @@
   async function doAction(unit: ServiceUnit, action: ServiceAction) {
     actionInProgress = `${unit.name}-${action}`;
     statusStore.setBusy(`${action} ${unit.name}…`);
+    
+    // Store backup for rollback on error
+    const prevActive = unit.active_state;
+    const prevSub = unit.sub_state;
+    const prevFileState = unit.unit_file_state;
+
+    // Optimistic UI state update
+    if (action === 'start') {
+      unit.active_state = 'activating';
+      unit.sub_state = 'starting';
+    } else if (action === 'stop') {
+      unit.active_state = 'deactivating';
+      unit.sub_state = 'stopping';
+    } else if (action === 'restart') {
+      unit.active_state = 'activating';
+      unit.sub_state = 'restarting';
+    } else if (action === 'enable') {
+      unit.unit_file_state = 'enabled';
+    } else if (action === 'disable') {
+      unit.unit_file_state = 'disabled';
+    } else if (action === 'mask') {
+      unit.unit_file_state = 'masked';
+    } else if (action === 'unmask') {
+      unit.unit_file_state = 'disabled';
+    }
+
     try {
       await invoke<string>('unit_action', { name: unit.name, action, userMode: userScope });
       uiStore.addToast(`${unit.name}: ${action} succeeded`, 'success');
       statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} ${action} ${unit.name}`, 0, true);
-      await load();
+      
+      // Fast single-unit sync via get_services_status (~15ms)
+      try {
+        const statuses = await invoke<Array<{ name: string; active_state: string; sub_state: string; unit_file_state: string }>>(
+          'get_services_status', 
+          { names: [unit.name], userMode: userScope }
+        );
+        if (statuses && statuses.length > 0) {
+          unit.active_state = statuses[0].active_state || (action === 'start' ? 'active' : 'inactive');
+          unit.sub_state = statuses[0].sub_state || (action === 'start' ? 'running' : 'dead');
+          if (statuses[0].unit_file_state && statuses[0].unit_file_state !== 'unknown') {
+            unit.unit_file_state = statuses[0].unit_file_state;
+          }
+        } else {
+          if (action === 'start' || action === 'restart') {
+            unit.active_state = 'active';
+            unit.sub_state = 'running';
+          } else if (action === 'stop') {
+            unit.active_state = 'inactive';
+            unit.sub_state = 'dead';
+          }
+        }
+      } catch {
+        if (action === 'start' || action === 'restart') {
+          unit.active_state = 'active';
+          unit.sub_state = 'running';
+        } else if (action === 'stop') {
+          unit.active_state = 'inactive';
+          unit.sub_state = 'dead';
+        }
+      }
     } catch (e) {
+      unit.active_state = prevActive;
+      unit.sub_state = prevSub;
+      unit.unit_file_state = prevFileState;
       uiStore.addToast(`${action} failed: ${e}`, 'error');
       statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} ${action} ${unit.name}`, 1, false);
     } finally {
@@ -595,14 +654,32 @@
     <!-- Service List -->
     <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
       <div style="flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;">
-        {#if loading}
-        <div style="padding: 16px; display: flex; flex-direction: column; gap: 8px;">
-          <Skeleton height="42px" borderRadius="8px" />
-          <Skeleton height="42px" borderRadius="8px" />
-          <Skeleton height="42px" borderRadius="8px" />
-          <Skeleton height="42px" borderRadius="8px" />
-          <Skeleton height="42px" borderRadius="8px" />
-        </div>
+        {#if loading && units.length === 0}
+          <div class="cyber-loading-matrix">
+            <div class="cyber-scanner-hero">
+              <div class="cyber-radar-orb">
+                <div class="radar-sweep"></div>
+                <Server size={24} class="radar-core-icon" />
+              </div>
+              <div class="cyber-scan-text">
+                <div class="cyber-scan-title">Querying Systemd Unit Registry</div>
+                <div class="cyber-scan-sub">Synchronizing service states, unit configurations, and security guardrails…</div>
+              </div>
+            </div>
+            <div class="cyber-skeleton-rows">
+              {#each [1, 2, 3, 4, 5, 6, 7] as _idx}
+                <div class="cyber-shimmer-row" style="animation-delay: {_idx * 0.12}s">
+                  <div class="shimmer-col-name">
+                    <div class="shimmer-pill-title"></div>
+                    <div class="shimmer-pill-sub"></div>
+                  </div>
+                  <div class="shimmer-col-badge"></div>
+                  <div class="shimmer-col-state"></div>
+                  <div class="shimmer-col-actions"></div>
+                </div>
+              {/each}
+            </div>
+          </div>
       {:else if filteredUnits.length === 0}
         <div class="empty-state" style="padding: 64px 32px;">
           <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
@@ -658,19 +735,23 @@
                 </td>
                 <td style="width: 140px;">
                   <div style="display:flex;gap:8px; align-items:center">
-                    {#if unit.active_state !== 'active'}
-                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={actionInProgress === `${unit.name}-start`}><Play size={14}/></button>
+                    {#if actionInProgress === `${unit.name}-start` || actionInProgress === `${unit.name}-stop` || actionInProgress === `${unit.name}-restart`}
+                      <button class="action-btn" disabled title="Processing action…">
+                        <RefreshCw size={13} class="animate-spin-slow" style="color:var(--color-accent)" />
+                      </button>
+                    {:else if unit.active_state !== 'active'}
+                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={!!actionInProgress}><Play size={14}/></button>
                     {:else}
                       <button 
                         class="action-btn" 
                         onclick={() => confirmDoAction(unit, 'stop')} 
                         title={unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : 'Stop'} 
-                        disabled={unit.protection_level === 'critical' || actionInProgress === `${unit.name}-stop`}
+                        disabled={unit.protection_level === 'critical' || !!actionInProgress}
                         style={unit.protection_level === 'critical' ? 'opacity: 0.4; cursor: not-allowed;' : ''}
                       >
                         <Square size={14}/>
                       </button>
-                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={actionInProgress === `${unit.name}-restart`}><RotateCcw size={14}/></button>
+                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={!!actionInProgress}><RotateCcw size={14}/></button>
                     {/if}
                     <KebabMenu align="right">
                       <button class="menu-item" onclick={() => confirmDoAction(unit, 'restart')} disabled={!!actionInProgress}>
@@ -1409,5 +1490,158 @@
     flex-direction: column;
     gap: 3px;
     line-height: 1.4;
+  }
+
+  /* ── Cybernetic Pulse Loading Animation ───────────────────────────── */
+  .cyber-loading-matrix {
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 14px;
+    height: 100%;
+    min-height: 380px;
+    background: var(--color-bg-base);
+  }
+
+  .cyber-scanner-hero {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(0, 218, 243, 0.07) 0%, rgba(37, 99, 235, 0.04) 100%);
+    border: 1px solid rgba(0, 218, 243, 0.22);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), inset 0 0 16px rgba(0, 218, 243, 0.03);
+  }
+
+  .cyber-radar-orb {
+    position: relative;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: rgba(0, 218, 243, 0.08);
+    border: 1.5px solid rgba(0, 218, 243, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 0 14px rgba(0, 218, 243, 0.25);
+    overflow: hidden;
+  }
+
+  .radar-sweep {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, transparent 0deg, rgba(0, 218, 243, 0.3) 300deg, rgba(0, 218, 243, 0.75) 360deg);
+    animation: radar-rotate 1.8s linear infinite;
+  }
+
+  @keyframes radar-rotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .radar-core-icon {
+    position: relative;
+    z-index: 2;
+    color: var(--color-accent);
+    filter: drop-shadow(0 0 4px var(--color-accent));
+  }
+
+  .cyber-scan-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .cyber-scan-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .cyber-scan-sub {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .cyber-skeleton-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    flex: 1;
+  }
+
+  .cyber-shimmer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: 6px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    position: relative;
+    overflow: hidden;
+    gap: 14px;
+  }
+
+  .cyber-shimmer-row::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -150%;
+    width: 150%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent 0%, rgba(0, 218, 243, 0.09) 50%, transparent 100%);
+    animation: cyber-shimmer 1.6s infinite ease-in-out;
+  }
+
+  @keyframes cyber-shimmer {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(200%); }
+  }
+
+  .shimmer-col-name {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1;
+  }
+
+  .shimmer-pill-title {
+    width: 140px;
+    height: 13px;
+    border-radius: 4px;
+    background: var(--color-bg-raised);
+  }
+
+  .shimmer-pill-sub {
+    width: 220px;
+    height: 9px;
+    border-radius: 3px;
+    background: var(--color-bg-hover);
+  }
+
+  .shimmer-col-badge {
+    width: 54px;
+    height: 18px;
+    border-radius: 999px;
+    background: var(--color-bg-raised);
+  }
+
+  .shimmer-col-state {
+    width: 50px;
+    height: 16px;
+    border-radius: 4px;
+    background: var(--color-bg-raised);
+  }
+
+  .shimmer-col-actions {
+    width: 65px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--color-bg-raised);
   }
 </style>

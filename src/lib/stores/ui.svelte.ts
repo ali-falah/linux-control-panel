@@ -188,7 +188,6 @@ class UIStore {
     this.navigateTo('journal-logs');
   }
 
-  enableProactiveHealth = $state<boolean>(true);
   serviceFilter = $state<string | null>(null);
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);
@@ -210,17 +209,6 @@ class UIStore {
     danger: false,
   });
 
-  setProactiveHealth(enabled: boolean) {
-    this.enableProactiveHealth = enabled;
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('app_enable_proactive_health', String(enabled));
-    }
-  }
-
-  toggleProactiveHealth() {
-    this.setProactiveHealth(!this.enableProactiveHealth);
-  }
-
   initTheme() {
     if (typeof window !== 'undefined') {
       const savedTheme = localStorage.getItem('app_theme') as 'dark' | 'light';
@@ -230,11 +218,6 @@ class UIStore {
         this.theme = 'dark';
       }
       this.applyTheme();
-
-      const savedHealth = localStorage.getItem('app_enable_proactive_health');
-      if (savedHealth !== null) {
-        this.enableProactiveHealth = savedHealth === 'true';
-      }
     }
   }
 

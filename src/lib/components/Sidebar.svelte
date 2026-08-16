@@ -79,7 +79,7 @@
     if (!uiStore.sidebarCollapsed) return;
     hoverTimeout = setTimeout(() => {
       hoveredGroup = null;
-    }, 180);
+    }, 60);
   }
 
   function handleFlyoutMouseEnter() {
@@ -372,8 +372,12 @@
     height: 100%;
     background: var(--color-sidebar-bg);
     border-right: 1px solid rgba(59, 73, 76, 0.5);
-    transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1),
-                min-width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: width 0.22s cubic-bezier(0.25, 1, 0.5, 1),
+                min-width 0.22s cubic-bezier(0.25, 1, 0.5, 1),
+                padding 0.22s cubic-bezier(0.25, 1, 0.5, 1);
+    will-change: width, min-width, padding;
+    position: relative;
+    z-index: 100;
     overflow: hidden;
     padding: 12px 8px;
     gap: 0;
@@ -384,6 +388,7 @@
     min-width: 52px;
     padding: 12px 6px;
     overflow: visible;
+    z-index: 1000;
   }
 
   .sidebar.collapsed .sidebar-nav {
@@ -398,6 +403,18 @@
     padding-top: 6px;
     align-items: center;
     width: 100%;
+    animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes sidebarContentFade {
+    from {
+      opacity: 0;
+      transform: translateX(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
   }
 
   .collapsed-cat-wrapper {
@@ -465,15 +482,16 @@
     position: absolute;
     left: calc(100% + 10px);
     top: -4px;
-    z-index: 1000;
-    min-width: 210px;
-    background: var(--color-bg-card);
+    z-index: 99999;
+    min-width: 220px;
+    background: var(--color-bg-card, #0f172a);
     border: 1px solid var(--color-active-border);
     border-radius: 10px;
     padding: 6px;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 0 12px var(--color-accent-glow);
-    backdrop-filter: blur(12px);
-    animation: flyout-appear 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 16px var(--color-accent-glow);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    animation: flyout-appear 0.14s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   @keyframes flyout-appear {
@@ -612,35 +630,38 @@
   }
 
   .logo-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
+    width: 30px;
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    overflow: hidden;
+    overflow: visible;
     background: transparent;
     border: none;
-    box-shadow: 0 0 10px rgba(0, 218, 243, 0.20);
-    transition: transform 0.18s ease, box-shadow 0.18s ease;
+    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.35));
+    transition: transform 0.18s ease, filter 0.18s ease;
   }
   .sidebar-logo:hover .logo-icon {
-    transform: scale(1.05);
-    box-shadow: 0 0 14px rgba(0, 218, 243, 0.40);
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.65));
   }
 
   .logo-img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
-    border-radius: 50%;
+    object-fit: contain;
   }
 
   .logo-text {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .logo-chevron {
+    animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .logo-title {
@@ -678,6 +699,7 @@
     border-radius: 6px;
     border: 1px solid var(--color-border);
     transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
   .sidebar-search:hover {
     border-color: var(--color-border-hover);
@@ -815,7 +837,7 @@
   .group-items-wrapper {
     display: grid;
     grid-template-rows: 1fr;
-    transition: grid-template-rows 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: grid-template-rows 0.2s cubic-bezier(0.25, 1, 0.5, 1);
   }
   .group-items-wrapper.collapsed-anim {
     grid-template-rows: 0fr;

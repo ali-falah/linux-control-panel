@@ -110,39 +110,180 @@ pub struct BlameEntry {
     pub name: String,
 }
 
-/// List all systemd units (system or user scope)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceUnitStatus {
+    pub name: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub unit_file_state: String,
+}
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+static SYSTEM_UNIT_FILE_CACHE: Mutex<Option<(std::collections::HashMap<String, String>, Instant)>> = Mutex::new(None);
+static USER_UNIT_FILE_CACHE: Mutex<Option<(std::collections::HashMap<String, String>, Instant)>> = Mutex::new(None);
+const UNIT_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+pub fn invalidate_unit_file_cache() {
+    if let Ok(mut g) = SYSTEM_UNIT_FILE_CACHE.lock() { *g = None; }
+    if let Ok(mut g) = USER_UNIT_FILE_CACHE.lock() { *g = None; }
+}
+
+/// Query specific services status quickly via systemctl show (instant ~15ms)
 #[tauri::command]
-pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> Result<Vec<ServiceUnit>, String> {
-    if !crate::binary_exists("systemctl").await {
-        return Err("systemctl is not available on this system".to_string());
+pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) -> Result<Vec<ServiceUnitStatus>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
     }
 
-    use std::collections::HashMap;
-    let mut all_services: HashMap<String, ServiceUnit> = HashMap::new();
     let is_user = user_mode.unwrap_or(false);
-
-    // 1. Get all installed unit files
-    let mut args_files = vec!["list-unit-files", "--type=service", "--no-pager", "--no-legend"];
+    let mut cmd = Command::new("systemctl");
     if is_user {
-        args_files.push("--user");
+        cmd.arg("--user");
+    }
+    cmd.arg("show");
+    cmd.arg("-p");
+    cmd.arg("Id,ActiveState,SubState,UnitFileState");
+    for name in &names {
+        cmd.arg(name);
     }
 
-    let output_files = Command::new("systemctl")
-        .args(&args_files)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = cmd.output().await.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let stdout_files = String::from_utf8_lossy(&output_files.stdout);
-    for line in stdout_files.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
+    let mut results = Vec::new();
+    let mut cur_name = String::new();
+    let mut cur_active = "inactive".to_string();
+    let mut cur_sub = "dead".to_string();
+    let mut cur_file_state = "unknown".to_string();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !cur_name.is_empty() {
+                results.push(ServiceUnitStatus {
+                    name: cur_name.clone(),
+                    active_state: cur_active.clone(),
+                    sub_state: cur_sub.clone(),
+                    unit_file_state: cur_file_state.clone(),
+                });
+                cur_name.clear();
+                cur_active = "inactive".to_string();
+                cur_sub = "dead".to_string();
+                cur_file_state = "unknown".to_string();
+            }
             continue;
         }
-        let name = parts[0].to_string();
-        let state = parts[1].to_string();
+
+        if let Some((k, v)) = line.split_once('=') {
+            match k {
+                "Id" => cur_name = v.to_string(),
+                "ActiveState" => cur_active = v.to_string(),
+                "SubState" => cur_sub = v.to_string(),
+                "UnitFileState" => cur_file_state = v.to_string(),
+                _ => {}
+            }
+        }
+    }
+
+    if !cur_name.is_empty() {
+        results.push(ServiceUnitStatus {
+            name: cur_name,
+            active_state: cur_active,
+            sub_state: cur_sub,
+            unit_file_state: cur_file_state,
+        });
+    }
+
+    Ok(results)
+}
+
+/// List all systemd units (system or user scope) with high performance concurrent parsing & cached unit-file states
+#[tauri::command]
+pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> Result<Vec<ServiceUnit>, String> {
+    use std::collections::HashMap;
+    let is_user = user_mode.unwrap_or(false);
+
+    // Check cached unit-file states
+    let cached_files: Option<HashMap<String, String>> = {
+        let guard = if is_user { USER_UNIT_FILE_CACHE.lock() } else { SYSTEM_UNIT_FILE_CACHE.lock() };
+        if let Ok(ref g) = guard {
+            if let Some((ref map, ref instant)) = **g {
+                if instant.elapsed() < UNIT_FILE_CACHE_TTL {
+                    Some(map.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let (files_map, output_units) = match cached_files {
+        Some(cached) => {
+            // Fast-path: Only fetch active/loaded units (takes ~50-100ms!)
+            let mut args_units = vec!["list-units", "--all", "--type=service", "--no-pager", "--no-legend", "--plain"];
+            if is_user {
+                args_units.push("--user");
+            }
+            let output_units = Command::new("systemctl")
+                .args(&args_units)
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            (cached, output_units)
+        }
+        None => {
+            // Cold path: Fetch both concurrently via tokio::join!
+            let mut args_files = vec!["list-unit-files", "--type=service", "--no-pager", "--no-legend"];
+            let mut args_units = vec!["list-units", "--all", "--type=service", "--no-pager", "--no-legend", "--plain"];
+            if is_user {
+                args_files.push("--user");
+                args_units.push("--user");
+            }
+
+            let mut cmd_files = Command::new("systemctl");
+            cmd_files.args(&args_files);
+            let mut cmd_units = Command::new("systemctl");
+            cmd_units.args(&args_units);
+
+            let (res_files, res_units) = tokio::join!(
+                cmd_files.output(),
+                cmd_units.output()
+            );
+
+            let out_files = res_files.map_err(|e| e.to_string())?;
+            let out_units = res_units.map_err(|e| e.to_string())?;
+
+            let mut map = HashMap::with_capacity(512);
+            let stdout_files = String::from_utf8_lossy(&out_files.stdout);
+            for line in stdout_files.lines() {
+                let mut parts = line.split_whitespace();
+                if let (Some(name), Some(state)) = (parts.next(), parts.next()) {
+                    map.insert(name.to_string(), state.to_string());
+                }
+            }
+
+            // Store in cache
+            if let Ok(mut g) = if is_user { USER_UNIT_FILE_CACHE.lock() } else { SYSTEM_UNIT_FILE_CACHE.lock() } {
+                *g = Some((map.clone(), Instant::now()));
+            }
+
+            (map, out_units)
+        }
+    };
+
+    let mut all_services: HashMap<String, ServiceUnit> = HashMap::with_capacity(files_map.len() + 64);
+
+    // Populate all known unit files
+    for (name, state) in files_map.iter() {
         let (is_protected, protection_level, protection_reason) = if !is_user {
-            get_service_protection(&name)
+            get_service_protection(name)
         } else {
             (false, String::new(), None)
         };
@@ -150,12 +291,12 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
         all_services.insert(
             name.clone(),
             ServiceUnit {
-                name,
+                name: name.clone(),
                 load_state: "loaded".to_string(),
                 active_state: "inactive".to_string(),
                 sub_state: "dead".to_string(),
                 description: String::new(),
-                unit_file_state: state,
+                unit_file_state: state.clone(),
                 is_protected,
                 protection_level,
                 protection_reason,
@@ -163,18 +304,7 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
         );
     }
 
-    // 2. Get active/loaded units state and descriptions
-    let mut args_units = vec!["list-units", "--all", "--type=service", "--no-pager", "--no-legend", "--plain"];
-    if is_user {
-        args_units.push("--user");
-    }
-
-    let output_units = Command::new("systemctl")
-        .args(&args_units)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
+    // Merge active/loaded units state and descriptions
     let stdout_units = String::from_utf8_lossy(&output_units.stdout);
     for line in stdout_units.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -182,31 +312,31 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
             continue;
         }
 
-        let name = parts[0].to_string();
-        let load_state = parts[1].to_string();
-        let active_state = parts[2].to_string();
-        let sub_state = parts[3].to_string();
+        let name = parts[0];
+        let load_state = parts[1];
+        let active_state = parts[2];
+        let sub_state = parts[3];
         let description = parts[4..].join(" ");
 
-        if let Some(unit) = all_services.get_mut(&name) {
-            unit.load_state = load_state;
-            unit.active_state = active_state;
-            unit.sub_state = sub_state;
+        if let Some(unit) = all_services.get_mut(name) {
+            unit.load_state = load_state.to_string();
+            unit.active_state = active_state.to_string();
+            unit.sub_state = sub_state.to_string();
             unit.description = description;
         } else {
             let (is_protected, protection_level, protection_reason) = if !is_user {
-                get_service_protection(&name)
+                get_service_protection(name)
             } else {
                 (false, String::new(), None)
             };
 
             all_services.insert(
-                name.clone(),
+                name.to_string(),
                 ServiceUnit {
-                    name,
-                    load_state,
-                    active_state,
-                    sub_state,
+                    name: name.to_string(),
+                    load_state: load_state.to_string(),
+                    active_state: active_state.to_string(),
+                    sub_state: sub_state.to_string(),
                     description,
                     unit_file_state: "generated".to_string(),
                     is_protected,
@@ -302,6 +432,10 @@ pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<
             &format!("unit_action ({scope_str}) {action_str} {name} failed: {stderr}"),
         );
         return Err(format!("systemctl {action_str} {name} failed: {stderr}"));
+    }
+
+    if matches!(action, ServiceAction::Enable | ServiceAction::Disable | ServiceAction::Mask | ServiceAction::Unmask) {
+        invalidate_unit_file_cache();
     }
 
     log_to_file("INFO", &format!("Service action: {action_str} {name}"));

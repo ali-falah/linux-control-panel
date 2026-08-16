@@ -694,11 +694,13 @@ pub async fn get_runtime_threats(
         }
     }
 
-    // 3. SELinux Enforcement Disabling
-    for ev in &audit_events {
+    // 3. SELinux Enforcement Disabling, Firewall Flush, Sysctl Tamper, Identity Access
+    for (idx, ev) in audit_events.iter().enumerate() {
+        let ts_clean = ev.timestamp.replace(' ', "_").replace(':', "_");
+
         if ev.command.contains("setenforce 0") || ev.command.contains("setenforce Permissive") {
             threats.push(RuntimeThreat {
-                id: format!("threat_setenforce_{}", ev.timestamp),
+                id: format!("threat_setenforce_{}_{}", ts_clean, idx),
                 timestamp: ev.timestamp.clone(),
                 title: "SELinux Enforcement Disabled".to_string(),
                 description: format!("User '{}' executed 'setenforce 0' in working directory '{}'.", ev.user, ev.cwd),
@@ -710,7 +712,7 @@ pub async fn get_runtime_threats(
         // 4. Firewall Rules Flushed
         if ev.command.contains("iptables -F") || ev.command.contains("iptables --flush") || ev.command.contains("nft flush ruleset") {
             threats.push(RuntimeThreat {
-                id: format!("threat_iptables_flush_{}", ev.timestamp),
+                id: format!("threat_iptables_flush_{}_{}", ts_clean, idx),
                 timestamp: ev.timestamp.clone(),
                 title: "Firewall Rules Flushed".to_string(),
                 description: format!("User '{}' executed firewall flush command '{}'.", ev.user, ev.command),
@@ -722,7 +724,7 @@ pub async fn get_runtime_threats(
         // 5. Kernel Sysctl Configuration Modification
         if ev.command.contains("sysctl_tamper") || (ev.command.contains("/etc/sysctl.d/") && ev.command.contains("sysctl")) {
             threats.push(RuntimeThreat {
-                id: format!("threat_sysctl_tamper_{}", ev.timestamp),
+                id: format!("threat_sysctl_tamper_{}_{}", ts_clean, idx),
                 timestamp: ev.timestamp.clone(),
                 title: "Kernel Sysctl Configuration Modification".to_string(),
                 description: format!("File modification in /etc/sysctl.d/ detected by user '{}'.", ev.user),
@@ -755,7 +757,7 @@ pub async fn get_runtime_threats(
 
                 if is_write_or_edit {
                     threats.push(RuntimeThreat {
-                        id: format!("threat_identity_tamper_{}", ev.timestamp),
+                        id: format!("threat_identity_tamper_{}_{}", ts_clean, idx),
                         timestamp: ev.timestamp.clone(),
                         title: "Authentication Credentials File Modification".to_string(),
                         description: format!("User '{}' modified system identity files ({}) in working directory '{}'.", ev.user, ev.command, ev.cwd),
@@ -765,7 +767,7 @@ pub async fn get_runtime_threats(
                 } else {
                     // Read attempt (cat, grep, head, tail, strings, etc.)
                     threats.push(RuntimeThreat {
-                        id: format!("threat_identity_read_{}", ev.timestamp),
+                        id: format!("threat_identity_read_{}_{}", ts_clean, idx),
                         timestamp: ev.timestamp.clone(),
                         title: "Sensitive Credential File Read Attempt".to_string(),
                         description: format!("User '{}' inspected system identity files via '{}' in directory '{}'.", ev.user, ev.command, ev.cwd),
@@ -781,7 +783,7 @@ pub async fn get_runtime_threats(
             let cmd_base = ev.command.split_whitespace().next().unwrap_or("");
             if !cmd_base.ends_with("sudo") && !cmd_base.ends_with("pkexec") && !cmd_base.ends_with("systemd") && !cmd_base.is_empty() {
                 threats.push(RuntimeThreat {
-                    id: format!("threat_root_bypass_{}", ev.timestamp),
+                    id: format!("threat_root_bypass_{}_{}", ts_clean, idx),
                     timestamp: ev.timestamp.clone(),
                     title: "Root Execution Bypassing Sudo".to_string(),
                     description: format!("User (auid={}) executed root command '{}' without standard sudo invocation.", ev.auid, ev.command),

@@ -50,10 +50,24 @@
   const CACHE_KEY = 'security_report_cache_v2';
   const MAX_HISTORY = 12;
 
+  function sanitizeReport(rep: SecurityReport | null): SecurityReport | null {
+    if (!rep || !Array.isArray(rep.findings)) return rep;
+    const seen = new Set<string>();
+    const sanitizedFindings = rep.findings.map((f, idx) => {
+      let id = f.id || `finding_${idx}`;
+      if (seen.has(id)) {
+        id = `${id}_${idx}`;
+      }
+      seen.add(id);
+      return { ...f, id };
+    });
+    return { ...rep, findings: sanitizedFindings };
+  }
+
   function getInitialCache(): SecurityReport | null {
     try {
       const raw = sessionStorage.getItem(CACHE_KEY);
-      if (raw) return JSON.parse(raw);
+      if (raw) return sanitizeReport(JSON.parse(raw));
     } catch {}
     return null;
   }
@@ -235,8 +249,9 @@
     try {
       const res = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
       if (res && res.findings) {
-        report = res;
-        saveCache(res);
+        const sanitized = sanitizeReport(res);
+        report = sanitized;
+        if (sanitized) saveCache(sanitized);
         saveHistory(effectiveScore);
         statusStore.setLastCommand('security_audit_executed', 0, true);
       }
@@ -937,7 +952,7 @@
       </div>
 
         <div class="findings-list">
-          {#each filteredFindings as finding (finding.id)}
+          {#each filteredFindings as finding, idx (finding.id || idx)}
             <div
               class="finding-card"
               class:resolved={finding.is_resolved}

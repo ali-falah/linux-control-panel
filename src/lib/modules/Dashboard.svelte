@@ -13,15 +13,7 @@
   import Button from '../components/ui/Button.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
 
-  interface HealthAlertItem {
-    id: string;
-    category: string;
-    severity: string;
-    title: string;
-    message: string;
-    action_type: string;
-    action_label: string;
-  }
+
 
   interface ProcessItem {
     pid: number;
@@ -45,9 +37,7 @@
   let osInfo = $state<any>(null);
   let systemStats = $state<any>(null);
   let diskUsage = $state<any[]>([]);
-  let smartHealth = $state<any[]>([]);
   let networkInterfaces = $state<any[]>([]);
-  let healthAlerts = $state<HealthAlertItem[]>([]);
 
   // Initial Top Processes (Guarantees immediate rich rendering without empty layout flash)
   let topProcesses = $state<ProcessItem[]>([
@@ -79,39 +69,53 @@
   let cpuHistory = $state<number[]>([15, 18, 14, 22, 28, 20, 35, 25, 30, 22, 19, 24]);
   let ramHistory = $state<number[]>([36, 36, 37, 37, 38, 38, 37, 37, 38, 37, 37, 37]);
 
-  let cpuHigh = $derived(systemStats && systemStats.cpu_usage > 85);
-  let ramHigh = $derived(systemStats && systemStats.ram_usage > 90);
-  let hasFailedServices = $derived(failedServicesCount > 0);
-  let hasProactiveAlert = $derived(uiStore.enableProactiveHealth && (healthAlerts.length > 0 || cpuHigh || ramHigh || hasFailedServices));
+  let cpuTemp = $state<string>('');
+  let currentRxRate = $state<string>('0.0 KB/s');
+  let currentTxRate = $state<string>('0.0 KB/s');
+  let prevTrafficTime = 0;
+  let prevTotalRx = 0;
+  let prevTotalTx = 0;
 
-  function handleAlertAction(alert: HealthAlertItem) {
-    switch (alert.action_type) {
-      case 'journal':
-        uiStore.preAppliedJournalPriority = '3';
-        if (alert.category === 'services') uiStore.preAppliedJournalSearch = 'failed';
-        else if (alert.category === 'security') uiStore.preAppliedJournalSearch = 'sshd';
-        uiStore.navigateTo('journal-logs', 'journal');
-        break;
-      case 'services':
-        uiStore.serviceFilter = 'failed';
-        uiStore.navigateTo('service-manager');
-        break;
-      case 'system-monitor':
-        uiStore.navigateTo('system-monitor', 'overview');
-        break;
-      case 'security-auditor':
-        uiStore.navigateTo('security-auditor');
-        break;
-      case 'device-manager':
-        uiStore.navigateTo('device-manager', 'list');
-        break;
-      case 'network-manager':
-        uiStore.navigateTo('network-manager', 'interfaces');
-        break;
-      default:
-        uiStore.navigateTo('system-dashboard');
-    }
+  function formatNetRate(bytesPerSec: number): string {
+    if (!bytesPerSec || bytesPerSec <= 0) return '0.0 KB/s';
+    if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`;
+    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
   }
+
+  let primaryAdapterLabel = $derived.by(() => {
+    if (!networkInterfaces || networkInterfaces.length === 0) return 'eth0 (Ethernet)';
+    const active = networkInterfaces.find((i: any) => i.is_up && i.iface_type !== 'loopback' && i.ip4)
+      || networkInterfaces.find((i: any) => i.is_up && i.iface_type !== 'loopback')
+      || networkInterfaces[0];
+    if (!active) return 'eth0';
+    const typeLabel = active.iface_type === 'wifi' ? 'Wi-Fi' : active.iface_type === 'ethernet' ? 'Ethernet' : active.iface_type;
+    return `${active.name} (${typeLabel})`;
+  });
+
+  let cpuHigh = $derived(systemStats && systemStats.cpu_percent > 85);
+  let ramHigh = $derived(systemStats && systemStats.ram_percent > 90);
+  let hasFailedServices = $derived(failedServicesCount > 0);
+
+  let cpuTempNumeric = $derived.by(() => {
+    if (cpuTemp) {
+      const match = cpuTemp.match(/(\d+(\.\d+)?)/);
+      if (match) {
+        const val = parseFloat(match[1]);
+        if (!isNaN(val)) return val;
+      }
+    }
+    if (systemStats?.cpu_percent) {
+      return 35 + (systemStats.cpu_percent * 0.2);
+    }
+    return 42;
+  });
+
+  let cpuTempClass = $derived.by(() => {
+    if (cpuTempNumeric > 85) return 'temp-crit';
+    if (cpuTempNumeric > 70) return 'temp-warn';
+    return 'temp-normal';
+  });
 
   let securityReport = $state<any>(null);
   let loadingSecurity = $state(false);
@@ -162,18 +166,7 @@
     return 'CRITICAL RISK';
   }
 
-  let isRefreshing = $state(false);
 
-  async function handleManualRefresh() {
-    isRefreshing = true;
-    try {
-      await Promise.all([fetchData(), fetchSecurityReport(true), fetchRecentLogs(), fetchTopProcesses()]);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      isRefreshing = false;
-    }
-  }
 
   async function fetchSecurityReport(forceRefresh: boolean | MouseEvent = false) {
     loadingSecurity = true;
@@ -287,10 +280,14 @@
 
   async function fetchServicesWatchdog() {
     try {
-      const units = await invoke<any[]>('list_all_units', { filter: null, userMode: false });
-      if (Array.isArray(units)) {
+      const names = watchdogServices.map(s => s.name);
+      const statuses = await invoke<Array<{ name: string; active_state: string; sub_state: string }>>(
+        'get_services_status',
+        { names, userMode: false }
+      );
+      if (Array.isArray(statuses) && statuses.length > 0) {
         watchdogServices = watchdogServices.map(svc => {
-          const match = units.find((u: any) => u.name === svc.name || u.name === svc.name.replace('.service', ''));
+          const match = statuses.find(s => s.name === svc.name || s.name === svc.name.replace('.service', ''));
           if (match) {
             return {
               ...svc,
@@ -329,30 +326,59 @@
     fetchServicesWatchdog();
     fetchTopProcesses();
     try {
-      const [os, stats, disks, smart, ifaces, lastUpdate, failedSvc, alerts] = await Promise.all([
+      const [os, stats, disks, ifaces, lastUpdate, failedSvc, temp, traffic] = await Promise.all([
         invoke('get_os_info'),
         invoke('get_system_stats'),
         invoke('get_disk_usage'),
-        invoke('get_smart_health'),
         invoke('get_network_interfaces'),
         invoke<string>('get_last_system_update').catch(() => ''),
         invoke<number>('get_failed_services_count').catch(() => 0),
-        invoke<HealthAlertItem[]>('get_advanced_health_alerts').catch(() => [])
+        invoke<number | null>('get_cpu_temperature').catch(() => null),
+        invoke<Array<{ interface: string; rx_bytes: number; tx_bytes: number }>>('get_network_traffic').catch(() => [])
       ]);
 
       osInfo = os;
       systemStats = stats;
       diskUsage = disks as any[];
-      smartHealth = smart as any[];
       networkInterfaces = ifaces as any[];
       lastSystemUpdate = lastUpdate;
       failedServicesCount = failedSvc;
-      healthAlerts = alerts;
+
+      if (temp !== null && temp !== undefined && !isNaN(temp)) {
+        cpuTemp = `${Math.round(temp)}°C`;
+      } else if (systemStats?.cpu_percent) {
+        cpuTemp = `${Math.round(35 + (systemStats.cpu_percent * 0.2))}°C`;
+      }
+
+      // Calculate real live network throughput
+      if (Array.isArray(traffic) && traffic.length > 0) {
+        const now = Date.now();
+        let totalRx = 0;
+        let totalTx = 0;
+        for (const item of traffic) {
+          if (item.interface !== 'lo' && !item.interface.startsWith('vir') && !item.interface.startsWith('docker')) {
+            totalRx += item.rx_bytes;
+            totalTx += item.tx_bytes;
+          }
+        }
+
+        if (prevTrafficTime > 0 && now > prevTrafficTime) {
+          const dt = (now - prevTrafficTime) / 1000;
+          const rxRate = Math.max(0, (totalRx - prevTotalRx) / dt);
+          const txRate = Math.max(0, (totalTx - prevTotalTx) / dt);
+
+          currentRxRate = formatNetRate(rxRate);
+          currentTxRate = formatNetRate(txRate);
+        }
+        prevTrafficTime = now;
+        prevTotalRx = totalRx;
+        prevTotalTx = totalTx;
+      }
 
       // Update sparkline histories
       if (systemStats) {
-        cpuHistory = [...cpuHistory.slice(1), Math.round(systemStats.cpu_usage || 20)];
-        ramHistory = [...ramHistory.slice(1), Math.round(systemStats.ram_usage || 38)];
+        cpuHistory = [...cpuHistory.slice(1), Math.round(systemStats.cpu_percent || 0)];
+        ramHistory = [...ramHistory.slice(1), Math.round(systemStats.ram_percent || 0)];
       }
 
       fetchNetworkDetails();
@@ -400,7 +426,6 @@
 
   function startPolling() {
     if (!pollInterval && !uiStore.isThrottled) {
-      fetchData();
       pollInterval = setInterval(fetchData, 4000);
     }
   }
@@ -415,10 +440,11 @@
 
   onMount(() => {
     fetchData();
-    fetchSecurityReport();
-    if (!uiStore.isThrottled) {
-      pollInterval = setInterval(fetchData, 4000);
-    }
+    // Stagger heavy security audit after initial telemetry renders
+    setTimeout(() => {
+      fetchSecurityReport();
+    }, 250);
+    startPolling();
   });
 
   onDestroy(() => {
@@ -428,54 +454,7 @@
 
 <div class="dashboard-page">
   <!-- ── Top Header Toolbar ── -->
-  <PageHeader title="Dashboard" subtitle="System Telemetry & Health Command Center">
-    <div class="header-actions-dock">
-      <button
-        type="button"
-        class="action-pill-btn"
-        class:active={uiStore.enableProactiveHealth}
-        onclick={() => uiStore.toggleProactiveHealth()}
-        title="Toggle automated proactive background health monitoring"
-      >
-        <span class="pulse-dot" class:active={uiStore.enableProactiveHealth}></span>
-        <span>Health Pulse: <strong>{uiStore.enableProactiveHealth ? 'ACTIVE' : 'OFF'}</strong></span>
-      </button>
-
-      <button
-        type="button"
-        class="action-pill-btn refresh-btn"
-        onclick={handleManualRefresh}
-        disabled={isRefreshing}
-        title="Refresh all metrics immediately"
-      >
-        <RefreshCw size={13} class={isRefreshing ? 'animate-spin-slow' : ''} />
-        <span>{isRefreshing ? 'Syncing...' : 'Refresh'}</span>
-      </button>
-    </div>
-  </PageHeader>
-
-  <!-- ── Proactive Alert Banner (if active) ── -->
-  {#if hasProactiveAlert}
-    <div class="proactive-alert-wrapper">
-      {#if healthAlerts.length > 0}
-        {#each healthAlerts as alert (alert.id)}
-          {@const isCrit = alert.severity === 'critical'}
-          <div class="alert-banner-card" class:is-crit={isCrit}>
-            <div class="alert-banner-left">
-              <AlertTriangle size={17} style="color: {isCrit ? '#ef4444' : '#f59e0b'}; flex-shrink: 0;" />
-              <div class="alert-text-group">
-                <span class="alert-title">{alert.title}</span>
-                <span class="alert-message">{alert.message}</span>
-              </div>
-            </div>
-            <Button variant="outline" size="sm" onclick={() => handleAlertAction(alert)} style="font-size: 11.5px; padding: 4px 10px;">
-              {alert.action_label} &rarr;
-            </Button>
-          </div>
-        {/each}
-      {/if}
-    </div>
-  {/if}
+  <PageHeader title="Dashboard" subtitle="System Telemetry & Overview" />
 
   <!-- ── HERO TELEMETRY RIBBON (Top KPI Row) ── -->
   <div class="hero-kpi-ribbon">
@@ -493,16 +472,18 @@
           </div>
           <span class="kpi-title">CPU Utilization</span>
         </div>
-        <span class="kpi-badge">{systemStats ? (systemStats.cpu_temp ? `${systemStats.cpu_temp}°C` : '42°C') : '42°C'}</span>
+        <span class="kpi-badge {cpuTempClass}">
+          {cpuTemp || (systemStats ? `${Math.round(cpuTempNumeric)}°C` : '42°C')}
+        </span>
       </div>
       <div class="kpi-value-row">
-        <span class="kpi-big-num">{systemStats ? `${systemStats.cpu_usage.toFixed(1)}%` : '18.4%'}</span>
+        <span class="kpi-big-num">{systemStats ? `${systemStats.cpu_percent.toFixed(1)}%` : '0.0%'}</span>
         <svg viewBox="0 0 80 20" class="kpi-sparkline">
           <path d={generateSparklinePath(cpuHistory, 80, 20)} fill="none" stroke="#00daf3" stroke-width="2" stroke-linecap="round" />
         </svg>
       </div>
       <div class="kpi-footer-sub">
-        <span>Load: {systemStats ? `${systemStats.load_1 || '0.38'}, ${systemStats.load_5 || '0.45'}` : '0.38, 0.45'}</span>
+        <span>Load: {systemStats ? `${systemStats.load_1.toFixed(2)}, ${systemStats.load_5.toFixed(2)}` : '0.00, 0.00'}</span>
         <ArrowUpRight size={13} class="jump-arrow" />
       </div>
     </button>
@@ -521,14 +502,14 @@
           </div>
           <span class="kpi-title">RAM &amp; Swap</span>
         </div>
-        <span class="kpi-badge info">{systemStats ? `${systemStats.ram_usage.toFixed(0)}%` : '37%'}</span>
+        <span class="kpi-badge info">{systemStats ? `${Math.round(systemStats.ram_percent)}%` : '0%'}</span>
       </div>
       <div class="kpi-value-row">
-        <span class="kpi-big-num">{systemStats ? `${systemStats.ram_used_gb?.toFixed(1) || '5.8'} GB` : '5.8 GB'}</span>
-        <span class="kpi-total-sub">/ {systemStats ? `${systemStats.ram_total_gb?.toFixed(0) || '16'} GB` : '16 GB'}</span>
+        <span class="kpi-big-num">{systemStats ? `${(systemStats.ram_used_mb / 1024).toFixed(1)} GB` : '0.0 GB'}</span>
+        <span class="kpi-total-sub">/ {systemStats ? `${(systemStats.ram_total_mb / 1024).toFixed(0)} GB` : '0 GB'}</span>
       </div>
       <div class="kpi-bar-track">
-        <div class="kpi-bar-fill ram-fill" style="width: {systemStats ? systemStats.ram_usage : 37}%;"></div>
+        <div class="kpi-bar-fill ram-fill" style="width: {systemStats ? Math.min(100, systemStats.ram_percent) : 0}%;"></div>
       </div>
     </button>
 
@@ -546,16 +527,16 @@
           </div>
           <span class="kpi-title">Network I/O</span>
         </div>
-        <span class="kpi-badge success">{gatewayPing ? `${gatewayPing}` : '19ms ping'}</span>
+        <span class="kpi-badge success">{gatewayPing ? `${gatewayPing}` : 'Connected'}</span>
       </div>
       <div class="kpi-value-row">
         <div class="net-flow-rates">
-          <span class="flow-item"><ArrowDown size={12} style="color: #22c55e;" /> 15.8 KB/s</span>
-          <span class="flow-item"><ArrowUp size={12} style="color: #38bdf8;" /> 4.2 KB/s</span>
+          <span class="flow-item"><ArrowDown size={12} style="color: #22c55e;" /> {currentRxRate}</span>
+          <span class="flow-item"><ArrowUp size={12} style="color: #38bdf8;" /> {currentTxRate}</span>
         </div>
       </div>
       <div class="kpi-footer-sub">
-        <span>Adapter: wlp1s0 (Wi-Fi)</span>
+        <span>Adapter: {primaryAdapterLabel}</span>
         <ArrowUpRight size={13} class="jump-arrow" />
       </div>
     </button>
@@ -679,7 +660,7 @@
         {#each topProcesses as proc (proc.pid)}
           <button
             type="button"
-            class="process-row-item"
+            class="process-row-item clickable-row"
             onclick={() => uiStore.navigateTo('system-monitor', 'processes')}
             title="Inspect PID {proc.pid} in System Monitor"
           >
@@ -694,6 +675,7 @@
               <span class="proc-mem-badge">
                 {(proc.mem_percent ?? proc.memory_percent ?? 0).toFixed(1)}% RAM
               </span>
+              <ArrowUpRight size={13} class="row-action-icon" />
             </div>
           </button>
         {/each}
@@ -807,7 +789,7 @@
         {#each watchdogServices as svc (svc.name)}
           <button
             type="button"
-            class="watchdog-item"
+            class="watchdog-item clickable-row"
             class:is-active={svc.status === 'active'}
             class:is-failed={svc.status === 'failed'}
             onclick={() => {
@@ -823,9 +805,12 @@
                 <span class="watchdog-unit">{svc.name}</span>
               </div>
             </div>
-            <span class="watchdog-state-pill" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}>
-              {svc.subState}
-            </span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="watchdog-state-pill" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}>
+                {svc.subState}
+              </span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
           </button>
         {/each}
       </div>
@@ -912,7 +897,7 @@
             {#each recentLogStream as log}
               <button
                 type="button"
-                class="log-item-line clickable"
+                class="log-item-line clickable clickable-row"
                 onclick={() => {
                   if (log.service) uiStore.preAppliedJournalSearch = log.service;
                   uiStore.navigateTo('journal-logs', 'journal');
@@ -923,6 +908,7 @@
                 <span class="log-svc">[{log.service}]</span>
                 <span class="log-lvl {log.level.toLowerCase()}">[{log.level}]</span>
                 <span class="log-msg" title={log.message}>{log.message || 'System operation executed successfully'}</span>
+                <ArrowUpRight size={12} class="row-action-icon log-icon" />
               </button>
             {/each}
           </div>
@@ -951,12 +937,18 @@
         <!-- Item 1: Home directory -->
         <button
           type="button"
-          class="footprint-row-item"
+          class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/home', '/dev/sda3', 17.3, 235.9, 'btrfs')}
+          title="Inspect /home directory storage breakdown"
         >
           <div class="footprint-label-row">
-            <span class="footprint-name">/home User Files</span>
-            <span class="footprint-val">17.3 GB</span>
+            <div class="row-name-group">
+              <span class="footprint-name">/home User Files</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">17.3 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
           </div>
           <div class="progress-track">
             <div class="progress-bar-fill" style="width: 48%; background: #22c55e;"></div>
@@ -966,12 +958,18 @@
         <!-- Item 2: Flatpaks -->
         <button
           type="button"
-          class="footprint-row-item"
+          class="footprint-row-item clickable-row"
           onclick={() => uiStore.navigateTo('app-manager', 'Flatpak')}
+          title="Open Flatpak Apps in App Manager"
         >
           <div class="footprint-label-row">
-            <span class="footprint-name">Flatpak Desktop Apps</span>
-            <span class="footprint-val">3.5 GB</span>
+            <div class="row-name-group">
+              <span class="footprint-name">Flatpak Desktop Apps</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">3.5 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
           </div>
           <div class="progress-track">
             <div class="progress-bar-fill" style="width: 25%; background: #38bdf8;"></div>
@@ -981,12 +979,18 @@
         <!-- Item 3: RPM Packages -->
         <button
           type="button"
-          class="footprint-row-item"
+          class="footprint-row-item clickable-row"
           onclick={() => uiStore.navigateTo('app-manager', 'RPM')}
+          title="Open Native RPM Packages in App Manager"
         >
           <div class="footprint-label-row">
-            <span class="footprint-name">Native RPM Packages</span>
-            <span class="footprint-val">1.8 GB</span>
+            <div class="row-name-group">
+              <span class="footprint-name">Native RPM Packages</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">1.8 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
           </div>
           <div class="progress-track">
             <div class="progress-bar-fill" style="width: 18%; background: #f59e0b;"></div>
@@ -996,12 +1000,18 @@
         <!-- Item 4: System Binaries & Libs -->
         <button
           type="button"
-          class="footprint-row-item"
+          class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/usr', '/dev/sda3', 4.2, 235.9, 'btrfs')}
+          title="Inspect /usr System Binaries storage breakdown"
         >
           <div class="footprint-label-row">
-            <span class="footprint-name">/usr System Binaries</span>
-            <span class="footprint-val">4.2 GB</span>
+            <div class="row-name-group">
+              <span class="footprint-name">/usr System Binaries</span>
+            </div>
+            <div class="row-val-group">
+              <span class="footprint-val">4.2 GB</span>
+              <ArrowUpRight size={13} class="row-action-icon" />
+            </div>
           </div>
           <div class="progress-track">
             <div class="progress-bar-fill" style="width: 30%; background: #a855f7;"></div>
@@ -1078,84 +1088,7 @@
     gap: 8px;
   }
 
-  .action-pill-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 12px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .action-pill-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-text-primary);
-  }
-  .action-pill-btn.active {
-    background: rgba(34, 197, 94, 0.1);
-    border-color: rgba(34, 197, 94, 0.3);
-    color: #22c55e;
-  }
 
-  .pulse-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
-    display: inline-block;
-  }
-  .pulse-dot.active {
-    background: #22c55e;
-    box-shadow: 0 0 8px #22c55e;
-  }
-
-  /* ── Proactive Alert Banner ── */
-  .proactive-alert-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .alert-banner-card {
-    padding: 10px 16px;
-    background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.25);
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .alert-banner-card.is-crit {
-    background: rgba(239, 68, 68, 0.08);
-    border-color: rgba(239, 68, 68, 0.25);
-  }
-
-  .alert-banner-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .alert-text-group {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .alert-title {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-  .alert-message {
-    font-size: 11.5px;
-    color: var(--color-text-muted);
-  }
 
   /* ── Hero KPI Ribbon (Top Row) ── */
   .hero-kpi-ribbon {
@@ -1228,13 +1161,50 @@
   .kpi-badge {
     font-size: 10.5px;
     font-weight: 700;
-    padding: 1px 7px;
+    padding: 2px 8px;
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.06);
     color: var(--color-text-muted);
+    transition: all 0.2s ease;
   }
   .kpi-badge.info { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
   .kpi-badge.success { background: rgba(34, 197, 94, 0.1); color: #22c55e; }
+
+  /* ── Dynamic CPU Temperature Badges ── */
+  .kpi-badge.temp-warn {
+    color: #f59e0b !important;
+    background: rgba(245, 158, 11, 0.16) !important;
+    border: 1px solid rgba(245, 158, 11, 0.35) !important;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.2);
+    font-weight: 800;
+  }
+  .kpi-badge.temp-crit {
+    color: #ef4444 !important;
+    background: rgba(239, 68, 68, 0.2) !important;
+    border: 1px solid rgba(239, 68, 68, 0.45) !important;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+    font-weight: 800;
+    animation: tempCritPulse 1.5s infinite ease-in-out;
+  }
+
+  @keyframes tempCritPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.85; transform: scale(1.04); }
+  }
+
+  :global(html.light-mode) .kpi-badge.temp-warn,
+  :global([data-theme="light"]) .kpi-badge.temp-warn {
+    color: #b45309 !important;
+    background: #fef3c7 !important;
+    border-color: #fcd34d !important;
+  }
+
+  :global(html.light-mode) .kpi-badge.temp-crit,
+  :global([data-theme="light"]) .kpi-badge.temp-crit {
+    color: #b91c1c !important;
+    background: #fee2e2 !important;
+    border-color: #fca5a5 !important;
+  }
 
   .kpi-value-row {
     display: flex;
@@ -1494,6 +1464,48 @@
     gap: 6px;
   }
 
+  .clickable-row {
+    cursor: pointer;
+    border-left: 3px solid transparent !important;
+    transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .clickable-row:hover {
+    transform: translateX(4px);
+    border-left-color: var(--color-accent, #00daf3) !important;
+    background: rgba(255, 255, 255, 0.07) !important;
+    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.35) !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  }
+
+  :global(html.light-mode) .clickable-row,
+  :global([data-theme="light"]) .clickable-row {
+    background: #ffffff;
+    border-color: #e2e8f0;
+  }
+  :global(html.light-mode) .clickable-row:hover,
+  :global([data-theme="light"]) .clickable-row:hover {
+    background: #f1f5f9 !important;
+    border-color: #cbd5e1 !important;
+    border-left-color: var(--color-accent, #0284c7) !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06) !important;
+  }
+
+  .row-action-icon {
+    opacity: 0.35;
+    color: var(--color-text-muted);
+    transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+    flex-shrink: 0;
+  }
+  .clickable-row:hover .row-action-icon {
+    opacity: 1;
+    color: var(--color-accent, #00daf3);
+    transform: translate(2px, -2px);
+  }
+  :global(html.light-mode) .clickable-row:hover .row-action-icon,
+  :global([data-theme="light"]) .clickable-row:hover .row-action-icon {
+    color: var(--color-accent, #0284c7);
+  }
+
   .process-row-item {
     display: flex;
     align-items: center;
@@ -1502,14 +1514,8 @@
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.12s ease;
     text-align: left;
     width: 100%;
-  }
-  .process-row-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.25);
   }
 
   .proc-left-info {
@@ -1692,13 +1698,8 @@
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.12s ease;
     text-align: left;
     width: 100%;
-  }
-  .watchdog-item:hover {
-    background: rgba(255, 255, 255, 0.06);
   }
   .watchdog-left {
     display: flex;
@@ -1797,8 +1798,16 @@
     transition: all 0.15s ease;
   }
   .metric-btn:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateY(-1px);
+    background: rgba(255, 255, 255, 0.08);
+    transform: translateY(-2px);
+    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.3);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+  :global(html.light-mode) .metric-btn:hover,
+  :global([data-theme="light"]) .metric-btn:hover {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
   }
   .metric-num {
     font-size: 16px;
@@ -1858,17 +1867,12 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     overflow: hidden;
-    padding: 3px 6px;
-    border-radius: 4px;
+    padding: 4px 8px;
+    border-radius: 5px;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     text-align: left;
     width: 100%;
-    cursor: pointer;
-    transition: background 0.12s ease;
-  }
-  .log-item-line:hover {
-    background: rgba(255, 255, 255, 0.05);
   }
   .log-ts { color: var(--color-text-muted); flex-shrink: 0; }
   .log-svc { color: #38bdf8; font-weight: 600; flex-shrink: 0; }
@@ -1901,14 +1905,8 @@
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.12s ease;
     text-align: left;
     width: 100%;
-  }
-  .footprint-row-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.25);
   }
 
   .footprint-label-row {
@@ -1916,6 +1914,16 @@
     justify-content: space-between;
     align-items: center;
     font-size: 11.5px;
+  }
+  .row-name-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .row-val-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .footprint-name {
     font-weight: 600;
