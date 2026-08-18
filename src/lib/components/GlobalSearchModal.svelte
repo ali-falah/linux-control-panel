@@ -6,16 +6,8 @@
     CheckCircle2, AlertTriangle, Play, Flame, CornerDownLeft, Trash2, Key, Database,
     SlidersHorizontal, Compass, Timer
   } from '@lucide/svelte';
-  import { onMount, onDestroy } from 'svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
-
-  // WebKitGTK production fix: listen for custom event dispatched by main.ts
-  onMount(() => {
-    const handler = () => uiStore.toggleSearchModal();
-    document.addEventListener('global-search-open', handler);
-    return () => document.removeEventListener('global-search-open', handler);
-  });
 
   interface SearchItem {
     id: string;
@@ -1059,13 +1051,6 @@
   }
 </script>
 
-<svelte:window onkeydown={(e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault();
-    uiStore.toggleSearchModal();
-  }
-}} />
-
 {#if uiStore.searchModalOpen}
   <div
     class="search-backdrop"
@@ -1160,7 +1145,7 @@
           <!-- Empty Query: Recent Visited + Quick Suggestions -->
 
           <!-- 1. Recent Searches History (if any) -->
-          {#if uiStore.recentSearches.length > 0}
+          {#if (uiStore.recentSearches?.length ?? 0) > 0}
             <div class="search-history-container">
               <div class="results-section-header">
                 <div class="section-title-group">
@@ -1177,7 +1162,7 @@
                 </button>
               </div>
               <div class="recent-search-pills">
-                {#each uiStore.recentSearches as query}
+                {#each (uiStore.recentSearches || []) as query}
                   <button
                     type="button"
                     class="recent-search-pill"
@@ -1192,7 +1177,7 @@
           {/if}
 
           <!-- 2. Recently Visited Menus & Tabs (if any) -->
-          {#if uiStore.recentVisitedItems.length > 0}
+          {#if (uiStore.recentVisitedItems?.length ?? 0) > 0}
             <div class="visited-section">
               <div class="results-section-header">
                 <div class="section-title-group">
@@ -1209,7 +1194,7 @@
                 </button>
               </div>
               <div class="visited-grid">
-                {#each uiStore.recentVisitedItems.slice(0, 6) as item}
+                {#each (uiStore.recentVisitedItems || []).slice(0, 6) as item}
                   <button
                     type="button"
                     class="visited-card"

@@ -32,7 +32,14 @@ export type TabId =
   | 'device-manager'
   | 'network-manager'
   | 'app-manager'
-  | 'journal-logs';
+export interface VisitedItem {
+  id: string;
+  title: string;
+  subtitle?: string;
+  tabId: TabId;
+  subTab?: string;
+  category: string;
+}
 
 class UIStore {
   activeTab = $state<TabId>('system-dashboard');
@@ -51,6 +58,7 @@ class UIStore {
   /** Recent search queries */
   recentSearches = $state<string[]>([]);
   /** Recently visited pages and subtabs */
+  recentVisitedItems = $state<VisitedItem[]>([]);
   version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
   isWindowFocused = $state(true);
   isDocumentVisible = $state(true);
@@ -108,17 +116,27 @@ class UIStore {
     if (typeof window !== 'undefined') {
       try {
         const rawSearches = localStorage.getItem('app_recent_searches');
-        if (rawSearches) this.recentSearches = JSON.parse(rawSearches);
+        if (rawSearches) {
+          const parsed = JSON.parse(rawSearches);
+          if (Array.isArray(parsed)) this.recentSearches = parsed;
+        }
         const rawVisited = localStorage.getItem('app_recent_visited_items');
-        if (rawVisited) this.recentVisitedItems = JSON.parse(rawVisited);
-      } catch {}
+        if (rawVisited) {
+          const parsed = JSON.parse(rawVisited);
+          if (Array.isArray(parsed)) this.recentVisitedItems = parsed;
+        }
+      } catch {
+        this.recentSearches = [];
+        this.recentVisitedItems = [];
+      }
     }
   }
 
   recordRecentSearch(query: string) {
     const trimmed = query.trim();
     if (!trimmed) return;
-    const filtered = this.recentSearches.filter(s => s.toLowerCase() !== trimmed.toLowerCase());
+    const current = Array.isArray(this.recentSearches) ? this.recentSearches : [];
+    const filtered = current.filter(s => s.toLowerCase() !== trimmed.toLowerCase());
     this.recentSearches = [trimmed, ...filtered].slice(0, 8);
     if (typeof window !== 'undefined') {
       try {
@@ -128,7 +146,8 @@ class UIStore {
   }
 
   recordVisitedItem(item: { id: string; title: string; subtitle?: string; tabId: TabId; subTab?: string; category: string }) {
-    const filtered = this.recentVisitedItems.filter(i => i.id !== item.id);
+    const current = Array.isArray(this.recentVisitedItems) ? this.recentVisitedItems : [];
+    const filtered = current.filter(i => i.id !== item.id);
     this.recentVisitedItems = [item, ...filtered].slice(0, 8);
     if (typeof window !== 'undefined') {
       try {

@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 import App from "./App.svelte";
 import "./app.css";
+import { uiStore } from './lib/stores/ui.svelte.ts';
 
 const app = mount(App, {
   target: document.getElementById("app")!,
@@ -23,17 +24,24 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// WebKitGTK production fix: register Ctrl+K at document level (svelte:window alone can miss it in GTK webview)
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-    // Don't steal from input elements
-    const target = e.target as HTMLElement;
-    const tag = target?.tagName?.toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || target?.isContentEditable || target?.closest('.cm-editor')) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    // Dispatch a custom event that GlobalSearchModal will listen for
-    document.dispatchEvent(new CustomEvent('global-search-open'));
+// Global Ctrl+K / Cmd+K Search Shortcut (Layout-agnostic, works across English/Arabic/etc. keyboard layouts)
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey) {
+    const isKeyK = e.code === 'KeyK' || e.key?.toLowerCase() === 'k' || e.keyCode === 75 || e.which === 75;
+    if (isKeyK) {
+      const target = e.target as HTMLElement;
+      // If search modal is already open, Ctrl+K toggles it closed even if focus is in search input
+      if (uiStore.searchModalOpen) {
+        e.preventDefault();
+        uiStore.toggleSearchModal();
+        return;
+      }
+      // If inside code editor, don't steal
+      if (target?.closest('.cm-editor')) return;
+
+      e.preventDefault();
+      uiStore.toggleSearchModal();
+    }
   }
 }, { capture: true });
 
