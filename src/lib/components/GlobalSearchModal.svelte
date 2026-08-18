@@ -6,8 +6,16 @@
     CheckCircle2, AlertTriangle, Play, Flame, CornerDownLeft, Trash2, Key, Database,
     SlidersHorizontal, Compass, Timer
   } from '@lucide/svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
+
+  // WebKitGTK production fix: listen for custom event dispatched by main.ts
+  onMount(() => {
+    const handler = () => uiStore.toggleSearchModal();
+    document.addEventListener('global-search-open', handler);
+    return () => document.removeEventListener('global-search-open', handler);
+  });
 
   interface SearchItem {
     id: string;
@@ -704,6 +712,18 @@
       subTab: 'analytics',
       action: () => { uiStore.navigateTo('nginx-manager', 'analytics'); uiStore.closeSearchModal(); }
     },
+    {
+      id: 'tab-nginx-ssl',
+      title: 'NGINX SSL / TLS Certificates',
+      description: 'Inspect SSL certificates, expiry timelines, Let’s Encrypt certbot integration, and renew certs',
+      category: 'Tabs',
+      breadcrumb: 'NGINX Manager › SSL Certificates',
+      icon: Lock,
+      keywords: 'nginx ssl tls certificates letsencrypt certbot renew https encryption expiry domains',
+      tabId: 'nginx-manager',
+      subTab: 'ssl',
+      action: () => { uiStore.navigateTo('nginx-manager', 'ssl'); uiStore.closeSearchModal(); }
+    },
 
     // ── Security Auditor Categories ──
     {
@@ -901,39 +921,99 @@
   ];
 
   // Ranked Filtering: Matches title, breadcrumb, description, keywords
+  // Shows searched page at top, then below it its tabs in exact UI sequence
   let filteredItems = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return searchItems;
 
     const terms = query.split(/\s+/).filter(Boolean);
 
-    return searchItems
-      .map(item => {
-        let score = 0;
-        const titleLower = item.title.toLowerCase();
-        const breadcrumbLower = (item.breadcrumb || '').toLowerCase();
-        const descLower = item.description.toLowerCase();
-        const kwLower = item.keywords.toLowerCase();
+    // 1. Calculate relevance score for all items
+    const scoredEntries = searchItems.map((item, originalIndex) => {
+      let score = 0;
+      const titleLower = item.title.toLowerCase();
+      const breadcrumbLower = (item.breadcrumb || '').toLowerCase();
+      const descLower = item.description.toLowerCase();
+      const kwLower = item.keywords.toLowerCase();
 
-        // Exact match boosts
-        if (titleLower === query) score += 100;
-        if (titleLower.startsWith(query)) score += 50;
-        if (breadcrumbLower.includes(query)) score += 40;
-        if (titleLower.includes(query)) score += 30;
+      // Exact match boosts
+      if (titleLower === query) score += 120;
+      if (titleLower.startsWith(query)) score += 60;
+      if (breadcrumbLower.includes(query)) score += 40;
+      if (titleLower.includes(query)) score += 35;
 
-        // Individual term matches
-        for (const term of terms) {
-          if (titleLower.includes(term)) score += 20;
-          if (breadcrumbLower.includes(term)) score += 15;
-          if (kwLower.includes(term)) score += 10;
-          if (descLower.includes(term)) score += 5;
-        }
+      // Category page boost if query matches page name
+      if (item.category === 'Pages' && (titleLower.includes(query) || kwLower.includes(query))) {
+        score += 30;
+      }
 
-        return { item, score };
-      })
-      .filter(entry => entry.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map(entry => entry.item);
+      // Individual term matches
+      for (const term of terms) {
+        if (titleLower.includes(term)) score += 25;
+        if (breadcrumbLower.includes(term)) score += 15;
+        if (kwLower.includes(term)) score += 10;
+        if (descLower.includes(term)) score += 5;
+      }
+
+      return { item, score, originalIndex };
+    });
+
+    const matchedEntries = scoredEntries.filter(entry => entry.score > 0);
+    if (matchedEntries.length === 0) return [];
+
+    // 2. Group by tabId (page/module) so that the Page is always on top, followed by its tabs in UI order
+    const groups: Map<string, {
+      pageItem?: { item: SearchItem; score: number; originalIndex: number };
+      tabs: { item: SearchItem; score: number; originalIndex: number }[];
+      maxScore: number;
+    }> = new Map();
+
+    const standaloneItems: { item: SearchItem; score: number; originalIndex: number }[] = [];
+
+    for (const entry of matchedEntries) {
+      if (!entry.item.tabId) {
+        standaloneItems.push(entry);
+        continue;
+      }
+
+      const key = entry.item.tabId;
+      if (!groups.has(key)) {
+        groups.set(key, { tabs: [], maxScore: 0 });
+      }
+      const grp = groups.get(key)!;
+      grp.maxScore = Math.max(grp.maxScore, entry.score);
+
+      if (entry.item.category === 'Pages') {
+        grp.pageItem = entry;
+      } else {
+        grp.tabs.push(entry);
+      }
+    }
+
+    // 3. Sort groups by their highest score
+    const sortedGroups = Array.from(groups.values()).sort((a, b) => b.maxScore - a.maxScore);
+
+    // 4. Flatten: Page item first, then its tabs in UI original sequence
+    const result: SearchItem[] = [];
+
+    for (const grp of sortedGroups) {
+      if (grp.pageItem) {
+        result.push(grp.pageItem.item);
+      }
+      // Sort matching tabs by their original index in searchItems (which matches UI order)
+      grp.tabs.sort((a, b) => a.originalIndex - b.originalIndex);
+      for (const t of grp.tabs) {
+        result.push(t.item);
+      }
+    }
+
+    // Append standalone actions / tools sorted by score
+    standaloneItems.sort((a, b) => b.score - a.score);
+    for (const s of standaloneItems) {
+      result.push(s.item);
+    }
+
+    return result;
   });
 
   // Keep selected index within valid bounds when query changes

@@ -5,7 +5,7 @@
   import { 
     FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, 
     AlertTriangle, Sparkles, Copy, Download, Radio, Play, Square, Activity, Check, Code, 
-    Sliders, Filter, Cpu, Layers, ExternalLink, ChevronRight
+    Sliders, Filter, Cpu, Layers, ExternalLink, ChevronRight, ChevronDown, FolderOpen
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
@@ -395,31 +395,123 @@
     uiStore.addToast('Log entry copied to clipboard', 'info');
   }
 
-  function exportLogs(format: 'txt' | 'json') {
-    if (filteredLogs.length === 0) {
-      uiStore.addToast('No logs to export', 'warning');
-      return;
+  let showExportMenu = $state(false);
+  let exportMenuContainer = $state<HTMLDivElement | null>(null);
+  let lastExportedFile = $state<{ name: string; path: string } | null>(null);
+
+  // Close export dropdown when clicking outside
+  $effect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (!showExportMenu) return;
+      if (exportMenuContainer && exportMenuContainer.contains(e.target as Node)) return;
+      showExportMenu = false;
     }
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  });
+
+  async function handleExportLogs(format: 'txt' | 'json', openFolder: boolean = false) {
+    showExportMenu = false;
+    let exportCount = 0;
     let content = '';
-    const filename = `journal-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.${format}`;
-    if (format === 'json') {
-      content = JSON.stringify(filteredLogs, null, 2);
-    } else {
-      content = filteredLogs.map(l => {
-        const ts = formatTimestamp(l.__REALTIME_TIMESTAMP);
-        const unit = l._SYSTEMD_UNIT || l.SYSLOG_IDENTIFIER || 'kernel';
-        return `[${ts}] [${unit}] [Prio:${l.PRIORITY}] ${l.MESSAGE}`;
-      }).join('\n');
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+    let filename = `journal-logs-${dateStr}.${format}`;
+
+    if (activeTab === 'journal') {
+      if (filteredLogs.length === 0) {
+        uiStore.addToast('No journal logs to export', 'warning');
+        return;
+      }
+      exportCount = filteredLogs.length;
+      filename = `system-journal-${dateStr}.${format}`;
+      if (format === 'json') {
+        content = JSON.stringify(filteredLogs, null, 2);
+      } else {
+        content = filteredLogs.map(l => {
+          const ts = formatTimestamp(l.__REALTIME_TIMESTAMP);
+          const unit = l._SYSTEMD_UNIT || l.SYSLOG_IDENTIFIER || 'kernel';
+          return `[${ts}] [${unit}] [Prio:${l.PRIORITY}] ${l.MESSAGE}`;
+        }).join('\n');
+      }
+    } else if (activeTab === 'auth') {
+      const items = filteredAuthEvents;
+      if (items.length === 0) {
+        uiStore.addToast('No auth events to export', 'warning');
+        return;
+      }
+      exportCount = items.length;
+      filename = `auth-events-${dateStr}.${format}`;
+      if (format === 'json') {
+        content = JSON.stringify(items, null, 2);
+      } else {
+        content = items.map(e => `[${e.timestamp}] [${e.event_type}] [${e.user || 'unknown'}] ${e.message}`).join('\n');
+      }
+    } else if (activeTab === 'audit') {
+      const items = filteredAuditLogs;
+      if (items.length === 0) {
+        uiStore.addToast('No audit logs to export', 'warning');
+        return;
+      }
+      exportCount = items.length;
+      filename = `audit-logs-${dateStr}.${format}`;
+      if (format === 'json') {
+        content = JSON.stringify(items, null, 2);
+      } else {
+        content = items.map(a => `[${a.timestamp}] [${a.syscall || a.event_type}] [${a.comm || a.exe}] ${a.details || a.message || ''}`).join('\n');
+      }
+    } else if (activeTab === 'threats') {
+      const items = filteredThreats;
+      if (items.length === 0) {
+        uiStore.addToast('No threat entries to export', 'warning');
+        return;
+      }
+      exportCount = items.length;
+      filename = `threat-events-${dateStr}.${format}`;
+      if (format === 'json') {
+        content = JSON.stringify(items, null, 2);
+      } else {
+        content = items.map(t => `[${t.timestamp}] [${t.severity}] [${t.threat_type}] ${t.description}`).join('\n');
+      }
     }
 
-    const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-    uiStore.addToast(`Exported ${filteredLogs.length} logs to ${filename}`, 'success');
+    try {
+      // 1. Write file via backend command directly to ~/Downloads
+      const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
+      lastExportedFile = { name: filename, path: savedPath };
+
+      // 2. Fallback browser download blob
+      try {
+        const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.warn('Browser download fallback failed:', err);
+      }
+
+      if (openFolder) {
+        await invoke('reveal_in_file_manager', { path: savedPath });
+        uiStore.addToast(`Exported ${exportCount} logs & opened Downloads folder`, 'success');
+      } else {
+        uiStore.addToast(`Exported ${exportCount} logs to ${filename}`, 'success');
+      }
+    } catch (e: any) {
+      console.error('Failed to export logs:', e);
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
+  }
+
+  async function openLastExportedFolder() {
+    if (lastExportedFile?.path) {
+      try {
+        await invoke('reveal_in_file_manager', { path: lastExportedFile.path });
+      } catch (e) {
+        console.error('Could not reveal in file manager:', e);
+      }
+    }
   }
 
   function formatTimestamp(us: string) {
@@ -680,7 +772,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Journal Logs" subtitle="Systemd journal log viewer" icon={FileText}>
+  <PageHeader title="Journal Logs" icon={FileText}>
     <!-- Single unified toolbar strip -->
     <div class="log-toolbar">
       <!-- Search icon -->
@@ -781,22 +873,6 @@
         {/if}
       </div>
 
-      <!-- Live Follow Toggle -->
-      <button 
-        class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
-        onclick={toggleLiveFollow} 
-        title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
-      >
-        <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
-        <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
-      </button>
-
-      <!-- Export Logs -->
-      <button class="log-action-btn" onclick={() => exportLogs('txt')} title="Export filtered logs to .txt file">
-        <Download size={13} />
-        <span>Export</span>
-      </button>
-
       <!-- Refresh -->
       <button class="log-action-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh">
         <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
@@ -811,12 +887,13 @@
   </PageHeader>
 
   <div class="page-content log-viewer" style="display:flex; flex-direction:column; gap:16px;">
-    <!-- Tab navigation and Level Selector row -->
+    <!-- Tab navigation and Actions row -->
     <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%;">
       <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} />
 
-      {#if activeTab === 'journal'}
-        <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+      <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+        {#if activeTab === 'journal'}
+          <!-- Level Selector -->
           <span class="log-label" style="font-size: 11px;">Level:</span>
           <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 28px; width: 110px;">
             <option value="all">All Levels</option>
@@ -824,8 +901,51 @@
             <option value="4">Warning+</option>
             <option value="6">Info+</option>
           </Select>
+
+          <!-- Live Follow Toggle -->
+          <button 
+            type="button"
+            class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
+            onclick={toggleLiveFollow} 
+            title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
+          >
+            <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
+            <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
+          </button>
+        {/if}
+
+        <!-- Export Logs Dropdown -->
+        <div class="export-dropdown-container" bind:this={exportMenuContainer}>
+          <button 
+            type="button"
+            class="log-action-btn export-main-btn" 
+            onclick={() => showExportMenu = !showExportMenu} 
+            title="Export logs (Text, JSON, with option to open folder)"
+          >
+            <Download size={13} />
+            <span>Export</span>
+            <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
+          </button>
+
+          {#if showExportMenu}
+            <div class="export-dropdown-menu">
+              <button type="button" class="export-menu-item" onclick={() => handleExportLogs('txt', false)}>
+                <FileText size={13} />
+                <span>Export as Text (.txt)</span>
+              </button>
+              <button type="button" class="export-menu-item" onclick={() => handleExportLogs('json', false)}>
+                <Code size={13} />
+                <span>Export as JSON (.json)</span>
+              </button>
+              <div class="export-menu-divider"></div>
+              <button type="button" class="export-menu-item accent" onclick={() => handleExportLogs('txt', true)}>
+                <FolderOpen size={13} />
+                <span>Export &amp; Open Folder</span>
+              </button>
+            </div>
+          {/if}
         </div>
-      {/if}
+      </div>
     </div>
 
     <div class="log-container" bind:this={logContainer}>
@@ -1591,6 +1711,97 @@
   .log-action-danger:hover {
     background: rgba(255, 118, 117, 0.12);
     color: var(--color-error);
+  }
+
+  /* Export Dropdown Menu */
+  .export-dropdown-container {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .export-main-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .export-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    right: 0;
+    z-index: 100;
+    min-width: 185px;
+    background: var(--color-bg-card, #0f172a);
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    border-radius: 8px;
+    padding: 5px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: menu-fade 0.12s ease;
+  }
+
+  .export-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .export-menu-item:hover {
+    background: rgba(0, 218, 243, 0.1);
+    color: var(--color-text-primary);
+  }
+
+  .export-menu-item.accent {
+    color: var(--color-accent);
+    font-weight: 500;
+  }
+
+  .export-menu-item.accent:hover {
+    background: rgba(0, 218, 243, 0.15);
+  }
+
+  .export-menu-divider {
+    height: 1px;
+    background: var(--color-border, rgba(255, 255, 255, 0.08));
+    margin: 3px 0;
+  }
+
+  .export-open-folder-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    background: rgba(0, 218, 243, 0.12);
+    border: 1px solid rgba(0, 218, 243, 0.3);
+    color: var(--color-accent);
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .export-open-folder-btn:hover {
+    background: rgba(0, 218, 243, 0.22);
+    color: #fff;
+    border-color: rgba(0, 218, 243, 0.5);
   }
 
   /* ── Log viewer ──────────────────────────────────────── */

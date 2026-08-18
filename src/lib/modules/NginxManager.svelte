@@ -9,19 +9,23 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import DatePicker from '../components/ui/DatePicker.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
-  import { Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield } from '@lucide/svelte';
-  import { Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle } from '@lucide/svelte';
-  import { Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download, Copy, ListFilter } from '@lucide/svelte';
-  import { ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2 } from '@lucide/svelte';
-  import { TerminalSquare, Filter, Search, Sparkles, Bot } from '@lucide/svelte';
+  import { 
+    Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield, 
+    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle, 
+    Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download, Copy, ListFilter, 
+    ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2, 
+    TerminalSquare, Filter, Search, Sparkles, Bot, Zap, TrendingUp, Radio, HardDrive, Compass, Layers, PieChart, ArrowUpRight, WrapText
+  } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+  import KebabMenu from '../components/KebabMenu.svelte';
 
   let aiNginxPrompt = $state('');
   let showAiNginxPromptBox = $state(false);
@@ -38,7 +42,18 @@
   interface NginxInstallInfo { installed: boolean; version: string; }
   interface NginxServiceStatus { active: boolean; status: string; since: string; sub_state: string; }
   interface NginxTestResult { passed: boolean; output: string; timestamp: string; }
-  interface NginxSite { name: string; path: string; enabled: boolean; source: string; }
+  interface NginxSite {
+    name: string;
+    path: string;
+    enabled: boolean;
+    source: string;
+    domains?: string[];
+    ports?: string[];
+    proxies?: string[];
+    has_ssl?: boolean;
+    access_log?: string | null;
+    error_log?: string | null;
+  }
   interface NginxStats { sites_available: number; sites_enabled: number; sites_disabled: number; }
   interface NginxConfigFile { name: string; path: string; source: string; }
   interface NginxBackup { original_path: string; backup_path: string; timestamp: string; filename: string; }
@@ -49,8 +64,21 @@
     proxy_url: string; index_file: string; enable_404: boolean; enable_50x: boolean;
   }
   interface NginxLogAnalytics {
-    total_requests: number; unique_ips: number; status_2xx: number; status_3xx: number; status_4xx: number; status_5xx: number;
-    top_ips: [string, number][]; top_paths: [string, number][];
+    total_requests: number;
+    unique_ips: number;
+    total_bytes_sent: number;
+    status_2xx: number;
+    status_3xx: number;
+    status_4xx: number;
+    status_5xx: number;
+    success_rate: number;
+    error_rate: number;
+    top_ips: [string, number][];
+    top_paths: [string, number][];
+    top_referrers: [string, number][];
+    top_user_agents: [string, number][];
+    top_methods: [string, number][];
+    hourly_traffic: [string, number][];
   }
 
   // ─── State ────────────────────────────────────────────────────────────────
@@ -77,7 +105,6 @@
   let analyticsLoading = $state(false);
   let analyticsLogFile = $state('/var/log/nginx/access.log');
 
-
   // Overview
   let serviceStatus = $state<NginxServiceStatus | null>(null);
   let testResult = $state<NginxTestResult | null>(null);
@@ -96,6 +123,48 @@
   });
   let newSiteLoading = $state(false);
   let toggleLoadingFor = $state<string>('');
+
+  // Site Context for Logs / Analytics
+  let activeSiteContext = $state<NginxSite | null>(null);
+
+  const detectedOverviewPorts = $derived.by(() => {
+    const portSet = new Set<string>();
+    for (const s of sites) {
+      if (s.ports && s.ports.length > 0) {
+        for (const p of s.ports) portSet.add(p);
+      } else {
+        portSet.add('80');
+      }
+    }
+    return Array.from(portSet);
+  });
+
+  const totalProxiesCount = $derived.by(() => {
+    let count = 0;
+    for (const s of sites) {
+      if (s.proxies) count += s.proxies.length;
+    }
+    return count;
+  });
+
+  // Site Drawer States
+  let showInspectDrawer = $state(false);
+  let inspectingSite = $state<NginxSite | null>(null);
+  let inspectingContent = $state('');
+  let inspectingLoading = $state(false);
+  let inspectWrapLines = $state(false);
+
+  let showCloneDrawer = $state(false);
+  let cloningSite = $state<NginxSite | null>(null);
+  let cloneNewName = $state('');
+  let cloneNewDomain = $state('');
+  let cloneLoading = $state(false);
+
+  let showSslIssueDrawer = $state(false);
+  let sslIssueSite = $state<NginxSite | null>(null);
+  let sslIssueDomain = $state('');
+  let sslIssueEmail = $state('');
+  let sslIssueLoading = $state(false);
 
   // Config Editor
   let configs = $state<NginxConfigFile[]>([]);
@@ -117,6 +186,7 @@
   let selectedWwwEntry = $state<WwwEntry | null>(null);
   let wwwFileContent = $state('');
   let wwwFileLoading = $state(false);
+  let wwwWrapLines = $state(false);
   let renamingEntry = $state<WwwEntry | null>(null);
   let renameValue = $state('');
   let newDirParent = $state('');
@@ -133,6 +203,47 @@
   let logInterval: ReturnType<typeof setInterval> | null = null;
   let logViewMode = $state<'structured' | 'raw'>('structured');
   let logStatusFilter = $state<'all' | '2xx' | '3xx' | '4xx' | '5xx'>('all');
+  let timeRange = $state('all');
+  let customStartDate = $state('');
+  let customStartTime = $state('00:00');
+  let customEndDate = $state('');
+  let customEndTime = $state('23:59');
+  let showCustomPopover = $state(false);
+  let popoverContainer = $state<HTMLDivElement | null>(null);
+
+  function formatDateLabel(dateStr: string) {
+    if (!dateStr) return '';
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      return `${parts[1]}/${parts[2]}/${parts[0]}`; // MM/DD/YYYY
+    }
+    return dateStr;
+  }
+
+  let customRangeLabel = $derived(
+    customStartDate
+      ? `${formatDateLabel(customStartDate)} - ${formatDateLabel(customEndDate || customStartDate)}`
+      : 'Custom Range...'
+  );
+
+  function handleRangeChange() {
+    if (timeRange === 'custom') {
+      setTimeout(() => { showCustomPopover = true; }, 0);
+    } else {
+      showCustomPopover = false;
+    }
+  }
+
+  function getCustomStart(): Date | null {
+    if (timeRange !== 'custom' || !customStartDate) return null;
+    return new Date(`${customStartDate}T${customStartTime || '00:00'}:00`);
+  }
+
+  function getCustomEnd(): Date | null {
+    if (timeRange !== 'custom' || !customEndDate) return null;
+    return new Date(`${customEndDate}T${customEndTime || '23:59'}:59`);
+  }
+
   let expandedLogIndex = $state<number | null>(null);
 
   interface ParsedLogEntry {
@@ -141,6 +252,7 @@
     ip?: string;
     timestamp?: string;
     formattedTime?: string;
+    date?: Date | null;
     method?: string;
     path?: string;
     httpVersion?: string;
@@ -155,6 +267,36 @@
     logLevel?: 'error' | 'warn' | 'crit' | 'notice' | 'info' | 'alert' | 'emerg';
     errorMessage?: string;
     pid?: string;
+  }
+
+  function parseLogDate(rawTime: string): Date | null {
+    if (!rawTime) return null;
+    try {
+      // Access log: "17/Aug/2026:13:40:00 +0300"
+      const accessMatch = rawTime.match(/^(\d{1,2})\/([a-zA-Z]{3})\/(\d{4}):(\d{2}):(\d{2}):(\d{2})/);
+      if (accessMatch) {
+        const monthMap: Record<string, string> = {
+          Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
+          Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'
+        };
+        const day = accessMatch[1].padStart(2, '0');
+        const month = monthMap[accessMatch[2]] || '01';
+        const year = accessMatch[3];
+        const hour = accessMatch[4];
+        const min = accessMatch[5];
+        const sec = accessMatch[6];
+        return new Date(`${year}-${month}-${day}T${hour}:${min}:${sec}`);
+      }
+      // Error log: "2026/08/17 13:40:00"
+      const errMatch = rawTime.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+      if (errMatch) {
+        return new Date(`${errMatch[1]}-${errMatch[2]}-${errMatch[3]}T${errMatch[4]}:${errMatch[5]}:${errMatch[6]}`);
+      }
+      const d = new Date(rawTime);
+      return isNaN(d.getTime()) ? null : d;
+    } catch {
+      return null;
+    }
   }
 
   function parseLogLine(line: string): ParsedLogEntry {
@@ -224,6 +366,7 @@
         ip,
         timestamp: rawTime,
         formattedTime,
+        date: parseLogDate(rawTime),
         method,
         path,
         httpVersion: httpVer,
@@ -259,6 +402,7 @@
         type: 'error',
         timestamp,
         formattedTime: timestamp.split(' ')[1] || timestamp,
+        date: parseLogDate(timestamp),
         logLevel: level,
         errorMessage: message,
         ip: clientIp || undefined,
@@ -287,6 +431,25 @@
     if (logStatusFilter !== 'all') {
       list = list.filter(e => e.statusCategory === logStatusFilter);
     }
+    if (timeRange !== 'all') {
+      const now = new Date();
+      const startDate = timeRange === 'custom' ? getCustomStart() : null;
+      const endDate = timeRange === 'custom' ? getCustomEnd() : null;
+      const days = timeRange !== 'custom' ? parseInt(timeRange, 10) : null;
+
+      list = list.filter(e => {
+        if (!e.date) return true;
+        if (timeRange === 'custom') {
+          if (startDate && e.date < startDate) return false;
+          if (endDate && e.date > endDate) return false;
+          return true;
+        } else if (days !== null && !isNaN(days)) {
+          const diffMs = now.getTime() - e.date.getTime();
+          return diffMs >= 0 && diffMs <= days * 24 * 3600 * 1000;
+        }
+        return true;
+      });
+    }
     if (logFilter.trim()) {
       const q = logFilter.toLowerCase();
       list = list.filter(e => 
@@ -311,6 +474,7 @@
     }
     return {
       total: parsedLogEntries.length,
+      filteredTotal: filteredLogEntries.length,
       count2xx,
       count3xx,
       count4xx,
@@ -354,6 +518,8 @@
           loadServiceStatus(),
           loadTestResult(),
           loadStats(),
+          loadSites(),
+          loadLogFiles(),
         ]);
         statusStore.setLastCommand('nginx -v; systemctl is-active nginx', 0, true);
       } else {
@@ -396,6 +562,26 @@
     }
   }
 
+  function requestServiceAction(action: string) {
+    if (action === 'stop') {
+      uiStore.confirm(
+        'Stop Web Server',
+        'Stopping Nginx will immediately disconnect all active HTTP/HTTPS web traffic and take down all hosted virtual hosts and reverse proxies. Are you sure you want to stop Nginx?',
+        () => doServiceAction('stop'),
+        true
+      );
+    } else if (action === 'restart') {
+      uiStore.confirm(
+        'Restart Web Server',
+        'Restarting Nginx will briefly interrupt active client connections and reload all configuration files from scratch. Proceed with restart?',
+        () => doServiceAction('restart'),
+        false
+      );
+    } else {
+      doServiceAction(action);
+    }
+  }
+
   async function doServiceAction(action: string) {
     serviceLoading = true;
     statusStore.setBusy(`Running: systemctl ${action} nginx…`);
@@ -422,10 +608,34 @@
     try {
       testResult = await invoke<NginxTestResult>('nginx_test_config');
       statusStore.setLastCommand('nginx -t', testResult.passed ? 0 : 1, testResult.passed);
-      showTestModal = true;
-      modalTestResult = testResult;
+      if (testResult.passed) {
+        uiStore.addToast('Nginx syntax test passed ✓', 'success');
+      } else {
+        uiStore.addToast('Nginx configuration error detected ✗', 'error');
+      }
     } catch (e) {
       uiStore.addToast(`Test failed: ${e}`, 'error');
+    } finally {
+      testLoading = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  async function testAndReload() {
+    testLoading = true;
+    statusStore.setBusy('Testing syntax and reloading Nginx…');
+    try {
+      const res = await invoke<NginxTestResult>('nginx_test_config');
+      testResult = res;
+      if (!res.passed) {
+        uiStore.addToast('Cannot reload: nginx -t syntax test failed ✗', 'error');
+        statusStore.setLastCommand('nginx -t', 1, false);
+        return;
+      }
+      statusStore.setLastCommand('nginx -t', 0, true);
+      await doServiceAction('reload');
+    } catch (e) {
+      uiStore.addToast(`Safe reload failed: ${e}`, 'error');
     } finally {
       testLoading = false;
       statusStore.clearBusy();
@@ -438,10 +648,10 @@
     sitesLoading = true;
     try {
       sites = await invoke<NginxSite[]>('nginx_list_sites');
-      statusStore.setLastCommand('ls -l /etc/nginx/sites-available', 0, true);
+      statusStore.setLastCommand('ls /etc/nginx/conf.d/ /etc/nginx/sites-available/', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load sites: ${e}`, 'error');
-      statusStore.setLastCommand('ls -l /etc/nginx/sites-available', 1, false);
+      statusStore.setLastCommand('ls /etc/nginx/conf.d/', 1, false);
     } finally {
       sitesLoading = false;
     }
@@ -450,8 +660,8 @@
   async function toggleSite(site: NginxSite) {
     const action = site.enabled ? 'disable' : 'enable';
     uiStore.confirm(
-      `${action === 'enable' ? 'Enable' : 'Disable'} site`,
-      `${action === 'enable' ? 'Enable' : 'Disable'} "${site.name}"? nginx -t will be run and nginx will reload if valid.`,
+      `${action === 'enable' ? 'Enable' : 'Disable'} Virtual Host`,
+      `Are you sure you want to ${action} virtual host "${site.name}"?\n\n${action === 'disable' ? 'Nginx will stop routing traffic to this domain.' : 'Nginx will validate configuration with nginx -t and activate routing.'}`,
       async () => {
         toggleLoadingFor = site.name;
         const toastId = uiStore.addToast(`nginx -t checking…`, 'info', 0);
@@ -461,7 +671,7 @@
             enable: !site.enabled,
           });
           uiStore.removeToast(toastId);
-          statusStore.setLastCommand(!site.enabled ? `ln -s /etc/nginx/sites-available/${site.name} /etc/nginx/sites-enabled/ && nginx -t` : `rm /etc/nginx/sites-enabled/${site.name} && nginx -t`, result.passed ? 0 : 1, result.passed);
+          statusStore.setLastCommand(!site.enabled ? `ln -s /etc/nginx/sites-available/${site.name} /etc/nginx/sites-enabled/${site.name} && nginx -t` : `rm /etc/nginx/sites-enabled/${site.name} && nginx -t`, result.passed ? 0 : 1, result.passed);
 
           if (result.passed) {
             uiStore.addToast(`Site "${site.name}" ${action}d and nginx reloaded ✓`, 'success');
@@ -510,30 +720,178 @@
   }
 
   function confirmDeleteSite(site: NginxSite) {
+    if (site.name === 'nginx.conf' || site.path === '/etc/nginx/nginx.conf') {
+      uiStore.addToast('System Protection: Core nginx.conf file cannot be deleted!', 'error');
+      return;
+    }
     uiStore.confirm(
-      'Delete Site',
-      `Delete "${site.name}"? This removes the config file and its symlink. This cannot be undone.`,
-      () => {
-        uiStore.confirm(
-          '⚠️ Confirm Delete',
-          `Are you absolutely sure you want to permanently delete "${site.name}"?`,
-          async () => {
-            try {
-              await invoke('nginx_delete_site', { name: site.name, path: site.path });
-              statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 0, true);
-              uiStore.addToast(`Site "${site.name}" deleted`, 'success');
-              await loadSites();
-              await loadStats();
-            } catch (e) {
-              uiStore.addToast(`Delete failed: ${e}`, 'error');
-              statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 1, false);
-            }
-          },
-          true,
-        );
+      'Delete Virtual Host',
+      `Are you sure you want to permanently delete virtual host "${site.name}"?\nPath: ${site.path}\n\nThis will remove the configuration file and its active symlink. This action cannot be undone.`,
+      async () => {
+        try {
+          await invoke('nginx_delete_site', { name: site.name, path: site.path });
+          statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 0, true);
+          uiStore.addToast(`Site "${site.name}" deleted`, 'success');
+          await loadSites();
+          await loadStats();
+        } catch (e) {
+          uiStore.addToast(`Delete failed: ${e}`, 'error');
+          statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 1, false);
+        }
       },
       true,
     );
+  }
+
+  let siteSearchQuery = $state('');
+  let siteSourceFilter = $state<'all' | 'conf.d' | 'sites-available' | 'sites-enabled'>('all');
+
+  let filteredSites = $derived.by(() => {
+    let list = sites;
+    if (siteSourceFilter !== 'all') {
+      list = list.filter(s => s.source === siteSourceFilter);
+    }
+    const q = siteSearchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter(s => 
+        s.name.toLowerCase().includes(q) || 
+        s.path.toLowerCase().includes(q) || 
+        s.source.toLowerCase().includes(q) ||
+        (s.domains && s.domains.some(d => d.toLowerCase().includes(q))) ||
+        (s.proxies && s.proxies.some(p => p.toLowerCase().includes(q))) ||
+        (s.ports && s.ports.some(p => p.toLowerCase().includes(q)))
+      );
+    }
+    return list;
+  });
+
+  async function openSiteInEditor(site: NginxSite) {
+    activeTab = 'editor';
+    if (configs.length === 0) {
+      await loadConfigs();
+    }
+    const matchingCfg = configs.find(c => c.path === site.path) || {
+      name: site.name,
+      path: site.path,
+      source: site.source,
+    };
+    await selectConfig(matchingCfg);
+    uiStore.addToast(`Opened ${site.name} in Config Editor`, 'info');
+  }
+
+  async function openSiteInspector(site: NginxSite) {
+    inspectingSite = site;
+    showInspectDrawer = true;
+    inspectingLoading = true;
+    try {
+      inspectingContent = await invoke<string>('nginx_read_config', { path: site.path });
+      statusStore.setLastCommand(`cat ${site.path}`, 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to read site config: ${e}`, 'error');
+      inspectingContent = `# Failed to load: ${e}`;
+    } finally {
+      inspectingLoading = false;
+    }
+  }
+
+  function openCloneModal(site: NginxSite) {
+    cloningSite = site;
+    cloneNewName = site.name.replace(/\.conf$/, '') + '-copy';
+    cloneNewDomain = site.domains && site.domains.length > 0 ? `${site.domains[0]}` : '';
+    showCloneDrawer = true;
+  }
+
+  async function executeCloneSite() {
+    if (!cloningSite || !cloneNewName.trim()) {
+      uiStore.addToast('Please specify a valid site name', 'warning');
+      return;
+    }
+    cloneLoading = true;
+    try {
+      const newPath = await invoke<string>('nginx_clone_site', {
+        sourcePath: cloningSite.path,
+        newName: cloneNewName.trim(),
+        newDomain: cloneNewDomain.trim() || null,
+      });
+      uiStore.addToast(`Site cloned to ${newPath} ✓`, 'success');
+      showCloneDrawer = false;
+      await loadSites();
+      await loadStats();
+      if (configs.length > 0) await loadConfigs();
+    } catch (e) {
+      uiStore.addToast(`Clone failed: ${e}`, 'error');
+    } finally {
+      cloneLoading = false;
+    }
+  }
+
+  function jumpToSiteLogs(site: NginxSite, mode: 'logs' | 'analytics' = 'analytics') {
+    activeSiteContext = site;
+    if (mode === 'analytics') {
+      if (site.access_log) {
+        analyticsLogFile = site.access_log;
+        uiStore.addToast(`Switched to dedicated log: ${site.access_log} (${site.name})`, 'success');
+      } else if (site.error_log) {
+        analyticsLogFile = site.error_log;
+        uiStore.addToast(`Switched to dedicated error log: ${site.error_log} (${site.name})`, 'success');
+      } else {
+        analyticsLogFile = '/var/log/nginx/access.log';
+        uiStore.addToast(`Viewing global log for ${site.name} (no custom access_log in config)`, 'info');
+      }
+      activeTab = 'analytics';
+      loadAnalytics(true);
+    } else {
+      if (site.access_log) {
+        selectedLog = site.access_log;
+        logFilter = '';
+        uiStore.addToast(`Switched to dedicated log: ${site.access_log}`, 'success');
+      } else if (site.error_log) {
+        selectedLog = site.error_log;
+        logFilter = '';
+        uiStore.addToast(`Switched to dedicated error log: ${site.error_log}`, 'success');
+      } else {
+        selectedLog = '/var/log/nginx/access.log';
+        logFilter = (site.domains && site.domains.length > 0) ? site.domains[0] : site.name.replace(/\.conf$/, '');
+        uiStore.addToast(`Viewing global log filtered for ${site.name}`, 'info');
+      }
+      activeTab = 'logs';
+      loadLog();
+    }
+  }
+
+  function openQuickSsl(site: NginxSite) {
+    sslIssueSite = site;
+    sslIssueDomain = (site.domains && site.domains.length > 0) ? site.domains[0] : site.name.replace(/\.conf$/, '');
+    sslIssueEmail = '';
+    showSslIssueDrawer = true;
+  }
+
+  async function executeIssueSsl() {
+    if (!sslIssueDomain.trim()) {
+      uiStore.addToast('Domain is required for SSL certificate', 'warning');
+      return;
+    }
+    sslIssueLoading = true;
+    const toastId = uiStore.addToast(`Requesting Let's Encrypt SSL for ${sslIssueDomain}…`, 'info', 0);
+    try {
+      await invoke<string>('nginx_request_cert', {
+        domain: sslIssueDomain.trim(),
+        email: sslIssueEmail.trim() || null,
+      });
+      uiStore.removeToast(toastId);
+      uiStore.addToast(`SSL Certificate issued successfully for ${sslIssueDomain} ✓`, 'success');
+      showSslIssueDrawer = false;
+      await loadSites();
+      if (hasCertbot) await loadSslCerts();
+    } catch (e) {
+      uiStore.removeToast(toastId);
+      uiStore.addToast(`SSL request failed: ${e}`, 'error');
+      showOutputModal = true;
+      outputModalTitle = `Certbot SSL Failed — ${sslIssueDomain}`;
+      outputModalContent = String(e);
+    } finally {
+      sslIssueLoading = false;
+    }
   }
 
   // ─── Config Editor ─────────────────────────────────────────────────────────
@@ -570,8 +928,22 @@
 
   async function saveConfig() {
     if (!selectedConfig) return;
+    if (selectedConfig.path === '/etc/nginx/nginx.conf') {
+      uiStore.confirm(
+        'Save Core Configuration',
+        'You are modifying the primary server configuration file (/etc/nginx/nginx.conf). An automatic safety backup will be created, and syntax will be validated with nginx -t. Proceed to apply changes?',
+        () => executeSaveConfig(),
+        false
+      );
+    } else {
+      executeSaveConfig();
+    }
+  }
+
+  async function executeSaveConfig() {
+    if (!selectedConfig) return;
     configSaving = true;
-    const toastId = uiStore.addToast('Running nginx -t before saving…', 'info', 0);
+    const toastId = uiStore.addToast('Validating syntax with nginx -t…', 'info', 0);
     try {
       const result = await invoke<NginxTestResult>('nginx_write_config', {
         path: selectedConfig.path,
@@ -581,14 +953,14 @@
       statusStore.setLastCommand(`echo "..." > ${selectedConfig.path} && nginx -t`, result.passed ? 0 : 1, result.passed);
 
       if (result.passed) {
-        uiStore.addToast('Config saved and nginx reloaded ✓', 'success');
+        uiStore.addToast('Config saved and verified with nginx -t ✓', 'success');
         savedContent = editorContent;
         showDiff = false;
       } else {
-        uiStore.addToast('nginx -t failed — file reverted from backup', 'error');
+        uiStore.addToast('⚠️ nginx -t failed — changes reverted from backup', 'error');
         showOutputModal = true;
-        outputModalTitle = 'nginx -t Failed — File Reverted';
-        outputModalContent = result.output;
+        outputModalTitle = 'Syntax Error — File Protected & Reverted';
+        outputModalContent = `Nginx rejected this configuration syntax:\n\n${result.output}\n\n[Protection Safeguard]: The file was restored from backup so your web server did not crash.`;
         // Reload the reverted content
         const content = await invoke<string>('nginx_read_config', { path: selectedConfig.path });
         editorContent = content;
@@ -646,14 +1018,6 @@
       },
     );
   }
-
-  $effect(() => {
-    if (activeTab === 'editor' && configs.length === 0) loadConfigs();
-    if (activeTab === 'sites' && sites.length === 0) loadSites();
-    if (activeTab === 'www' && wwwEntries.length === 0) loadWww();
-    if (activeTab === 'logs' && logFiles.length === 0) loadLogFiles();
-    if (activeTab === 'ssl' && sslCerts.length === 0 && hasCertbot) loadSslCerts();
-  });
 
   // Diff helper
   function getDiff(): { type: 'add'|'remove'|'same'; text: string }[] {
@@ -748,27 +1112,26 @@
   }
 
   function confirmDeleteWww(entry: WwwEntry) {
+    const trimmed = entry.path.replace(/\/+$/, '');
+    if (trimmed === '/var/www' || trimmed === '/var/www/html' || trimmed === '') {
+      uiStore.addToast('System Protection: Root /var/www and /var/www/html cannot be deleted!', 'error');
+      return;
+    }
+
     uiStore.confirm(
-      'Delete Entry',
-      `Delete "${entry.name}"? This is permanent.`,
-      () => {
-        uiStore.confirm(
-          '⚠️ Confirm Delete',
-          `Permanently delete "${entry.path}"?`,
-          async () => {
-            try {
-              await invoke('nginx_delete_www_entry', { path: entry.path });
-              statusStore.setLastCommand(`rm -rf ${entry.path}`, 0, true);
-              uiStore.addToast(`Deleted "${entry.name}"`, 'success');
-              if (selectedWwwEntry?.path === entry.path) selectedWwwEntry = null;
-              await loadWww();
-            } catch (e) {
-              uiStore.addToast(`Delete failed: ${e}`, 'error');
-              statusStore.setLastCommand(`rm -rf ${entry.path}`, 1, false);
-            }
-          },
-          true,
-        );
+      `Delete ${entry.isDir ? 'Folder' : 'File'}`,
+      `Are you sure you want to permanently delete "${entry.path}"${entry.isDir ? ' and all files within it? This will remove all web content permanently.' : '? This action cannot be undone.'}`,
+      async () => {
+        try {
+          await invoke('nginx_delete_www_entry', { path: entry.path });
+          statusStore.setLastCommand(`rm -rf ${entry.path}`, 0, true);
+          uiStore.addToast(`Deleted "${entry.name}"`, 'success');
+          if (selectedWwwEntry?.path === entry.path) selectedWwwEntry = null;
+          await loadWww();
+        } catch (e) {
+          uiStore.addToast(`Delete failed: ${e}`, 'error');
+          statusStore.setLastCommand(`rm -rf ${entry.path}`, 1, false);
+        }
       },
       true,
     );
@@ -794,38 +1157,138 @@
     if (bytes === 0) return '—';
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
+
+  function formatBytes(bytes: number): string {
+    if (!bytes || bytes === 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  // ─── WWW Context Menu ──────────────────────────────────────────────────────
+  let wwwContextMenu = $state<{
+    visible: boolean;
+    x: number;
+    y: number;
+    entry: WwwEntry | null;
+  }>({ visible: false, x: 0, y: 0, entry: null });
+
+  function handleWwwContextMenu(e: MouseEvent, entry: WwwEntry | null) {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 210;
+    const menuHeight = 260;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
+    wwwContextMenu = {
+      visible: true,
+      x,
+      y,
+      entry,
+    };
+  }
+
+  function closeWwwContextMenu() {
+    wwwContextMenu.visible = false;
+  }
+
+  // Right-click Site Context Menu
+  let siteContextMenu = $state<{
+    visible: boolean;
+    x: number;
+    y: number;
+    site: NginxSite | null;
+  }>({ visible: false, x: 0, y: 0, site: null });
+
+  function handleSiteContextMenu(e: MouseEvent, site: NginxSite) {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 310;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
+    siteContextMenu = {
+      visible: true,
+      x,
+      y,
+      site,
+    };
+  }
+
+  function closeSiteContextMenu() {
+    siteContextMenu.visible = false;
+  }
+
+  // Global click & esc listener to close context menus and popovers
+  $effect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      if (wwwContextMenu.visible) {
+        closeWwwContextMenu();
+      }
+      if (siteContextMenu.visible) {
+        closeSiteContextMenu();
+      }
+      if (showCustomPopover && popoverContainer && !popoverContainer.contains(e.target as Node)) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('.custom-range-container') && !target.closest('.date-picker-container')) {
+          showCustomPopover = false;
+        }
+      }
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (wwwContextMenu.visible) closeWwwContextMenu();
+        if (siteContextMenu.visible) closeSiteContextMenu();
+        if (showCustomPopover) showCustomPopover = false;
+      }
+    }
+    window.addEventListener('click', handleOutsideClick);
+    window.addEventListener('keydown', handleKey);
+    return () => {
+      window.removeEventListener('click', handleOutsideClick);
+      window.removeEventListener('keydown', handleKey);
+    };
+  });
 
   // ─── Logs ──────────────────────────────────────────────────────────────────
 
   async function loadLogFiles() {
     try {
       logFiles = await invoke<string[]>('nginx_list_log_files');
-      statusStore.setLastCommand('ls /var/log/nginx/*.log', 0, true);
-      if (logFiles.length > 0 && !selectedLog) {
-        selectedLog = logFiles[0];
+      statusStore.setLastCommand('find /var/log/nginx -maxdepth 1 -type f', 0, true);
+      if (logFiles.length > 0) {
+        if (!selectedLog || !logFiles.includes(selectedLog)) {
+          selectedLog = logFiles[0];
+        }
         await loadLog();
       }
     } catch (e) {
       uiStore.addToast(`Failed to load log files: ${e}`, 'error');
-      statusStore.setLastCommand('ls /var/log/nginx/*.log', 1, false);
+      statusStore.setLastCommand('find /var/log/nginx -maxdepth 1 -type f', 1, false);
     }
   }
 
   async function loadLog() {
+    if (!selectedLog && logFiles.length > 0) {
+      selectedLog = logFiles[0];
+    }
     if (!selectedLog) return;
     logLoading = true;
     try {
       logContent = await invoke<string>('nginx_read_log', {
         path: selectedLog,
-        lines: 200,
-        filter: logFilter || null,
+        lines: 500,
+        filter: null,
       });
-      statusStore.setLastCommand(logFilter ? `grep "${logFilter}" ${selectedLog} | tail -n 200` : `tail -n 200 ${selectedLog}`, 0, true);
+      statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 0, true);
     } catch (e) {
-      logContent = String(e);
-      statusStore.setLastCommand(logFilter ? `grep "${logFilter}" ${selectedLog} | tail -n 200` : `tail -n 200 ${selectedLog}`, 1, false);
+      logContent = '';
+      uiStore.addToast(`Failed to read log: ${e}`, 'error');
+      statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 1, false);
     } finally {
       logLoading = false;
     }
@@ -841,9 +1304,10 @@
   }
 
   function confirmClearLog() {
+    if (!selectedLog) return;
     uiStore.confirm(
-      'Clear Log',
-      `Truncate "${selectedLog}"? This cannot be undone.`,
+      'Truncate Log File',
+      `Are you sure you want to clear and truncate "${selectedLog}" to 0 bytes?\n\nThis will permanently delete all records currently in this file. This action cannot be undone.`,
       async () => {
         try {
           await invoke('nginx_clear_log', { path: selectedLog });
@@ -911,14 +1375,20 @@
     );
   }
 
-  async function loadAnalytics() {
+  let lastLoadedAnalyticsLog = $state('');
+
+  async function loadAnalytics(notify = false) {
     analyticsLoading = true;
     try {
       analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', { path: analyticsLogFile });
-      statusStore.setLastCommand(`tail -n 10000 ${analyticsLogFile}`, 0, true);
+      statusStore.setLastCommand(`tail -n 15000 ${analyticsLogFile}`, 0, true);
+      lastLoadedAnalyticsLog = analyticsLogFile;
+      if (notify) {
+        uiStore.addToast(`Refreshed telemetry from ${analyticsLogFile.split('/').pop()}`, 'info');
+      }
     } catch (e) {
       uiStore.addToast(`Failed to load analytics: ${e}`, 'error');
-      statusStore.setLastCommand(`tail -n 10000 ${analyticsLogFile}`, 1, false);
+      statusStore.setLastCommand(`tail -n 15000 ${analyticsLogFile}`, 1, false);
     } finally {
       analyticsLoading = false;
     }
@@ -961,7 +1431,7 @@
     { id: 'www',      label: 'WWW Files', icon: FolderOpen },
     { id: 'logs',     label: 'Logs',     icon: FileText },
     { id: 'analytics',label: 'Analytics',icon: BarChart2 },
-    ...(hasCertbot ? [{ id: 'ssl', label: 'SSL', icon: Lock }] : []),
+    { id: 'ssl',      label: 'SSL / Certs', icon: Lock },
   ] as { id: typeof activeTab; label: string; icon: any }[]);
 
   $effect(() => {
@@ -971,13 +1441,34 @@
     }
   });
 
+  let loadedTabs = new Set<string>();
+  let prevActiveTab = '';
+
   $effect(() => {
-    if (activeTab === 'editor' && configs.length === 0) loadConfigs();
-    if (activeTab === 'sites' && sites.length === 0) loadSites();
-    if (activeTab === 'www' && wwwEntries.length === 0) loadWww();
-    if (activeTab === 'logs' && logFiles.length === 0) loadLogFiles();
-    if (activeTab === 'analytics' && !analyticsData) loadAnalytics();
-    if (activeTab === 'ssl' && sslCerts.length === 0 && hasCertbot) loadSslCerts();
+    const currentTab = activeTab;
+    if (currentTab !== prevActiveTab) {
+      prevActiveTab = currentTab;
+      if (currentTab === 'editor' && !loadedTabs.has('editor')) {
+        loadedTabs.add('editor');
+        loadConfigs();
+      } else if (currentTab === 'sites' && !loadedTabs.has('sites')) {
+        loadedTabs.add('sites');
+        loadSites();
+      } else if (currentTab === 'www' && !loadedTabs.has('www')) {
+        loadedTabs.add('www');
+        loadWww();
+      } else if (currentTab === 'logs' && !loadedTabs.has('logs')) {
+        loadedTabs.add('logs');
+        loadLogFiles();
+      } else if (currentTab === 'analytics') {
+        if (!analyticsData || analyticsLogFile !== lastLoadedAnalyticsLog) {
+          loadAnalytics(false);
+        }
+      } else if (currentTab === 'ssl' && !loadedTabs.has('ssl')) {
+        loadedTabs.add('ssl');
+        if (hasCertbot) loadSslCerts();
+      }
+    }
   });
 
   function hasChanges() {
@@ -993,6 +1484,64 @@
     subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
     icon={Server} 
   >
+    {#if activeTab === 'logs'}
+      <!-- Range Selector (Journal Logs Style) placed in Page Header -->
+      <div class="custom-range-container">
+        <Select bind:value={timeRange} onchange={handleRangeChange} style="height: 30px; width: 140px;">
+          <option value="all">All Logs</option>
+          <option value="1">Last 24 Hours</option>
+          <option value="3">Last 3 Days</option>
+          <option value="7">Last 7 Days</option>
+          <option value="30">Last 30 Days</option>
+          <option value="custom">{customRangeLabel}</option>
+        </Select>
+
+        {#if timeRange === 'custom' && showCustomPopover}
+          <div bind:this={popoverContainer} class="custom-range-popover">
+            <div class="popover-row">
+              <span class="popover-label">From</span>
+              <DatePicker bind:value={customStartDate} placeholder="Start date" />
+              <input
+                type="time"
+                bind:value={customStartTime}
+                class="log-dt"
+              />
+            </div>
+            <div class="popover-row" style="margin-top: 10px;">
+              <span class="popover-label">To</span>
+              <DatePicker bind:value={customEndDate} placeholder="End date" />
+              <input
+                type="time"
+                bind:value={customEndTime}
+                class="log-dt"
+              />
+            </div>
+            <div class="popover-actions">
+              <button
+                type="button"
+                class="popover-btn apply-btn"
+                onclick={() => {
+                  showCustomPopover = false;
+                }}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                class="popover-btn cancel-btn"
+                onclick={() => {
+                  showCustomPopover = false;
+                  if (!customStartDate) timeRange = 'all';
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     {#if aiStore.enabled && installInfo?.installed}
       <Button variant="outline" size="sm" onclick={() => showAiNginxPromptBox = !showAiNginxPromptBox} title="Generate NGINX configuration block with AI">
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Config Generator
@@ -1093,10 +1642,15 @@
             <FolderPlus size={13} /> New Dir
           </Button>
         {:else if activeTab === 'logs'}
-          <div style="width: 220px; max-width: 220px; flex-shrink: 0;">
+          <div style="width: 260px; max-width: 280px; flex-shrink: 0;">
             <Select bind:value={selectedLog} onchange={loadLog} id="nginx-log-select">
+              {#if selectedLog && !logFiles.includes(selectedLog)}
+                <option value={selectedLog}>{selectedLog.split('/').pop()} • Custom</option>
+              {/if}
               {#each logFiles as lf}
-                <option value={lf}>{lf.split('/').pop() || lf}</option>
+                {@const name = lf.split('/').pop() || lf}
+                {@const isRotated = name.includes('-') || name.endsWith('.gz') || name.includes('.1')}
+                <option value={lf}>{name} {isRotated ? '• Archive' : '• Active'}</option>
               {/each}
             </Select>
           </div>
@@ -1130,114 +1684,385 @@
 
       <!-- ══ OVERVIEW ══════════════════════════════════════════════════════ -->
       {#if activeTab === 'overview'}
-        <div class="overview-grid">
-          <!-- Service Status Card -->
-          <div class="card ov-card">
-            <div class="ov-card-header">
-              <div class="ov-card-title">
-                <Activity size={16} />
-                Service Status
+        <div class="tab-section overview-section" style="display:flex; flex-direction:column; gap:20px;">
+          <!-- Top Action Ribbon -->
+          <div class="ov-action-ribbon">
+            <div class="ov-ribbon-left">
+              <div class="ov-service-pill {serviceStatus?.active ? 'active' : 'inactive'}">
+                <span class="status-dot {serviceStatus?.active ? 'dot-active' : 'dot-inactive'}"></span>
+                <span style="font-weight:600; font-size:12.5px;">
+                  {serviceStatus?.active ? 'Nginx Active & Serving Traffic' : 'Nginx Service Stopped'}
+                </span>
+                {#if serviceStatus?.since}
+                  <span class="ov-uptime-tag">Started: {serviceStatus.since}</span>
+                {/if}
               </div>
-              <div class="status-dot {serviceStatus?.active ? 'dot-active' : 'dot-inactive'}"></div>
             </div>
-            {#if serviceStatus}
-              <div class="service-status-badge badge {serviceStatus.active ? 'badge-success' : 'badge-error'}">
-                {serviceStatus.status} — {serviceStatus.sub_state}
-              </div>
-              {#if serviceStatus.since}
-                <p class="ov-since">Since: {serviceStatus.since}</p>
-              {/if}
-            {:else}
-              <p class="ov-since">Loading…</p>
-            {/if}
-            <div class="service-btns">
-              {#each [['start','Start',false], ['stop','Stop',true], ['restart','Restart',false], ['reload','Reload',false]] as [action, label, isDanger]}
-                <Button
-                  class="btn btn-sm {isDanger ? 'btn-danger' : '-outline'}"
-                  onclick={() => doServiceAction(action as string)}
-                  disabled={serviceLoading}
-                  id={`nginx-svc-${action}`}
-                >
-                  {#if action === 'start'}<Play size={12} />
-                  {:else if action === 'stop'}<Square size={12} />
-                  {:else if action === 'restart'}<RotateCcw size={12} />
-                  {:else}<RefreshCw size={12} />
-                  {/if}
-                  {label}
-                </Button>
-              {/each}
-            </div>
-          </div>
 
-          <!-- Config Test Card -->
-          <div class="card ov-card">
-            <div class="ov-card-header">
-              <div class="ov-card-title">
-                <TerminalSquare size={16} />
-                Config Test (nginx -t)
-              </div>
-              <Button class="btn btn-sm -outline" onclick={runTest} disabled={testLoading} id="nginx-run-test">
+            <div class="ov-ribbon-right">
+              <Button 
+                variant="primary" 
+                class="btn-sm" 
+                onclick={testAndReload} 
+                disabled={testLoading || serviceLoading} 
+                title="Test configuration syntax with nginx -t and safely reload service"
+              >
                 {#if testLoading}
                   <div class="spinner-sm"></div>
                 {:else}
-                  <RefreshCw size={12} />
+                  <Zap size={13} />
                 {/if}
-                Run Test
+                <span>Test &amp; Reload Safe</span>
+              </Button>
+
+              <Button 
+                variant="outline" 
+                class="btn-sm" 
+                onclick={() => { activeTab = 'sites'; showNewSiteForm = true; }}
+                title="Create a new virtual host"
+              >
+                <Plus size={13} />
+                <span>New Site</span>
+              </Button>
+
+              <Button 
+                variant="outline" 
+                class="btn-sm" 
+                onclick={() => { newSite.is_proxy = true; activeTab = 'sites'; showNewSiteForm = true; }}
+                title="Create a reverse proxy config"
+              >
+                <ArrowUpRight size={13} />
+                <span>New Proxy</span>
+              </Button>
+
+              <Button 
+                variant="outline" 
+                class="btn-sm" 
+                onclick={() => Promise.all([loadServiceStatus(), loadTestResult(), loadStats(), loadSites()])}
+                title="Refresh all overview statistics"
+              >
+                <RefreshCw size={13} class={serviceLoading || testLoading ? 'animate-spin' : ''} />
+                <span>Refresh</span>
               </Button>
             </div>
-            {#if testResult}
-              <div class="test-result {testResult.passed ? 'test-pass' : 'test-fail'}">
-                {#if testResult.passed}
-                  <CheckCircle size={18} /> <span>Configuration OK</span>
-                {:else}
-                  <XCircle size={18} /> <span>Configuration Error</span>
-                {/if}
+          </div>
+
+          <!-- Hero 2-Column Grid -->
+          <div class="overview-grid">
+            <!-- Card 1: Service Lifecycle -->
+            <div class="card ov-card">
+              <div class="ov-card-header">
+                <div class="ov-card-title">
+                  <Activity size={16} class="text-accent" />
+                  <span>Service Control</span>
+                </div>
+                <span class="badge {serviceStatus?.active ? 'badge-success' : 'badge-error'}">
+                  {serviceStatus ? `${serviceStatus.status} (${serviceStatus.sub_state})` : 'Checking…'}
+                </span>
               </div>
-              <p class="ov-since">{testResult.timestamp}</p>
-              {#if testResult.output && testResult.output.trim()}
-                <pre class="test-output">{testResult.output}</pre>
+
+              <div class="service-control-body">
+                <p class="ov-since" style="margin-bottom: 12px;">
+                  systemd service: <code>nginx.service</code>
+                  {#if serviceStatus?.since}
+                    • Uptime: <strong>{serviceStatus.since}</strong>
+                  {/if}
+                </p>
+
+                <div class="service-btns">
+                  {#each [['start','Start',false,Play], ['stop','Stop',true,Square], ['restart','Restart',false,RotateCcw], ['reload','Reload',false,RefreshCw]] as [action, label, isDanger, Icon]}
+                    <Button
+                      variant={isDanger ? 'danger' : 'outline'}
+                      class="btn-sm"
+                      onclick={() => requestServiceAction(action as string)}
+                      disabled={serviceLoading}
+                      id={`nginx-svc-${action}`}
+                    >
+                      {#if serviceLoading}
+                        <div class="spinner-sm"></div>
+                      {:else}
+                        <Icon size={12} />
+                      {/if}
+                      <span>{label}</span>
+                    </Button>
+                  {/each}
+                </div>
+              </div>
+            </div>
+
+            <!-- Card 2: Configuration Syntax Test (nginx -t) -->
+            <div class="card ov-card">
+              <div class="ov-card-header">
+                <div class="ov-card-title">
+                  <TerminalSquare size={16} class="text-accent" />
+                  <span>Config Test (nginx -t)</span>
+                </div>
+                <Button 
+                  variant="outline" 
+                  class="btn-sm" 
+                  onclick={runTest} 
+                  disabled={testLoading} 
+                  id="nginx-run-test"
+                  title="Run nginx -t syntax validation without dialog"
+                >
+                  {#if testLoading}
+                    <div class="spinner-sm"></div>
+                  {:else}
+                    <RefreshCw size={12} />
+                  {/if}
+                  <span>Run Test</span>
+                </Button>
+              </div>
+
+              {#if testResult}
+                <div class="test-result {testResult.passed ? 'test-pass' : 'test-fail'}">
+                  {#if testResult.passed}
+                    <CheckCircle size={17} /> <span>Configuration Syntax OK</span>
+                  {:else}
+                    <XCircle size={17} /> <span>Configuration Syntax Error</span>
+                  {/if}
+                  <span style="margin-left:auto; font-size:11px; opacity:0.8; font-weight:normal;">{testResult.timestamp}</span>
+                </div>
+
+                {#if testResult.output && testResult.output.trim()}
+                  <div class="test-output-wrap">
+                    <pre class="test-output">{testResult.output}</pre>
+                    <button 
+                      type="button" 
+                      class="inspect-copy-icon-btn" 
+                      style="position:absolute; top:6px; right:8px;"
+                      onclick={() => { navigator.clipboard.writeText(testResult!.output); uiStore.addToast('Copied test output', 'info'); }}
+                      title="Copy test output"
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
+                {/if}
+              {:else}
+                <p class="ov-since">Click "Run Test" to validate configuration syntax.</p>
               {/if}
-            {:else}
-              <p class="ov-since">Run test to see result</p>
-            {/if}
-          </div>
-
-          <!-- Stats Card -->
-          <div class="card ov-card ov-stats-card">
-            <div class="ov-card-header">
-              <div class="ov-card-title">
-                <Globe size={16} />
-                Sites Overview
-              </div>
-              <Button class="btn btn-sm -ghost" onclick={() => Promise.all([loadStats(), loadServiceStatus()])} id="nginx-refresh-stats">
-                <RefreshCw size={12} />
-              </Button>
-            </div>
-            <div class="stats-grid">
-              <div class="stat-item">
-                <span class="stat-value">{stats?.sites_available ?? '—'}</span>
-                <span class="stat-label">Available</span>
-              </div>
-              <div class="stat-item stat-enabled">
-                <span class="stat-value">{stats?.sites_enabled ?? '—'}</span>
-                <span class="stat-label">Enabled</span>
-              </div>
-              <div class="stat-item stat-disabled">
-                <span class="stat-value">{stats?.sites_disabled ?? '—'}</span>
-                <span class="stat-label">Disabled</span>
-              </div>
             </div>
           </div>
 
-          <!-- Version Card -->
+          <!-- Middle 3-Column Metrics Grid -->
+          <div class="overview-tri-grid">
+            <!-- Tri 1: Virtual Hosts & Routing -->
+            <div class="card ov-card">
+              <div class="ov-card-header">
+                <div class="ov-card-title">
+                  <Globe size={15} class="text-accent" />
+                  <span>Virtual Hosts</span>
+                </div>
+                <button type="button" class="ov-link-btn" onclick={() => activeTab = 'sites'}>
+                  <span>Manage</span>
+                  <ArrowUpRight size={12} />
+                </button>
+              </div>
+
+              <div class="stats-grid">
+                <div class="stat-item">
+                  <span class="stat-value">{stats?.sites_available ?? sites.length}</span>
+                  <span class="stat-label">Total</span>
+                </div>
+                <div class="stat-item stat-enabled">
+                  <span class="stat-value">{stats?.sites_enabled ?? sites.filter(s => s.enabled).length}</span>
+                  <span class="stat-label">Active</span>
+                </div>
+                <div class="stat-item stat-disabled">
+                  <span class="stat-value">{stats?.sites_disabled ?? sites.filter(s => !s.enabled).length}</span>
+                  <span class="stat-label">Disabled</span>
+                </div>
+              </div>
+
+              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;">
+                <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Ports:</span>
+                {#each detectedOverviewPorts as p}
+                  <span class="port-badge {p.includes('SSL') ? 'ssl' : 'plain'}">{p}</span>
+                {/each}
+                {#if totalProxiesCount > 0}
+                  <span class="site-meta-pill proxy" style="margin-left:auto;">
+                    <ArrowUpRight size={10} /> {totalProxiesCount} Prox{totalProxiesCount > 1 ? 'ies' : 'y'}
+                  </span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Tri 2: SSL & Encryption -->
+            <div class="card ov-card">
+              <div class="ov-card-header">
+                <div class="ov-card-title">
+                  <Lock size={15} class="text-accent" />
+                  <span>SSL &amp; Security</span>
+                </div>
+                <button type="button" class="ov-link-btn" onclick={() => activeTab = 'ssl'}>
+                  <span>View Certs</span>
+                  <ArrowUpRight size={12} />
+                </button>
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span style="font-size:12px; color:var(--color-text-secondary);">Certbot Engine</span>
+                  <span class="badge {hasCertbot ? 'badge-success' : 'badge-warning'}">
+                    {hasCertbot ? '✓ Ready' : '⚠ Not Installed'}
+                  </span>
+                </div>
+
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span style="font-size:12px; color:var(--color-text-secondary);">Managed Certificates</span>
+                  <span style="font-weight:600; font-size:12.5px; color:var(--color-text-primary);">{sslCerts.length} active</span>
+                </div>
+
+                {#if !hasCertbot}
+                  <div style="display:flex; align-items:center; justify-content:space-between; background:var(--color-bg-base); border:1px solid var(--color-border); border-radius:6px; padding:6px 10px; margin-top:2px;">
+                    <code style="font-family:var(--font-mono); font-size:10.5px; color:var(--color-accent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">sudo dnf install certbot python3-certbot-nginx</code>
+                    <button 
+                      type="button" 
+                      class="inspect-copy-icon-btn" 
+                      onclick={() => { navigator.clipboard.writeText('sudo dnf install certbot python3-certbot-nginx'); uiStore.addToast('Copied installation command', 'info'); }}
+                      title="Copy install command"
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
+                {:else}
+                  <div class="ov-ssl-ok-note">
+                    <CheckCircle size={13} class="text-success" />
+                    <span>Automatic HTTPS &amp; renewal engine ready</span>
+                  </div>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Tri 3: Engine & System Paths -->
+            <div class="card ov-card">
+              <div class="ov-card-header">
+                <div class="ov-card-title">
+                  <Server size={15} class="text-accent" />
+                  <span>Environment Paths</span>
+                </div>
+                {#if installInfo.version}
+                  <span class="version-display" style="padding:2px 8px; font-size:11px;">{installInfo.version}</span>
+                {/if}
+              </div>
+
+              <div class="ov-env-list">
+                <div class="ov-env-item">
+                  <span class="ov-env-label">Main Config:</span>
+                  <button type="button" class="ov-env-btn" onclick={() => activeTab = 'editor'}>
+                    <FileCode size={11} />
+                    <code>/etc/nginx/nginx.conf</code>
+                  </button>
+                </div>
+
+                <div class="ov-env-item">
+                  <span class="ov-env-label">Web Root:</span>
+                  <button type="button" class="ov-env-btn" onclick={() => activeTab = 'www'}>
+                    <FolderOpen size={11} />
+                    <code>/var/www</code>
+                  </button>
+                </div>
+
+                <div class="ov-env-item">
+                  <span class="ov-env-label">Log Stream:</span>
+                  <button type="button" class="ov-env-btn" onclick={() => activeTab = 'logs'}>
+                    <FileText size={11} />
+                    <code>/var/log/nginx/</code>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom: Configured Virtual Hosts Preview Table -->
           <div class="card ov-card">
             <div class="ov-card-header">
-              <div class="ov-card-title"><Server size={16} />Version</div>
+              <div class="ov-card-title">
+                <Globe size={16} class="text-accent" />
+                <span>Configured Virtual Hosts</span>
+                <span class="badge badge-muted" style="margin-left:6px;">{sites.length} total</span>
+              </div>
+              <Button variant="outline" class="btn-sm" onclick={() => activeTab = 'sites'}>
+                <span>Open Sites Manager</span>
+                <ArrowUpRight size={13} />
+              </Button>
             </div>
-            {#if installInfo.version}
-              <div class="version-display">{installInfo.version}</div>
+
+            {#if sites.length === 0}
+              <div class="empty-state" style="padding:24px;">No virtual hosts loaded yet.</div>
+            {:else}
+              <div class="ov-sites-mini-table-wrap">
+                <table class="ov-sites-mini-table">
+                  <thead>
+                    <tr>
+                      <th>Virtual Host</th>
+                      <th>Ports &amp; SSL</th>
+                      <th>Source</th>
+                      <th>Status</th>
+                      <th style="text-align:right;">Quick Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each sites as site}
+                      <tr>
+                        <td>
+                          <div style="display:flex; align-items:center; gap:8px;">
+                            <Globe size={13} class="text-accent" />
+                            <strong>{site.name}</strong>
+                            {#if site.domains && site.domains.length > 0}
+                              {#each site.domains as dom}
+                                <span class="site-meta-pill domain" style="font-size:10px;">{dom}</span>
+                              {/each}
+                            {/if}
+                            {#if site.proxies && site.proxies.length > 0}
+                              {#each site.proxies as prx}
+                                <span class="site-meta-pill proxy" style="font-size:10px;">{prx}</span>
+                              {/each}
+                            {/if}
+                          </div>
+                        </td>
+                        <td>
+                          <div style="display:flex; align-items:center; gap:4px;">
+                            {#if site.ports && site.ports.length > 0}
+                              {#each site.ports as p}
+                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}" style="font-size:10px; padding:1px 5px;">
+                                  {#if p.includes('SSL') || site.has_ssl}<Lock size={9} />{/if}
+                                  {p}
+                                </span>
+                              {/each}
+                            {:else}
+                              <span class="port-badge plain" style="font-size:10px; padding:1px 5px;">80</span>
+                            {/if}
+                          </div>
+                        </td>
+                        <td><span class="badge badge-muted" style="font-size:10.5px;">{site.source}</span></td>
+                        <td>
+                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}" style="font-size:10.5px;">
+                            {site.enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </td>
+                        <td style="text-align:right;">
+                          <div style="display:flex; justify-content:flex-end; gap:6px;">
+                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInspector(site)} title="Quick Inspect">
+                              <Eye size={11} />
+                              <span>Inspect</span>
+                            </Button>
+                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInEditor(site)} title="Edit Config">
+                              <FileCode size={11} />
+                              <span>Edit</span>
+                            </Button>
+                            <Button variant="outline" class="btn-sm" onclick={() => jumpToSiteLogs(site, 'analytics')} title="View Logs">
+                              <BarChart2 size={11} />
+                              <span>Logs</span>
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
             {/if}
-            <p class="ov-since">Installed at <code>/usr/sbin/nginx</code></p>
           </div>
         </div>
 
@@ -1336,58 +2161,227 @@
           {:else if sites.length === 0}
             <div class="empty-state">No site configurations found</div>
           {:else}
+            <!-- Sites Toolbar -->
+            <div class="sites-toolbar">
+              <div class="sites-search-wrap">
+                <SearchBar 
+                  bind:value={siteSearchQuery} 
+                  placeholder="Search sites by name, source, or path…" 
+                />
+              </div>
+              <div class="sites-filter-pills">
+                <button 
+                  type="button" 
+                  class="filter-pill" 
+                  class:active={siteSourceFilter === 'all'} 
+                  onclick={() => siteSourceFilter = 'all'}
+                >
+                  All ({sites.length})
+                </button>
+                <button 
+                  type="button" 
+                  class="filter-pill" 
+                  class:active={siteSourceFilter === 'conf.d'} 
+                  onclick={() => siteSourceFilter = 'conf.d'}
+                >
+                  conf.d ({sites.filter(s => s.source === 'conf.d').length})
+                </button>
+                <button 
+                  type="button" 
+                  class="filter-pill" 
+                  class:active={siteSourceFilter === 'sites-available'} 
+                  onclick={() => siteSourceFilter = 'sites-available'}
+                >
+                  sites-available ({sites.filter(s => s.source === 'sites-available').length})
+                </button>
+              </div>
+            </div>
+
             <div class="table-wrap">
               <table use:tableFeatures>
                 <thead>
                   <tr>
-                    <th>Name</th>
+                    <th>Site &amp; Routing</th>
+                    <th>Ports &amp; SSL</th>
                     <th>Source</th>
                     <th>Status</th>
-                    <th>Path</th>
-                    <th>Actions</th>
+                    <th>Configuration Path</th>
+                    <th style="text-align:right;">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {#each sites as site}
+                  {#if filteredSites.length === 0}
                     <tr>
-                      <td class="site-name">{site.name}</td>
-                      <td><span class="badge badge-muted">{site.source}</span></td>
-                      <td>
-                        <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}">
-                          {site.enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                      </td>
-                      <td><code class="path-code">{site.path}</code></td>
-                      <td>
-                        <div class="row-actions">
-                          {#if site.source === 'sites-available'}
-                            <Button
-                              class="btn btn-sm {site.enabled ? 'btn-outline' : '-primary'}"
-                              onclick={() => toggleSite(site)}
-                              disabled={toggleLoadingFor === site.name}
-                              id={`nginx-toggle-${site.name}`}
-                            >
-                              {#if toggleLoadingFor === site.name}
-                                <div class="spinner-sm"></div>
-                              {:else if site.enabled}
-                                <EyeOff size={12} />
-                              {:else}
-                                <Eye size={12} />
-                              {/if}
-                              {site.enabled ? 'Disable' : 'Enable'}
-                            </Button>
-                          {/if}
-                          <Button
-                            class="btn btn-sm -danger"
-                            onclick={() => confirmDeleteSite(site)}
-                            id={`nginx-delete-site-${site.name}`}
-                          >
-                            <Trash2 size={12} /> Delete
-                          </Button>
-                        </div>
+                      <td colspan="6" style="text-align:center; padding:32px; color:var(--color-text-muted);">
+                        No sites matching "{siteSearchQuery}"
                       </td>
                     </tr>
-                  {/each}
+                  {:else}
+                    {#each filteredSites as site}
+                      <tr class="site-row" oncontextmenu={(e) => handleSiteContextMenu(e, site)}>
+                        <!-- Column 1: Site Name & Routing -->
+                        <td class="site-name-cell-wrapper">
+                          <div style="display:flex; flex-direction:column; gap:4px;">
+                            <button 
+                              type="button" 
+                              class="site-name-btn" 
+                              onclick={() => openSiteInEditor(site)} 
+                              title="Open {site.name} in Config Editor"
+                            >
+                              <div class="site-name-icon-box">
+                                <Globe size={14} class="site-name-icon" />
+                              </div>
+                              <div class="site-name-info">
+                                <span class="site-name-title">{site.name}</span>
+                              </div>
+                            </button>
+
+                            <!-- Detected Domains & Proxy Targets -->
+                            {#if (site.domains && site.domains.length > 0) || (site.proxies && site.proxies.length > 0)}
+                              <div class="site-routing-tags">
+                                {#if site.domains}
+                                  {#each site.domains as dom}
+                                    <span class="site-meta-pill domain" title="Configured Server Name">
+                                      <Globe size={10} />
+                                      <span>{dom}</span>
+                                    </span>
+                                  {/each}
+                                {/if}
+                                {#if site.proxies}
+                                  {#each site.proxies as prx}
+                                    <span class="site-meta-pill proxy" title="Reverse Proxy Target">
+                                      <ArrowUpRight size={10} />
+                                      <span>{prx}</span>
+                                    </span>
+                                  {/each}
+                                {/if}
+                              </div>
+                            {/if}
+                          </div>
+                        </td>
+
+                        <!-- Column 2: Ports & SSL -->
+                        <td>
+                          <div class="site-ports-cell">
+                            {#if site.ports && site.ports.length > 0}
+                              {#each site.ports as p}
+                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}">
+                                  {#if p.includes('SSL') || site.has_ssl}
+                                    <Lock size={10} />
+                                  {/if}
+                                  <span>{p}</span>
+                                </span>
+                              {/each}
+                            {:else}
+                              <span class="port-badge plain">80</span>
+                            {/if}
+
+                            {#if !site.has_ssl}
+                              <button 
+                                type="button" 
+                                class="btn-quick-ssl-badge" 
+                                onclick={() => openQuickSsl(site)} 
+                                title="Issue automated Let's Encrypt SSL certificate via Certbot"
+                              >
+                                <Sparkles size={10} />
+                                <span>Get SSL</span>
+                              </button>
+                            {/if}
+                          </div>
+                        </td>
+
+                        <!-- Column 3: Source -->
+                        <td><span class="badge badge-muted">{site.source}</span></td>
+
+                        <!-- Column 4: Status -->
+                        <td>
+                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}">
+                            {site.enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </td>
+
+                        <!-- Column 5: Path -->
+                        <td>
+                          <div 
+                            class="site-path-wrap" 
+                            title="Click to copy path" 
+                            onclick={() => { navigator.clipboard.writeText(site.path); uiStore.addToast('Copied site path', 'info'); }}
+                          >
+                            <code class="path-code">{site.path}</code>
+                            <Copy size={11} class="path-copy-icon" />
+                          </div>
+                        </td>
+
+                        <!-- Column 6: Actions -->
+                        <td style="text-align: right;">
+                          <div class="row-actions" style="justify-content: flex-end;">
+                            <KebabMenu align="right" title={`Actions for ${site.name}`}>
+                              <button class="menu-item" onclick={() => openSiteInspector(site)}>
+                                <Eye size={13} />
+                                <span>Quick Inspect</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => openSiteInEditor(site)}>
+                                <FileCode size={13} />
+                                <span>Edit in Full Editor</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => openCloneModal(site)}>
+                                <Copy size={13} />
+                                <span>Clone / Duplicate Site</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => jumpToSiteLogs(site, 'analytics')}>
+                                <BarChart2 size={13} />
+                                <span>View Logs &amp; Analytics</span>
+                              </button>
+
+                              {#if !site.has_ssl}
+                                <button class="menu-item" onclick={() => openQuickSsl(site)}>
+                                  <Sparkles size={13} class="text-accent" />
+                                  <span>Issue Let's Encrypt SSL</span>
+                                </button>
+                              {/if}
+
+                              {#if site.source === 'sites-available'}
+                                <button 
+                                  class="menu-item" 
+                                  onclick={() => toggleSite(site)}
+                                  disabled={toggleLoadingFor === site.name}
+                                >
+                                  {#if site.enabled}
+                                    <EyeOff size={13} />
+                                    <span>Disable Site</span>
+                                  {:else}
+                                    <Eye size={13} />
+                                    <span>Enable Site</span>
+                                  {/if}
+                                </button>
+                              {/if}
+
+                              <button 
+                                class="menu-item" 
+                                onclick={() => { navigator.clipboard.writeText(site.path); uiStore.addToast('Copied site path to clipboard', 'info'); }}
+                              >
+                                <Copy size={13} />
+                                <span>Copy File Path</span>
+                              </button>
+
+                              <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
+
+                              <button 
+                                class="menu-item danger" 
+                                onclick={() => confirmDeleteSite(site)}
+                              >
+                                <Trash2 size={13} />
+                                <span>Delete Site</span>
+                              </button>
+                            </KebabMenu>
+                          </div>
+                        </td>
+                      </tr>
+                    {/each}
+                  {/if}
                 </tbody>
               </table>
             </div>
@@ -1514,13 +2508,50 @@
       {:else if activeTab === 'www'}
         <div class="www-layout">
           <!-- Tree -->
-          <div class="www-tree">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="www-tree" oncontextmenu={(e) => handleWwwContextMenu(e, null)}>
+            <!-- Tree Header Toolbar -->
+            <div class="www-tree-header">
+              <span class="www-tree-title">
+                <FolderOpen size={14} class="text-accent" />
+                <span>/var/www Root</span>
+              </span>
+              <div class="www-tree-header-actions">
+                <Button 
+                  variant="ghost" 
+                  class="btn-xs" 
+                  onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; }} 
+                  title="New Folder" 
+                  id="nginx-new-folder-top"
+                >
+                  <FolderPlus size={12} />
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  class="btn-xs" 
+                  onclick={() => uploadFile('/var/www')} 
+                  title="Upload File" 
+                  id="nginx-upload-top"
+                >
+                  <Upload size={12} />
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  class="btn-xs" 
+                  onclick={loadWww} 
+                  title="Refresh Files" 
+                  id="nginx-refresh-www-top"
+                >
+                  <RefreshCw size={12} class={wwwLoading ? 'animate-spin-slow' : ''} />
+                </Button>
+              </div>
+            </div>
 
             {#if showNewDirForm}
               <div class="new-dir-form">
-                <input type="text" bind:value={newDirName} placeholder="folder-name" id="nginx-new-dir-name" />
-                <Button variant="primary" class=" btn-sm" onclick={createDir} id="nginx-create-dir">Create</Button>
-                <Button variant="ghost" class=" btn-sm" onclick={() => (showNewDirForm = false)}>✕</Button>
+                <input type="text" bind:value={newDirName} placeholder="Folder name..." id="nginx-new-dir-name" />
+                <Button variant="primary" class="btn-xs" onclick={createDir} id="nginx-create-dir">Create</Button>
+                <Button variant="ghost" class="btn-xs" onclick={() => (showNewDirForm = false)}>✕</Button>
               </div>
             {/if}
             {#if wwwLoading}
@@ -1536,28 +2567,155 @@
             {/if}
           </div>
 
-          <!-- File Viewer -->
+          <!-- File / Folder Viewer -->
           <div class="www-viewer">
             {#if selectedWwwEntry && !selectedWwwEntry.is_dir}
               <div class="viewer-header">
-                <span class="editor-filename"><FileText size={14} />{selectedWwwEntry.name}</span>
-                <div class="header-actions">
+                <div class="viewer-header-info">
+                  <FileText size={15} class="text-accent" />
+                  <span class="editor-filename">{selectedWwwEntry.name}</span>
                   <span class="badge badge-muted">{formatSize(selectedWwwEntry.size)}</span>
-                  <Button variant="danger" class=" btn-sm" onclick={() => confirmDeleteWww(selectedWwwEntry!)} id="nginx-delete-www-selected">
+                  <span class="viewer-path-tag" title="Click to copy path" onclick={() => { navigator.clipboard.writeText(selectedWwwEntry!.path); uiStore.addToast('Copied path', 'info'); }}>
+                    {selectedWwwEntry.path}
+                  </span>
+                </div>
+                <div class="header-actions">
+                  <Button 
+                    variant="outline" 
+                    class="btn-sm" 
+                    onclick={() => { renamingEntry = selectedWwwEntry; renameValue = selectedWwwEntry!.name; }} 
+                    title="Rename File"
+                  >
+                    <Edit3 size={12} /> Rename
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    class="btn-sm" 
+                    onclick={() => { navigator.clipboard.writeText(selectedWwwEntry!.path); uiStore.addToast('Copied path to clipboard', 'info'); }} 
+                    title="Copy Path"
+                  >
+                    <Copy size={12} /> Copy Path
+                  </Button>
+                  <Button 
+                    variant="danger" 
+                    class="btn-sm" 
+                    onclick={() => confirmDeleteWww(selectedWwwEntry!)} 
+                    id="nginx-delete-www-selected"
+                  >
                     <Trash2 size={12} /> Delete
                   </Button>
                 </div>
               </div>
+
               {#if wwwFileLoading}
                 <div class="center-state"><div class="spinner"></div></div>
               {:else}
-                <pre class="file-view">{wwwFileContent}</pre>
+                {@const lines = (wwwFileContent || '').split('\n')}
+                <div class="file-reader-frame">
+                  <!-- Meta Status Toolbar -->
+                  <div class="file-reader-meta">
+                    <div class="file-reader-meta-info">
+                      <span class="file-stat-chip"><FileText size={11} /> {lines.length} lines</span>
+                      <span class="file-stat-chip">{formatSize(selectedWwwEntry.size)}</span>
+                      <span class="file-stat-chip">{(wwwFileContent || '').length.toLocaleString()} chars</span>
+                    </div>
+                    <div class="file-reader-tools">
+                      <button 
+                        type="button" 
+                        class="reader-tool-btn" 
+                        class:active={wwwWrapLines}
+                        onclick={() => wwwWrapLines = !wwwWrapLines}
+                        title="Toggle Line Wrap"
+                      >
+                        <WrapText size={12} />
+                        <span>Wrap</span>
+                      </button>
+                      <button 
+                        type="button" 
+                        class="reader-tool-btn" 
+                        onclick={() => { navigator.clipboard.writeText(wwwFileContent || ''); uiStore.addToast('Copied content to clipboard', 'info'); }}
+                        title="Copy full file content"
+                      >
+                        <Copy size={12} />
+                        <span>Copy Content</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Code Viewport with Gutter -->
+                  <div class="file-code-viewport" class:wrap-lines={wwwWrapLines}>
+                    <div class="code-rows-container">
+                      {#each lines as line, i}
+                        <div class="code-row">
+                          <div class="gutter-num" aria-hidden="true">{i + 1}</div>
+                          <div class="code-line">{line || '\u00A0'}</div>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                </div>
               {/if}
+            {:else if selectedWwwEntry && selectedWwwEntry.is_dir}
+              <div class="viewer-header">
+                <div class="viewer-header-info">
+                  <FolderOpen size={15} class="text-accent" />
+                  <span class="editor-filename">{selectedWwwEntry.name}</span>
+                  <span class="badge badge-info">{selectedWwwEntry.children ? selectedWwwEntry.children.length : 0} items</span>
+                  <span class="viewer-path-tag">{selectedWwwEntry.path}</span>
+                </div>
+                <div class="header-actions">
+                  <Button 
+                    variant="outline" 
+                    class="btn-sm" 
+                    onclick={() => { showNewDirForm = true; newDirParent = selectedWwwEntry!.path; }} 
+                    title="New Subfolder"
+                  >
+                    <FolderPlus size={12} /> Subfolder
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    class="btn-sm" 
+                    onclick={() => uploadFile(selectedWwwEntry!.path)} 
+                    title="Upload File Here"
+                  >
+                    <Upload size={12} /> Upload
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    class="btn-sm" 
+                    onclick={() => { renamingEntry = selectedWwwEntry; renameValue = selectedWwwEntry!.name; }} 
+                    title="Rename Folder"
+                  >
+                    <Edit3 size={12} /> Rename
+                  </Button>
+                  <Button 
+                    variant="danger" 
+                    class="btn-sm" 
+                    onclick={() => confirmDeleteWww(selectedWwwEntry!)} 
+                    id="nginx-delete-www-dir"
+                  >
+                    <Trash2 size={12} /> Delete
+                  </Button>
+                </div>
+              </div>
+              <div class="folder-overview-body">
+                <div class="folder-quick-shortcuts">
+                  <div class="shortcut-card" onclick={() => { showNewDirForm = true; newDirParent = selectedWwwEntry!.path; }}>
+                    <FolderPlus size={20} class="text-accent" />
+                    <span>Create Subfolder</span>
+                  </div>
+                  <div class="shortcut-card" onclick={() => uploadFile(selectedWwwEntry!.path)}>
+                    <Upload size={20} class="text-accent" />
+                    <span>Upload File</span>
+                  </div>
+                </div>
+                <p class="ov-since" style="margin-top:16px;">Right-click any file or directory in the tree to access quick contextual actions.</p>
+              </div>
             {:else}
               <div class="editor-empty">
-                <FolderOpen size={40} />
-                <p>Select a file to view its contents</p>
-                <p class="ov-since">Binary files cannot be displayed</p>
+                <FolderOpen size={44} style="color:var(--color-accent); opacity:0.7;" />
+                <p style="font-weight:600; font-size:14px; margin-top:8px;">No File Selected</p>
+                <p class="ov-since">Select a file from the tree to view contents, or right-click any item to open context actions.</p>
               </div>
             {/if}
           </div>
@@ -1566,6 +2724,32 @@
       <!-- ══ LOGS ══════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'logs'}
         <div class="tab-section log-tab-container">
+          {#if activeSiteContext}
+            <div class="site-context-banner">
+              <div class="context-banner-left">
+                <Globe size={14} class="text-accent" />
+                <span class="context-banner-text">
+                  Site Context: <strong>{activeSiteContext.name}</strong>
+                </span>
+                {#if activeSiteContext.access_log}
+                  <span class="site-context-pill dedicated">
+                    <FileText size={12} class="context-success-icon" />
+                    <span>Dedicated Log File</span>
+                  </span>
+                {:else}
+                  <span class="site-context-pill shared" title="Filtered lines in global log">
+                    <AlertTriangle size={12} class="context-warn-icon" />
+                    <span>Shared Global Log (Filtered by Site)</span>
+                  </span>
+                {/if}
+              </div>
+              <button type="button" class="btn-clear-context" onclick={() => { activeSiteContext = null; logFilter = ''; }} title="Clear site context filter">
+                <span>Clear Site Context</span>
+                <XCircle size={13} />
+              </button>
+            </div>
+          {/if}
+
           <!-- Log Filter Bar & View Toggle -->
           <div class="log-control-ribbon">
             <div class="log-status-pills">
@@ -1786,69 +2970,441 @@
 
       <!-- ══ ANALYTICS ══════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'analytics'}
-        <div class="tab-section" style="display:flex; flex-direction:column; gap:16px;">
-          {#if analyticsLoading}
-            <div class="center-state"><div class="spinner"></div></div>
-          {:else if analyticsData}
-            <div style="display:flex; gap:16px; flex-wrap:wrap;">
-              <!-- Summary Cards -->
-              <div class="card" style="flex:1; min-width:200px;">
-                <h4 style="margin:0 0 8px; color:var(--color-text-secondary); font-size:12px;">Total Requests</h4>
-                <div style="font-size:24px; font-weight:600;">{analyticsData.total_requests}</div>
+        <div class="tab-section analytics-section" style="display:flex; flex-direction:column; gap:20px;">
+          <!-- Analytics Top Header / Filter Bar -->
+          <div class="analytics-header-bar">
+            <div class="analytics-header-left">
+              <div class="analytics-title-wrap">
+                <BarChart2 size={16} class="text-accent" />
+                <span class="analytics-title">Nginx Traffic &amp; Request Telemetry</span>
               </div>
-              <div class="card" style="flex:1; min-width:200px;">
-                <h4 style="margin:0 0 8px; color:var(--color-text-secondary); font-size:12px;">Unique IPs</h4>
-                <div style="font-size:24px; font-weight:600;">{analyticsData.unique_ips}</div>
-              </div>
+              <span class="analytics-log-source-tag">
+                <FileText size={12} /> {analyticsLogFile}
+              </span>
             </div>
 
-            <!-- HTTP Status Codes Bar Chart -->
-            <div class="card">
-              <h3 style="margin-top:0;">HTTP Status Codes</h3>
-              <div style="display:flex; height:24px; border-radius:4px; overflow:hidden; background:var(--color-bg-raised); margin-top:12px; margin-bottom:12px;">
-                {#if analyticsData.total_requests > 0}
-                  <div style="width:{(analyticsData.status_2xx / analyticsData.total_requests) * 100}%; background:var(--color-success);" title="2xx: {analyticsData.status_2xx}"></div>
-                  <div style="width:{(analyticsData.status_3xx / analyticsData.total_requests) * 100}%; background:var(--color-info);" title="3xx: {analyticsData.status_3xx}"></div>
-                  <div style="width:{(analyticsData.status_4xx / analyticsData.total_requests) * 100}%; background:var(--color-warning);" title="4xx: {analyticsData.status_4xx}"></div>
-                  <div style="width:{(analyticsData.status_5xx / analyticsData.total_requests) * 100}%; background:var(--color-danger);" title="5xx: {analyticsData.status_5xx}"></div>
+            <div class="analytics-header-right">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Log Source:</span>
+                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} style="height:28px; width:260px;">
+                  {#if analyticsLogFile && !logFiles.includes(analyticsLogFile)}
+                    <option value={analyticsLogFile}>{analyticsLogFile.split('/').pop()} • Custom</option>
+                  {/if}
+                  {#if logFiles.length > 0}
+                    {#each logFiles as lf}
+                      {@const name = lf.split('/').pop() || lf}
+                      {@const isRotated = name.includes('-') || name.endsWith('.gz') || name.includes('.1')}
+                      <option value={lf}>{name} {isRotated ? '• Archive' : '• Active'}</option>
+                    {/each}
+                  {:else}
+                    <option value="/var/log/nginx/access.log">access.log • Active</option>
+                    <option value="/var/log/nginx/error.log">error.log • Active</option>
+                  {/if}
+                </Select>
+              </div>
+
+              <span class="analytics-sample-badge">
+                <Radio size={11} class="text-accent pulsing" />
+                <span>{analyticsLogFile.includes('error') ? 'Error Event Diagnostics' : 'Sample: 15,000 requests'}</span>
+              </span>
+
+              <Button variant="outline" class="btn-sm" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
+                <RefreshCw size={12} class={analyticsLoading ? 'animate-spin' : ''} />
+                <span>Refresh</span>
+              </Button>
+            </div>
+          </div>
+
+          {#if activeSiteContext}
+            <div class="site-context-banner">
+              <div class="context-banner-left">
+                <Globe size={14} class="text-accent" />
+                <span class="context-banner-text">
+                  Site Context: <strong>{activeSiteContext.name}</strong>
+                </span>
+                {#if activeSiteContext.access_log}
+                  <span class="site-context-pill dedicated">
+                    <FileText size={12} class="context-success-icon" />
+                    <span>Dedicated Log: <code>{activeSiteContext.access_log}</code></span>
+                  </span>
                 {:else}
-                  <div style="width:100%; display:flex; align-items:center; justify-content:center; color:var(--color-text-muted); font-size:11px; background:rgba(255,255,255,0.02);">No data available</div>
+                  <span class="site-context-pill shared" title="No custom access_log directive defined inside {activeSiteContext.name}; Nginx directs all traffic to the default global access.log">
+                    <AlertTriangle size={12} class="context-warn-icon" />
+                    <span>Shared Global Log (No custom access_log in config)</span>
+                  </span>
                 {/if}
               </div>
-              <div style="display:flex; gap:16px; font-size:12px; flex-wrap:wrap;">
-                <span style="color:var(--color-success)">● 2xx ({(analyticsData.status_2xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
-                <span style="color:var(--color-info)">● 3xx ({(analyticsData.status_3xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
-                <span style="color:var(--color-warning)">● 4xx ({(analyticsData.status_4xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
-                <span style="color:var(--color-danger)">● 5xx ({(analyticsData.status_5xx/analyticsData.total_requests * 100 || 0).toFixed(1)}%)</span>
+              <button type="button" class="btn-clear-context" onclick={() => activeSiteContext = null} title="Clear site context">
+                <span>Clear Site Context</span>
+                <XCircle size={13} />
+              </button>
+            </div>
+          {/if}
+
+          {#if analyticsLoading}
+            <div class="center-state" style="padding:60px 0;"><div class="spinner"></div></div>
+          {:else if analyticsData}
+            <!-- ─── 5 Large Hero KPI Cards ──────────────────────────────── -->
+            <div class="analytics-kpi-grid">
+              <!-- KPI 1: Total Requests / Error Events -->
+              <div class="analytics-kpi-card card">
+                <div class="analytics-kpi-header">
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Total Error Events' : 'Total Requests'}</span>
+                  <div class="analytics-kpi-icon-wrap cyan">
+                    <Activity size={18} />
+                  </div>
+                </div>
+                <div class="analytics-kpi-value cyan">{analyticsData.total_requests.toLocaleString()}</div>
+                <div class="analytics-kpi-footer">
+                  <span class="analytics-kpi-subtext">{analyticsLogFile.includes('error') ? 'Error entries in log stream' : 'Requests in analyzed log stream'}</span>
+                  <span class="analytics-kpi-tag cyan">{analyticsLogFile.includes('error') ? 'Errors' : 'Live'}</span>
+                </div>
+              </div>
+
+              <!-- KPI 2: Unique Visitors / Affected IPs -->
+              <div class="analytics-kpi-card card">
+                <div class="analytics-kpi-header">
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Affected Client IPs' : 'Unique Client IPs'}</span>
+                  <div class="analytics-kpi-icon-wrap purple">
+                    <Globe size={18} />
+                  </div>
+                </div>
+                <div class="analytics-kpi-value purple">{analyticsData.unique_ips.toLocaleString()}</div>
+                <div class="analytics-kpi-footer">
+                  <span class="analytics-kpi-subtext">
+                    {((analyticsData.unique_ips / (analyticsData.total_requests || 1)) * 100).toFixed(1)}% unique visitor ratio
+                  </span>
+                  <span class="analytics-kpi-tag purple">Clients</span>
+                </div>
+              </div>
+
+              <!-- KPI 3: Bandwidth Sent -->
+              <div class="analytics-kpi-card card">
+                <div class="analytics-kpi-header">
+                  <span class="analytics-kpi-label">Data Transferred</span>
+                  <div class="analytics-kpi-icon-wrap blue">
+                    <Download size={18} />
+                  </div>
+                </div>
+                <div class="analytics-kpi-value blue">{analyticsLogFile.includes('error') ? 'Diagnostic Log' : formatBytes(analyticsData.total_bytes_sent)}</div>
+                <div class="analytics-kpi-footer">
+                  <span class="analytics-kpi-subtext">{analyticsLogFile.includes('error') ? 'Error diagnostic stream' : 'Total outbound response payload'}</span>
+                  <span class="analytics-kpi-tag blue">{analyticsLogFile.includes('error') ? 'Diagnostics' : 'Bandwidth'}</span>
+                </div>
+              </div>
+
+              <!-- KPI 4: Success Rate (2xx/3xx) -->
+              <div class="analytics-kpi-card card">
+                <div class="analytics-kpi-header">
+                  <span class="analytics-kpi-label">Success Rate</span>
+                  <div class="analytics-kpi-icon-wrap green">
+                    <CheckCircle size={18} />
+                  </div>
+                </div>
+                <div class="analytics-kpi-value green">{analyticsData.success_rate.toFixed(1)}%</div>
+                <div class="analytics-kpi-footer">
+                  <span class="analytics-kpi-subtext">{(analyticsData.status_2xx + analyticsData.status_3xx).toLocaleString()} successful hits</span>
+                  <span class="analytics-kpi-tag green">Healthy</span>
+                </div>
+              </div>
+
+              <!-- KPI 5: Error Rate (4xx/5xx) -->
+              <div class="analytics-kpi-card card">
+                <div class="analytics-kpi-header">
+                  <span class="analytics-kpi-label">Error Rate</span>
+                  <div class="analytics-kpi-icon-wrap amber">
+                    <AlertTriangle size={18} />
+                  </div>
+                </div>
+                <div class="analytics-kpi-value {analyticsData.error_rate > 5 ? 'red' : 'amber'}">{analyticsData.error_rate.toFixed(1)}%</div>
+                <div class="analytics-kpi-footer">
+                  <span class="analytics-kpi-subtext">{(analyticsData.status_4xx + analyticsData.status_5xx).toLocaleString()} 4xx/5xx responses</span>
+                  <span class="analytics-kpi-tag {analyticsData.error_rate > 5 ? 'red' : 'amber'}">
+                    {analyticsData.error_rate > 5 ? 'Elevated' : 'Normal'}
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div style="display:flex; gap:16px;">
-              <div class="card" style="flex:1;">
-                <h3 style="margin-top:0;">Top IP Addresses</h3>
-                <table class="table" style="margin-top:12px;">
-                  <thead><tr><th>IP Address</th><th style="text-align:right">Hits</th></tr></thead>
-                  <tbody>
-                    {#each analyticsData.top_ips as [ip, count]}
-                      <tr><td>{ip}</td><td style="text-align:right">{count}</td></tr>
-                    {:else}
-                      <tr><td colspan="2" style="text-align:center; padding:24px; color:var(--color-text-muted); font-size:13px;">No IP data available</td></tr>
-                    {/each}
-                  </tbody>
-                </table>
+            <!-- ─── HTTP Status Code Breakdown ──────────────────────────── -->
+            <div class="card analytics-status-card">
+              <div class="analytics-card-header">
+                <div>
+                  <h3 class="analytics-card-title">HTTP Response Code Health</h3>
+                  <p class="analytics-card-subtitle">Distribution of HTTP status codes across all processed server transactions</p>
+                </div>
+                <div class="analytics-status-counts-summary">
+                  <span class="status-summary-item green">● 2xx: {analyticsData.status_2xx.toLocaleString()}</span>
+                  <span class="status-summary-item blue">● 3xx: {analyticsData.status_3xx.toLocaleString()}</span>
+                  <span class="status-summary-item amber">● 4xx: {analyticsData.status_4xx.toLocaleString()}</span>
+                  <span class="status-summary-item red">● 5xx: {analyticsData.status_5xx.toLocaleString()}</span>
+                </div>
               </div>
-              <div class="card" style="flex:1;">
-                <h3 style="margin-top:0;">Top Requested Paths</h3>
-                <table class="table" style="margin-top:12px;">
-                  <thead><tr><th>Path</th><th style="text-align:right">Hits</th></tr></thead>
-                  <tbody>
-                    {#each analyticsData.top_paths as [path, count]}
-                      <tr><td style="word-break:break-all;">{path}</td><td style="text-align:right">{count}</td></tr>
-                    {:else}
-                      <tr><td colspan="2" style="text-align:center; padding:24px; color:var(--color-text-muted); font-size:13px;">No path data available</td></tr>
-                    {/each}
-                  </tbody>
-                </table>
+
+              <!-- Multi-color Segmented Status Bar -->
+              <div class="analytics-status-bar">
+                {#if analyticsData.total_requests > 0}
+                  <div class="status-seg seg-2xx" style="width:{(analyticsData.status_2xx / analyticsData.total_requests) * 100}%;" title="2xx Success: {analyticsData.status_2xx}"></div>
+                  <div class="status-seg seg-3xx" style="width:{(analyticsData.status_3xx / analyticsData.total_requests) * 100}%;" title="3xx Redirect: {analyticsData.status_3xx}"></div>
+                  <div class="status-seg seg-4xx" style="width:{(analyticsData.status_4xx / analyticsData.total_requests) * 100}%;" title="4xx Client Error: {analyticsData.status_4xx}"></div>
+                  <div class="status-seg seg-5xx" style="width:{(analyticsData.status_5xx / analyticsData.total_requests) * 100}%;" title="5xx Server Error: {analyticsData.status_5xx}"></div>
+                {:else}
+                  <div class="status-seg-empty">No status data recorded</div>
+                {/if}
+              </div>
+
+              <!-- Status Pills Grid -->
+              <div class="analytics-status-pills-grid">
+                <div class="status-pill-card green">
+                  <div class="status-pill-top">
+                    <span class="status-pill-dot green"></span>
+                    <span class="status-pill-name">2xx Success</span>
+                    <span class="status-pill-pct">{(analyticsData.status_2xx / (analyticsData.total_requests || 1) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="status-pill-count">{analyticsData.status_2xx.toLocaleString()} requests</div>
+                </div>
+
+                <div class="status-pill-card blue">
+                  <div class="status-pill-top">
+                    <span class="status-pill-dot blue"></span>
+                    <span class="status-pill-name">3xx Redirection</span>
+                    <span class="status-pill-pct">{(analyticsData.status_3xx / (analyticsData.total_requests || 1) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="status-pill-count">{analyticsData.status_3xx.toLocaleString()} requests</div>
+                </div>
+
+                <div class="status-pill-card amber">
+                  <div class="status-pill-top">
+                    <span class="status-pill-dot amber"></span>
+                    <span class="status-pill-name">4xx Client Error</span>
+                    <span class="status-pill-pct">{(analyticsData.status_4xx / (analyticsData.total_requests || 1) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="status-pill-count">{analyticsData.status_4xx.toLocaleString()} requests</div>
+                </div>
+
+                <div class="status-pill-card red">
+                  <div class="status-pill-top">
+                    <span class="status-pill-dot red"></span>
+                    <span class="status-pill-name">5xx Server Error</span>
+                    <span class="status-pill-pct">{(analyticsData.status_5xx / (analyticsData.total_requests || 1) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div class="status-pill-count">{analyticsData.status_5xx.toLocaleString()} requests</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ─── 24-Hour Traffic Activity Histogram ───────────────────── -->
+            <div class="card analytics-hourly-card">
+              <div class="analytics-card-header">
+                <div>
+                  <h3 class="analytics-card-title">24-Hour Request Activity Timeline</h3>
+                  <p class="analytics-card-subtitle">Hourly traffic volume distribution across the parsed sample window</p>
+                </div>
+                <div class="analytics-hourly-peak-badge">
+                  <TrendingUp size={13} class="text-accent" />
+                  <span>24-Hour Profile</span>
+                </div>
+              </div>
+
+              {#if analyticsData.hourly_traffic && analyticsData.hourly_traffic.length > 0}
+                {@const maxHourly = Math.max(...analyticsData.hourly_traffic.map(h => h[1]), 1)}
+                <div class="analytics-hourly-chart">
+                  {#each analyticsData.hourly_traffic as [hour, count]}
+                    {@const heightPct = Math.max((count / maxHourly) * 100, 4)}
+                    {@const pctShare = ((count / (analyticsData.total_requests || 1)) * 100).toFixed(1)}
+                    <div class="analytics-hourly-col">
+                      <div class="analytics-hourly-bar-wrap">
+                        <div class="analytics-hourly-bar" style="height: {heightPct}%;">
+                          <div class="hourly-bar-tooltip">
+                            <span class="tooltip-time">{hour}</span>
+                            <span class="tooltip-val">{count.toLocaleString()} reqs</span>
+                            <span class="tooltip-pct">({pctShare}%)</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span class="analytics-hourly-label">{hour.substring(0, 2)}h</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="empty-state">No hourly traffic data available</div>
+              {/if}
+            </div>
+
+            <!-- ─── 2x2 Rich Sysadmin Telemetry Grid ─────────────────────── -->
+            <div class="analytics-details-grid">
+              <!-- Table 1: Top Client IPs -->
+              <div class="card analytics-table-card">
+                <div class="analytics-card-header">
+                  <div>
+                    <h3 class="analytics-card-title">Top Client IP Addresses</h3>
+                    <p class="analytics-card-subtitle">Highest volume origin addresses and client endpoints</p>
+                  </div>
+                  <span class="badge badge-outline">{analyticsData.top_ips.length} IPs</span>
+                </div>
+
+                <div class="analytics-table-wrap">
+                  <table class="table analytics-table">
+                    <thead>
+                      <tr>
+                        <th style="width:36px;">#</th>
+                        <th>Client IP</th>
+                        <th style="width:130px;">Traffic Share</th>
+                        <th style="text-align:right; width:70px;">Hits</th>
+                        <th style="width:36px;"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each analyticsData.top_ips as [ip, count], idx}
+                        {@const pct = (count / (analyticsData.total_requests || 1)) * 100}
+                        <tr>
+                          <td class="analytics-rank">{idx + 1}</td>
+                          <td>
+                            <div class="analytics-ip-cell">
+                              <span class="analytics-ip-addr">{ip}</span>
+                              {#if ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.') || ip === '127.0.0.1'}
+                                <span class="analytics-sub-badge">LAN</span>
+                              {:else}
+                                <span class="analytics-sub-badge public">WAN</span>
+                              {/if}
+                            </div>
+                          </td>
+                          <td>
+                            <div class="analytics-prog-wrap">
+                              <div class="analytics-prog-bar cyan" style="width: {pct}%;"></div>
+                              <span class="analytics-prog-pct">{pct.toFixed(1)}%</span>
+                            </div>
+                          </td>
+                          <td style="text-align:right; font-family:var(--font-mono); font-weight:600;">{count.toLocaleString()}</td>
+                          <td>
+                            <button 
+                              class="analytics-copy-btn" 
+                              onclick={() => { navigator.clipboard.writeText(ip); uiStore.addToast(`Copied ${ip}`, 'info'); }} 
+                              title="Copy IP Address"
+                            >
+                              <Copy size={11} />
+                            </button>
+                          </td>
+                        </tr>
+                      {:else}
+                        <tr><td colspan="5" class="empty-state">No IP data recorded</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Table 2: Top Requested URL Endpoints -->
+              <div class="card analytics-table-card">
+                <div class="analytics-card-header">
+                  <div>
+                    <h3 class="analytics-card-title">Top Requested Endpoints</h3>
+                    <p class="analytics-card-subtitle">Most frequently hit URIs and application routes</p>
+                  </div>
+                  <span class="badge badge-outline">{analyticsData.top_paths.length} Routes</span>
+                </div>
+
+                <div class="analytics-table-wrap">
+                  <table class="table analytics-table">
+                    <thead>
+                      <tr>
+                        <th style="width:36px;">#</th>
+                        <th>Path URI</th>
+                        <th style="width:130px;">Traffic Share</th>
+                        <th style="text-align:right; width:70px;">Hits</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each analyticsData.top_paths as [path, count], idx}
+                        {@const pct = (count / (analyticsData.total_requests || 1)) * 100}
+                        <tr>
+                          <td class="analytics-rank">{idx + 1}</td>
+                          <td>
+                            <span class="analytics-path-text" title={path}>{path}</span>
+                          </td>
+                          <td>
+                            <div class="analytics-prog-wrap">
+                              <div class="analytics-prog-bar purple" style="width: {pct}%;"></div>
+                              <span class="analytics-prog-pct">{pct.toFixed(1)}%</span>
+                            </div>
+                          </td>
+                          <td style="text-align:right; font-family:var(--font-mono); font-weight:600;">{count.toLocaleString()}</td>
+                        </tr>
+                      {:else}
+                        <tr><td colspan="4" class="empty-state">No path data recorded</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Card 3: HTTP Methods & User Agents -->
+              <div class="card analytics-table-card">
+                <div class="analytics-card-header">
+                  <div>
+                    <h3 class="analytics-card-title">HTTP Methods &amp; Protocol</h3>
+                    <p class="analytics-card-subtitle">Distribution of HTTP verbs in client requests</p>
+                  </div>
+                </div>
+
+                <div class="analytics-methods-container">
+                  {#each analyticsData.top_methods as [method, count]}
+                    {@const pct = (count / (analyticsData.total_requests || 1)) * 100}
+                    <div class="analytics-method-row">
+                      <div class="analytics-method-badge-wrap">
+                        <span class="analytics-method-tag method-{method.toLowerCase()}">{method}</span>
+                        <span class="analytics-method-count">{count.toLocaleString()} requests</span>
+                      </div>
+                      <div class="analytics-prog-wrap" style="flex:1;">
+                        <div class="analytics-prog-bar green" style="width: {pct}%;"></div>
+                        <span class="analytics-prog-pct">{pct.toFixed(1)}%</span>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+
+                <div class="analytics-card-header" style="margin-top:20px; padding-top:16px; border-top:1px solid var(--color-border);">
+                  <div>
+                    <h3 class="analytics-card-title">Traffic Sources / Referrers</h3>
+                    <p class="analytics-card-subtitle">Incoming referrer domains</p>
+                  </div>
+                </div>
+                <div class="analytics-referrers-list">
+                  {#each analyticsData.top_referrers as [ref, count]}
+                    <div class="analytics-ref-row">
+                      <span class="analytics-ref-name" title={ref}>{ref}</span>
+                      <span class="analytics-ref-count">{count.toLocaleString()} hits</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+
+              <!-- Card 4: User Agents & Clients / Bots -->
+              <div class="card analytics-table-card">
+                <div class="analytics-card-header">
+                  <div>
+                    <h3 class="analytics-card-title">User Agents &amp; Client Software</h3>
+                    <p class="analytics-card-subtitle">Browsers, automated scripts, CLI tools, and web crawlers</p>
+                  </div>
+                </div>
+
+                <div class="analytics-ua-list">
+                  {#each analyticsData.top_user_agents as [ua, count]}
+                    {@const pct = (count / (analyticsData.total_requests || 1)) * 100}
+                    <div class="analytics-ua-row">
+                      <div class="analytics-ua-info">
+                        <span class="analytics-ua-name">{ua}</span>
+                        <span class="analytics-ua-count">{count.toLocaleString()} hits</span>
+                      </div>
+                      <div class="analytics-prog-wrap">
+                        <div class="analytics-prog-bar blue" style="width: {pct}%;"></div>
+                        <span class="analytics-prog-pct">{pct.toFixed(1)}%</span>
+                      </div>
+                    </div>
+                  {:else}
+                    <div class="empty-state">No User Agent data available</div>
+                  {/each}
+                </div>
               </div>
             </div>
           {/if}
@@ -1857,17 +3413,43 @@
       <!-- ══ SSL ════════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'ssl'}
         <div class="tab-section">
-
-          <div class="ssl-notice">
-            <AlertTriangle size={14} />
-            To issue a <strong>new</strong> certificate, use the terminal:
-            <code>sudo certbot --nginx -d yourdomain.com</code>
-          </div>
-          {#if sslLoading}
-            <div class="center-state"><div class="spinner"></div></div>
-          {:else if sslCerts.length === 0}
-            <div class="empty-state">No certificates found in /etc/letsencrypt/live/</div>
+          {#if !hasCertbot}
+            <div class="card" style="display:flex; flex-direction:column; gap:14px; padding:32px 24px; align-items:center; text-align:center; max-width:620px; margin:32px auto;">
+              <div style="width:52px; height:52px; border-radius:14px; background:rgba(0,218,243,0.1); border:1px solid rgba(0,218,243,0.25); display:flex; align-items:center; justify-content:center; color:var(--color-accent);">
+                <Lock size={26} />
+              </div>
+              <div>
+                <h3 style="margin:0 0 6px; font-size:16px; font-weight:600; color:var(--color-text-primary);">Certbot Not Installed</h3>
+                <p style="margin:0; font-size:13px; color:var(--color-text-secondary); line-height:1.5;">
+                  Certbot automates obtaining and renewing Let's Encrypt SSL/TLS certificates and configuring Nginx HTTPS.
+                </p>
+              </div>
+              <div style="display:flex; align-items:center; gap:10px; background:var(--color-bg-base); border:1px solid var(--color-border); border-radius:8px; padding:10px 16px; width:100%; justify-content:space-between;">
+                <code style="font-family:var(--font-mono); font-size:12.5px; color:var(--color-accent);">sudo dnf install certbot python3-certbot-nginx</code>
+                <button 
+                  type="button" 
+                  class="inspect-copy-icon-btn" 
+                  onclick={() => { navigator.clipboard.writeText('sudo dnf install certbot python3-certbot-nginx'); uiStore.addToast('Copied installation command', 'info'); }}
+                  title="Copy installation command"
+                >
+                  <Copy size={14} />
+                </button>
+              </div>
+              <p style="margin:0; font-size:11.5px; color:var(--color-text-muted);">
+                For Debian / Ubuntu systems, use <code>sudo apt install certbot python3-certbot-nginx</code>
+              </p>
+            </div>
           {:else}
+            <div class="ssl-notice">
+              <AlertTriangle size={14} />
+              To issue a <strong>new</strong> certificate, click the <strong>Get SSL</strong> button in the Sites tab or run:
+              <code>sudo certbot --nginx -d yourdomain.com</code>
+            </div>
+            {#if sslLoading}
+              <div class="center-state"><div class="spinner"></div></div>
+            {:else if sslCerts.length === 0}
+              <div class="empty-state">No certificates found in /etc/letsencrypt/live/</div>
+            {:else}
             <div class="ssl-grid">
               {#each sslCerts as cert}
                 <div class="card ssl-card">
@@ -1901,6 +3483,7 @@
               {/each}
             </div>
           {/if}
+        {/if}
         </div>
       {/if}
     </div>
@@ -1909,18 +3492,24 @@
 
 <!-- ─── WWW Tree Node Snippet ─────────────────────────────────────────────── -->
 {#snippet wwwTreeNode(entry: WwwEntry, depth: number)}
-  <div class="tree-node" style="padding-left: {depth * 16 + 8}px">
+  <div class="tree-node" style="padding-left: {depth * 14 + 6}px">
     <button
       class="tree-item {selectedWwwEntry?.path === entry.path ? 'tree-selected' : ''}"
       onclick={() => viewWwwFile(entry)}
+      oncontextmenu={(e) => handleWwwContextMenu(e, entry)}
       id={`nginx-www-${entry.name}-${depth}`}
+      title="Click to view • Right-click for options"
     >
       {#if entry.is_dir}
-        {#if expandedPaths.has(entry.path)}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}
-        <FolderOpen size={14} />
+        <span class="tree-arrow">
+          {#if expandedPaths.has(entry.path)}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}
+        </span>
+        <FolderOpen size={14} class="tree-icon folder" />
       {:else}
-        <FileText size={14} />
+        <span class="tree-arrow-spacer"></span>
+        <FileText size={14} class="tree-icon file" />
       {/if}
+
       {#if renamingEntry?.path === entry.path}
         <input
           class="rename-input"
@@ -1928,30 +3517,16 @@
           onkeydown={(e) => { if (e.key === 'Enter') doRename(); if (e.key === 'Escape') renamingEntry = null; }}
           onclick={(e) => e.stopPropagation()}
           id={`nginx-rename-${entry.name}`}
+          autofocus
         />
       {:else}
         <span class="tree-name">{entry.name}</span>
       {/if}
+
       {#if !entry.is_dir}
         <span class="tree-size">{formatSize(entry.size)}</span>
       {/if}
     </button>
-    <div class="tree-actions">
-      <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); renamingEntry = entry; renameValue = entry.name; }} title="Rename" id={`nginx-rename-btn-${entry.name}`}>
-        <Edit3 size={11} />
-      </Button>
-      {#if entry.is_dir}
-        <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); uploadFile(entry.path); }} title="Upload file here" id={`nginx-upload-${entry.name}`}>
-          <Upload size={11} />
-        </Button>
-        <Button class="tree-action-" onclick={(e) => { e.stopPropagation(); showNewDirForm = true; newDirParent = entry.path; }} title="New subfolder" id={`nginx-newdir-${entry.name}`}>
-          <FolderPlus size={11} />
-        </Button>
-      {/if}
-      <Button class="tree-action- danger" onclick={(e) => { e.stopPropagation(); confirmDeleteWww(entry); }} title="Delete" id={`nginx-del-www-${entry.name}`}>
-        <Trash2 size={11} />
-      </Button>
-    </div>
   </div>
   {#if entry.is_dir && expandedPaths.has(entry.path)}
     {#each entry.children as child}
@@ -1959,6 +3534,164 @@
     {/each}
   {/if}
 {/snippet}
+
+<!-- ─── Sites Right-Click Context Menu ────────────────────────────────────── -->
+{#if siteContextMenu.visible && siteContextMenu.site}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div 
+    class="www-context-menu" 
+    style="top: {siteContextMenu.y}px; left: {siteContextMenu.x}px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <div class="context-menu-header">
+      <Globe size={13} class="text-accent" />
+      <span class="context-menu-title" title={siteContextMenu.site.name}>{siteContextMenu.site.name}</span>
+    </div>
+    <div class="context-menu-divider"></div>
+
+    <button class="context-menu-item" onclick={() => { openSiteInspector(siteContextMenu.site!); closeSiteContextMenu(); }}>
+      <Eye size={13} />
+      <span>Quick Inspect</span>
+    </button>
+
+    <button class="context-menu-item" onclick={() => { openSiteInEditor(siteContextMenu.site!); closeSiteContextMenu(); }}>
+      <FileCode size={13} />
+      <span>Edit in Full Editor</span>
+    </button>
+
+    <button class="context-menu-item" onclick={() => { openCloneModal(siteContextMenu.site!); closeSiteContextMenu(); }}>
+      <Copy size={13} />
+      <span>Clone Site Config</span>
+    </button>
+
+    <button class="context-menu-item" onclick={() => { jumpToSiteLogs(siteContextMenu.site!, 'analytics'); closeSiteContextMenu(); }}>
+      <BarChart2 size={13} />
+      <span>View Logs &amp; Analytics</span>
+    </button>
+
+    {#if !siteContextMenu.site.has_ssl}
+      <button class="context-menu-item" onclick={() => { openQuickSsl(siteContextMenu.site!); closeSiteContextMenu(); }}>
+        <Sparkles size={13} class="text-accent" />
+        <span>Issue Let's Encrypt SSL</span>
+      </button>
+    {/if}
+
+    {#if siteContextMenu.site.source === 'sites-available'}
+      <button 
+        class="context-menu-item" 
+        onclick={() => { toggleSite(siteContextMenu.site!); closeSiteContextMenu(); }}
+        disabled={toggleLoadingFor === siteContextMenu.site.name}
+      >
+        {#if siteContextMenu.site.enabled}
+          <EyeOff size={13} />
+          <span>Disable Site</span>
+        {:else}
+          <Eye size={13} />
+          <span>Enable Site</span>
+        {/if}
+      </button>
+    {/if}
+
+    <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(siteContextMenu.site!.path); uiStore.addToast('Copied site path to clipboard', 'info'); closeSiteContextMenu(); }}>
+      <Copy size={13} />
+      <span>Copy Config Path</span>
+    </button>
+
+    <div class="context-menu-divider"></div>
+
+    <button class="context-menu-item danger" onclick={() => { confirmDeleteSite(siteContextMenu.site!); closeSiteContextMenu(); }}>
+      <Trash2 size={13} />
+      <span>Delete Site</span>
+    </button>
+  </div>
+{/if}
+
+<!-- ─── WWW Right-Click Context Menu ──────────────────────────────────────── -->
+{#if wwwContextMenu.visible}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div 
+    class="www-context-menu" 
+    style="top: {wwwContextMenu.y}px; left: {wwwContextMenu.x}px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    {#if wwwContextMenu.entry}
+      <div class="context-menu-header">
+        {#if wwwContextMenu.entry.is_dir}
+          <FolderOpen size={13} class="text-accent" />
+        {:else}
+          <FileText size={13} class="text-accent" />
+        {/if}
+        <span class="context-menu-title" title={wwwContextMenu.entry.name}>{wwwContextMenu.entry.name}</span>
+      </div>
+      <div class="context-menu-divider"></div>
+
+      {#if !wwwContextMenu.entry.is_dir}
+        <!-- File Actions -->
+        <button class="context-menu-item" onclick={() => { viewWwwFile(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
+          <Eye size={13} />
+          <span>View / Preview</span>
+        </button>
+        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
+          <Edit3 size={13} />
+          <span>Rename File</span>
+        </button>
+        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied full path to clipboard', 'info'); closeWwwContextMenu(); }}>
+          <Copy size={13} />
+          <span>Copy Full Path</span>
+        </button>
+        <div class="context-menu-divider"></div>
+        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
+          <Trash2 size={13} />
+          <span>Delete File</span>
+        </button>
+      {:else}
+        <!-- Directory Actions -->
+        <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = wwwContextMenu.entry!.path; closeWwwContextMenu(); }}>
+          <FolderPlus size={13} />
+          <span>New Subfolder</span>
+        </button>
+        <button class="context-menu-item" onclick={() => { uploadFile(wwwContextMenu.entry!.path); closeWwwContextMenu(); }}>
+          <Upload size={13} />
+          <span>Upload File Here</span>
+        </button>
+        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
+          <Edit3 size={13} />
+          <span>Rename Folder</span>
+        </button>
+        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied folder path to clipboard', 'info'); closeWwwContextMenu(); }}>
+          <Copy size={13} />
+          <span>Copy Folder Path</span>
+        </button>
+        <div class="context-menu-divider"></div>
+        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
+          <Trash2 size={13} />
+          <span>Delete Folder</span>
+        </button>
+      {/if}
+    {:else}
+      <!-- Empty Tree Area Actions -->
+      <div class="context-menu-header">
+        <FolderOpen size={13} class="text-accent" />
+        <span class="context-menu-title">/var/www Root</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; closeWwwContextMenu(); }}>
+        <FolderPlus size={13} />
+        <span>New Folder at Root</span>
+      </button>
+      <button class="context-menu-item" onclick={() => { uploadFile('/var/www'); closeWwwContextMenu(); }}>
+        <Upload size={13} />
+        <span>Upload File to /var/www</span>
+      </button>
+      <button class="context-menu-item" onclick={() => { loadWww(); closeWwwContextMenu(); }}>
+        <RefreshCw size={13} />
+        <span>Refresh File Tree</span>
+      </button>
+    {/if}
+  </div>
+{/if}
 
 <!-- ─── Modals ─────────────────────────────────────────────────────────────── -->
 
@@ -2069,6 +3802,229 @@
   </div>
 </SideDrawer>
 
+<!-- ══ SITE INSPECTOR DRAWER ═════════════════════════════════════════════════ -->
+<SideDrawer bind:isOpen={showInspectDrawer} title="Site Inspector — {inspectingSite?.name || 'Config'}" width="680px">
+  {#if inspectingSite}
+    <div style="display:flex; flex-direction:column; gap:16px; padding-top:4px;">
+      <!-- Metadata Bar -->
+      <div class="inspect-meta-card">
+        <div class="inspect-meta-row">
+          <span class="inspect-label">File Path:</span>
+          <code class="inspect-path-code">{inspectingSite.path}</code>
+          <button 
+            type="button" 
+            class="inspect-copy-icon-btn" 
+            title="Copy path"
+            onclick={() => { navigator.clipboard.writeText(inspectingSite!.path); uiStore.addToast('Copied path', 'info'); }}
+          >
+            <Copy size={12} />
+          </button>
+        </div>
+
+        {#if inspectingSite.domains && inspectingSite.domains.length > 0}
+          <div class="inspect-meta-row">
+            <span class="inspect-label">Domains:</span>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              {#each inspectingSite.domains as dom}
+                <span class="site-meta-pill domain"><Globe size={11} /> {dom}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if inspectingSite.proxies && inspectingSite.proxies.length > 0}
+          <div class="inspect-meta-row">
+            <span class="inspect-label">Proxy Pass:</span>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              {#each inspectingSite.proxies as prx}
+                <span class="site-meta-pill proxy"><ArrowUpRight size={11} /> {prx}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Inspector Action Toolbar -->
+      <div class="inspect-toolbar">
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <Button variant="primary" class="btn-sm" onclick={() => { showInspectDrawer = false; openSiteInEditor(inspectingSite!); }}>
+            <FileCode size={12} />
+            <span>Open in Full Editor</span>
+          </Button>
+          <Button variant="outline" class="btn-sm" onclick={() => { showInspectDrawer = false; openCloneModal(inspectingSite!); }}>
+            <Copy size={12} />
+            <span>Clone Site</span>
+          </Button>
+          <Button variant="outline" class="btn-sm" onclick={() => { showInspectDrawer = false; jumpToSiteLogs(inspectingSite!, 'analytics'); }}>
+            <BarChart2 size={12} />
+            <span>View Logs</span>
+          </Button>
+        </div>
+
+        <div style="display:flex; gap:6px;">
+          <button 
+            type="button" 
+            class="reader-tool-btn" 
+            class:active={inspectWrapLines} 
+            onclick={() => inspectWrapLines = !inspectWrapLines}
+            title="Toggle word wrap"
+          >
+            <WrapText size={12} />
+            <span>Wrap</span>
+          </button>
+          <button 
+            type="button" 
+            class="reader-tool-btn" 
+            onclick={() => { navigator.clipboard.writeText(inspectingContent); uiStore.addToast('Copied config to clipboard', 'info'); }}
+            title="Copy full configuration"
+          >
+            <Copy size={12} />
+            <span>Copy</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Config Code Viewport with Gutter -->
+      {#if inspectingLoading}
+        <div class="center-state" style="padding:60px 0;"><div class="spinner"></div></div>
+      {:else}
+        {@const lines = (inspectingContent || '').split('\n')}
+        <div class="file-code-viewport" class:wrap-lines={inspectWrapLines} style="max-height: calc(100vh - 310px); border-radius: 8px; border: 1px solid var(--color-border);">
+          <div class="code-rows-container">
+            {#each lines as line, i}
+              <div class="code-row">
+                <div class="gutter-num" aria-hidden="true">{i + 1}</div>
+                <div class="code-line">{line || '\u00A0'}</div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+</SideDrawer>
+
+<!-- ══ CLONE SITE DRAWER ═════════════════════════════════════════════════════ -->
+<SideDrawer bind:isOpen={showCloneDrawer} title="Clone Site Configuration" width="460px">
+  {#if cloningSite}
+    <div style="display:flex; flex-direction:column; gap:16px; padding-top:4px;">
+      <div class="drawer-banner">
+        <Copy size={16} class="text-accent" />
+        <span style="font-size:12.5px; color:var(--color-text-secondary); line-height:1.4;">
+          Duplicate <strong>{cloningSite.name}</strong> from <code>{cloningSite.source}</code> into a new isolated virtual host configuration.
+        </span>
+      </div>
+
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
+        <label for="clone-new-name" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">New Config File Name</label>
+        <input 
+          id="clone-new-name"
+          type="text" 
+          class="input" 
+          bind:value={cloneNewName} 
+          placeholder="my-new-site.conf" 
+          style="font-family:var(--font-mono); font-size:12px;"
+        />
+        <span style="font-size:11px; color:var(--color-text-muted);">Will be saved in {cloningSite.source === 'sites-available' ? '/etc/nginx/sites-available/' : '/etc/nginx/conf.d/'}</span>
+      </div>
+
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
+        <label for="clone-new-domain" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">New Server Name / Domain (Optional)</label>
+        <input 
+          id="clone-new-domain"
+          type="text" 
+          class="input" 
+          bind:value={cloneNewDomain} 
+          placeholder="newdomain.com" 
+          style="font-family:var(--font-mono); font-size:12px;"
+        />
+        <span style="font-size:11px; color:var(--color-text-muted);">If provided, replaces the <code>server_name</code> line automatically</span>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:8px;">
+        <Button variant="outline" onclick={() => showCloneDrawer = false}>Cancel</Button>
+        <Button variant="primary" disabled={cloneLoading} onclick={executeCloneSite}>
+          {#if cloneLoading}<div class="spinner-sm"></div>{/if}
+          <span>Clone Site</span>
+        </Button>
+      </div>
+    </div>
+  {/if}
+</SideDrawer>
+
+<!-- ══ QUICK SSL ISSUE DRAWER ════════════════════════════════════════════════ -->
+<SideDrawer bind:isOpen={showSslIssueDrawer} title="Issue Let's Encrypt SSL" width="480px">
+  {#if sslIssueSite}
+    <div style="display:flex; flex-direction:column; gap:16px; padding-top:4px;">
+      {#if !hasCertbot}
+        <div class="drawer-banner" style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); flex-direction:column; gap:8px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <AlertTriangle size={16} class="text-error" />
+            <span style="font-size:13px; font-weight:600; color:var(--color-text-primary);">
+              Certbot is not installed
+            </span>
+          </div>
+          <span style="font-size:12px; color:var(--color-text-secondary); line-height:1.4;">
+            Install Certbot and the Nginx plugin on your system to issue automated SSL certificates:
+          </span>
+          <div style="display:flex; align-items:center; justify-content:space-between; background:var(--color-bg-base); border:1px solid var(--color-border); border-radius:6px; padding:6px 10px;">
+            <code style="font-family:var(--font-mono); font-size:11.5px; color:var(--color-accent);">sudo dnf install certbot python3-certbot-nginx</code>
+            <button 
+              type="button" 
+              class="inspect-copy-icon-btn" 
+              onclick={() => { navigator.clipboard.writeText('sudo dnf install certbot python3-certbot-nginx'); uiStore.addToast('Copied installation command', 'info'); }}
+              title="Copy installation command"
+            >
+              <Copy size={13} />
+            </button>
+          </div>
+        </div>
+      {:else}
+        <div class="drawer-banner ssl-banner">
+          <Lock size={16} class="text-success" />
+          <span style="font-size:12.5px; color:var(--color-text-secondary); line-height:1.4;">
+            Automated SSL certificate request via Certbot for <strong>{sslIssueSite.name}</strong>.
+          </span>
+        </div>
+      {/if}
+
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
+        <label for="ssl-issue-domain" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Domain Name</label>
+        <input 
+          id="ssl-issue-domain"
+          type="text" 
+          class="input" 
+          bind:value={sslIssueDomain} 
+          placeholder="e.g. app.example.com" 
+          style="font-family:var(--font-mono); font-size:12px;"
+        />
+        <span style="font-size:11px; color:var(--color-text-muted);">Ensure your public DNS A/AAAA records point to this server</span>
+      </div>
+
+      <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
+        <label for="ssl-issue-email" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Admin Email (Optional for Expiry Alerts)</label>
+        <input 
+          id="ssl-issue-email"
+          type="email" 
+          class="input" 
+          bind:value={sslIssueEmail} 
+          placeholder="admin@example.com" 
+          style="font-size:12px;"
+        />
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:8px;">
+        <Button variant="outline" onclick={() => showSslIssueDrawer = false}>Cancel</Button>
+        <Button variant="primary" disabled={sslIssueLoading || !hasCertbot} onclick={executeIssueSsl}>
+          {#if sslIssueLoading}<div class="spinner-sm"></div>{/if}
+          <Sparkles size={13} />
+          <span>Issue &amp; Install Certificate</span>
+        </Button>
+      </div>
+    </div>
+  {/if}
+</SideDrawer>
+
 <style>
   /* ─── Layout ─────────────────────────────────────────────────────────── */
   .module-page { overflow: hidden; }
@@ -2140,13 +4096,83 @@
   }
 
   /* ─── Overview ───────────────────────────────────────────────────────── */
+  .ov-action-ribbon {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 18px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    flex-wrap: wrap;
+  }
+  .ov-ribbon-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 260px;
+  }
+  .ov-service-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+  }
+  .ov-service-pill.active {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--color-success);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+  .ov-service-pill.inactive {
+    background: rgba(244, 63, 94, 0.1);
+    color: var(--color-error);
+    border: 1px solid rgba(244, 63, 94, 0.25);
+  }
+  .ov-uptime-tag {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    margin-left: 4px;
+  }
+  .ov-ribbon-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .overview-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 20px;
+    gap: 16px;
     padding: 0;
   }
-  .ov-card { display: flex; flex-direction: column; gap: 12px; }
+  .overview-tri-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    padding: 0;
+  }
+  @media (max-width: 900px) {
+    .overview-grid, .overview-tri-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .ov-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 16px;
+  }
   .ov-card-header {
     display: flex;
     align-items: center;
@@ -2158,60 +4184,230 @@
     gap: 8px;
     font-size: 13px;
     font-weight: 600;
-    color: var(--color-text-secondary);
+    color: var(--color-text-primary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
+  .ov-link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: var(--color-accent);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+  }
+  .ov-link-btn:hover {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--color-accent-soft);
+  }
+
   .status-dot {
-    width: 10px; height: 10px; border-radius: 50%;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
     box-shadow: 0 0 8px currentColor;
+    flex-shrink: 0;
   }
-  .dot-active { background: var(--color-success); color: var(--color-success); animation: pulse 2s infinite; }
-  .dot-inactive { background: var(--color-error); color: var(--color-error); }
+  .dot-active {
+    background: var(--color-success);
+    color: var(--color-success);
+    animation: pulse 2s infinite;
+  }
+  .dot-inactive {
+    background: var(--color-error);
+    color: var(--color-error);
+  }
   @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.9); }
   }
-  .service-status-badge { font-size: 14px; padding: 6px 14px; }
-  .ov-since { font-size: 11px; color: var(--color-text-muted); margin: 0; }
-  .service-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+  .service-control-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .service-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .ov-since {
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
   .test-result {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
-    border-radius: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
     font-weight: 600;
+    font-size: 12.5px;
   }
-  .test-pass { background: var(--color-success-muted); color: var(--color-success); border: 1px solid rgba(16,185,129,0.2); }
-  .test-fail { background: var(--color-error-muted); color: var(--color-error); border: 1px solid rgba(244,63,94,0.2); }
-  .test-output { max-height: 80px; overflow: auto; font-size: 11px; }
-  .ov-stats-card {}
-  .stats-grid { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; }
+  .test-pass {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--color-success);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+  .test-fail {
+    background: rgba(244, 63, 94, 0.1);
+    color: var(--color-error);
+    border: 1px solid rgba(244, 63, 94, 0.25);
+  }
+  .test-output-wrap {
+    position: relative;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .test-output {
+    max-height: 85px;
+    overflow: auto;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    line-height: 1.4;
+    padding: 8px 12px;
+    margin: 0;
+    color: var(--color-text-secondary);
+  }
+
+  .stats-grid {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
   .stat-item {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
   }
-  .stat-value { font-size: 16px; font-weight: 700; color: var(--color-text-primary); line-height: 1; }
-  .stat-label { font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin: 0; }
+  .stat-value {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    line-height: 1;
+  }
+  .stat-label {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    margin: 0;
+  }
   .stat-enabled .stat-value { color: var(--color-success); }
   .stat-disabled .stat-value { color: var(--color-error); }
+
+  .ov-ssl-ok-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    padding: 6px 10px;
+    background: rgba(16, 185, 129, 0.06);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    border-radius: 6px;
+    margin-top: 4px;
+  }
+
+  .ov-env-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ov-env-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .ov-env-label {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .ov-env-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--color-accent);
+    font-size: 11px;
+    transition: all 0.15s ease;
+  }
+  .ov-env-btn:hover {
+    border-color: var(--color-accent);
+    background: rgba(99, 102, 241, 0.08);
+  }
+  .ov-env-btn code {
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+  }
+
+  .ov-sites-mini-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-base);
+  }
+  .ov-sites-mini-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .ov-sites-mini-table th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .ov-sites-mini-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+  }
+  .ov-sites-mini-table tr:last-child td {
+    border-bottom: none;
+  }
+  .ov-sites-mini-table tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+
   .version-display {
     font-family: var(--font-mono);
-    font-size: 14px;
+    font-size: 13px;
     color: var(--color-accent-soft);
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border);
-    padding: 10px 14px;
-    border-radius: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
   }
 
   /* ─── Section Headers ────────────────────────────────────────────────── */
@@ -2225,8 +4421,352 @@
   .row-actions { display: flex; gap: 6px; }
 
   /* ─── Sites ──────────────────────────────────────────────────────────── */
-  .site-name { font-weight: 600; color: var(--color-text-primary); }
-  .path-code { font-size: 11px; color: var(--color-text-muted); }
+  .sites-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .sites-search-wrap {
+    flex: 1;
+    min-width: 260px;
+    max-width: 480px;
+  }
+  .sites-filter-pills {
+    display: flex;
+    gap: 4px;
+    background: var(--color-bg-base);
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+  }
+  .filter-pill {
+    background: transparent;
+    border: none;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .filter-pill:hover {
+    color: var(--color-text-primary);
+  }
+  .filter-pill.active {
+    background: var(--color-bg-card);
+    color: var(--color-accent);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    font-weight: 600;
+  }
+
+  .site-row {
+    transition: background 0.15s ease, transform 0.1s ease;
+  }
+  .site-row:hover {
+    background: var(--color-bg-hover);
+  }
+  .site-name-cell-wrapper {
+    min-width: 180px;
+  }
+  .site-name-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--color-text-primary);
+    transition: all 0.15s ease;
+  }
+  .site-name-icon-box {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.18);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+  }
+  .site-name-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--color-text-primary);
+    transition: color 0.15s ease;
+  }
+  .site-row:hover .site-name-title {
+    color: var(--color-accent);
+  }
+  .site-path-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .site-path-wrap:hover {
+    background: rgba(0, 218, 243, 0.08);
+  }
+  .site-path-wrap:hover .path-code {
+    color: var(--color-accent);
+  }
+  .path-copy-icon {
+    color: var(--color-text-muted);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  .site-row:hover .path-copy-icon {
+    opacity: 0.7;
+  }
+  .site-path-wrap:hover .path-copy-icon {
+    opacity: 1;
+    color: var(--color-accent);
+  }
+  .site-routing-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .site-meta-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    line-height: 1.3;
+    font-weight: 500;
+  }
+  .site-meta-pill.domain {
+    background: rgba(0, 218, 243, 0.08);
+    color: var(--color-accent);
+    border: 1px solid rgba(0, 218, 243, 0.2);
+  }
+  .site-meta-pill.proxy {
+    background: rgba(168, 85, 247, 0.1);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.25);
+  }
+  .site-ports-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .port-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .port-badge.plain {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border);
+  }
+  .port-badge.ssl {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--color-success);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+  .btn-quick-ssl-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    background: linear-gradient(135deg, rgba(236, 72, 153, 0.15), rgba(168, 85, 247, 0.15));
+    color: #f472b6;
+    border: 1px dashed rgba(236, 72, 153, 0.4);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-quick-ssl-badge:hover {
+    background: linear-gradient(135deg, rgba(236, 72, 153, 0.35), rgba(168, 85, 247, 0.35));
+    color: #ffffff;
+    border-color: #f472b6;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(236, 72, 153, 0.25);
+  }
+
+  /* ─── Inspector & Drawer Utilities ───────────────────────────────────── */
+  .inspect-meta-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+  .inspect-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .inspect-label {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    min-width: 80px;
+  }
+  .inspect-path-code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-accent-soft);
+  }
+  .inspect-copy-icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 2px;
+    border-radius: 4px;
+    transition: color 0.15s;
+  }
+  .inspect-copy-icon-btn:hover {
+    color: var(--color-accent);
+  }
+  .inspect-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .drawer-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    background: rgba(0, 218, 243, 0.06);
+    border: 1px solid rgba(0, 218, 243, 0.18);
+    border-radius: 8px;
+  }
+  .drawer-banner.ssl-banner {
+    background: rgba(16, 185, 129, 0.06);
+    border-color: rgba(16, 185, 129, 0.2);
+  }
+
+  /* ─── Site Context Banner ────────────────────────────────────────────── */
+  .site-context-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    background: rgba(0, 218, 243, 0.05);
+    border: 1px solid rgba(0, 218, 243, 0.2);
+    border-radius: 8px;
+    flex-wrap: wrap;
+  }
+  .context-banner-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .context-banner-text {
+    font-size: 12.5px;
+    color: var(--color-text-primary);
+  }
+  .site-context-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+  .site-context-pill.dedicated {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--color-text-primary);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+  }
+  .site-context-pill.shared {
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--color-text-primary);
+    border: 1px solid rgba(245, 158, 11, 0.38);
+  }
+  .site-context-pill code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-accent-soft);
+    background: rgba(0, 0, 0, 0.2);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .context-success-icon {
+    color: #10b981;
+    flex-shrink: 0;
+  }
+  .context-warn-icon {
+    color: #f59e0b;
+    flex-shrink: 0;
+  }
+  .btn-clear-context {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 11.5px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-clear-context:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+    background: rgba(0, 218, 243, 0.08);
+  }
+
+  .btn-open-site {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .btn-delete-site {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--color-error);
+    border-color: rgba(239, 68, 68, 0.28);
+    transition: all 0.15s ease;
+  }
+  .btn-delete-site:hover {
+    background: var(--color-error) !important;
+    color: #ffffff !important;
+    border-color: var(--color-error) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(239, 68, 68, 0.35);
+  }
+  .path-code { font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono); }
 
   .new-site-form { margin-bottom: 8px; }
   .form-title { margin: 0 0 16px; font-size: 14px; font-weight: 600; }
@@ -2395,26 +4935,39 @@
   .backup-ts { color: var(--color-text-muted); font-size: 10px; }
 
   /* ─── WWW Files ──────────────────────────────────────────────────────── */
-  .www-layout { display: flex; height: 100%; overflow: hidden; }
+  .www-layout { display: flex; height: 100%; overflow: hidden; background: var(--color-bg-base); }
   .www-tree {
-    width: 280px;
-    min-width: 280px;
+    width: 290px;
+    min-width: 290px;
     border-right: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
-    padding: 8px 0;
+    background: var(--color-bg-card);
+    padding: 0;
+    user-select: none;
   }
   .www-tree-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 4px 12px 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(255, 255, 255, 0.02);
+    flex-shrink: 0;
+  }
+  .www-tree-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     font-size: 12px;
     font-weight: 700;
-    color: var(--color-text-secondary);
-    border-bottom: 1px solid var(--color-border);
-    margin-bottom: 4px;
+    color: var(--color-text-primary);
+  }
+  .www-tree-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
   .new-dir-form {
     display: flex;
@@ -2422,13 +4975,13 @@
     padding: 8px 12px;
     align-items: center;
     border-bottom: 1px solid var(--color-border);
+    background: rgba(0, 218, 243, 0.05);
   }
-  .new-dir-form input { flex: 1; padding: 6px 10px; font-size: 12px; }
-  .tree-list { display: flex; flex-direction: column; }
+  .new-dir-form input { flex: 1; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; }
+  .tree-list { display: flex; flex-direction: column; padding: 6px 0; }
   .tree-node {
     display: flex;
     align-items: center;
-    gap: 4px;
     position: relative;
   }
   .tree-item {
@@ -2436,7 +4989,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 8px 6px 0;
+    padding: 5px 10px 5px 0;
     border: none;
     background: transparent;
     color: var(--color-text-secondary);
@@ -2445,40 +4998,101 @@
     cursor: pointer;
     text-align: left;
     min-width: 0;
-    transition: color 0.15s;
+    border-radius: 5px;
+    margin: 1px 4px;
+    transition: all 0.12s ease;
   }
-  .tree-item:hover { color: var(--color-text-primary); }
-  .tree-item.tree-selected { color: var(--color-accent-soft); }
+  .tree-item:hover { 
+    background: rgba(255, 255, 255, 0.05); 
+    color: var(--color-text-primary); 
+  }
+  .tree-item.tree-selected { 
+    background: rgba(0, 218, 243, 0.12); 
+    color: var(--color-accent); 
+    font-weight: 500;
+  }
+  .tree-arrow { width: 14px; display: flex; align-items: center; justify-content: center; opacity: 0.7; }
+  .tree-arrow-spacer { width: 14px; flex-shrink: 0; }
+  .tree-icon { flex-shrink: 0; }
+  .tree-icon.folder { color: #f59e0b; }
+  .tree-icon.file { color: var(--color-text-muted); }
+  .tree-item.tree-selected .tree-icon.file { color: var(--color-accent); }
   .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tree-size { font-size: 10px; color: var(--color-text-muted); flex-shrink: 0; }
-  .tree-actions {
-    display: none;
+  .tree-size { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+  .rename-input { font-size: 11px; padding: 2px 6px; width: 120px; border-radius: 4px; }
+
+  /* Right-Click Context Menu */
+  .www-context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 200px;
+    background: var(--color-bg-card, #0f172a);
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+    display: flex;
+    flex-direction: column;
     gap: 2px;
-    padding-right: 8px;
-    flex-shrink: 0;
+    animation: menu-fade 0.12s ease;
   }
-  .tree-node:hover .tree-actions { display: flex; }
-  .tree-action-btn {
+  .context-menu-header {
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 22px; height: 22px;
-    border: none;
-    background: transparent;
+    gap: 7px;
+    padding: 5px 8px 6px;
+    font-size: 11px;
+    font-weight: 700;
     color: var(--color-text-muted);
-    cursor: pointer;
-    border-radius: 4px;
-    transition: all 0.15s;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 2px;
   }
-  .tree-action-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-  .tree-action-btn.danger:hover { color: var(--color-error); }
-  .rename-input { font-size: 12px; padding: 2px 6px; width: 120px; }
+  .context-menu-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
+  }
+  .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.12s ease;
+    white-space: nowrap;
+  }
+  .context-menu-item:hover {
+    background: rgba(0, 218, 243, 0.12);
+    color: var(--color-text-primary);
+  }
+  .context-menu-item.danger { color: var(--color-error); }
+  .context-menu-item.danger:hover {
+    background: rgba(239, 68, 68, 0.15);
+    color: #fca5a5;
+  }
+  .context-menu-divider {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 3px 0;
+  }
+
+  /* WWW Viewer */
   .www-viewer {
     flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
+    background: var(--color-bg-base);
   }
   .viewer-header {
     display: flex;
@@ -2488,16 +5102,738 @@
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
     gap: 12px;
+    background: var(--color-bg-card);
   }
-  .file-view {
+  .viewer-header-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
     flex: 1;
-    overflow: auto;
-    margin: 0;
-    padding: 16px;
-    border: none;
-    border-radius: 0;
+  }
+  .viewer-path-tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 2px 7px;
+    border-radius: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .viewer-path-tag:hover { color: var(--color-accent); background: rgba(0, 218, 243, 0.08); }
+  .folder-overview-body {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+  }
+  .folder-quick-shortcuts {
+    display: flex;
+    gap: 16px;
+  }
+  .shortcut-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 20px 24px;
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    transition: all 0.15s ease;
     font-size: 12px;
-    line-height: 1.6;
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+  .shortcut-card:hover {
+    border-color: var(--color-accent);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  /* ─── Modern WWW Code / File Viewer ─────────────────────────────────── */
+  .file-reader-frame {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--color-bg-card);
+    min-height: 0;
+  }
+  .file-reader-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .file-reader-meta-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .file-stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    background: var(--color-bg-base);
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+  }
+  .file-reader-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .reader-tool-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: var(--font-sans);
+    color: var(--color-text-secondary);
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .reader-tool-btn:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+    background: var(--color-active-bg);
+  }
+  .reader-tool-btn.active {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: var(--color-active-bg);
+    font-weight: 600;
+  }
+  .file-code-viewport {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+    background: var(--color-bg-card);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+  }
+  .code-rows-container {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: fit-content;
+    padding: 8px 0;
+  }
+  .code-row {
+    display: flex;
+    align-items: flex-start;
+    width: 100%;
+    transition: background 0.1s ease;
+  }
+  .code-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .code-row .gutter-num {
+    padding: 0 12px 0 10px;
+    min-width: 48px;
+    text-align: right;
+    user-select: none;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    opacity: 0.6;
+    border-right: 1px solid var(--color-border);
+    background: var(--color-bg-base);
+    flex-shrink: 0;
+    line-height: 1.65;
+  }
+  .code-row .code-line {
+    flex: 1;
+    padding: 0 16px 0 12px;
+    color: var(--color-text-primary);
+    white-space: pre;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+  }
+  .file-code-viewport.wrap-lines .code-row .code-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ─── Advanced Analytics ─────────────────────────────────────────────────── */
+  .analytics-section {
+    padding: 4px 0 24px 0;
+  }
+  .analytics-header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .analytics-header-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .analytics-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .analytics-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+  .analytics-log-source-tag {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-muted);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+  .analytics-header-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .analytics-sample-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.25);
+    padding: 4px 10px;
+    border-radius: 6px;
+  }
+
+  /* KPI Grid */
+  .analytics-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+  }
+  .analytics-kpi-card {
+    display: flex;
+    flex-direction: column;
+    padding: 16px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+  .analytics-kpi-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(0, 218, 243, 0.35);
+  }
+  .analytics-kpi-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .analytics-kpi-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .analytics-kpi-icon-wrap {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .analytics-kpi-icon-wrap.cyan { background: rgba(0, 218, 243, 0.12); color: #00daf3; }
+  .analytics-kpi-icon-wrap.purple { background: rgba(168, 85, 247, 0.12); color: #a855f7; }
+  .analytics-kpi-icon-wrap.blue { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
+  .analytics-kpi-icon-wrap.green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+  .analytics-kpi-icon-wrap.amber { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+
+  .analytics-kpi-value {
+    font-size: 26px;
+    font-weight: 800;
+    line-height: 1.1;
+    font-family: var(--font-mono);
+    color: var(--color-text-primary);
+    margin-bottom: 8px;
+  }
+  .analytics-kpi-value.cyan { color: #00daf3; }
+  .analytics-kpi-value.purple { color: #c084fc; }
+  .analytics-kpi-value.blue { color: #60a5fa; }
+  .analytics-kpi-value.green { color: #34d399; }
+  .analytics-kpi-value.amber { color: #fbbf24; }
+  .analytics-kpi-value.red { color: #f87171; }
+
+  .analytics-kpi-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .analytics-kpi-subtext {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .analytics-kpi-tag {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .analytics-kpi-tag.cyan { background: rgba(0, 218, 243, 0.15); color: #00daf3; }
+  .analytics-kpi-tag.purple { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
+  .analytics-kpi-tag.blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+  .analytics-kpi-tag.green { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+  .analytics-kpi-tag.amber { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+  .analytics-kpi-tag.red { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+  /* HTTP Status Code Card */
+  .analytics-status-card {
+    padding: 18px 20px;
+    border-radius: 10px;
+  }
+  .analytics-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .analytics-card-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+  .analytics-card-subtitle {
+    margin: 3px 0 0;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+  }
+  .analytics-status-counts-summary {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .status-summary-item.green { color: var(--color-success); }
+  .status-summary-item.blue { color: #38bdf8; }
+  .status-summary-item.amber { color: var(--color-warning); }
+  .status-summary-item.red { color: var(--color-error); }
+
+  .analytics-status-bar {
+    display: flex;
+    height: 18px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.05);
+    margin-bottom: 14px;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+  }
+  .status-seg { height: 100%; transition: width 0.4s ease; }
+  .status-seg.seg-2xx { background: linear-gradient(90deg, #059669, #10b981); }
+  .status-seg.seg-3xx { background: linear-gradient(90deg, #0284c7, #38bdf8); }
+  .status-seg.seg-4xx { background: linear-gradient(90deg, #d97706, #f59e0b); }
+  .status-seg.seg-5xx { background: linear-gradient(90deg, #dc2626, #f87171); }
+  .status-seg-empty {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+    font-size: 11px;
+  }
+
+  .analytics-status-pills-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+  }
+  .status-pill-card {
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .status-pill-card.green { border-left: 3px solid var(--color-success); }
+  .status-pill-card.blue { border-left: 3px solid #38bdf8; }
+  .status-pill-card.amber { border-left: 3px solid var(--color-warning); }
+  .status-pill-card.red { border-left: 3px solid var(--color-error); }
+
+  .status-pill-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .status-pill-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  .status-pill-dot.green { background: var(--color-success); }
+  .status-pill-dot.blue { background: #38bdf8; }
+  .status-pill-dot.amber { background: var(--color-warning); }
+  .status-pill-dot.red { background: var(--color-error); }
+  .status-pill-name { color: var(--color-text-secondary); }
+  .status-pill-pct { font-family: var(--font-mono); color: var(--color-text-primary); }
+  .status-pill-count { font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono); }
+
+  /* Hourly Activity Chart */
+  .analytics-hourly-card {
+    padding: 18px 20px;
+    border-radius: 10px;
+    position: relative;
+    overflow: visible;
+  }
+  .analytics-hourly-peak-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .analytics-hourly-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    height: 145px;
+    padding-top: 42px;
+    position: relative;
+    overflow: visible;
+  }
+  .analytics-hourly-col {
+    flex: 1;
+    min-width: 18px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    cursor: pointer;
+    position: relative;
+  }
+  .analytics-hourly-bar-wrap {
+    width: 100%;
+    height: 90px;
+    display: flex;
+    align-items: flex-end;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+    overflow: visible;
+    position: relative;
+  }
+  .analytics-hourly-bar {
+    width: 100%;
+    background: linear-gradient(180deg, #00daf3, #0284c7);
+    border-radius: 3px;
+    transition: height 0.3s ease, background 0.15s ease;
+    position: relative;
+  }
+  .analytics-hourly-col:hover .analytics-hourly-bar {
+    background: linear-gradient(180deg, #38bdf8, #00daf3);
+    filter: brightness(1.2);
+    box-shadow: 0 0 12px rgba(0, 218, 243, 0.4);
+  }
+  .hourly-bar-tooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--color-bg-card, #0f172a);
+    color: var(--color-text-primary, #fff);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.18));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    white-space: nowrap;
+    z-index: 9999;
+    pointer-events: none;
+    align-items: center;
+    gap: 5px;
+  }
+  .hourly-bar-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 4px;
+    border-style: solid;
+    border-color: var(--color-border, rgba(255, 255, 255, 0.18)) transparent transparent transparent;
+  }
+  .hourly-bar-tooltip .tooltip-time {
+    color: var(--color-accent, #00daf3);
+    font-weight: 700;
+  }
+  .hourly-bar-tooltip .tooltip-val {
+    font-weight: 600;
+    color: #fff;
+  }
+  .hourly-bar-tooltip .tooltip-pct {
+    color: var(--color-text-muted, #94a3b8);
+    font-size: 9.5px;
+  }
+  .analytics-hourly-col:hover .hourly-bar-tooltip {
+    display: flex;
+  }
+  .analytics-hourly-label {
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  /* 2x2 Details Grid */
+  .analytics-details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 16px;
+  }
+  .analytics-table-card {
+    padding: 16px 18px;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+  }
+  .analytics-table-wrap {
+    overflow-x: auto;
+    margin-top: 8px;
+  }
+  .analytics-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .analytics-table th {
+    padding: 8px 10px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+  }
+  .analytics-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    vertical-align: middle;
+  }
+  .analytics-rank {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+  .analytics-ip-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .analytics-ip-addr {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+  .analytics-sub-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text-muted);
+  }
+  .analytics-sub-badge.public {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+  }
+  .analytics-path-text {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-primary);
+    word-break: break-all;
+  }
+  .analytics-prog-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 100px;
+  }
+  .analytics-prog-bar {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+  .analytics-prog-bar.cyan { background: #00daf3; }
+  .analytics-prog-bar.purple { background: #a855f7; }
+  .analytics-prog-bar.green { background: #10b981; }
+  .analytics-prog-bar.blue { background: #3b82f6; }
+  .analytics-prog-pct {
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    width: 38px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .analytics-copy-btn {
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: all 0.12s;
+  }
+  .analytics-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--color-text-primary);
+  }
+
+  /* Methods & Referrers */
+  .analytics-methods-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .analytics-method-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .analytics-method-badge-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 140px;
+    flex-shrink: 0;
+  }
+  .analytics-method-tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .analytics-method-tag.method-get { background: rgba(16, 185, 129, 0.18); color: #34d399; }
+  .analytics-method-tag.method-post { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }
+  .analytics-method-tag.method-put { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }
+  .analytics-method-tag.method-delete { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+  .analytics-method-tag.method-head { background: rgba(168, 85, 247, 0.18); color: #c084fc; }
+  .analytics-method-tag.method-options { background: rgba(255, 255, 255, 0.12); color: var(--color-text-secondary); }
+  .analytics-method-count {
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .analytics-referrers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .analytics-ref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 5px;
+    font-size: 11.5px;
+  }
+  .analytics-ref-name {
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+  }
+  .analytics-ref-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+
+  /* User Agents */
+  .analytics-ua-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .analytics-ua-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 6px;
+  }
+  .analytics-ua-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+  }
+  .analytics-ua-name {
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+  .analytics-ua-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
   }
 
   /* ─── Logs ───────────────────────────────────────────────────────────── */
@@ -2615,6 +5951,96 @@
     border-color: var(--color-accent);
     color: var(--color-accent);
     box-shadow: 0 0 10px rgba(0, 218, 243, 0.15);
+  }
+
+  /* Custom Range Popover (Journal Logs Style) */
+  .custom-range-container {
+    position: relative;
+    display: inline-block;
+  }
+
+  .custom-range-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 100;
+    width: 310px;
+    background: var(--color-bg-popover, var(--color-bg-card, #0d1c2d));
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 14px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.45);
+  }
+
+  .popover-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .popover-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.5px;
+  }
+
+  .popover-row .log-dt {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    outline: none;
+    color-scheme: dark;
+  }
+
+  .popover-row .log-dt:focus {
+    border-color: var(--color-accent);
+  }
+
+  .popover-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 10px;
+  }
+
+  .popover-btn {
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s ease;
+  }
+
+  .apply-btn {
+    background: var(--color-accent);
+    color: #0f172a;
+  }
+
+  .apply-btn:hover {
+    background: #00b9cf;
+  }
+
+  .cancel-btn {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text-secondary);
+  }
+
+  .cancel-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: var(--color-text-primary);
   }
 
   .pill-dot {

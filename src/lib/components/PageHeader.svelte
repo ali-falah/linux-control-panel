@@ -5,12 +5,12 @@
 
   let {
     title,
-    subtitle,
+    subtitle = '',
     icon: Icon = undefined,
     children = undefined,
   }: {
     title: string;
-    subtitle: string;
+    subtitle?: string;
     icon?: any;
     children?: Snippet;
   } = $props();

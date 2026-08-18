@@ -122,3 +122,18 @@ pub async fn start_journal_live_stream(
 pub fn stop_journal_live_stream() {
     LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
 }
+
+#[tauri::command]
+pub async fn export_journal_logs_to_file(filename: String, content: String) -> Result<String, String> {
+    let download_dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+
+    let target_path = download_dir.join(&filename);
+    tokio::fs::write(&target_path, content.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write export file: {e}"))?;
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+

@@ -6,6 +6,7 @@
     label?: string;
     id?: string;
     children?: Snippet;
+    onchange?: (e: any) => void;
   }
 
   let { 
@@ -15,6 +16,7 @@
     value = $bindable(),
     children,
     style = '',
+    onchange,
     ...rest 
   }: Props = $props();
 
@@ -74,6 +76,9 @@
     if (selectEl) {
       selectEl.value = optValue;
       selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if (typeof onchange === 'function') {
+      onchange({ target: { value: optValue }, currentTarget: { value: optValue } });
     }
   }
 

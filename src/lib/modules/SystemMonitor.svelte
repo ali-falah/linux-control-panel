@@ -1188,9 +1188,9 @@
                 class:depth-1={item.depth === 1}
                 class:depth-2={item.depth === 2}
                 class:depth-3={item.depth >= 3}
-                onclick={() => openProcessInspector(p)}
+                onclick={() => item.hasChildren ? toggleTreeExpand(p.pid) : undefined}
                 oncontextmenu={(e) => handleProcContextMenu(e, p)}
-                style="cursor: pointer;"
+                style="cursor: {item.hasChildren ? 'pointer' : 'default'};"
               >
                 <td class="col-pid" onclick={(e) => e.stopPropagation()}>
                   <div class="pid-badge-container">

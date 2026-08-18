@@ -1038,18 +1038,20 @@ fn get_last_boot_time() -> Option<String> {
 pub async fn get_system_events() -> Result<SystemEvents, String> {
     let last_boot_time = get_last_boot_time().unwrap_or_else(|| "Unknown".to_string());
     
-    let error_output = std::process::Command::new("sh")
-        .args(["-c", "journalctl -p err -b --no-pager -q | wc -l"])
+    let error_output = Command::new("sh")
+        .args(["-c", "journalctl -p err -b --no-pager -q | head -n 500 | wc -l"])
         .output()
+        .await
         .map_err(|e| e.to_string())?;
     let error_count = String::from_utf8_lossy(&error_output.stdout)
         .trim()
         .parse::<u64>()
         .unwrap_or(0);
 
-    let warning_output = std::process::Command::new("sh")
-        .args(["-c", "journalctl -p warning -b --no-pager -q | wc -l"])
+    let warning_output = Command::new("sh")
+        .args(["-c", "journalctl -p warning -b --no-pager -q | head -n 500 | wc -l"])
         .output()
+        .await
         .map_err(|e| e.to_string())?;
     let warning_count = String::from_utf8_lossy(&warning_output.stdout)
         .trim()
@@ -1197,9 +1199,10 @@ pub async fn get_cpu_temperature() -> Result<Option<f32>, String> {
 
 #[tauri::command]
 pub async fn get_last_system_update() -> Result<String, String> {
-    let output = std::process::Command::new("sh")
+    let output = Command::new("sh")
         .args(["-c", "for pkg in dnf5 dnf python3-dnf; do rpm -q --last $pkg 2>/dev/null && break; done | head -1"])
         .output()
+        .await
         .map_err(|e| format!("Failed to run rpm command: {e}"))?;
 
     if !output.status.success() {
@@ -1218,9 +1221,10 @@ pub async fn get_last_system_update() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_failed_services_count() -> Result<u32, String> {
-    let output = std::process::Command::new("sh")
+    let output = Command::new("sh")
         .args(["-c", "systemctl --failed --no-legend | wc -l"])
         .output()
+        .await
         .map_err(|e| format!("Failed to run systemctl: {e}"))?;
 
     if !output.status.success() {

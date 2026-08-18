@@ -45,6 +45,7 @@ use commands::{
     nginx_manager::{
         nginx_check_installed, nginx_service_status, nginx_service_action, nginx_test_config,
         nginx_get_stats, nginx_list_sites, nginx_toggle_site, nginx_create_site, nginx_delete_site,
+        nginx_clone_site, nginx_request_cert,
         nginx_list_configs, nginx_read_config, nginx_write_config, nginx_list_backups,
         nginx_restore_backup, nginx_list_www, nginx_read_www_file, nginx_create_www_dir,
         nginx_delete_www_entry, nginx_rename_www_entry, nginx_upload_www_file,
@@ -75,8 +76,8 @@ use commands::{
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, ping_interface_gateway, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
-    journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
+    journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
     security_auditor::{
         security_run_audit,
         security_fix_root_ssh, security_fix_ssh_param,
@@ -290,6 +291,8 @@ pub fn run() {
             nginx_toggle_site,
             nginx_create_site,
             nginx_delete_site,
+            nginx_clone_site,
+            nginx_request_cert,
             nginx_list_configs,
             nginx_read_config,
             nginx_write_config,
@@ -390,6 +393,7 @@ pub fn run() {
             get_journal_logs,
             start_journal_live_stream,
             stop_journal_live_stream,
+            export_journal_logs_to_file,
             // Security Auditor
             security_run_audit,
             security_fix_root_ssh,

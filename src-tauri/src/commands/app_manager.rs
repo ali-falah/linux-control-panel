@@ -203,7 +203,7 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
 pub async fn get_app_details(package_id: String, source: String) -> Result<AppDetails, String> {
     if source == "Flatpak" {
         let mut version = "Unknown".to_string();
-        let mut description = "No description available.".to_string();
+        let description = "No description available.".to_string();
         
         if let Ok(output) = Command::new("flatpak").arg("info").arg(&package_id).output().await {
             if output.status.success() {
@@ -717,16 +717,56 @@ pub async fn launch_desktop_app(exec: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
-    let target = if p.is_file() {
-        p.parent().unwrap_or(p).to_string_lossy().to_string()
+    let abs_path = if p.is_relative() {
+        std::env::current_dir().unwrap_or_default().join(p)
     } else {
-        path
+        p.to_path_buf()
     };
 
-    tokio::process::Command::new("xdg-open")
-        .arg(&target)
-        .spawn()
-        .map_err(|e| format!("Failed to open file manager: {e}"))?;
+    if abs_path.is_file() {
+        let uri = format!("file://{}", abs_path.to_string_lossy());
+        
+        // 1. Try DBus org.freedesktop.FileManager1 ShowItems (standard Linux Desktop spec)
+        if let Ok(output) = tokio::process::Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                &format!("array:string:{}", uri),
+                "string:",
+            ])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                return Ok(());
+            }
+        }
+
+        // 2. Try nautilus --select
+        if tokio::process::Command::new("nautilus")
+            .arg("--select")
+            .arg(&abs_path)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // 3. Fallback: xdg-open parent folder
+        let parent = abs_path.parent().unwrap_or(&abs_path);
+        tokio::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {e}"))?;
+    } else {
+        tokio::process::Command::new("xdg-open")
+            .arg(&abs_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {e}"))?;
+    }
 
     Ok(())
 }

@@ -1029,22 +1029,24 @@ pub async fn get_boot_critical_chain(force: Option<bool>) -> Result<Vec<Critical
             continue;
         }
 
-        // Count leading indentation / tree symbols
+        // Count leading indentation / tree symbols safely with char vectors
         let mut depth = 0;
-        let mut idx = 0;
+        let mut char_idx = 0;
         let chars: Vec<char> = line.chars().collect();
-        while idx < chars.len() {
-            if chars[idx] == ' ' || chars[idx] == '│' || chars[idx] == '└' || chars[idx] == '─' || chars[idx] == '├' {
-                if chars[idx] == '└' || chars[idx] == '├' {
+        while char_idx < chars.len() {
+            let c = chars[char_idx];
+            if c == ' ' || c == '│' || c == '└' || c == '─' || c == '├' || c == '|' || c == '`' || c == '-' {
+                if c == '└' || c == '├' || c == '`' {
                     depth += 1;
                 }
-                idx += 1;
+                char_idx += 1;
             } else {
                 break;
             }
         }
 
-        let content = line[idx..].trim();
+        let content_str: String = chars[char_idx..].iter().collect();
+        let content = content_str.trim();
         if content.is_empty() {
             continue;
         }
