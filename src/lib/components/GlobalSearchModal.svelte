@@ -8,6 +8,7 @@
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
+  import { portal } from '../actions/portal.ts';
 
   interface SearchItem {
     id: string;
@@ -1113,6 +1114,7 @@
 
 {#if uiStore.searchModalOpen}
   <div
+    use:portal
     class="search-backdrop"
     role="button"
     tabindex="0"
@@ -1337,7 +1339,7 @@
     background: rgba(0, 0, 0, 0.72);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    z-index: 10000;
+    z-index: 99995;
     display: flex;
     align-items: flex-start;
     justify-content: center;

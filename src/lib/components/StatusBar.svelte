@@ -3,6 +3,7 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
+  import { portal } from '../actions/portal.ts';
 
   // ─── Root Auth State ────────────────────────────────────────────────────────
 
@@ -612,7 +613,7 @@
 {#if showRootModal}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showRootModal = false; }}>
+  <div use:portal class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showRootModal = false; }}>
     <div class="modal" style="max-width: 320px;">
       <h3 style="margin-top:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
         <Shield size={18} style="color:var(--color-accent)"/>

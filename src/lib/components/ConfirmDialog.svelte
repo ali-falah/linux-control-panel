@@ -2,6 +2,7 @@
   import { X, AlertTriangle } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { fade, fly } from 'svelte/transition';
+  import { portal } from '../actions/portal.ts';
 
   async function handleConfirm() {
     const callback = uiStore.confirmDialog.onConfirm;
@@ -17,7 +18,7 @@
 {#if uiStore.confirmDialog.isOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="confirm-dialog-backdrop" transition:fade={{ duration: 150 }}>
+  <div use:portal class="confirm-dialog-backdrop" transition:fade={{ duration: 150 }}>
     <!-- Backdrop dismiss -->
     <div 
       class="backdrop" 

@@ -16,6 +16,7 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KpiCard from '../components/ui/KpiCard.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
+  import { portal } from '../actions/portal.ts';
 
   interface UserInfo {
     username: string;
@@ -605,7 +606,7 @@
 {#if showGroupModal && selectedUser}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={() => showGroupModal = false}>
+  <div use:portal class="modal-backdrop" onclick={() => showGroupModal = false}>
     <div class="modal" onclick={(e) => e.stopPropagation()} style="width: 500px; max-height: 80vh; display:flex; flex-direction:column">
       <h2 style="margin-top:0; color:var(--color-text-primary)">Manage Groups for {selectedUser.username}</h2>
       <p style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px">Check the groups you want this user to be a member of.</p>

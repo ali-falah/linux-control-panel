@@ -18,6 +18,7 @@
   import Skeleton from '../components/Skeleton.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import CoprBrowser from './CoprBrowser.svelte';
+  import { portal } from '../actions/portal.ts';
 
   interface RepoEntry {
     id: string;
@@ -405,6 +406,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
+    use:portal
     class="modal-backdrop"
     onclick={(e) => { if(e.target === e.currentTarget) showAddDialog = false; }}
     role="dialog"

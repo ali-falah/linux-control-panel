@@ -26,6 +26,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import { portal } from '../actions/portal.ts';
 
   let aiNginxPrompt = $state('');
   let showAiNginxPromptBox = $state(false);
@@ -3697,7 +3698,7 @@
 
 <!-- nginx -t result modal -->
 {#if showTestModal && modalTestResult}
-  <div class="modal-backdrop"
+  <div use:portal class="modal-backdrop"
     onclick={() => (showTestModal = false)}
     onkeydown={(e) => e.key === 'Escape' && (showTestModal = false)}
     role="dialog" aria-modal="true" tabindex="-1"
@@ -3731,7 +3732,7 @@
 
 <!-- General output modal -->
 {#if showOutputModal}
-  <div class="modal-backdrop"
+  <div use:portal class="modal-backdrop"
     onclick={() => (showOutputModal = false)}
     onkeydown={(e) => e.key === 'Escape' && (showOutputModal = false)}
     role="dialog" aria-modal="true" tabindex="-1"

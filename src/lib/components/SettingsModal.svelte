@@ -9,6 +9,7 @@
   import Toggle from './ui/Toggle.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { portal } from '../actions/portal.ts';
 
   let activeCategoryTab = $state<'appearance' | 'ai' | 'system'>('appearance');
   let showKey = $state(false);
@@ -147,6 +148,7 @@
 
 {#if uiStore.settingsModalOpen}
   <div 
+    use:portal
     class="modal-backdrop" 
     onclick={() => uiStore.closeSettingsModal()} 
     onwheel={(e) => e.stopPropagation()}
@@ -605,9 +607,10 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 2000;
+    z-index: 99995;
     background: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

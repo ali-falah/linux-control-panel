@@ -9,6 +9,7 @@
   import { invokeSafe } from '../utils/ipc';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import { portal } from '../actions/portal.ts';
 
   // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1401,7 +1402,7 @@
 
 <!-- 1. Generate SSH Key Modal -->
 {#if showGenModal}
-  <div class="modal-backdrop" onclick={() => showGenModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showGenModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -1463,7 +1464,7 @@
 
 <!-- 2. Generated Key Result Modal -->
 {#if generatedKeyResult}
-  <div class="modal-backdrop" onclick={() => generatedKeyResult = null} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => generatedKeyResult = null} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -1498,7 +1499,7 @@
 
 <!-- 3. Add Client Host Modal -->
 {#if showAddClientModal}
-  <div class="modal-backdrop" onclick={() => showAddClientModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showAddClientModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -1555,7 +1556,7 @@
 
 <!-- 4. Add Authorized Key Modal -->
 {#if showAddAuthModal}
-  <div class="modal-backdrop" onclick={() => showAddAuthModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showAddAuthModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -1591,7 +1592,7 @@
 
 <!-- 5. Test Remote TLS Modal -->
 {#if showTestSslModal}
-  <div class="modal-backdrop" onclick={() => showTestSslModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showTestSslModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -1666,7 +1667,7 @@
 
 <!-- 6. Manually Ban IP Modal -->
 {#if showBanModal}
-  <div class="modal-backdrop" onclick={() => showBanModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showBanModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
@@ -2453,9 +2454,10 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 2000;
+    z-index: 99990;
     background: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

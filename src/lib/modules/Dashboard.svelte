@@ -12,6 +12,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
+  import { portal } from '../actions/portal.ts';
 
 
 
@@ -1133,7 +1134,7 @@
 {#if selectedStorageDetail}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) selectedStorageDetail = null; }}>
+  <div use:portal class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) selectedStorageDetail = null; }}>
     <div class="modal-glass-card">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <h3 style="margin:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700;">
@@ -2082,7 +2083,8 @@
     inset: 0;
     background: rgba(0, 0, 0, 0.65);
     backdrop-filter: blur(8px);
-    z-index: 10000;
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 99990;
     display: flex;
     align-items: center;
     justify-content: center;

@@ -5,6 +5,7 @@
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import { getHardcodedFix } from '../stores/aiStore.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
+  import { portal } from '../actions/portal.ts';
 
   // ── Derived state ──────────────────────────────────────────────────────────
   let showModal = $derived(aiStore.activeModalType === 'finding');
@@ -61,6 +62,7 @@
 
 {#if showModal}
   <div
+    use:portal
     class="ai-modal-backdrop"
     role="button"
     tabindex="0"
@@ -237,9 +239,10 @@
   .ai-modal-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 2100;
-    background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(5px);
+    z-index: 99995;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

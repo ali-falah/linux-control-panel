@@ -6,7 +6,7 @@
     FileCode, Settings, Cpu, HardDrive, Shield, AlertTriangle, 
     CheckCircle2, Copy, Check, Eye, RefreshCcw, Save, Zap,
     FileText, ArrowDown, Search, Folder, TerminalSquare, Info,
-    Activity, Clock, ChevronRight, Hash, Box, KeyRound, Database
+    Activity, Clock, ChevronRight, Hash, Box, KeyRound, Database, Sparkles
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -15,12 +15,14 @@
   import SearchBar from '../components/ui/SearchBar.svelte';
   import Select from '../components/ui/Select.svelte';
   import Button from '../components/ui/Button.svelte';
+  import Stepper from '../components/ui/Stepper.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import CodeEditor from '../components/CodeEditor.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Table from '../components/ui/Table.svelte';
   import { tableFeatures } from '../actions/tableFeatures.ts';
+  import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
 
   // Types
@@ -125,8 +127,12 @@
   let copiedLogs = $state(false);
   let copiedField = $state<string | null>(null);
 
-  // Launch App Modal
+  // Launch App Modal & Stepper State
   let showLaunchModal = $state(false);
+  let launchStep = $state<1 | 2 | 3>(1);
+  let bulkEnvText = $state('');
+  let showBulkEnvInput = $state(false);
+
   let launchForm = $state({
     script_path: '',
     name: '',
@@ -137,6 +143,34 @@
     max_memory_restart: '500M',
     args: '',
     env_vars: [{ key: 'NODE_ENV', value: 'production' }]
+  });
+
+  let detectedRuntime = $derived.by(() => {
+    const p = launchForm.script_path.toLowerCase().trim();
+    if (!p) return null;
+    if (p.endsWith('.py')) return { label: 'Python Script', badge: '🐍 Python', type: 'python' };
+    if (p.endsWith('.sh') || p.endsWith('.bash')) return { label: 'Shell Script', badge: '🐚 Shell', type: 'shell' };
+    if (p.endsWith('.json') || p.includes('ecosystem')) return { label: 'PM2 Ecosystem', badge: '📦 Ecosystem', type: 'ecosystem' };
+    if (p.endsWith('.ts') || p.endsWith('.tsx')) return { label: 'TypeScript App', badge: '🔷 TypeScript', type: 'ts' };
+    if (p.endsWith('.js') || p.endsWith('.mjs') || p.endsWith('.cjs')) return { label: 'Node.js App', badge: '🟩 Node.js', type: 'node' };
+    return { label: 'Generic Executable', badge: '⚙️ Binary / Script', type: 'generic' };
+  });
+
+  let livePm2Command = $derived.by(() => {
+    let cmd = `pm2 start "${launchForm.script_path || '<script_path>'}"`;
+    if (launchForm.name && launchForm.name.trim()) cmd += ` --name "${launchForm.name.trim()}"`;
+    if (launchForm.cwd && launchForm.cwd.trim()) cmd += ` --cwd "${launchForm.cwd.trim()}"`;
+    if (launchForm.exec_mode === 'cluster') {
+      cmd += ` -i ${launchForm.instances || 'max'}`;
+    }
+    if (launchForm.max_memory_restart && launchForm.max_memory_restart.trim()) {
+      cmd += ` --max-memory-restart ${launchForm.max_memory_restart.trim()}`;
+    }
+    if (launchForm.watch) cmd += ` --watch`;
+    if (launchForm.args && launchForm.args.trim()) {
+      cmd += ` -- ${launchForm.args.trim()}`;
+    }
+    return cmd;
   });
 
   // Ecosystem Editor
@@ -632,7 +666,39 @@
     }
   }
 
+  function parseAndApplyBulkEnv() {
+    if (!bulkEnvText.trim()) return;
+    const lines = bulkEnvText.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        let val = trimmed.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        if (key) {
+          const existing = launchForm.env_vars.find(e => e.key === key);
+          if (existing) {
+            existing.value = val;
+          } else {
+            launchForm.env_vars.push({ key, value: val });
+          }
+        }
+      }
+    }
+    launchForm.env_vars = [...launchForm.env_vars];
+    bulkEnvText = '';
+    showBulkEnvInput = false;
+    uiStore.showToast('Environment variables imported', 'success');
+  }
+
   function resetLaunchForm() {
+    launchStep = 1;
+    bulkEnvText = '';
+    showBulkEnvInput = false;
     launchForm = {
       script_path: '',
       name: '',
@@ -2060,182 +2126,336 @@
 {/if}
 
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
-<!-- MODAL: LAUNCH NEW APP -->
+<!-- MODAL: LAUNCH NEW APP (3-STEP GUIDED WIZARD) -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showLaunchModal}
-  <div class="modal-backdrop" onclick={() => showLaunchModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog">
+  <div use:portal class="modal-backdrop" onclick={() => showLaunchModal = false} role="presentation">
+    <div class="modal-card modal-wizard-card" onclick={(e) => e.stopPropagation()} role="dialog">
+      <!-- Modal Header -->
       <div class="modal-header">
         <div class="modal-title-wrap">
           <Plus size={18} class="text-accent" />
-          <h3>Launch New Node.js Application</h3>
+          <h3>Launch Application</h3>
         </div>
         <button class="modal-close-btn" onclick={() => showLaunchModal = false}>×</button>
       </div>
 
-      <div class="modal-body">
-        <!-- Script Path with Browse Button -->
-        <div class="form-group">
-          <label for="script-path-input" class="form-label">Script / Entrypoint Path *</label>
-          <div class="input-browse-wrap">
-            <input
-              id="script-path-input"
-              type="text"
-              placeholder="/var/www/my-app/dist/main.js or ./index.js"
-              bind:value={launchForm.script_path}
-              class="form-input"
-            />
-            <Button variant="outline" onclick={browseScriptFile} title="Browse for script file (.js, .ts, .mjs, .cjs, etc.)">
-              <Folder size={14} class="text-accent" />
-              <span>Browse...</span>
-            </Button>
-          </div>
-          <small class="form-help">Supported: JavaScript (*.js, *.mjs, *.cjs), TypeScript (*.ts), Python, Shell (*.sh), or Ecosystem JSON.</small>
-        </div>
+      <!-- Stepper Progress Bar (Reusable Component) -->
+      <Stepper
+        bind:currentStep={launchStep}
+        steps={[
+          { label: 'Target & Script' },
+          { label: 'Scaling & Limits' },
+          { label: 'Environment & CLI' }
+        ]}
+        onchange={(s) => {
+          if (s > 1 && !launchForm.script_path.trim()) {
+            uiStore.showToast('Please specify a script path first', 'warning');
+            launchStep = 1;
+          }
+        }}
+      />
 
-        <div class="form-row">
-          <!-- App Name -->
-          <div class="form-group">
-            <label for="app-name-input" class="form-label">App Name</label>
-            <input
-              id="app-name-input"
-              type="text"
-              placeholder="e.g. backend-api"
-              bind:value={launchForm.name}
-              class="form-input"
-            />
-            <small class="form-help">Identifier in PM2 process table (auto-inferred if blank)</small>
-          </div>
-
-          <!-- Working Directory with Browse Button -->
-          <div class="form-group">
-            <label for="app-cwd-input" class="form-label">Working Directory (CWD)</label>
-            <div class="input-browse-wrap">
-              <input
-                id="app-cwd-input"
-                type="text"
-                placeholder="e.g. /var/www/my-app"
-                bind:value={launchForm.cwd}
-                class="form-input"
-              />
-              <Button variant="outline" onclick={browseWorkingDir} title="Browse for Working Directory">
-                <Folder size={14} />
-              </Button>
-            </div>
-            <small class="form-help">Root directory where app runs</small>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label for="exec-mode-select" class="form-label">Execution Mode</label>
-            <Select id="exec-mode-select" bind:value={launchForm.exec_mode}>
-              <option value="fork">Fork Mode (Single instance)</option>
-              <option value="cluster">Cluster Mode (Multi-core load balancing)</option>
-            </Select>
-          </div>
-
-          {#if launchForm.exec_mode === 'cluster'}
+      <!-- Modal Body (Step Specific) -->
+      <div class="modal-body wizard-body">
+        {#if launchStep === 1}
+          <!-- ─── STEP 1: TARGET & SCRIPT ────────────────────────────── -->
+          <div class="step-pane">
             <div class="form-group">
-              <label for="instances-input" class="form-label">Instances (0 = All Cores)</label>
-              <input
-                id="instances-input"
-                type="number"
-                min="0"
-                max="32"
-                bind:value={launchForm.instances}
-                class="form-input"
-              />
-            </div>
-          {/if}
+              <label for="script-path-input" class="form-label">Script / Entrypoint Path <span class="text-rose">*</span></label>
+              <div class="input-browse-wrap">
+                <input
+                  id="script-path-input"
+                  type="text"
+                  placeholder="/var/www/my-app/dist/main.js, ./server.js, or script.py"
+                  bind:value={launchForm.script_path}
+                  class="form-input"
+                />
+                <Button variant="outline" onclick={browseScriptFile} title="Browse for executable script file">
+                  <Folder size={14} class="text-accent" />
+                  <span>Browse...</span>
+                </Button>
+              </div>
 
-          <div class="form-group">
-            <label for="max-mem-input" class="form-label">Max Memory Restart</label>
-            <input
-              id="max-mem-input"
-              type="text"
-              placeholder="500M, 1G"
-              bind:value={launchForm.max_memory_restart}
-              class="form-input"
-            />
-            <div class="preset-pill-row">
-              {#each ['256M', '512M', '1G', '2G'] as mem}
+              {#if detectedRuntime}
+                <div class="runtime-badge-pill">
+                  <span>Detected:</span>
+                  <strong>{detectedRuntime.badge}</strong>
+                  <span class="text-muted">({detectedRuntime.label})</span>
+                </div>
+              {:else}
+                <small class="form-help">Supported: JavaScript (*.js, *.mjs, *.cjs), TypeScript (*.ts), Python (*.py), Shell (*.sh), or Ecosystem JSON.</small>
+              {/if}
+            </div>
+
+            <div class="form-row">
+              <!-- App Name -->
+              <div class="form-group">
+                <label for="app-name-input" class="form-label">Application Name</label>
+                <input
+                  id="app-name-input"
+                  type="text"
+                  placeholder="e.g. billing-backend"
+                  bind:value={launchForm.name}
+                  class="form-input"
+                />
+                <small class="form-help">Process name in PM2 table (auto-inferred from folder if empty)</small>
+              </div>
+
+              <!-- Working Directory with Browse Button -->
+              <div class="form-group">
+                <label for="app-cwd-input" class="form-label">Working Directory (CWD)</label>
+                <div class="input-browse-wrap">
+                  <input
+                    id="app-cwd-input"
+                    type="text"
+                    placeholder="e.g. /var/www/my-app"
+                    bind:value={launchForm.cwd}
+                    class="form-input"
+                  />
+                  <Button variant="outline" onclick={browseWorkingDir} title="Browse for Working Directory">
+                    <Folder size={14} />
+                  </Button>
+                </div>
+                <small class="form-help">Root execution folder</small>
+              </div>
+            </div>
+
+            <div class="step-info-card">
+              <Sparkles size={16} class="text-accent flex-shrink-0" />
+              <div class="text-xs text-secondary">
+                Need to launch fast? Click <strong>Quick Launch</strong> to start immediately with standard defaults, or click <strong>Next</strong> to configure cluster instances, memory limits, and environment variables.
+              </div>
+            </div>
+          </div>
+
+        {:else if launchStep === 2}
+          <!-- ─── STEP 2: SCALING & RESOURCES ────────────────────────── -->
+          <div class="step-pane">
+            <div class="form-group">
+              <label class="form-label">Execution Mode</label>
+              <div class="mode-card-grid">
                 <button
                   type="button"
-                  class="preset-pill {launchForm.max_memory_restart === mem ? 'active' : ''}"
-                  onclick={() => launchForm.max_memory_restart = mem}
+                  class="mode-card"
+                  class:active={launchForm.exec_mode === 'fork'}
+                  onclick={() => launchForm.exec_mode = 'fork'}
                 >
-                  {mem}
+                  <div class="mode-card-header">
+                    <Zap size={16} class="text-amber" />
+                    <strong>Fork Mode</strong>
+                  </div>
+                  <span class="mode-card-desc">Single-instance execution. Best for background workers, cron scripts, Python, or standard Node.js scripts.</span>
                 </button>
-              {/each}
+
+                <button
+                  type="button"
+                  class="mode-card"
+                  class:active={launchForm.exec_mode === 'cluster'}
+                  onclick={() => launchForm.exec_mode = 'cluster'}
+                >
+                  <div class="mode-card-header">
+                    <Layers size={16} class="text-accent" />
+                    <strong>Cluster Mode</strong>
+                  </div>
+                  <span class="mode-card-desc">Multi-core load balancing with zero-downtime reloads. Best for HTTP APIs (NestJS, Express, etc.).</span>
+                </button>
+              </div>
+            </div>
+
+            {#if launchForm.exec_mode === 'cluster'}
+              <div class="form-group" style="margin-top: 4px;">
+                <label for="instances-input" class="form-label">CPU Instances (0 = All Cores / Max)</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <input
+                    id="instances-input"
+                    type="number"
+                    min="0"
+                    max="64"
+                    bind:value={launchForm.instances}
+                    class="form-input font-mono"
+                    style="width: 120px;"
+                  />
+                  <span class="text-xs text-muted">Set <code>0</code> or <code>max</code> to scale across all detected CPU cores automatically.</span>
+                </div>
+              </div>
+            {/if}
+
+            <div class="form-row" style="margin-top: 4px;">
+              <div class="form-group">
+                <label for="max-mem-input" class="form-label">Max Memory Restart Limit</label>
+                <input
+                  id="max-mem-input"
+                  type="text"
+                  placeholder="500M, 1G, 2G"
+                  bind:value={launchForm.max_memory_restart}
+                  class="form-input font-mono"
+                />
+                <div class="preset-pill-row">
+                  {#each ['256M', '512M', '1G', '2G'] as mem}
+                    <button
+                      type="button"
+                      class="preset-pill {launchForm.max_memory_restart === mem ? 'active' : ''}"
+                      onclick={() => launchForm.max_memory_restart = mem}
+                    >
+                      {mem}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label">File Watch Mode</label>
+                <label class="toggle-card-label">
+                  <input type="checkbox" bind:checked={launchForm.watch} />
+                  <div>
+                    <strong>Watch Mode</strong>
+                    <p class="text-xs text-muted" style="margin: 2px 0 0 0;">Auto-restart when files change in CWD</p>
+                  </div>
+                </label>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="form-group">
-          <label class="checkbox-label">
-            <input type="checkbox" bind:checked={launchForm.watch} />
-            <span>Watch mode (Auto-restart on source file changes)</span>
-          </label>
-        </div>
-
-        <div class="form-group">
-          <label for="app-args-input" class="form-label">CLI Arguments</label>
-          <input
-            id="app-args-input"
-            type="text"
-            placeholder="--port 8080 --verbose --env staging"
-            bind:value={launchForm.args}
-            class="form-input"
-          />
-        </div>
-
-        <!-- Environment Variables Section with Presets -->
-        <div class="env-section">
-          <div class="env-section-header">
-            <div>
-              <span class="form-label" style="font-weight: 600;">Environment Variables</span>
-              <span class="text-muted" style="font-size: 11px; margin-left: 6px;">({launchForm.env_vars.length} configured)</span>
-            </div>
-            <div style="display: flex; gap: 6px;">
-              <Button variant="ghost" size="xs" onclick={addEnvRow}>+ Add Variable</Button>
-            </div>
-          </div>
-
-          <!-- Quick Env Presets -->
-          <div class="preset-pill-row" style="margin-bottom: 6px;">
-            <span style="font-size: 10px; color: var(--color-text-muted); font-weight: 600;">Quick Presets:</span>
-            <button type="button" class="preset-pill" onclick={() => addEnvPreset('NODE_ENV', 'production')}>+ NODE_ENV=production</button>
-            <button type="button" class="preset-pill" onclick={() => addEnvPreset('PORT', '3000')}>+ PORT=3000</button>
-            <button type="button" class="preset-pill" onclick={() => addEnvPreset('PORT', '8080')}>+ PORT=8080</button>
-          </div>
-
-          {#each launchForm.env_vars as env, idx}
-            <div class="modal-env-row">
+        {:else if launchStep === 3}
+          <!-- ─── STEP 3: ENVIRONMENT & CLI ──────────────────────────── -->
+          <div class="step-pane">
+            <div class="form-group">
+              <label for="app-args-input" class="form-label">CLI Arguments (Passed to process)</label>
               <input
+                id="app-args-input"
                 type="text"
-                placeholder="KEY (e.g. PORT)"
-                bind:value={env.key}
-                class="form-input form-input-sm font-mono"
+                placeholder="--port 8080 --verbose --env staging"
+                bind:value={launchForm.args}
+                class="form-input font-mono"
               />
-              <input
-                type="text"
-                placeholder="VALUE (e.g. 3000)"
-                bind:value={env.value}
-                class="form-input form-input-sm font-mono"
-              />
-              <button class="btn-remove-row text-rose" onclick={() => removeEnvRow(idx)} title="Remove variable">×</button>
             </div>
-          {/each}
-        </div>
+
+            <!-- Environment Variables Section with Presets & Bulk Import -->
+            <div class="env-section">
+              <div class="env-section-header">
+                <div>
+                  <span class="form-label" style="font-weight: 600;">Environment Variables</span>
+                  <span class="text-muted" style="font-size: 11px; margin-left: 6px;">({launchForm.env_vars.length} configured)</span>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <Button variant="ghost" size="xs" onclick={() => showBulkEnvInput = !showBulkEnvInput}>
+                    <FileText size={12} />
+                    <span>{showBulkEnvInput ? 'Cancel Paste' : 'Paste .env'}</span>
+                  </Button>
+                  <Button variant="ghost" size="xs" onclick={addEnvRow}>+ Add Variable</Button>
+                </div>
+              </div>
+
+              {#if showBulkEnvInput}
+                <div class="bulk-env-box">
+                  <textarea
+                    bind:value={bulkEnvText}
+                    placeholder="Paste .env contents here (e.g. PORT=3000&#10;NODE_ENV=production)"
+                    class="form-textarea font-mono text-xs"
+                    rows="4"
+                  ></textarea>
+                  <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px;">
+                    <Button variant="ghost" size="xs" onclick={() => showBulkEnvInput = false}>Close</Button>
+                    <Button variant="primary" size="xs" onclick={parseAndApplyBulkEnv}>Import Variables</Button>
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Quick Env Presets -->
+              <div class="preset-pill-row">
+                <span style="font-size: 10px; color: var(--color-text-muted); font-weight: 600;">Quick Presets:</span>
+                <button type="button" class="preset-pill" onclick={() => addEnvPreset('NODE_ENV', 'production')}>+ NODE_ENV=production</button>
+                <button type="button" class="preset-pill" onclick={() => addEnvPreset('PORT', '3000')}>+ PORT=3000</button>
+                <button type="button" class="preset-pill" onclick={() => addEnvPreset('PORT', '8080')}>+ PORT=8080</button>
+              </div>
+
+              <div class="env-rows-scroll">
+                {#each launchForm.env_vars as env, idx}
+                  <div class="modal-env-row">
+                    <input
+                      type="text"
+                      placeholder="KEY (e.g. PORT)"
+                      bind:value={env.key}
+                      class="form-input form-input-sm font-mono"
+                    />
+                    <input
+                      type="text"
+                      placeholder="VALUE (e.g. 3000)"
+                      bind:value={env.value}
+                      class="form-input form-input-sm font-mono"
+                    />
+                    <button class="btn-remove-row text-rose" onclick={() => removeEnvRow(idx)} title="Remove variable">×</button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <!-- Pre-flight PM2 Command Preview Box -->
+            <div class="terminal-preview-box">
+              <div class="terminal-header">
+                <Terminal size={12} class="text-accent" />
+                <span>Pre-flight Command Preview</span>
+              </div>
+              <div class="terminal-code font-mono text-xs">
+                $ {livePm2Command}
+              </div>
+            </div>
+          </div>
+        {/if}
       </div>
 
+      <!-- Modal Footer (Step-aware) -->
       <div class="modal-footer">
-        <Button variant="outline" onclick={() => showLaunchModal = false}>Cancel</Button>
-        <Button variant="primary" onclick={launchProcess}>
-          <Play size={13} />
-          <span>Launch Application</span>
-        </Button>
+        {#if launchStep === 1}
+          <Button variant="ghost" onclick={() => showLaunchModal = false}>Cancel</Button>
+          <div style="display: flex; gap: 8px; margin-left: auto;">
+            <Button
+              variant="outline"
+              onclick={launchProcess}
+              disabled={!launchForm.script_path.trim()}
+              title="Launch immediately with standard defaults"
+            >
+              <Zap size={13} class="text-amber" />
+              <span>Quick Launch</span>
+            </Button>
+            <Button
+              variant="primary"
+              onclick={() => {
+                if (!launchForm.script_path.trim()) {
+                  uiStore.showToast('Please specify a script path first', 'warning');
+                  return;
+                }
+                launchStep = 2;
+              }}
+            >
+              <span>Next: Scaling &amp; Limits &rarr;</span>
+            </Button>
+          </div>
+        {:else if launchStep === 2}
+          <Button variant="outline" onclick={() => launchStep = 1}>&larr; Back</Button>
+          <div style="display: flex; gap: 8px; margin-left: auto;">
+            <Button
+              variant="outline"
+              onclick={launchProcess}
+              title="Launch with settings configured so far"
+            >
+              <Zap size={13} class="text-amber" />
+              <span>Launch Now</span>
+            </Button>
+            <Button variant="primary" onclick={() => launchStep = 3}>
+              <span>Next: Environment &amp; CLI &rarr;</span>
+            </Button>
+          </div>
+        {:else if launchStep === 3}
+          <Button variant="outline" onclick={() => launchStep = 2}>&larr; Back</Button>
+          <div style="display: flex; gap: 8px; margin-left: auto;">
+            <Button variant="primary" onclick={launchProcess}>
+              <Play size={13} />
+              <span>Launch Application</span>
+            </Button>
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -2245,7 +2465,7 @@
 <!-- MODAL: NEW ECOSYSTEM FILE -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showNewEcosystemModal}
-  <div class="modal-backdrop" onclick={() => showNewEcosystemModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => showNewEcosystemModal = false} role="presentation">
     <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog">
       <div class="modal-header">
         <div class="modal-title-wrap">
@@ -4093,17 +4313,18 @@
   }
 
   /* ═════════════════════════════════════════════════════════════════════════ */
-  /* MODALS */
+  /* MODALS & STEPPER WIZARD */
   /* ═════════════════════════════════════════════════════════════════════════ */
   .modal-backdrop {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(4px);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 999;
+    z-index: 99990;
     padding: 20px;
   }
 
@@ -4120,8 +4341,14 @@
     overflow: hidden;
   }
 
+  .modal-wizard-card {
+    max-width: 640px;
+    height: 560px;
+    max-height: 92vh;
+  }
+
   .modal-header {
-    padding: 16px 20px;
+    padding: 14px 20px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -4148,12 +4375,168 @@
     cursor: pointer;
   }
 
-  .modal-body {
-    padding: 20px;
+  .wizard-body {
+    flex: 1;
+    min-height: 0;
+    padding: 18px 20px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+  }
+
+  .step-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+    flex: 1;
+  }
+
+  .step-info-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+    margin-top: auto;
+  }
+
+  /* Mode selection cards */
+  .mode-card-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .mode-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--color-bg-raised);
+    border: 1.5px solid var(--color-border);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+    font-family: inherit;
+  }
+
+  .mode-card:hover {
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-hover);
+  }
+
+  .mode-card.active {
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent);
+    box-shadow: 0 0 12px rgba(0, 218, 243, 0.15);
+  }
+
+  .mode-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--color-text-primary);
+  }
+
+  .mode-card-desc {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    line-height: 1.35;
+  }
+
+  .toggle-card-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .toggle-card-label strong {
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }
+
+  /* Pre-flight Terminal box */
+  .terminal-preview-box {
+    background: #020813;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: auto;
+  }
+
+  .terminal-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .terminal-code {
+    color: var(--color-accent);
+    overflow-x: auto;
+    white-space: nowrap;
+    font-size: 11.5px;
+  }
+
+  .runtime-badge-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(0, 218, 243, 0.08);
+    border: 1px solid rgba(0, 218, 243, 0.25);
+    color: var(--color-accent);
+    font-size: 11px;
+    font-weight: 500;
+    margin-top: 4px;
+    width: fit-content;
+  }
+
+  .bulk-env-box {
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 8px;
+    margin-bottom: 6px;
+  }
+
+  .form-textarea {
+    width: 100%;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 8px;
+    color: var(--color-text-primary);
+    outline: none;
+    resize: vertical;
+    box-sizing: border-box;
+    font-family: inherit;
+  }
+
+  .env-rows-scroll {
+    max-height: 120px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-right: 2px;
   }
 
   .form-group {
@@ -4282,7 +4665,7 @@
   }
 
   .modal-footer {
-    padding: 14px 20px;
+    padding: 12px 20px;
     display: flex;
     align-items: center;
     justify-content: flex-end;
