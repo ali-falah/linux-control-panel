@@ -22,3 +22,4 @@ pub mod security_auditor;
 pub mod audit_log;
 pub mod ssh_cert_vault;
 pub mod ai_advisor;
+pub mod pm2_manager;

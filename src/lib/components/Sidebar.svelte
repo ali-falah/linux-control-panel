@@ -120,6 +120,7 @@
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
         { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, authorized access & TLS certs' },
         { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & vhosts' },
+        { id: 'pm2-manager',      label: 'PM2 Manager',      icon: Layers, desc: 'Node.js apps, clusters & logs' },
       ],
     },
     {

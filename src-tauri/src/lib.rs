@@ -108,6 +108,14 @@ use commands::{
         ai_generate_terminal_command, ai_test_cloud_connection,
         open_system_config_file,
     },
+    pm2_manager::{
+        pm2_get_system_status, pm2_list_processes, pm2_process_action,
+        pm2_start_custom_process, pm2_save_dump, pm2_resurrect_dump,
+        pm2_get_saved_dump_apps, pm2_start_saved_app, pm2_delete_saved_app,
+        pm2_flush_logs, pm2_read_logs, pm2_clear_logs,
+        pm2_list_ecosystem_files, pm2_read_ecosystem_file,
+        pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
+    },
 };
 use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
@@ -453,6 +461,24 @@ pub fn run() {
             ai_generate_terminal_command,
             ai_test_cloud_connection,
             open_system_config_file,
+            // PM2 Process Manager
+            pm2_get_system_status,
+            pm2_list_processes,
+            pm2_process_action,
+            pm2_start_custom_process,
+            pm2_save_dump,
+            pm2_resurrect_dump,
+            pm2_get_saved_dump_apps,
+            pm2_start_saved_app,
+            pm2_delete_saved_app,
+            pm2_flush_logs,
+            pm2_read_logs,
+            pm2_clear_logs,
+            pm2_list_ecosystem_files,
+            pm2_read_ecosystem_file,
+            pm2_write_ecosystem_file,
+            pm2_start_ecosystem,
+            pm2_get_startup_status,
         ])
         .setup(|_app| {
             tauri::async_runtime::spawn(async {

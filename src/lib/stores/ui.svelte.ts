@@ -32,6 +32,8 @@ export type TabId =
   | 'device-manager'
   | 'network-manager'
   | 'app-manager'
+  | 'journal-logs'
+  | 'pm2-manager';
 export interface VisitedItem {
   id: string;
   title: string;

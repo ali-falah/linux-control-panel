@@ -50,6 +50,7 @@
     'env-manager': 'Environment',
     'shell-env': 'Shell Environment',
     'cron-manager': 'Scheduled Tasks',
+    'pm2-manager': 'PM2 Manager',
   };
 </script>
 

@@ -26,8 +26,13 @@
     if (triggerBtn) {
       const rect = triggerBtn.getBoundingClientRect();
       const top = rect.bottom + 4;
-      const left = align === 'right' ? (rect.right - 160) : rect.left;
-      dropdownStyle = `position: fixed; top: ${top}px; left: ${Math.max(10, left)}px; margin-top: 0; z-index: 9999;`;
+      if (align === 'right') {
+        const right = Math.max(10, window.innerWidth - rect.right);
+        dropdownStyle = `position: fixed; top: ${top}px; right: ${right}px; left: auto; margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 280px;`;
+      } else {
+        const left = Math.max(10, rect.left);
+        dropdownStyle = `position: fixed; top: ${top}px; left: ${left}px; right: auto; margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 280px;`;
+      }
     }
   }
 
@@ -82,7 +87,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div 
       use:portal
-      class="menu-dropdown card animate-fade-slide" 
+      class="menu-dropdown animate-fade-slide" 
       style={dropdownStyle}
       onclick={closeMenu}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeMenu(); }}
@@ -114,48 +119,60 @@
   }
 
   .menu-dropdown {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
-    padding: 6px !important;
-    min-width: 160px;
+    position: fixed;
+    padding: 5px !important;
+    width: max-content;
+    min-width: 180px;
+    max-width: 280px;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    background: var(--color-bg-popover, var(--color-bg-card)) !important;
+    background: var(--color-bg-surface) !important;
     border: 1px solid var(--color-border) !important;
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.08) !important;
-    z-index: 9999;
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+    z-index: 99999;
     transform-origin: top right;
+  }
+
+  :global(html.light-mode) .menu-dropdown {
+    background: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.08) !important;
   }
   
   :global(.menu-dropdown .menu-item) {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     width: 100%;
-    padding: 8px 12px;
+    padding: 7px 10px;
     border-radius: 6px;
     background: transparent;
     border: none;
     color: var(--color-text-primary);
-    font-size: 13px;
+    font-size: 12px;
+    font-weight: 500;
     cursor: pointer;
     text-align: left;
-    transition: background 0.15s ease;
+    transition: background 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+    font-family: inherit;
   }
   
   :global(.menu-dropdown .menu-item:hover) {
     background: var(--color-bg-hover);
-    color: var(--color-accent);
+    color: var(--color-text-primary);
   }
   
-  :global(.menu-dropdown .menu-item.danger) {
+  :global(.menu-dropdown .menu-item.danger),
+  :global(.menu-dropdown .menu-item.text-danger) {
     color: var(--color-error);
   }
   
-  :global(.menu-dropdown .menu-item.danger:hover) {
-    background: var(--color-error-muted);
+  :global(.menu-dropdown .menu-item.danger:hover),
+  :global(.menu-dropdown .menu-item.text-danger:hover) {
+    background: rgba(244, 63, 94, 0.12);
+    color: var(--color-error);
   }
 </style>

@@ -244,7 +244,7 @@
     border: 1px solid var(--color-border);
     border-radius: 8px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
-    z-index: 100;
+    z-index: 1000;
     display: flex;
     flex-direction: column;
     gap: 2px;

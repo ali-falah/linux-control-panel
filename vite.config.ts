@@ -11,8 +11,8 @@ export default defineConfig(async () => ({
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
   plugins: [
-    tailwindcss(),
     svelte(),
+    tailwindcss(),
   ],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -38,6 +38,10 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    cors: true,
+    fs: {
+      strict: false,
+    },
     hmr: host
       ? {
           protocol: "ws",

@@ -254,6 +254,19 @@
           {:then module}
             <module.default />
           {/await}
+        {:else if uiStore.activeTab === 'pm2-manager'}
+          {#await import('./lib/modules/Pm2Manager.svelte')}
+            <div class="module-lazy-loader">
+              <div class="module-lazy-spinner"></div>
+              <span>Loading PM2 Process Manager…</span>
+            </div>
+          {:then module}
+            <module.default />
+          {:catch error}
+            <div class="module-lazy-loader">
+              <span style="color: var(--color-error, #f43f5e);">Failed to load PM2 module: {error?.message || error}</span>
+            </div>
+          {/await}
         {/if}
       {/key}
     </div>

@@ -4,7 +4,7 @@
     ShieldAlert, FileText, HardDrive, Terminal, Sliders, Lock, Cpu, User, FolderLock, 
     Settings, Sparkles, Sun, Moon, ArrowRight, Zap, RefreshCw, Clock, History,
     CheckCircle2, AlertTriangle, Play, Flame, CornerDownLeft, Trash2, Key, Database,
-    SlidersHorizontal, Compass, Timer
+    SlidersHorizontal, Compass, Timer, FileCode, Save
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
@@ -251,10 +251,70 @@
       tabId: 'grub-manager',
       action: () => { uiStore.navigateTo('grub-manager'); uiStore.closeSearchModal(); }
     },
+    {
+      id: 'page-pm2-manager',
+      title: 'PM2 Process Manager (Node.js)',
+      description: 'Monitor Node.js servers, cluster processes, live streaming logs & ecosystem files',
+      category: 'Pages',
+      icon: Layers,
+      keywords: 'pm2 node nodejs javascript backend server cluster fork ecosystem daemon express nest next process api',
+      tabId: 'pm2-manager',
+      action: () => { uiStore.navigateTo('pm2-manager'); uiStore.closeSearchModal(); }
+    },
 
     // ═════════════════════════════════════════════════════════════════════════════
     // 2. SUB-TABS & VIEWS WITHIN PAGES
     // ═════════════════════════════════════════════════════════════════════════════
+    // ── PM2 Manager Tabs ──
+    {
+      id: 'tab-pm2-processes',
+      title: 'PM2 Processes & Telemetry',
+      description: 'Live table & card grid of managed Node.js backend processes',
+      category: 'Tabs',
+      breadcrumb: 'PM2 Manager › Processes',
+      icon: Layers,
+      keywords: 'pm2 processes list jlist cpu ram memory cluster fork status uptime restarts',
+      tabId: 'pm2-manager',
+      subTab: 'processes',
+      action: () => { uiStore.navigateTo('pm2-manager', 'processes'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-pm2-logs',
+      title: 'PM2 Live Logs Stream',
+      description: 'Real-time stdout & stderr log console with filtering & search',
+      category: 'Tabs',
+      breadcrumb: 'PM2 Manager › Logs Stream',
+      icon: Terminal,
+      keywords: 'pm2 logs stream stdout stderr tail flush console output errors',
+      tabId: 'pm2-manager',
+      subTab: 'logs',
+      action: () => { uiStore.navigateTo('pm2-manager', 'logs'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-pm2-ecosystem',
+      title: 'PM2 Ecosystem & Configurations',
+      description: 'Edit ecosystem.config.js & pm2.json config files in CodeMirror',
+      category: 'Tabs',
+      breadcrumb: 'PM2 Manager › Ecosystem Configs',
+      icon: FileCode,
+      keywords: 'pm2 ecosystem config json js cjs configuration editor template',
+      tabId: 'pm2-manager',
+      subTab: 'ecosystem',
+      action: () => { uiStore.navigateTo('pm2-manager', 'ecosystem'); uiStore.closeSearchModal(); }
+    },
+    {
+      id: 'tab-pm2-daemon',
+      title: 'PM2 Daemon & Startup Service',
+      description: 'Systemd startup hook, ~/.pm2 dump state & resurrection',
+      category: 'Tabs',
+      breadcrumb: 'PM2 Manager › Daemon & Startup',
+      icon: Settings,
+      keywords: 'pm2 daemon startup systemd systemctl resurrect save dump',
+      tabId: 'pm2-manager',
+      subTab: 'daemon',
+      action: () => { uiStore.navigateTo('pm2-manager', 'daemon'); uiStore.closeSearchModal(); }
+    },
+
     // ── System Monitor Tabs ──
     {
       id: 'tab-monitor-processes',
