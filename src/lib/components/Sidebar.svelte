@@ -3,7 +3,7 @@
   import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
-  import { HardDrive, Wifi, Activity, Search, LayoutDashboard, KeyRound } from '@lucide/svelte';
+  import { HardDrive, Wifi, Activity, Search, LayoutDashboard, KeyRound, Network } from '@lucide/svelte';
   import { Sun, Moon, Settings } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
@@ -113,37 +113,43 @@
       ],
     },
     {
-      label: 'Network & Web Services',
-      icon: Wifi,
+      label: 'Web & App Services',
+      icon: Server,
       items: [
-        { id: 'network-manager',  label: 'Advanced Network', icon: Wifi, desc: 'Interfaces, IP & DNS' },
-        { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
-        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, authorized access & TLS certs' },
-        { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & vhosts' },
+        { id: 'nginx-manager',    label: 'Nginx Manager',    icon: Server, desc: 'Web server & reverse proxy' },
         { id: 'pm2-manager',      label: 'PM2 Manager',      icon: Layers, desc: 'Node.js apps, clusters & logs' },
+        { id: 'service-manager',  label: 'Service Manager',  icon: Settings2, desc: 'Systemd units & daemons' },
       ],
     },
     {
-      label: 'Security & System Logs',
+      label: 'Network & Remote',
+      icon: Network,
+      items: [
+        { id: 'network-manager',  label: 'Advanced Network', icon: Network, desc: 'Interfaces, IP & DNS routing' },
+        { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
+        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, access & TLS certs' },
+      ],
+    },
+    {
+      label: 'Security & Logs',
       icon: Shield,
       items: [
         { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
-        { id: 'selinux-manager', label: 'SELinux Manager', icon: ShieldCheck, desc: 'Security policies & contexts' },
-        { id: 'journal-logs',    label: 'Journal Logs',    icon: FileText, desc: 'Systemd Journal logs' },
-        { id: 'user-manager',    label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
+        { id: 'selinux-manager',  label: 'SELinux Manager',  icon: ShieldCheck, desc: 'Security policies & contexts' },
+        { id: 'journal-logs',     label: 'Journal Logs',     icon: FileText, desc: 'Systemd Journal logs' },
+        { id: 'user-manager',     label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
       ],
     },
     {
-      label: 'System Configuration',
-      icon: Settings2,
+      label: 'System & Hardware',
+      icon: Cpu,
       items: [
-        { id: 'service-manager', label: 'Service Manager', icon: Settings2, desc: 'System units & daemons' },
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
         { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
-        { id: 'env-manager',     label: 'Environment',       icon: FileText, desc: 'System environment vars' },
+        { id: 'cron-manager',    label: 'Scheduled Tasks', icon: Clock, desc: 'Crontab jobs & timers' },
+        { id: 'env-manager',     label: 'Environment',     icon: FileText, desc: 'System environment vars' },
         { id: 'shell-env',       label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
-        { id: 'cron-manager',    label: 'Scheduled Tasks',   icon: Clock, desc: 'Crontab jobs & timers' },
       ],
     },
   ];

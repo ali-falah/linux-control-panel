@@ -2394,11 +2394,28 @@
             <!-- Pre-flight PM2 Command Preview Box -->
             <div class="terminal-preview-box">
               <div class="terminal-header">
-                <Terminal size={12} class="text-accent" />
-                <span>Pre-flight Command Preview</span>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <Terminal size={13} style="color: #38bdf8;" />
+                  <span>Pre-flight Command Preview</span>
+                </div>
+                <button
+                  type="button"
+                  class="terminal-copy-btn"
+                  onclick={() => copyToClipboard(livePm2Command, 'preview-cmd')}
+                  title="Copy command to clipboard"
+                >
+                  {#if copiedCommand === 'preview-cmd'}
+                    <Check size={12} style="color: #34d399;" />
+                    <span style="color: #34d399;">Copied</span>
+                  {:else}
+                    <Copy size={12} />
+                    <span>Copy</span>
+                  {/if}
+                </button>
               </div>
-              <div class="terminal-code font-mono text-xs">
-                $ {livePm2Command}
+              <div class="terminal-code font-mono">
+                <span class="terminal-prompt">$</span>
+                <span class="terminal-cmd">{livePm2Command}</span>
               </div>
             </div>
           </div>
@@ -4342,8 +4359,9 @@
   }
 
   .modal-wizard-card {
-    max-width: 640px;
-    height: 560px;
+    width: 704px;
+    max-width: calc(100vw - 32px);
+    height: 600px;
     max-height: 92vh;
   }
 
@@ -4466,32 +4484,76 @@
 
   /* Pre-flight Terminal box */
   .terminal-preview-box {
-    background: #020813;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 8px 12px;
+    background: #0b1320;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 10px 14px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
     margin-top: auto;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   }
 
   .terminal-header {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 10px;
+    justify-content: space-between;
+    font-size: 10.5px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--color-text-muted);
+    color: #94a3b8;
+  }
+
+  .terminal-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 10.5px;
+    color: #cbd5e1;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+  }
+
+  .terminal-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.25);
   }
 
   .terminal-code {
-    color: var(--color-accent);
-    overflow-x: auto;
-    white-space: nowrap;
-    font-size: 11.5px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    max-height: 80px;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .terminal-prompt {
+    color: #38bdf8;
+    font-weight: 700;
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .terminal-cmd {
+    color: #f1f5f9;
+    word-break: break-all;
+    white-space: pre-wrap;
+    font-weight: 500;
   }
 
   .runtime-badge-pill {

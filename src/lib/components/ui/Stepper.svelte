@@ -126,7 +126,7 @@
 
   .step-indicator.active .step-num {
     background: var(--color-accent);
-    color: #020914;
+    color: #ffffff;
     border-color: var(--color-accent);
     font-weight: 700;
     box-shadow: 0 0 10px var(--color-accent-glow, rgba(0, 218, 243, 0.35));
