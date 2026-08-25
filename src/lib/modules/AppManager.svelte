@@ -8,6 +8,7 @@
     Play, FolderOpen, Copy, Info
   } from '@lucide/svelte';
   import Button from '../components/ui/Button.svelte';
+  import BulkActionBar from '../components/ui/BulkActionBar.svelte';
   import Input from '../components/ui/Input.svelte';
   import Card from '../components/ui/Card.svelte';
   import PageHeader from '../components/PageHeader.svelte';
@@ -71,6 +72,7 @@
   }
 
   let apps = $state<DesktopApp[]>([]);
+  let selectedAppNames = $state<Set<string>>(new Set());
   let duplicates = $state<DuplicateEntry[]>([]);
   let loadingDuplicates = $state(false);
   let loading = $state(false);
@@ -98,6 +100,37 @@
   let uninstallLog = $state<string[]>([]);
   let uninstallingApp = $state<DesktopApp | null>(null);
   let isUninstalling = $state(false);
+
+  function toggleAppSelection(appName: string) {
+    if (selectedAppNames.has(appName)) {
+      selectedAppNames.delete(appName);
+    } else {
+      selectedAppNames.add(appName);
+    }
+    selectedAppNames = new Set(selectedAppNames);
+  }
+
+  function deselectAllApps() {
+    selectedAppNames = new Set();
+  }
+
+  async function bulkUninstallSelected() {
+    if (selectedAppNames.size === 0) return;
+    const list = apps.filter(a => selectedAppNames.has(a.name));
+    const count = list.length;
+    uiStore.confirm(
+      'Batch Uninstall Applications',
+      `Are you sure you want to uninstall ${count} selected applications?\n\n${list.map(a => `• ${a.name} (${a.source})`).join('\n')}`,
+      async () => {
+        uiStore.addToast(`Starting batch uninstall of ${count} applications…`, 'info');
+        for (const app of list) {
+          await executeUninstall(app);
+        }
+        selectedAppNames = new Set();
+      },
+      true
+    );
+  }
   let logContainer = $state<HTMLElement | null>(null);
 
   // Side panel state
@@ -686,8 +719,16 @@
               class="app-card" 
               onclick={() => openDetails(app)} 
               oncontextmenu={(e) => handleAppContextMenu(e, app)}
-              style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; transition: all 0.2s ease;"
+              style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; transition: all 0.2s ease;"
             >
+              <div onclick={(e) => e.stopPropagation()} style="display: flex; align-items: center;">
+                <input
+                  type="checkbox"
+                  class="form-checkbox"
+                  checked={selectedAppNames.has(app.name)}
+                  onchange={() => toggleAppSelection(app.name)}
+                />
+              </div>
               <div class="app-icon-wrapper" style="width: 36px; height: 36px; border-radius: 8px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-module-icon-border, var(--color-border)); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
                 <AppIcon size={18} style="color: var(--color-accent);" />
               </div>
@@ -1028,6 +1069,22 @@
     {/if}
   </div>
 {/if}
+
+<!-- Bulk Action Bar for Installed Apps -->
+<BulkActionBar
+  selectedCount={selectedAppNames.size}
+  itemLabel="apps"
+  onclear={deselectAllApps}
+>
+  <button
+    type="button"
+    class="btn-bulk-action btn-bulk-danger"
+    onclick={bulkUninstallSelected}
+  >
+    <Trash2 size={12} />
+    <span>Batch Uninstall ({selectedAppNames.size})</span>
+  </button>
+</BulkActionBar>
 
 <style>
   .module-page {

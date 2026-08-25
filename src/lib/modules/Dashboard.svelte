@@ -7,7 +7,7 @@
     AlertTriangle, ShieldAlert, Thermometer, ExternalLink, ChevronRight,
     Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
     Zap, Layers, Package, Sliders, Play, RotateCcw, ShieldCheck, Database,
-    FileText, HardDriveDownload
+    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X, GripVertical
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -49,15 +49,158 @@
     { pid: 980, name: 'NetworkManager', cpu_percent: 0.4, mem_percent: 0.8, user: 'root' }
   ]);
 
-  // Watchdog Services
-  let watchdogServices = $state<ServiceDaemon[]>([
+  const DEFAULT_WATCHDOG_SERVICES: ServiceDaemon[] = [
     { name: 'systemd-journald.service', label: 'Journal Logging', status: 'active', subState: 'running' },
     { name: 'firewalld.service', label: 'Firewall Daemon', status: 'active', subState: 'running' },
     { name: 'sshd.service', label: 'OpenSSH Server', status: 'active', subState: 'running' },
     { name: 'NetworkManager.service', label: 'Network Manager', status: 'active', subState: 'running' },
     { name: 'crond.service', label: 'Cron Scheduler', status: 'active', subState: 'running' },
     { name: 'nginx.service', label: 'NGINX Web Server', status: 'inactive', subState: 'dead' }
-  ]);
+  ];
+
+  function getInitialWatchdogServices(): ServiceDaemon[] {
+    try {
+      const stored = localStorage.getItem('dashboard_watchdog_services');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return DEFAULT_WATCHDOG_SERVICES;
+  }
+
+  // Watchdog Services
+  let watchdogServices = $state<ServiceDaemon[]>(getInitialWatchdogServices());
+  let showWatchdogModal = $state(false);
+  let availableUnits = $state<Array<{ name: string; description: string; active_state: string }>>([]);
+  let loadingUnits = $state(false);
+  let watchdogSearchQuery = $state('');
+  let draggedIndex = $state<number | null>(null);
+  let dragOverIndex = $state<number | null>(null);
+
+  function handleDragStart(e: DragEvent, index: number) {
+    draggedIndex = index;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(index));
+    }
+  }
+
+  function handleDragOver(e: DragEvent, index: number) {
+    e.preventDefault();
+    if (draggedIndex === null || draggedIndex === index) return;
+    dragOverIndex = index;
+  }
+
+  function handleDragLeave(index: number) {
+    if (dragOverIndex === index) {
+      dragOverIndex = null;
+    }
+  }
+
+  function handleDrop(e: DragEvent, targetIndex: number) {
+    e.preventDefault();
+    if (draggedIndex === null || draggedIndex === targetIndex) {
+      draggedIndex = null;
+      dragOverIndex = null;
+      return;
+    }
+    const updated = [...watchdogServices];
+    const [movedItem] = updated.splice(draggedIndex, 1);
+    updated.splice(targetIndex, 0, movedItem);
+    saveWatchdogServices(updated);
+    draggedIndex = null;
+    dragOverIndex = null;
+    uiStore.addToast(`Reordered watchdog: "${movedItem.label}" moved to position #${targetIndex + 1}`, 'info');
+  }
+
+  function handleDragEnd() {
+    draggedIndex = null;
+    dragOverIndex = null;
+  }
+
+  function saveWatchdogServices(newList: ServiceDaemon[]) {
+    watchdogServices = newList;
+    try {
+      localStorage.setItem('dashboard_watchdog_services', JSON.stringify(newList));
+    } catch (e) {
+      console.warn('Failed to persist watchdog services:', e);
+    }
+    fetchServicesWatchdog();
+  }
+
+  function togglePinService(name: string, defaultLabel?: string, active_state?: string) {
+    const isPinned = watchdogServices.some(s => s.name === name);
+    if (isPinned) {
+      saveWatchdogServices(watchdogServices.filter(s => s.name !== name));
+      uiStore.addToast(`Removed ${name} from Watchdog`, 'info');
+    } else {
+      const formattedLabel = defaultLabel || name.replace(/\.service$/, '').replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const newService: ServiceDaemon = {
+        name,
+        label: formattedLabel,
+        status: (active_state === 'active' ? 'active' : active_state === 'failed' ? 'failed' : 'unknown') as any,
+        subState: active_state || 'checking'
+      };
+      saveWatchdogServices([...watchdogServices, newService]);
+      uiStore.addToast(`Pinned ${formattedLabel} to Watchdog`, 'success');
+    }
+  }
+
+  function resetWatchdogDefaults() {
+    saveWatchdogServices(DEFAULT_WATCHDOG_SERVICES);
+    uiStore.addToast('Reset Watchdog to default core services', 'info');
+  }
+
+  function addPresetBundle(bundle: { name: string; label: string }[]) {
+    const currentNames = new Set(watchdogServices.map(s => s.name));
+    const toAdd: ServiceDaemon[] = [];
+    for (const b of bundle) {
+      if (!currentNames.has(b.name)) {
+        toAdd.push({
+          name: b.name,
+          label: b.label,
+          status: 'unknown',
+          subState: 'checking'
+        });
+      }
+    }
+    if (toAdd.length > 0) {
+      saveWatchdogServices([...watchdogServices, ...toAdd]);
+      uiStore.addToast(`Added ${toAdd.length} services from preset`, 'success');
+    } else {
+      uiStore.addToast('All services in this preset are already pinned', 'info');
+    }
+  }
+
+  async function loadAvailableUnitsForModal() {
+    if (availableUnits.length > 0) return;
+    loadingUnits = true;
+    try {
+      const units = await invoke<Array<any>>('list_all_units', { userMode: false });
+      availableUnits = units
+        .filter(u => u.name && u.name.endsWith('.service'))
+        .map(u => ({
+          name: u.name,
+          description: u.description || '',
+          active_state: u.active_state || 'unknown'
+        }));
+    } catch {
+      availableUnits = [];
+    } finally {
+      loadingUnits = false;
+    }
+  }
+
+  const filteredAvailableUnits = $derived.by(() => {
+    const q = watchdogSearchQuery.trim().toLowerCase();
+    if (!q) {
+      return availableUnits.slice(0, 35);
+    }
+    return availableUnits.filter(u => 
+      u.name.toLowerCase().includes(q) || (u.description && u.description.toLowerCase().includes(q))
+    ).slice(0, 60);
+  });
 
   let networkDetails = $state<any>(null);
   let gatewayPing = $state<string>('');
@@ -794,19 +937,33 @@
         <div class="header-left">
           <ShieldCheck size={17} style="color: #22c55e;" />
           <span class="card-header-title">Services &amp; Daemons Watchdog</span>
+          <span class="badge-watchdog-count">{watchdogServices.length}</span>
         </div>
-        <button
-          type="button"
-          class="card-jump-btn"
-          onclick={() => {
-            uiStore.serviceSearchQuery = '';
-            uiStore.serviceFilter = 'all';
-            uiStore.navigateTo('service-manager');
-          }}
-          title="Open Service Manager"
-        >
-          <ArrowUpRight size={15} />
-        </button>
+        <div style="display: flex; align-items: center; gap: 4px;">
+          <button
+            type="button"
+            class="card-jump-btn"
+            onclick={() => {
+              showWatchdogModal = true;
+              loadAvailableUnitsForModal();
+            }}
+            title="Customize Watchdog Services"
+          >
+            <SlidersHorizontal size={14} />
+          </button>
+          <button
+            type="button"
+            class="card-jump-btn"
+            onclick={() => {
+              uiStore.serviceSearchQuery = '';
+              uiStore.serviceFilter = 'all';
+              uiStore.navigateTo('service-manager');
+            }}
+            title="Open Full Service Manager"
+          >
+            <ArrowUpRight size={15} />
+          </button>
+        </div>
       </div>
 
       <div class="services-watchdog-grid">
@@ -1135,7 +1292,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div use:portal class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) selectedStorageDetail = null; }}>
-    <div class="modal-glass-card">
+    <div class="modal-glass-card modal-storage-card">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <h3 style="margin:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700;">
           <HardDrive size={18} style="color:var(--color-accent)"/>
@@ -1155,6 +1312,227 @@
 
       <div style="margin-top:20px; display:flex; justify-content:flex-end;">
         <button type="button" class="modal-action-btn" onclick={() => selectedStorageDetail = null}>Close</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: CUSTOMIZE WATCHDOG SERVICES (EXPANDED 2-COLUMN WORKSPACE) -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+{#if showWatchdogModal}
+  <div use:portal class="modal-backdrop" onclick={() => showWatchdogModal = false} role="presentation">
+    <div class="modal-glass-card modal-watchdog-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div class="modal-header-row">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <ShieldCheck size={20} style="color:#22c55e;" />
+          <div>
+            <h3 style="margin:0; font-size:16px; font-weight:700; color:var(--color-text-primary);">Customize Watchdog Services</h3>
+            <span style="font-size:11.5px; color:var(--color-text-muted);">Select and configure critical system services to monitor on your dashboard</span>
+          </div>
+        </div>
+        <button type="button" class="close-modal-btn" onclick={() => showWatchdogModal = false}>&times;</button>
+      </div>
+
+      <div class="watchdog-modal-body-2col">
+        <!-- LEFT COLUMN: System Directory Search & Custom Adder (58% width) -->
+        <div class="watchdog-col-left">
+          <div class="watchdog-section" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <label for="watchdog-search-input" style="font-size:12.5px; font-weight:700; color:var(--color-text-primary);">
+                System Services Directory
+              </label>
+              <span style="font-size:11px; color:var(--color-text-muted);">
+                {filteredAvailableUnits.length} available
+              </span>
+            </div>
+
+            <div class="search-input-wrap">
+              <Search size={14} class="search-icon" />
+              <input
+                id="watchdog-search-input"
+                type="text"
+                class="form-input"
+                placeholder="Search installed services (e.g. docker, redis, nginx, firewalld, ufw)..."
+                bind:value={watchdogSearchQuery}
+              />
+            </div>
+
+            <div class="available-services-list-expanded">
+              {#if loadingUnits}
+                <div style="padding:32px; text-align:center; color:var(--color-text-muted); font-size:12.5px;">
+                  <RefreshCw size={16} class="spin" style="margin-right:6px;" /> Loading installed service units…
+                </div>
+              {:else if filteredAvailableUnits.length === 0}
+                <div style="padding:32px; text-align:center; color:var(--color-text-muted); font-size:12.5px;">
+                  {watchdogSearchQuery ? `No service found matching "${watchdogSearchQuery}". You can add it manually below.` : 'No services available.'}
+                </div>
+              {:else}
+                {#each filteredAvailableUnits as u}
+                  {@const isPinned = watchdogServices.some(s => s.name === u.name)}
+                  <div class="avail-unit-row-card" class:is-pinned-row={isPinned}>
+                    <div class="avail-unit-meta">
+                      <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="avail-unit-name font-mono">{u.name}</span>
+                        <span class="unit-state-tag" class:active={u.active_state === 'active'} class:failed={u.active_state === 'failed'}>
+                          {u.active_state}
+                        </span>
+                      </div>
+                      {#if u.description}
+                        <span class="avail-unit-desc">{u.description}</span>
+                      {/if}
+                    </div>
+                    <button
+                      type="button"
+                      class="pin-toggle-btn"
+                      class:pinned={isPinned}
+                      onclick={() => togglePinService(u.name, u.description, u.active_state)}
+                    >
+                      {#if isPinned}
+                        <Check size={13} />
+                        <span>Pinned</span>
+                      {:else}
+                        <Plus size={13} />
+                        <span>Pin to Watchdog</span>
+                      {/if}
+                    </button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT COLUMN: Pinned Services & Quick Presets (42% width) -->
+        <div class="watchdog-col-right">
+          <!-- Section 1: Active Pinned Services -->
+          <div class="watchdog-section" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary);">
+                Pinned on Dashboard ({watchdogServices.length})
+              </span>
+              <button
+                type="button"
+                onclick={resetWatchdogDefaults}
+                style="font-size:11px; color:var(--color-text-muted); background:transparent; border:none; cursor:pointer; display:flex; align-items:center; gap:4px;"
+                title="Reset to default 6 services"
+              >
+                <RotateCcw size={11} /> Reset Defaults
+              </button>
+            </div>
+
+            <div class="pinned-services-scroll-panel">
+              {#if watchdogServices.length === 0}
+                <div style="padding:24px; text-align:center; color:var(--color-text-muted); font-size:12px; font-style:italic;">
+                  No services currently pinned.<br />Pick services from the left or click a preset below.
+                </div>
+              {:else}
+                {#each watchdogServices as svc, i (svc.name)}
+                  <div
+                    class="pinned-service-row"
+                    class:is-dragging={draggedIndex === i}
+                    class:is-dragover={dragOverIndex === i}
+                    draggable="true"
+                    ondragstart={(e) => handleDragStart(e, i)}
+                    ondragover={(e) => handleDragOver(e, i)}
+                    ondragleave={() => handleDragLeave(i)}
+                    ondrop={(e) => handleDrop(e, i)}
+                    ondragend={handleDragEnd}
+                  >
+                    <div class="drag-handle" title="Drag to reorder on dashboard">
+                      <GripVertical size={13} />
+                    </div>
+                    <div class="pinned-row-left">
+                      <span class="chip-status-dot" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}></span>
+                      <div class="chip-info">
+                        <span class="chip-label">{svc.label}</span>
+                        <span class="chip-unit font-mono">{svc.name}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="chip-remove-btn"
+                      onclick={() => togglePinService(svc.name)}
+                      title="Unpin {svc.name}"
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </div>
+
+          <!-- Section 2: Quick Presets -->
+          <div class="watchdog-section" style="border-top:1px solid var(--color-border); padding-top:12px; margin-top:10px;">
+            <span style="font-size:11.5px; font-weight:600; color:var(--color-text-secondary); margin-bottom:6px; display:block;">
+              Quick Preset Bundles
+            </span>
+            <div class="preset-buttons-grid">
+              <button
+                type="button"
+                class="preset-add-card"
+                onclick={() => addPresetBundle([
+                  { name: 'systemd-journald.service', label: 'Journal Logging' },
+                  { name: 'firewalld.service', label: 'Firewall Daemon' },
+                  { name: 'sshd.service', label: 'OpenSSH Server' },
+                  { name: 'NetworkManager.service', label: 'Network Manager' },
+                  { name: 'crond.service', label: 'Cron Scheduler' }
+                ])}
+              >
+                <Plus size={12} />
+                <span>Core Daemons</span>
+              </button>
+
+              <button
+                type="button"
+                class="preset-add-card"
+                onclick={() => addPresetBundle([
+                  { name: 'nginx.service', label: 'NGINX Web Server' },
+                  { name: 'caddy.service', label: 'Caddy Server' },
+                  { name: 'apache2.service', label: 'Apache HTTP' },
+                  { name: 'httpd.service', label: 'HTTPD Daemon' }
+                ])}
+              >
+                <Plus size={12} />
+                <span>Web &amp; Proxy</span>
+              </button>
+
+              <button
+                type="button"
+                class="preset-add-card"
+                onclick={() => addPresetBundle([
+                  { name: 'postgresql.service', label: 'PostgreSQL Database' },
+                  { name: 'mariadb.service', label: 'MariaDB Server' },
+                  { name: 'mysqld.service', label: 'MySQL Database' },
+                  { name: 'redis.service', label: 'Redis In-Memory Cache' }
+                ])}
+              >
+                <Plus size={12} />
+                <span>Databases</span>
+              </button>
+
+              <button
+                type="button"
+                class="preset-add-card"
+                onclick={() => addPresetBundle([
+                  { name: 'docker.service', label: 'Docker Engine' },
+                  { name: 'podman.service', label: 'Podman Container Manager' },
+                  { name: 'containerd.service', label: 'containerd Runtime' }
+                ])}
+              >
+                <Plus size={12} />
+                <span>Containers</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:14px; display:flex; justify-content:flex-end; border-top:1px solid var(--color-border); padding-top:12px;">
+        <Button variant="primary" onclick={() => showWatchdogModal = false}>
+          Done
+        </Button>
       </div>
     </div>
   </div>
@@ -1803,6 +2181,337 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    height: 310px;
+    max-height: 310px;
+    overflow-y: auto;
+    padding-right: 4px;
+    scrollbar-width: thin;
+  }
+
+  .badge-watchdog-count {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e;
+  }
+
+  .modal-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .modal-glass-card.modal-watchdog-card,
+  .modal-watchdog-card {
+    width: 1060px !important;
+    max-width: calc(100vw - 40px) !important;
+    height: 680px !important;
+    max-height: 90vh !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+    padding: 22px !important;
+  }
+
+  .watchdog-modal-body-2col {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1.35fr 1fr;
+    gap: 22px;
+    overflow: hidden;
+    padding-top: 6px;
+  }
+
+  .watchdog-col-left,
+  .watchdog-col-right {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .watchdog-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .available-services-list-expanded {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-surface);
+    padding: 6px;
+    scrollbar-width: thin;
+  }
+
+  .avail-unit-row-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    border-radius: 7px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border-subtle, var(--color-border));
+    transition: all 0.12s ease;
+  }
+  .avail-unit-row-card:hover {
+    border-color: var(--color-accent);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .avail-unit-row-card.is-pinned-row {
+    border-color: rgba(34, 197, 94, 0.35);
+    background: rgba(34, 197, 94, 0.04);
+  }
+
+  .unit-state-tag {
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+  }
+  .unit-state-tag.active {
+    background: rgba(34, 197, 94, 0.14);
+    color: #22c55e;
+  }
+  .unit-state-tag.failed {
+    background: rgba(239, 68, 68, 0.14);
+    color: #ef4444;
+  }
+
+  .pinned-services-scroll-panel {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-surface);
+    padding: 6px;
+    scrollbar-width: thin;
+  }
+
+  .pinned-service-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 10px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 7px;
+    cursor: grab;
+    transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+    user-select: none;
+  }
+  .pinned-service-row:hover {
+    border-color: var(--color-accent);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .pinned-service-row:active {
+    cursor: grabbing;
+  }
+  .pinned-service-row.is-dragging {
+    opacity: 0.35;
+    border-style: dashed;
+    border-color: var(--color-accent);
+  }
+  .pinned-service-row.is-dragover {
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  .drag-handle {
+    color: var(--color-text-muted);
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    opacity: 0.5;
+    transition: opacity 0.15s ease, color 0.15s ease;
+    flex-shrink: 0;
+  }
+  .pinned-service-row:hover .drag-handle {
+    opacity: 1;
+    color: var(--color-accent);
+  }
+
+  .pinned-row-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .chip-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+  .chip-status-dot.active { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.5); }
+  .chip-status-dot.failed { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+
+  .chip-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .chip-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chip-unit {
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chip-remove-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 3px;
+    display: flex;
+    align-items: center;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+  }
+  .chip-remove-btn:hover {
+    color: #ffffff;
+    background: var(--color-error, #ef4444);
+  }
+
+  .preset-buttons-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .preset-add-card {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle, var(--color-border));
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .preset-add-card:hover {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
+  }
+
+  .search-input-wrap {
+    position: relative;
+    margin-bottom: 6px;
+  }
+  :global(.search-input-wrap .search-icon) {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--color-text-muted);
+    pointer-events: none;
+  }
+  .search-input-wrap .form-input {
+    padding-left: 32px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .form-input {
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    color: var(--color-text-primary);
+    font-family: inherit;
+    outline: none;
+  }
+  .form-input:focus {
+    border-color: var(--color-accent);
+  }
+
+  .avail-unit-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+  }
+  .avail-unit-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+  .avail-unit-desc {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pin-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.12s ease;
+    flex-shrink: 0;
+  }
+  .pin-toggle-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+  .pin-toggle-btn.pinned {
+    background: rgba(34, 197, 94, 0.12);
+    border-color: #22c55e;
+    color: #22c55e;
   }
 
   .watchdog-item {
@@ -2092,13 +2801,16 @@
   }
 
   .modal-glass-card {
-    width: 460px;
-    max-width: 100%;
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 14px;
     padding: 20px;
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  }
+
+  .modal-storage-card {
+    width: 480px;
+    max-width: 100%;
   }
 
   .close-modal-btn {

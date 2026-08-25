@@ -13,6 +13,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
 
   interface EnvVar {
     key: string;
@@ -21,15 +22,25 @@
   }
 
   let vars = $state<EnvVar[]>([]);
+  let originalVars = $state<EnvVar[]>([]);
   let loading = $state(true);
   let saving = $state(false);
   let hasChanges = $state(false);
+  let showDiffModal = $state(false);
+
+  function serializeEnvVars(list: EnvVar[]): string {
+    return list
+      .filter(v => v.key.trim())
+      .map(v => `${v.key.trim()}="${v.value.trim()}"`)
+      .join('\n');
+  }
 
   async function loadVars() {
     loading = true;
     statusStore.setBusy('Reading /etc/environment…');
     try {
       vars = await invoke<EnvVar[]>('read_env_vars');
+      originalVars = JSON.parse(JSON.stringify(vars));
       statusStore.setLastCommand('cat /etc/environment', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load env vars: ${e}`, 'error');
@@ -49,12 +60,7 @@
   }
 
   function confirmSave() {
-    uiStore.confirm(
-      'Save Global Environment',
-      'Are you sure you want to save these variables to /etc/environment?\n\nThey will affect all users on the next login or reboot.',
-      () => doSave(),
-      true
-    );
+    showDiffModal = true;
   }
 
   async function doSave() {
@@ -67,6 +73,8 @@
       statusStore.setLastCommand('echo "..." > /etc/environment', 0, true);
       uiStore.addToast('/etc/environment saved successfully', 'success');
       hasChanges = false;
+      originalVars = JSON.parse(JSON.stringify(vars));
+      showDiffModal = false;
       await loadVars();
     } catch (e) {
       uiStore.addToast(`Failed to save env vars: ${e}`, 'error');
@@ -152,4 +160,17 @@
       </div>
     </div>
   {/if}
+
+  <!-- Config Diff Modal -->
+  <ConfigDiffModal
+    bind:show={showDiffModal}
+    filePath="/etc/environment"
+    title="Review /etc/environment Changes"
+    oldContent={serializeEnvVars(originalVars)}
+    newContent={serializeEnvVars(vars)}
+    warningMessage="Note: Global environment changes will take effect for all users upon next login or reboot."
+    isSaving={saving}
+    onconfirm={doSave}
+    oncancel={() => showDiffModal = false}
+  />
 </div>

@@ -57,6 +57,8 @@ class UIStore {
   searchModalOpen = $state(false);
   /** Target subtab to activate when navigating into a module */
   targetSubTab = $state<string | null>(null);
+  /** Payload passed during cross-module navigation */
+  navigationPayload = $state<any>(null);
   /** Recent search queries */
   recentSearches = $state<string[]>([]);
   /** Recently visited pages and subtabs */
@@ -107,9 +109,12 @@ class UIStore {
     this.searchModalOpen = !this.searchModalOpen;
   }
 
-  navigateTo(tab: TabId, subTab?: string) {
+  navigateTo(tab: TabId, subTab?: string, payload?: any) {
     if (subTab) {
       this.targetSubTab = subTab;
+    }
+    if (payload !== undefined) {
+      this.navigationPayload = payload;
     }
     this.setActiveTab(tab);
   }

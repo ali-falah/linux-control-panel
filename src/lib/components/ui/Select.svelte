@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { HTMLSelectAttributes } from 'svelte/elements';
   import type { Snippet } from 'svelte';
+  import { portal } from '../../actions/portal.ts';
 
   interface Props extends HTMLSelectAttributes {
     label?: string;
@@ -22,8 +23,10 @@
 
   let selectEl = $state<HTMLSelectElement | null>(null);
   let containerEl = $state<HTMLDivElement | null>(null);
+  let dropdownEl = $state<HTMLDivElement | null>(null);
   let options = $state<{ value: string; label: string }[]>([]);
   let isOpen = $state(false);
+  let dropdownStyle = $state('');
 
   function syncOptions() {
     if (selectEl) {
@@ -31,6 +34,19 @@
         value: opt.value,
         label: opt.text
       }));
+    }
+  }
+
+  function updateDropdownPosition() {
+    if (containerEl && isOpen) {
+      const rect = containerEl.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const openUpwards = spaceBelow < 220 && rect.top > 220;
+      if (openUpwards) {
+        dropdownStyle = `position: fixed; top: auto; bottom: ${window.innerHeight - rect.top + 4}px; left: ${rect.left}px; width: ${rect.width}px; z-index: 999999;`;
+      } else {
+        dropdownStyle = `position: fixed; top: ${rect.bottom + 4}px; bottom: auto; left: ${rect.left}px; width: ${rect.width}px; z-index: 999999;`;
+      }
     }
   }
 
@@ -43,10 +59,28 @@
     }
   });
 
+  $effect(() => {
+    if (isOpen) {
+      updateDropdownPosition();
+      const handleScrollOrResize = () => updateDropdownPosition();
+      window.addEventListener('resize', handleScrollOrResize, { passive: true });
+      window.addEventListener('scroll', handleScrollOrResize, { capture: true, passive: true });
+      return () => {
+        window.removeEventListener('resize', handleScrollOrResize);
+        window.removeEventListener('scroll', handleScrollOrResize, { capture: true });
+      };
+    }
+  });
+
   // Watch for click outside to close dropdown
   $effect(() => {
     function handleDocumentClick(e: MouseEvent) {
-      if (containerEl && !containerEl.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        containerEl && 
+        !containerEl.contains(target) && 
+        (!dropdownEl || !dropdownEl.contains(target))
+      ) {
         isOpen = false;
       }
     }
@@ -134,7 +168,15 @@
 
   <!-- Custom Option Popover list -->
   {#if isOpen}
-    <div id="{id}-listbox" class="ui-select-dropdown" role="listbox" tabindex="-1">
+    <div
+      bind:this={dropdownEl}
+      use:portal
+      id="{id}-listbox"
+      class="ui-select-dropdown"
+      style={dropdownStyle}
+      role="listbox"
+      tabindex="-1"
+    >
       {#each options as opt}
         <button
           type="button"
@@ -234,22 +276,19 @@
   }
 
   .ui-select-dropdown {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    margin-top: 4px;
+    position: fixed;
     padding: 4px;
     background-color: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 8px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
-    z-index: 1000;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4), 0 0 1px rgba(255, 255, 255, 0.15);
+    z-index: 999999;
     display: flex;
     flex-direction: column;
     gap: 2px;
     max-height: 250px;
     overflow-y: auto;
+    box-sizing: border-box;
   }
 
   .ui-select-option {

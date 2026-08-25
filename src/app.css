@@ -580,7 +580,14 @@ body,
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
 }
 
-/* ─── Modal Backdrops ────────────────────────────────────────────────── */
+/* ─── Modal Backdrops & Scroll Lock ─────────────────────────────────── */
+html.modal-open-scroll-lock,
+html.modal-open-scroll-lock body,
+html.modal-open-scroll-lock .dashboard-scrollable-content,
+html.modal-open-scroll-lock .content-area {
+  overflow: hidden !important;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -592,6 +599,13 @@ body,
   justify-content: center;
   z-index: 99990;
   animation: fadeIn 0.2s ease;
+  overscroll-behavior: contain;
+}
+
+.modal,
+.modal-glass-card,
+.modal-card {
+  overscroll-behavior: contain;
 }
 
 .modal {

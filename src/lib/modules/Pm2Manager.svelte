@@ -21,6 +21,7 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Table from '../components/ui/Table.svelte';
+  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import { tableFeatures } from '../actions/tableFeatures.ts';
   import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -105,6 +106,7 @@
   // Loading and State
   let loading = $state(true);
   let refreshing = $state(false);
+  let showEcosystemDiffModal = $state(false);
   let systemStatus = $state<Pm2SystemStatus | null>(null);
   let processes = $state<Pm2Process[]>([]);
   let ecosystemFiles = $state<Pm2EcosystemFile[]>([]);
@@ -732,19 +734,9 @@
     }
   }
 
-  async function saveEcosystemFile() {
+  function openSaveEcosystemModal() {
     if (!selectedEcosystemFile) return;
-    try {
-      const msg = await invoke<string>('pm2_write_ecosystem_file', {
-        path: selectedEcosystemFile.path,
-        content: ecosystemContent
-      });
-      originalEcosystemContent = ecosystemContent;
-      uiStore.showToast(msg, 'success');
-      await loadData(true);
-    } catch (err: any) {
-      uiStore.showToast(err || 'Failed to save ecosystem file', 'error');
-    }
+    showEcosystemDiffModal = true;
   }
 
   async function startEcosystemFile() {
@@ -1558,7 +1550,7 @@
                   <Button
                     variant="outline"
                     size="sm"
-                    onclick={saveEcosystemFile}
+                    onclick={openSaveEcosystemModal}
                     disabled={!isEcosystemDirty}
                   >
                     <Save size={13} />
@@ -2531,6 +2523,23 @@
       </div>
     </div>
   </div>
+{/if}
+
+<!-- Universal Config Diff Modal for PM2 Ecosystem -->
+{#if selectedEcosystemFile}
+  <ConfigDiffModal
+    bind:show={showEcosystemDiffModal}
+    filePath={selectedEcosystemFile.path}
+    title={`Review ${selectedEcosystemFile.name} Changes`}
+    oldContent={originalEcosystemContent}
+    newContent={ecosystemContent}
+    warningMessage="Ensure module export syntax and process names are valid before saving."
+    onconfirm={async () => {
+      await saveEcosystemFile();
+      showEcosystemDiffModal = false;
+    }}
+    oncancel={() => showEcosystemDiffModal = false}
+  />
 {/if}
 
 <style>
@@ -4391,6 +4400,13 @@
     font-size: 20px;
     color: var(--color-text-muted);
     cursor: pointer;
+  }
+
+  .modal-body {
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .wizard-body {

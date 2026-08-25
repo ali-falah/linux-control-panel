@@ -26,6 +26,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import { portal } from '../actions/portal.ts';
 
   let aiNginxPrompt = $state('');
@@ -100,6 +101,123 @@
   let showProxyWizard = $state(false);
   let proxyConfig = $state({ domain: '', target_ip: '127.0.0.1', target_port: '8080', enable_websockets: false });
   let proxyLoading = $state(false);
+  let proxyConfigTouched = $state({
+    domain: false,
+    target_ip: false,
+    target_port: false
+  });
+
+  let proxyConfigErrors = $derived.by(() => {
+    const errors: Record<string, string> = {};
+
+    // Domain name
+    const d = proxyConfig.domain.trim();
+    if (!d) {
+      errors.domain = 'Domain name is required.';
+    } else if (/\s/.test(d)) {
+      errors.domain = 'Domain name cannot contain spaces.';
+    } else if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(d) && d !== 'localhost') {
+      errors.domain = 'Invalid domain format (e.g. app.example.com, myapp.local).';
+    }
+
+    // Target IP / Host
+    const tip = proxyConfig.target_ip.trim();
+    if (!tip) {
+      errors.target_ip = 'Target IP or hostname is required.';
+    } else if (/\s/.test(tip)) {
+      errors.target_ip = 'Target IP/host cannot contain spaces.';
+    }
+
+    // Target Port
+    const tport = proxyConfig.target_port.trim();
+    if (!tport) {
+      errors.target_port = 'Target port is required.';
+    } else {
+      const p = parseInt(tport, 10);
+      if (isNaN(p) || p < 1 || p > 65535 || String(p) !== tport) {
+        errors.target_port = 'Port must be an integer between 1 and 65535.';
+      }
+    }
+
+    return errors;
+  });
+
+  let isProxyConfigValid = $derived(
+    !proxyConfigErrors.domain && !proxyConfigErrors.target_ip && !proxyConfigErrors.target_port
+  );
+
+  interface Pm2ProxyItem {
+    pm_id: number;
+    name: string;
+    status: string;
+    pid?: number;
+    script_path?: string;
+    env_vars?: Record<string, string>;
+  }
+  let pm2ProcessesForProxy = $state<Pm2ProxyItem[]>([]);
+  let loadingPm2Processes = $state(false);
+
+  function extractPortFromPm2(p: Pm2ProxyItem): string {
+    if (p.env_vars) {
+      const portVal = p.env_vars['PORT'] || p.env_vars['port'] || p.env_vars['APP_PORT'] || p.env_vars['SERVER_PORT'] || p.env_vars['HTTP_PORT'];
+      if (portVal && !isNaN(Number(portVal))) return String(portVal);
+    }
+    return '3000';
+  }
+
+  async function fetchPm2ProcessesForProxy() {
+    loadingPm2Processes = true;
+    try {
+      const list = await invoke<any[]>('pm2_list_processes');
+      pm2ProcessesForProxy = list.map(p => ({
+        pm_id: p.pm_id,
+        name: p.name,
+        status: p.status,
+        pid: p.pid,
+        script_path: p.script_path,
+        env_vars: p.env_vars
+      }));
+    } catch {
+      pm2ProcessesForProxy = [];
+    } finally {
+      loadingPm2Processes = false;
+    }
+  }
+
+  function linkPm2AppToProxy(p: Pm2ProxyItem) {
+    const port = extractPortFromPm2(p);
+    proxyConfig.domain = `${p.name}.local`;
+    proxyConfig.target_ip = '127.0.0.1';
+    proxyConfig.target_port = port;
+    proxyConfig.enable_websockets = true;
+    uiStore.addToast(`Auto-configured proxy for PM2 '${p.name}' (Port ${port})`, 'info');
+  }
+
+  $effect(() => {
+    if (uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)) {
+      activeTab = uiStore.targetSubTab as any;
+      uiStore.targetSubTab = null;
+    }
+  });
+
+  $effect(() => {
+    if (uiStore.navigationPayload && uiStore.activeTab === 'nginx-manager') {
+      const payload = uiStore.navigationPayload;
+      if (payload.initialDomain) {
+        showProxyWizard = true;
+        proxyConfig.domain = payload.initialDomain;
+        if (payload.targetIp) proxyConfig.target_ip = payload.targetIp;
+        if (payload.targetPort) proxyConfig.target_port = payload.targetPort;
+      }
+      uiStore.navigationPayload = null;
+    }
+  });
+
+  $effect(() => {
+    if (showProxyWizard) {
+      fetchPm2ProcessesForProxy();
+    }
+  });
 
   // Analytics
   let analyticsData = $state<NginxLogAnalytics | null>(null);
@@ -175,6 +293,7 @@
   let editorLoading = $state(false);
   let configSaving = $state(false);
   let showDiff = $state(false);
+  let showConfigDiffModal = $state(false);
   let wordWrap = $state(true);
   let backups = $state<NginxBackup[]>([]);
   let showBackups = $state(false);
@@ -929,16 +1048,7 @@
 
   async function saveConfig() {
     if (!selectedConfig) return;
-    if (selectedConfig.path === '/etc/nginx/nginx.conf') {
-      uiStore.confirm(
-        'Save Core Configuration',
-        'You are modifying the primary server configuration file (/etc/nginx/nginx.conf). An automatic safety backup will be created, and syntax will be validated with nginx -t. Proceed to apply changes?',
-        () => executeSaveConfig(),
-        false
-      );
-    } else {
-      executeSaveConfig();
-    }
+    showConfigDiffModal = true;
   }
 
   async function executeSaveConfig() {
@@ -1396,23 +1506,28 @@
   }
 
   async function createProxy() {
-    if (!proxyConfig.domain.trim() || !proxyConfig.target_ip.trim() || !proxyConfig.target_port.trim()) {
-      uiStore.addToast('All proxy fields are required', 'warning');
+    proxyConfigTouched.domain = true;
+    proxyConfigTouched.target_ip = true;
+    proxyConfigTouched.target_port = true;
+
+    if (!isProxyConfigValid) {
+      uiStore.addToast(proxyConfigErrors.domain || proxyConfigErrors.target_ip || proxyConfigErrors.target_port || 'Please resolve proxy form errors', 'warning');
       return;
     }
     proxyLoading = true;
     try {
       const confStr = await invoke<string>('nginx_generate_reverse_proxy', {
-        domain: proxyConfig.domain,
-        targetIp: proxyConfig.target_ip,
-        targetPort: proxyConfig.target_port,
+        domain: proxyConfig.domain.trim(),
+        targetIp: proxyConfig.target_ip.trim(),
+        targetPort: proxyConfig.target_port.trim(),
         enableWebsockets: proxyConfig.enable_websockets
       });
-      const path = `/etc/nginx/sites-available/${proxyConfig.domain}.conf`;
+      const path = `/etc/nginx/sites-available/${proxyConfig.domain.trim()}.conf`;
       await invoke('nginx_write_config', { path, content: confStr });
       uiStore.addToast(`Reverse Proxy created at ${path} ✓`, 'success');
       showProxyWizard = false;
       proxyConfig = { domain: '', target_ip: '127.0.0.1', target_port: '8080', enable_websockets: false };
+      proxyConfigTouched = { domain: false, target_ip: false, target_port: false };
       await loadSites();
       await loadStats();
     } catch (e) {
@@ -3763,19 +3878,80 @@
       Quickly configure Nginx as a reverse proxy for another local or remote service. This generator creates a new site configuration routing all HTTP traffic for a specific domain to your target server.
     </div>
 
+    <!-- Active PM2 Apps Auto-Linker -->
+    {#if pm2ProcessesForProxy.length > 0}
+      <div style="background:var(--color-bg-raised); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; flex-direction:column; gap:8px;">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <div style="display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:var(--color-text-primary);">
+            <Zap size={13} style="color:var(--color-accent);" />
+            <span>Auto-Link Running PM2 Application</span>
+          </div>
+          <span style="font-size:10.5px; color:var(--color-text-muted);">{pm2ProcessesForProxy.filter(p => p.status === 'online').length} online</span>
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          {#each pm2ProcessesForProxy as p}
+            <button
+              type="button"
+              onclick={() => linkPm2AppToProxy(p)}
+              style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:6px; font-size:11.5px; font-family:inherit; cursor:pointer; background:var(--color-bg-surface); border:1px solid var(--color-border-subtle); color:var(--color-text-primary); transition:all 0.15s ease;"
+              title="Click to auto-fill reverse proxy for {p.name}"
+            >
+              <span style="width:7px; height:7px; border-radius:50%; background:{p.status === 'online' ? 'var(--color-success, #10b981)' : 'var(--color-text-muted)'}"></span>
+              <span style="font-weight:600;">{p.name}</span>
+              <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--color-text-muted);">#{p.pm_id}</span>
+              <span style="font-family:var(--font-mono); font-size:10.5px; color:var(--color-accent); font-weight:600; padding:1px 4px; background:var(--color-accent-muted, rgba(0,218,243,0.1)); border-radius:4px;">:{extractPortFromPm2(p)}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <div class="form-group" style="display:flex; flex-direction:column; gap:6px;">
-      <label for="proxy-domain" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Domain Name</label>
-      <input id="proxy-domain" type="text" class="input" bind:value={proxyConfig.domain} placeholder="e.g. app.example.com" />
+      <label for="proxy-domain" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Domain Name <span style="color:var(--color-error, #f43f5e)">*</span></label>
+      <input
+        id="proxy-domain"
+        type="text"
+        class="input"
+        class:input-error={proxyConfigTouched.domain && proxyConfigErrors.domain}
+        bind:value={proxyConfig.domain}
+        oninput={() => proxyConfigTouched.domain = true}
+        placeholder="e.g. app.example.com or myapp.local"
+      />
+      {#if proxyConfigTouched.domain && proxyConfigErrors.domain}
+        <small style="color:var(--color-error, #f43f5e); font-size:11px; font-weight:500;">{proxyConfigErrors.domain}</small>
+      {/if}
     </div>
 
     <div style="display:flex; gap:16px;">
       <div class="form-group" style="display:flex; flex-direction:column; gap:6px; flex:2;">
-        <label for="proxy-target" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target IP / Host</label>
-        <input id="proxy-target" type="text" class="input" bind:value={proxyConfig.target_ip} placeholder="127.0.0.1" />
+        <label for="proxy-target" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target IP / Host <span style="color:var(--color-error, #f43f5e)">*</span></label>
+        <input
+          id="proxy-target"
+          type="text"
+          class="input"
+          class:input-error={proxyConfigTouched.target_ip && proxyConfigErrors.target_ip}
+          bind:value={proxyConfig.target_ip}
+          oninput={() => proxyConfigTouched.target_ip = true}
+          placeholder="127.0.0.1"
+        />
+        {#if proxyConfigTouched.target_ip && proxyConfigErrors.target_ip}
+          <small style="color:var(--color-error, #f43f5e); font-size:11px; font-weight:500;">{proxyConfigErrors.target_ip}</small>
+        {/if}
       </div>
       <div class="form-group" style="display:flex; flex-direction:column; gap:6px; flex:1;">
-        <label for="proxy-port" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target Port</label>
-        <input id="proxy-port" type="text" class="input" bind:value={proxyConfig.target_port} placeholder="8080" />
+        <label for="proxy-port" style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Target Port <span style="color:var(--color-error, #f43f5e)">*</span></label>
+        <input
+          id="proxy-port"
+          type="text"
+          class="input"
+          class:input-error={proxyConfigTouched.target_port && proxyConfigErrors.target_port}
+          bind:value={proxyConfig.target_port}
+          oninput={() => proxyConfigTouched.target_port = true}
+          placeholder="8080"
+        />
+        {#if proxyConfigTouched.target_port && proxyConfigErrors.target_port}
+          <small style="color:var(--color-error, #f43f5e); font-size:11px; font-weight:500;">{proxyConfigErrors.target_port}</small>
+        {/if}
       </div>
     </div>
 
@@ -4025,6 +4201,24 @@
     </div>
   {/if}
 </SideDrawer>
+
+<!-- Universal Config Diff Modal for Nginx -->
+{#if selectedConfig}
+  <ConfigDiffModal
+    bind:show={showConfigDiffModal}
+    filePath={selectedConfig.path}
+    title="Review Nginx Configuration Changes"
+    oldContent={savedContent}
+    newContent={editorContent}
+    warningMessage={selectedConfig.path === '/etc/nginx/nginx.conf' ? 'Notice: You are modifying the primary server configuration file (/etc/nginx/nginx.conf). An automatic safety backup will be created, and syntax will be tested with nginx -t.' : ''}
+    isSaving={configSaving}
+    onconfirm={async () => {
+      await executeSaveConfig();
+      showConfigDiffModal = false;
+    }}
+    oncancel={() => showConfigDiffModal = false}
+  />
+{/if}
 
 <style>
   /* ─── Layout ─────────────────────────────────────────────────────────── */

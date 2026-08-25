@@ -15,6 +15,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
 
   interface HostEntry {
     id: string;
@@ -26,10 +27,12 @@
   }
 
   let entries = $state<HostEntry[]>([]);
+  let originalEntries = $state<HostEntry[]>([]);
   let loading = $state(false);
   let saving = $state(false);
   let hasChanges = $state(false);
   let filter = $state('');
+  let showDiffModal = $state(false);
 
   // New entry form
   let newIp = $state('');
@@ -53,12 +56,34 @@
     })
   );
 
+  function serializeHosts(list: HostEntry[]): string {
+    const lines: string[] = [];
+    let lastCategory = '';
+    for (const entry of list) {
+      if (entry.category !== lastCategory && entry.ip) {
+        if (lastCategory) lines.push('');
+        lines.push(`# ${entry.category}`);
+        lastCategory = entry.category;
+      }
+      if (!entry.ip) {
+        lines.push(entry.comment ? `# ${entry.comment}` : '');
+        continue;
+      }
+      const prefix = entry.enabled ? '' : '# ';
+      const hostnames = entry.hostnames.join(' ');
+      const comment = entry.comment ? ` # ${entry.comment}` : '';
+      lines.push(`${prefix}${entry.ip}\t${hostnames}${comment}`);
+    }
+    return lines.join('\n');
+  }
+
   async function load() {
     loading = true;
     hasChanges = false;
     statusStore.setBusy('Reading /etc/hosts…');
     try {
       entries = await invoke<HostEntry[]>('read_hosts');
+      originalEntries = JSON.parse(JSON.stringify(entries));
       statusStore.setLastCommand('cat /etc/hosts', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load hosts: ${e}`, 'error');
@@ -69,19 +94,12 @@
     }
   }
 
+  const hasLocalhost = $derived(
+    entries.some(e => e.ip === '127.0.0.1' && e.hostnames.includes('localhost') && e.enabled)
+  );
+
   function confirmSave() {
-    const hasLocalhost = entries.some(e => e.ip === '127.0.0.1' && e.hostnames.includes('localhost') && e.enabled);
-    let warning = 'Are you sure you want to save changes to /etc/hosts?';
-    if (!hasLocalhost) {
-      warning += '\n\nWARNING: You have removed or disabled the 127.0.0.1 localhost entry! This will break local networking for many applications.';
-    }
-    
-    uiStore.confirm(
-      'Confirm Save /etc/hosts',
-      warning,
-      () => save(),
-      true
-    );
+    showDiffModal = true;
   }
 
   async function save() {
@@ -91,6 +109,7 @@
       await invoke('write_hosts', { entries });
       uiStore.addToast('/etc/hosts saved successfully', 'success');
       hasChanges = false;
+      originalEntries = JSON.parse(JSON.stringify(entries));
       statusStore.setLastCommand('echo "..." > /etc/hosts', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to save hosts: ${e}`, 'error');
@@ -148,6 +167,14 @@
   }
 
   $effect(() => { load(); });
+  function createNginxVhostForDomain(domain: string, ip: string) {
+    uiStore.navigateTo('nginx-manager', 'sites', {
+      initialDomain: domain,
+      targetIp: ip === '127.0.0.1' || ip === '::1' ? '127.0.0.1' : ip,
+      isProxy: true
+    });
+    uiStore.addToast(`Switched to Nginx Manager for ${domain}`, 'info');
+  }
 </script>
 
 <div class="module-page">
@@ -317,6 +344,17 @@
                       </td>
                       <td style="text-align:right">
                         <KebabMenu>
+                          {#if entry.hostnames.length > 0}
+                            {@const primaryDomain = entry.hostnames.find(h => h !== 'localhost' && !h.includes('localhost')) || entry.hostnames[0]}
+                            <button
+                              type="button"
+                              class="menu-item"
+                              onclick={() => createNginxVhostForDomain(primaryDomain, entry.ip)}
+                            >
+                              <Globe size={14} style="color:var(--color-accent);" />
+                              <span>Create Nginx VHost</span>
+                            </button>
+                          {/if}
                           <button
                             class="menu-item danger"
                             onclick={() => removeEntry(entry)}
@@ -335,6 +373,22 @@
       {/if}
     {/each}
   {/if}
+
+  <!-- Config Visual Diff Modal -->
+  <ConfigDiffModal
+    bind:show={showDiffModal}
+    filePath="/etc/hosts"
+    title="Review /etc/hosts Modifications"
+    oldContent={serializeHosts(originalEntries)}
+    newContent={serializeHosts(entries)}
+    warningMessage={!hasLocalhost ? 'CRITICAL WARNING: 127.0.0.1 localhost entry is missing or disabled! This will break local networking for many applications.' : ''}
+    isSaving={saving}
+    onconfirm={async () => {
+      await save();
+      showDiffModal = false;
+    }}
+    oncancel={() => showDiffModal = false}
+  />
 </div>
 
 <style>
