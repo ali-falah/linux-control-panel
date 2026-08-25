@@ -473,3 +473,472 @@ pub async fn test_repo_mirror_speeds(
 
     Ok(results)
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoDiagnostic {
+    pub repo_id: String,
+    pub name: String,
+    pub file_path: String,
+    pub enabled: bool,
+    pub status: String, // "healthy" | "slow" | "unreachable" | "corrupted" | "empty" | "disabled"
+    pub latency_ms: Option<u32>,
+    pub http_status: Option<u16>,
+    pub repomd_valid: bool,
+    pub error_message: Option<String>,
+    pub tested_url: Option<String>,
+    pub is_empty_file: bool,
+    pub is_corrupted_syntax: bool,
+}
+
+fn get_system_repo_vars() -> (String, String) {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64".to_string(),
+        "aarch64" => "aarch64".to_string(),
+        other => other.to_string(),
+    };
+
+    let mut releasever = "44".to_string();
+    if let Ok(content) = fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("VERSION_ID=") {
+                let clean = val.trim_matches('"').trim();
+                if !clean.is_empty() {
+                    releasever = clean.to_string();
+                    break;
+                }
+            }
+        }
+    }
+    (releasever, arch)
+}
+
+fn substitute_repo_vars(url: &str, releasever: &str, basearch: &str) -> String {
+    url.replace("$releasever", releasever)
+       .replace("$basearch", basearch)
+       .replace("$infra", "stock")
+       .replace("$arch", basearch)
+}
+
+#[tauri::command]
+pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
+    let repo_dir = PathBuf::from("/etc/yum.repos.d");
+    if !repo_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let (releasever, basearch) = get_system_repo_vars();
+    let mut diagnostics = Vec::new();
+    let dir_entries = fs::read_dir(&repo_dir).map_err(|e| format!("Failed to read /etc/yum.repos.d: {e}"))?;
+
+    struct PendingProbe {
+        repo_id: String,
+        name: String,
+        file_path: String,
+        enabled: bool,
+        candidate_url: Option<String>,
+    }
+
+    let mut pending_probes = Vec::new();
+
+    for entry in dir_entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("repo") {
+            continue;
+        }
+
+        let file_path = path.to_string_lossy().to_string();
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                diagnostics.push(RepoDiagnostic {
+                    repo_id: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    name: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    file_path: file_path.clone(),
+                    enabled: false,
+                    status: "corrupted".to_string(),
+                    latency_ms: None,
+                    http_status: None,
+                    repomd_valid: false,
+                    error_message: Some(format!("Cannot read metadata: {e}")),
+                    tested_url: None,
+                    is_empty_file: false,
+                    is_corrupted_syntax: true,
+                });
+                continue;
+            }
+        };
+
+        if metadata.len() == 0 {
+            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            diagnostics.push(RepoDiagnostic {
+                repo_id: filename.clone(),
+                name: filename,
+                file_path: file_path.clone(),
+                enabled: false,
+                status: "empty".to_string(),
+                latency_ms: None,
+                http_status: None,
+                repomd_valid: false,
+                error_message: Some("Repository file is 0 bytes (empty and corrupted)".to_string()),
+                tested_url: None,
+                is_empty_file: true,
+                is_corrupted_syntax: true,
+            });
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                diagnostics.push(RepoDiagnostic {
+                    repo_id: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    name: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    file_path: file_path.clone(),
+                    enabled: false,
+                    status: "corrupted".to_string(),
+                    latency_ms: None,
+                    http_status: None,
+                    repomd_valid: false,
+                    error_message: Some(format!("Could not read file content: {e}")),
+                    tested_url: None,
+                    is_empty_file: false,
+                    is_corrupted_syntax: true,
+                });
+                continue;
+            }
+        };
+
+        let mut current_id = String::new();
+        let mut current_name = String::new();
+        let mut current_baseurl = String::new();
+        let mut current_enabled = true;
+        let mut current_metalink: Option<String> = None;
+        let mut current_mirrorlist: Option<String> = None;
+        let mut in_section = false;
+        let mut sections_found = 0;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                if in_section && !current_id.is_empty() {
+                    sections_found += 1;
+                    let cand = if !current_baseurl.is_empty() {
+                        Some(substitute_repo_vars(&current_baseurl, &releasever, &basearch))
+                    } else if let Some(ref ml) = current_mirrorlist {
+                        Some(substitute_repo_vars(ml, &releasever, &basearch))
+                    } else if let Some(ref mt) = current_metalink {
+                        Some(substitute_repo_vars(mt, &releasever, &basearch))
+                    } else {
+                        None
+                    };
+
+                    pending_probes.push(PendingProbe {
+                        repo_id: current_id.clone(),
+                        name: if current_name.is_empty() { current_id.clone() } else { current_name.clone() },
+                        file_path: file_path.clone(),
+                        enabled: current_enabled,
+                        candidate_url: cand,
+                    });
+                }
+                current_id = line[1..line.len() - 1].to_string();
+                current_name = String::new();
+                current_baseurl = String::new();
+                current_enabled = true;
+                current_metalink = None;
+                current_mirrorlist = None;
+                in_section = true;
+            } else if in_section {
+                if let Some((key, val)) = line.split_once('=') {
+                    let key = key.trim().to_lowercase();
+                    let val = val.trim().to_string();
+                    match key.as_str() {
+                        "name" => current_name = val,
+                        "baseurl" => current_baseurl = val,
+                        "enabled" => current_enabled = val == "1" || val == "true",
+                        "metalink" => current_metalink = Some(val),
+                        "mirrorlist" => current_mirrorlist = Some(val),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if in_section && !current_id.is_empty() {
+            sections_found += 1;
+            let cand = if !current_baseurl.is_empty() {
+                Some(substitute_repo_vars(&current_baseurl, &releasever, &basearch))
+            } else if let Some(ref ml) = current_mirrorlist {
+                Some(substitute_repo_vars(ml, &releasever, &basearch))
+            } else if let Some(ref mt) = current_metalink {
+                Some(substitute_repo_vars(mt, &releasever, &basearch))
+            } else {
+                None
+            };
+
+            pending_probes.push(PendingProbe {
+                repo_id: current_id.clone(),
+                name: if current_name.is_empty() { current_id.clone() } else { current_name.clone() },
+                file_path: file_path.clone(),
+                enabled: current_enabled,
+                candidate_url: cand,
+            });
+        }
+
+        if sections_found == 0 {
+            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            diagnostics.push(RepoDiagnostic {
+                repo_id: filename.clone(),
+                name: filename,
+                file_path: file_path.clone(),
+                enabled: false,
+                status: "corrupted".to_string(),
+                latency_ms: None,
+                http_status: None,
+                repomd_valid: false,
+                error_message: Some("No valid [repo] section headers found in file".to_string()),
+                tested_url: None,
+                is_empty_file: false,
+                is_corrupted_syntax: true,
+            });
+        }
+    }
+
+    // Concurrently test reachability and latency for enabled repos
+    let mut probe_handles = Vec::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(4500))
+        .build()
+        .unwrap_or_default();
+
+    for probe in pending_probes {
+        let client_clone = client.clone();
+        let handle = tokio::spawn(async move {
+            if !probe.enabled {
+                return RepoDiagnostic {
+                    repo_id: probe.repo_id,
+                    name: probe.name,
+                    file_path: probe.file_path,
+                    enabled: false,
+                    status: "disabled".to_string(),
+                    latency_ms: None,
+                    http_status: None,
+                    repomd_valid: false,
+                    error_message: None,
+                    tested_url: probe.candidate_url,
+                    is_empty_file: false,
+                    is_corrupted_syntax: false,
+                };
+            }
+
+            let Some(raw_url) = probe.candidate_url else {
+                return RepoDiagnostic {
+                    repo_id: probe.repo_id,
+                    name: probe.name,
+                    file_path: probe.file_path,
+                    enabled: true,
+                    status: "corrupted".to_string(),
+                    latency_ms: None,
+                    http_status: None,
+                    repomd_valid: false,
+                    error_message: Some("No baseurl, metalink, or mirrorlist provided".to_string()),
+                    tested_url: None,
+                    is_empty_file: false,
+                    is_corrupted_syntax: true,
+                };
+            };
+
+            let start = std::time::Instant::now();
+            let res = client_clone.get(&raw_url).send().await;
+            let elapsed = start.elapsed().as_millis() as u32;
+
+            match res {
+                Ok(resp) => {
+                    let status_code = resp.status().as_u16();
+                    if resp.status().is_success() || resp.status().is_redirection() {
+                        let status_str = if elapsed > 1500 { "slow" } else { "healthy" };
+                        let err_msg = if elapsed > 1500 {
+                            Some(format!("Slow response time ({}ms > 1500ms)", elapsed))
+                        } else {
+                            None
+                        };
+
+                        RepoDiagnostic {
+                            repo_id: probe.repo_id,
+                            name: probe.name,
+                            file_path: probe.file_path,
+                            enabled: true,
+                            status: status_str.to_string(),
+                            latency_ms: Some(elapsed),
+                            http_status: Some(status_code),
+                            repomd_valid: true,
+                            error_message: err_msg,
+                            tested_url: Some(raw_url),
+                            is_empty_file: false,
+                            is_corrupted_syntax: false,
+                        }
+                    } else if status_code == 404 {
+                        RepoDiagnostic {
+                            repo_id: probe.repo_id,
+                            name: probe.name,
+                            file_path: probe.file_path,
+                            enabled: true,
+                            status: "unreachable".to_string(),
+                            latency_ms: Some(elapsed),
+                            http_status: Some(status_code),
+                            repomd_valid: false,
+                            error_message: Some(format!("HTTP 404 Not Found — repository is defunct, removed, or has invalid version path")),
+                            tested_url: Some(raw_url),
+                            is_empty_file: false,
+                            is_corrupted_syntax: false,
+                        }
+                    } else {
+                        RepoDiagnostic {
+                            repo_id: probe.repo_id,
+                            name: probe.name,
+                            file_path: probe.file_path,
+                            enabled: true,
+                            status: "unreachable".to_string(),
+                            latency_ms: Some(elapsed),
+                            http_status: Some(status_code),
+                            repomd_valid: false,
+                            error_message: Some(format!("HTTP {} error from server", status_code)),
+                            tested_url: Some(raw_url),
+                            is_empty_file: false,
+                            is_corrupted_syntax: false,
+                        }
+                    }
+                }
+                Err(err) => {
+                    let err_str = if err.is_timeout() {
+                        "Connection timed out (> 4.5s) — mirror server is unreachable or offline".to_string()
+                    } else {
+                        format!("Network connection failed: {err}")
+                    };
+
+                    RepoDiagnostic {
+                        repo_id: probe.repo_id,
+                        name: probe.name,
+                        file_path: probe.file_path,
+                        enabled: true,
+                        status: "unreachable".to_string(),
+                        latency_ms: None,
+                        http_status: None,
+                        repomd_valid: false,
+                        error_message: Some(err_str),
+                        tested_url: Some(raw_url),
+                        is_empty_file: false,
+                        is_corrupted_syntax: false,
+                    }
+                }
+            }
+        });
+        probe_handles.push(handle);
+    }
+
+    for handle in probe_handles {
+        if let Ok(diag) = handle.await {
+            diagnostics.push(diag);
+        }
+    }
+
+    diagnostics.sort_by(|a, b| {
+        let order = |s: &str| match s {
+            "unreachable" => 0,
+            "corrupted" => 1,
+            "empty" => 2,
+            "slow" => 3,
+            "healthy" => 4,
+            _ => 5,
+        };
+        order(&a.status).cmp(&order(&b.status)).then(a.repo_id.cmp(&b.repo_id))
+    });
+
+    Ok(diagnostics)
+}
+
+#[tauri::command]
+pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let sections: Vec<&str> = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with('[') && l.ends_with(']'))
+        .collect();
+
+    if sections.is_empty() || sections.len() <= 1 {
+        let output = Command::new("pkexec")
+            .args(["rm", "-f", &file_path])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to delete repo file: {e}"))?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Failed to delete repo file: {err}"));
+        }
+        log_to_file("INFO", &format!("Deleted repo file: {}", file_path));
+        return Ok(());
+    }
+
+    let mut new_lines = Vec::new();
+    let mut skipping = false;
+    let target_header = format!("[{}]", repo_id);
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed == target_header {
+                skipping = true;
+            } else {
+                skipping = false;
+            }
+        }
+
+        if !skipping {
+            new_lines.push(line);
+        }
+    }
+
+    let final_content = new_lines.join("\n") + "\n";
+    crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
+    log_to_file("INFO", &format!("Deleted repo section [{}] from {}", repo_id, file_path));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clean_repo_cache(repo_id: String) -> Result<String, String> {
+    if !binary_exists("dnf").await {
+        return Err("dnf is not available".to_string());
+    }
+
+    let output = Command::new("pkexec")
+        .args(["/usr/bin/dnf", "clean", "expire-cache", "--repo", &repo_id])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("dnf clean failed: {stderr}"));
+    }
+
+    Ok(stdout)
+}
+
+#[tauri::command]
+pub async fn bulk_disable_repos(repo_targets: Vec<(String, String)>) -> Result<usize, String> {
+    let mut count = 0;
+    for (repo_id, file_path) in repo_targets {
+        if toggle_repo(repo_id, false, file_path).await.is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}

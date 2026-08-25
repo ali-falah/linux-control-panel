@@ -9,7 +9,7 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database, Settings, Activity } from '@lucide/svelte';
+  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database, Settings, Activity, ShieldAlert, AlertTriangle, CheckCircle2, Trash2, Zap, HelpCircle, FileX } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -37,6 +37,21 @@
     speed_ms: number | null;
   }
 
+  interface RepoDiagnostic {
+    repo_id: string;
+    name: string;
+    file_path: string;
+    enabled: boolean;
+    status: 'healthy' | 'slow' | 'unreachable' | 'corrupted' | 'empty' | 'disabled';
+    latency_ms: number | null;
+    http_status: number | null;
+    repomd_valid: boolean;
+    error_message: string | null;
+    tested_url: string | null;
+    is_empty_file: boolean;
+    is_corrupted_syntax: boolean;
+  }
+
   let activeTab = $state<'repos' | 'copr'>(
     uiStore.targetSubTab && ['repos', 'copr'].includes(uiStore.targetSubTab)
       ? (uiStore.targetSubTab as any)
@@ -49,11 +64,16 @@
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);
   let filter = $state('');
-  let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'errors'>('all');
+  let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'errors' | 'slow' | 'unreachable'>('all');
   let showAddDialog = $state(false);
   let addUrl = $state('');
   let addLoading = $state(false);
   let togglingId = $state<string | null>(null);
+
+  // Diagnostics State
+  let validating = $state(false);
+  let diagnostics = $state<RepoDiagnostic[]>([]);
+  let showDiagnosticsBanner = $state(false);
 
   // Edit Side Drawer State
   let editOpen = $state(false);
@@ -70,14 +90,42 @@
   let testingSpeeds = $state(false);
   let speedResults = $state<SpeedResult[]>([]);
 
+  function getDiagnosticForRepo(repoId: string, filePath: string): RepoDiagnostic | undefined {
+    return diagnostics.find(d => d.repo_id === repoId || d.file_path === filePath);
+  }
+
+  const deadReposCount = $derived(
+    diagnostics.filter(d => d.status === 'unreachable' || d.status === 'corrupted' || d.status === 'empty').length
+  );
+  const slowReposCount = $derived(
+    diagnostics.filter(d => d.status === 'slow').length
+  );
+  const healthyReposCount = $derived(
+    diagnostics.filter(d => d.status === 'healthy').length
+  );
+
   const filteredRepos = $derived(
     repos.filter(r => {
       if (statusFilter === 'enabled' && !r.enabled) return false;
       if (statusFilter === 'disabled' && r.enabled) return false;
-      if (statusFilter === 'errors' && (r.baseurl || r.metalink || r.mirrorlist)) return false;
+      if (statusFilter === 'errors') {
+        const diag = getDiagnosticForRepo(r.id, r.file_path);
+        if (diag) {
+          return diag.status === 'unreachable' || diag.status === 'corrupted' || diag.status === 'empty';
+        }
+        return !r.baseurl && !r.metalink && !r.mirrorlist;
+      }
+      if (statusFilter === 'slow') {
+        const diag = getDiagnosticForRepo(r.id, r.file_path);
+        return diag?.status === 'slow';
+      }
+      if (statusFilter === 'unreachable') {
+        const diag = getDiagnosticForRepo(r.id, r.file_path);
+        return diag?.status === 'unreachable';
+      }
 
       const q = filter.toLowerCase();
-      return !q || r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q);
+      return !q || r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q) || r.file_path.toLowerCase().includes(q);
     })
   );
 
@@ -92,6 +140,28 @@
       statusStore.setLastCommand('dnf repolist -v', 1, false);
     } finally {
       loading = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  async function runDiagnostics() {
+    validating = true;
+    statusStore.setBusy('Validating & probing all DNF repository mirrors...');
+    try {
+      diagnostics = await invoke<RepoDiagnostic[]>('validate_all_repos');
+      showDiagnosticsBanner = true;
+      const issues = diagnostics.filter(d => d.status !== 'healthy' && d.status !== 'disabled').length;
+      if (issues > 0) {
+        uiStore.addToast(`Diagnostics complete: Found ${issues} problematic repo(s) (slow, corrupted, or 404).`, 'warning');
+      } else {
+        uiStore.addToast(`All active repositories tested healthy and responsive!`, 'success');
+      }
+      statusStore.setLastCommand('dnf check-update / validate repos', 0, true);
+    } catch (e) {
+      uiStore.addToast(`Failed to validate repos: ${e}`, 'error');
+      statusStore.setLastCommand('dnf validate repos', 1, false);
+    } finally {
+      validating = false;
       statusStore.clearBusy();
     }
   }
@@ -117,6 +187,76 @@
       statusStore.setLastCommand(`dnf config-manager --${newEnabled ? 'enable' : 'disable'} ${repo.id}`, 1, false);
     } finally {
       togglingId = null;
+    }
+  }
+
+  function confirmDeleteRepo(repo: { id: string; file_path: string; name?: string }) {
+    const displayName = repo.name || repo.id;
+    uiStore.confirm(
+      `Delete Repository "${displayName}"?`,
+      `Are you sure you want to remove this repository configuration from "${repo.file_path}"? This requires root privilege and cannot be undone.`,
+      async () => {
+        statusStore.setBusy(`Deleting repository ${displayName}...`);
+        try {
+          await invoke('delete_repo', {
+            repoId: repo.id,
+            filePath: repo.file_path,
+          });
+          uiStore.addToast(`Repository "${displayName}" deleted successfully`, 'success');
+          await loadRepos();
+          if (diagnostics.length > 0) {
+            diagnostics = diagnostics.filter(d => !(d.repo_id === repo.id && d.file_path === repo.file_path));
+          }
+          if (editOpen && selectedRepo?.id === repo.id) {
+            editOpen = false;
+          }
+        } catch (e) {
+          uiStore.addToast(`Failed to delete repo: ${e}`, 'error');
+        } finally {
+          statusStore.clearBusy();
+        }
+      },
+      true
+    );
+  }
+
+  async function disableAllDeadRepos() {
+    const dead = diagnostics.filter(d => (d.status === 'unreachable' || d.status === 'corrupted' || d.status === 'empty') && d.enabled);
+    if (dead.length === 0) {
+      uiStore.addToast('No active dead repositories to disable', 'info');
+      return;
+    }
+
+    uiStore.confirm(
+      `Disable ${dead.length} Dead / Unreachable Repositories?`,
+      `This will set 'enabled=0' for all ${dead.length} failing repositories to prevent DNF upgrade hangs and errors.`,
+      async () => {
+        statusStore.setBusy(`Disabling ${dead.length} dead repositories...`);
+        try {
+          const targets = dead.map(d => [d.repo_id, d.file_path]);
+          const disabledCount = await invoke<number>('bulk_disable_repos', { repoTargets: targets });
+          uiStore.addToast(`Successfully disabled ${disabledCount} dead repositories!`, 'success');
+          await loadRepos();
+          await runDiagnostics();
+        } catch (e) {
+          uiStore.addToast(`Failed to bulk disable repos: ${e}`, 'error');
+        } finally {
+          statusStore.clearBusy();
+        }
+      },
+      false
+    );
+  }
+
+  async function cleanCacheForRepo(repoId: string) {
+    statusStore.setBusy(`Cleaning cache for repo "${repoId}"...`);
+    try {
+      await invoke('clean_repo_cache', { repoId });
+      uiStore.addToast(`Cache cleaned for "${repoId}"`, 'success');
+    } catch (e) {
+      uiStore.addToast(`Failed to clean cache: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
     }
   }
 
@@ -216,8 +356,8 @@
 </script>
 
 <div class="module-page"> 
-  <PageHeader title="Repo Manager" subtitle="Manage DNF repositories and Fedora COPR packages" icon={Package}>
-    <div style="display:flex; align-items:center; gap:12px;">
+  <PageHeader title="Repo Manager" icon={Package}>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap: wrap;">
       <TabGroup
         tabs={[
           { id: 'repos', label: 'RPM Repos' },
@@ -228,15 +368,30 @@
       />
 
       {#if activeTab === 'repos'}
+        <button
+          type="button"
+          class="btn {validating ? 'btn-ghost' : 'btn-secondary'} btn-sm"
+          onclick={runDiagnostics}
+          disabled={validating || loading}
+          title="Probe all repository mirrors for latency, HTTP 404s, repomd integrity, and syntax errors"
+        >
+          <Activity size={14} class={validating ? 'animate-spin-slow text-accent' : 'text-accent'} />
+          <span>{validating ? 'Validating Mirrors...' : 'Validate & Diagnose Repos'}</span>
+        </button>
+
         <Button variant="primary" onclick={() => showAddDialog = true}>
           <Plus size={14} /> Add Repo
         </Button>
+
         <KebabMenu>
+          <button class="menu-item" onclick={runDiagnostics} disabled={validating}>
+            <Activity size={14} /> Test All Mirror Speeds
+          </button>
           <button class="menu-item" onclick={makecache} disabled={loading}>
-            <RefreshCw size={14} /> makecache
+            <RefreshCw size={14} /> Run dnf makecache
           </button>
           <button class="menu-item" onclick={loadRepos} disabled={loading}>
-            <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+            <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh Repo List
           </button>
         </KebabMenu>
       {/if}
@@ -246,6 +401,84 @@
   {#if activeTab === 'copr'}
     <CoprBrowser />
   {:else}
+
+  <!-- Diagnostics & Mirror Health Overview Banner -->
+  {#if diagnostics.length > 0}
+    <div class="card diagnostics-banner" style="padding: 14px 18px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 12px; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--color-border);">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <Activity size={18} style="color: var(--color-accent);" />
+          <span style="font-weight: 700; font-size: 13.5px; color: var(--color-text-primary);">
+            Repository Health &amp; Mirror Speed Diagnostics
+          </span>
+          <span class="badge badge-info" style="font-size: 11px;">{diagnostics.length} Probed</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          {#if deadReposCount > 0}
+            <button
+              type="button"
+              class="btn btn-warning btn-sm"
+              onclick={disableAllDeadRepos}
+              title="Bulk disable all unreachable, 404, or corrupted repositories to prevent DNF hangs"
+            >
+              <AlertTriangle size={13} />
+              <span>Disable {deadReposCount} Dead Repos</span>
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm"
+            onclick={runDiagnostics}
+            disabled={validating}
+            title="Re-run speed and health tests on all repository mirrors"
+          >
+            <RefreshCw size={13} class={validating ? 'animate-spin-slow' : ''} />
+            <span>Re-validate</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Metrics Grid -->
+      <div class="diag-metrics-grid">
+        <button
+          type="button"
+          class="diag-metric-card"
+          class:active={statusFilter === 'all'}
+          onclick={() => statusFilter = 'all'}
+        >
+          <span class="metric-num">{diagnostics.length}</span>
+          <span class="metric-lbl">Total Probed</span>
+        </button>
+        <button
+          type="button"
+          class="diag-metric-card healthy"
+          class:active={statusFilter === 'enabled'}
+          onclick={() => statusFilter = 'enabled'}
+        >
+          <span class="metric-num text-success">{healthyReposCount}</span>
+          <span class="metric-lbl">Healthy (&lt;1.5s)</span>
+        </button>
+        <button
+          type="button"
+          class="diag-metric-card slow"
+          class:active={statusFilter === 'slow'}
+          onclick={() => statusFilter = statusFilter === 'slow' ? 'all' : 'slow'}
+        >
+          <span class="metric-num text-warn">{slowReposCount}</span>
+          <span class="metric-lbl">Slow Latency</span>
+        </button>
+        <button
+          type="button"
+          class="diag-metric-card dead"
+          class:active={statusFilter === 'errors'}
+          onclick={() => statusFilter = statusFilter === 'errors' ? 'all' : 'errors'}
+        >
+          <span class="metric-num text-danger">{deadReposCount}</span>
+          <span class="metric-lbl">Dead / Corrupted</span>
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <!-- Controls: Stats & Search -->
   <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
@@ -281,14 +514,16 @@
           class="stat-card"
           class:active={statusFilter === 'errors'}
         >
-          <span class="stat-value errors">{repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}</span>
-          <span class="stat-label">Errors</span>
+          <span class="stat-value errors">
+            {diagnostics.length > 0 ? deadReposCount : repos.filter(r => !r.baseurl && !r.metalink && !r.mirrorlist).length}
+          </span>
+          <span class="stat-label">Issues</span>
         </button>
       </div>
     {/if}
 
     <!-- Search -->
-    <SearchBar bind:value={filter} placeholder="Filter repositories…" style="flex:1; min-width:200px; margin: 0;" />
+    <SearchBar bind:value={filter} placeholder="Filter repositories by ID, name, file path..." style="flex:1; min-width:200px; margin: 0;" />
   </div>
 
   <!-- Repo List -->
@@ -319,77 +554,127 @@
         {/if}
       </div>
     {:else}
-      <Table tableAction={tableFeatures} style="min-width: 900px; border:none; border-radius:0;">
+      <Table tableAction={tableFeatures} style="min-width: 950px; border:none; border-radius:0;">
         <thead>
           <tr>
-              <th>Repository</th>
-              <th>ID</th>
-              <th>URL / Metalink</th>
-              <th style="text-align:center">Priority</th>
-              <th style="text-align:center">GPG</th>
-              <th style="text-align:center">Enabled</th>
-              <th style="width:50px"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each filteredRepos as repo (repo.id)}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <tr class:disabled-row={!repo.enabled} onclick={() => openEditDrawer(repo)} style="cursor: pointer;">
-                <td style="max-width:240px;">
-                  <div style="font-weight:500; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.name}>
-                    {repo.name}
-                  </div>
-                  <div style="font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.file_path.split('/').pop()}>
-                    {repo.file_path.split('/').pop()}
-                  </div>
-                </td>
-                <td style="max-width:180px;">
-                  <code style="font-size:11px; color:var(--color-text-accent); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.id}>
-                    {repo.id}
-                  </code>
-                </td>
-                <td style="max-width:220px;">
-                  <div style="font-size:11px; color:var(--color-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono);" title={repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}>
-                    {repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}
-                  </div>
-                </td>
-                <td style="text-align:center">
-                  <span style="font-family:var(--font-mono); color:var(--color-text-secondary)">
-                    {repo.priority ?? '99'}
-                  </span>
-                </td>
-                <td style="text-align:center">
-                  <span class="badge {repo.gpgcheck ? 'badge-success' : 'badge-muted'}">
-                    {repo.gpgcheck ? 'on' : 'off'}
-                  </span>
-                </td>
-                <td style="text-align:center">
-                  <button
-                    class="ui-toggle"
-                    class:on={repo.enabled}
-                    onclick={(e) => { e.stopPropagation(); toggleRepo(repo); }}
-                    disabled={togglingId === repo.id}
-                    title="{repo.enabled ? 'Disable' : 'Enable'} repo"
-                    aria-checked={repo.enabled}
-                    role="switch"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                </td>
-                <td style="text-align:center">
+            <th>Repository</th>
+            <th>ID</th>
+            <th>Health &amp; Latency</th>
+            <th>URL / Metalink</th>
+            <th style="text-align:center">Priority</th>
+            <th style="text-align:center">GPG</th>
+            <th style="text-align:center">Enabled</th>
+            <th style="width:70px; text-align:center">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each filteredRepos as repo (repo.id)}
+            {@const diag = getDiagnosticForRepo(repo.id, repo.file_path)}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <tr class:disabled-row={!repo.enabled} onclick={() => openEditDrawer(repo)} style="cursor: pointer;">
+              <td style="max-width:230px;">
+                <div style="font-weight:600; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.name}>
+                  {repo.name}
+                </div>
+                <div style="font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.file_path}>
+                  {repo.file_path.split('/').pop()}
+                </div>
+              </td>
+              <td style="max-width:160px;">
+                <code style="font-size:11px; color:var(--color-text-accent); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.id}>
+                  {repo.id}
+                </code>
+              </td>
+              <td style="min-width:130px;">
+                {#if diag}
+                  {#if diag.status === 'healthy'}
+                    <span class="badge badge-success" title="Mirror responding fast ({diag.latency_ms}ms)">
+                      <CheckCircle2 size={11} /> {diag.latency_ms}ms
+                    </span>
+                  {:else if diag.status === 'slow'}
+                    <span class="badge badge-warning" title="{diag.error_message || 'Sluggish mirror'} ({diag.latency_ms}ms)">
+                      <Zap size={11} /> {diag.latency_ms}ms (Slow)
+                    </span>
+                  {:else if diag.status === 'unreachable'}
+                    <span class="badge badge-error" title="{diag.error_message || 'HTTP 404 / Host unreachable'}">
+                      <AlertTriangle size={11} /> {diag.http_status ? `HTTP ${diag.http_status}` : 'Dead/404'}
+                    </span>
+                  {:else if diag.status === 'empty'}
+                    <span class="badge badge-error" title="Empty 0-byte file (corrupted)">
+                      <FileX size={11} /> 0-byte File
+                    </span>
+                  {:else if diag.status === 'corrupted'}
+                    <span class="badge badge-error" title="{diag.error_message}">
+                      <ShieldAlert size={11} /> Corrupted
+                    </span>
+                  {:else}
+                    <span class="badge badge-muted">Disabled</span>
+                  {/if}
+                {:else if !repo.enabled}
+                  <span class="badge badge-muted">Disabled</span>
+                {:else}
+                  <span class="badge badge-info" style="opacity:0.7">Ready</span>
+                {/if}
+              </td>
+              <td style="max-width:200px;">
+                <div style="font-size:11px; color:var(--color-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono);" title={repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}>
+                  {repo.metalink ?? repo.mirrorlist ?? repo.baseurl ?? '—'}
+                </div>
+              </td>
+              <td style="text-align:center">
+                <span style="font-family:var(--font-mono); color:var(--color-text-secondary)">
+                  {repo.priority ?? '99'}
+                </span>
+              </td>
+              <td style="text-align:center">
+                <span class="badge {repo.gpgcheck ? 'badge-success' : 'badge-muted'}">
+                  {repo.gpgcheck ? 'on' : 'off'}
+                </span>
+              </td>
+              <td style="text-align:center">
+                <button
+                  class="ui-toggle"
+                  class:on={repo.enabled}
+                  onclick={(e) => { e.stopPropagation(); toggleRepo(repo); }}
+                  disabled={togglingId === repo.id}
+                  title="{repo.enabled ? 'Disable' : 'Enable'} repo"
+                  aria-checked={repo.enabled}
+                  role="switch"
+                >
+                  <span class="ui-toggle-thumb"></span>
+                </button>
+              </td>
+              <td style="text-align:center" onclick={(e) => e.stopPropagation()}>
+                <div style="display:flex; align-items:center; justify-content:center; gap:2px;">
                   <button 
                     class="action-btn"
-                    onclick={(e) => { e.stopPropagation(); openEditDrawer(repo); }}
+                    onclick={() => openEditDrawer(repo)}
                     title="Configure repository"
                   >
                     <Settings size={14} />
                   </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </Table>
+                  <KebabMenu align="right">
+                    <button class="menu-item" onclick={() => openEditDrawer(repo)}>
+                      <Settings size={14} /> Edit Configuration
+                    </button>
+                    <button class="menu-item" onclick={() => cleanCacheForRepo(repo.id)}>
+                      <RefreshCw size={14} /> Clean Expired Cache
+                    </button>
+                    <button class="menu-item" onclick={() => { openEditDrawer(repo); testSpeeds(); }}>
+                      <Activity size={14} /> Test Mirror Speeds
+                    </button>
+                    <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
+                    <button class="menu-item text-danger" onclick={() => confirmDeleteRepo(repo)}>
+                      <Trash2 size={14} /> Delete Repository
+                    </button>
+                  </KebabMenu>
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </Table>
       {/if}
   </div>
 {/if}
@@ -557,12 +842,23 @@
       </div>
 
       <!-- Action Buttons -->
-      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:auto; padding-top:20px; border-top:1px solid var(--color-border);">
-        <Button variant="ghost" onclick={() => editOpen = false} disabled={saving}>Cancel</Button>
-        <Button variant="primary" onclick={saveRepo} disabled={saving || !editName.trim()}>
-          {#if saving}<RefreshCw size={14} class="animate-spin-slow" />{/if}
-          Save Changes
-        </Button>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:auto; padding-top:20px; border-top:1px solid var(--color-border);">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm text-danger"
+          onclick={() => selectedRepo && confirmDeleteRepo(selectedRepo)}
+          title="Delete this repository"
+        >
+          <Trash2 size={14} /> Delete Repo
+        </button>
+
+        <div style="display:flex; gap:8px;">
+          <Button variant="ghost" onclick={() => editOpen = false} disabled={saving}>Cancel</Button>
+          <Button variant="primary" onclick={saveRepo} disabled={saving || !editName.trim()}>
+            {#if saving}<RefreshCw size={14} class="animate-spin-slow" />{/if}
+            Save Changes
+          </Button>
+        </div>
       </div>
 
     </div>
@@ -580,6 +876,55 @@
     margin-bottom: 4px;
     color: var(--color-text-secondary);
     font-weight: 500;
+  }
+
+  /* Diagnostics Banner & Metrics Grid */
+  .diagnostics-banner {
+    border-radius: 12px;
+  }
+
+  .diag-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+  }
+
+  .diag-metric-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 12px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.18s ease;
+  }
+
+  .diag-metric-card:hover {
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-hover);
+  }
+
+  .diag-metric-card.active {
+    border-color: var(--color-accent);
+    background: rgba(0, 218, 243, 0.08);
+  }
+
+  .diag-metric-card .metric-num {
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  .diag-metric-card .metric-lbl {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-top: 2px;
   }
 
   /* Stat cards */

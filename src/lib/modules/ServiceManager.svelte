@@ -316,9 +316,11 @@
   function handleServiceContextMenu(e: MouseEvent, unit: ServiceUnit) {
     e.preventDefault();
     e.stopPropagation();
+    const menuWidth = 260;
+    const menuHeight = 440;
     contextMenu = {
-      x: Math.min(e.clientX, window.innerWidth - 240),
-      y: Math.min(e.clientY, window.innerHeight - 340),
+      x: Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 10)),
+      y: Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 10)),
       show: true,
       unit
     };
@@ -2567,6 +2569,9 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .context-menu-item {

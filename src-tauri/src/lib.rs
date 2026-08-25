@@ -25,7 +25,7 @@ use commands::{
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
     grub_manager::{read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
     hosts_manager::{read_hosts, write_hosts},
-    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds},
+    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
     selinux_manager::{
         get_selinux_denials, get_selinux_status, set_selinux_state, set_selinux_mode,
         selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override, selinux_apply_audit2allow,
@@ -191,6 +191,10 @@ pub fn run() {
             run_makecache,
             save_repo_details,
             test_repo_mirror_speeds,
+            validate_all_repos,
+            delete_repo,
+            clean_repo_cache,
+            bulk_disable_repos,
             // DNF History
             list_dnf_history,
             undo_transaction,

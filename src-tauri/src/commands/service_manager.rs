@@ -162,6 +162,34 @@ pub fn invalidate_unit_file_cache() {
     if let Ok(mut g) = USER_UNIT_FILE_CACHE.lock() { *g = None; }
 }
 
+fn resolve_service_alias(unit_name: &str, is_user: bool) -> Option<String> {
+    let dirs = if is_user {
+        vec![
+            dirs::config_dir().map(|p| p.join("systemd/user")),
+            Some(std::path::PathBuf::from("/etc/systemd/user")),
+            Some(std::path::PathBuf::from("/usr/lib/systemd/user")),
+        ]
+    } else {
+        vec![
+            Some(std::path::PathBuf::from("/etc/systemd/system")),
+            Some(std::path::PathBuf::from("/usr/lib/systemd/system")),
+            Some(std::path::PathBuf::from("/lib/systemd/system")),
+        ]
+    };
+
+    for dir_opt in dirs {
+        if let Some(dir) = dir_opt {
+            let path = dir.join(unit_name);
+            if let Ok(target) = std::fs::read_link(&path) {
+                if let Some(filename) = target.file_name().and_then(|f| f.to_str()) {
+                    return Some(filename.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Query specific services status quickly via systemctl show (instant ~15ms)
 #[tauri::command]
 pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) -> Result<Vec<ServiceUnitStatus>, String> {
@@ -176,7 +204,7 @@ pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) ->
     }
     cmd.arg("show");
     cmd.arg("-p");
-    cmd.arg("Id,ActiveState,SubState,UnitFileState");
+    cmd.arg("Id,Names,ActiveState,SubState,UnitFileState");
     for name in &names {
         cmd.arg(name);
     }
@@ -185,22 +213,34 @@ pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) ->
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     let mut results = Vec::new();
-    let mut cur_name = String::new();
+    let mut cur_names: Vec<String> = Vec::new();
+    let mut cur_id = String::new();
     let mut cur_active = "inactive".to_string();
     let mut cur_sub = "dead".to_string();
     let mut cur_file_state = "unknown".to_string();
 
+    let flush_block = |res: &mut Vec<ServiceUnitStatus>, id: &str, names: &[String], active: &str, sub: &str, file_state: &str| {
+        let mut all_target_names = names.to_vec();
+        if !id.is_empty() && !all_target_names.contains(&id.to_string()) {
+            all_target_names.push(id.to_string());
+        }
+        for n in all_target_names {
+            res.push(ServiceUnitStatus {
+                name: n,
+                active_state: active.to_string(),
+                sub_state: sub.to_string(),
+                unit_file_state: file_state.to_string(),
+            });
+        }
+    };
+
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
-            if !cur_name.is_empty() {
-                results.push(ServiceUnitStatus {
-                    name: cur_name.clone(),
-                    active_state: cur_active.clone(),
-                    sub_state: cur_sub.clone(),
-                    unit_file_state: cur_file_state.clone(),
-                });
-                cur_name.clear();
+            if !cur_id.is_empty() || !cur_names.is_empty() {
+                flush_block(&mut results, &cur_id, &cur_names, &cur_active, &cur_sub, &cur_file_state);
+                cur_id.clear();
+                cur_names.clear();
                 cur_active = "inactive".to_string();
                 cur_sub = "dead".to_string();
                 cur_file_state = "unknown".to_string();
@@ -210,7 +250,20 @@ pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) ->
 
         if let Some((k, v)) = line.split_once('=') {
             match k {
-                "Id" => cur_name = v.to_string(),
+                "Id" => {
+                    cur_id = v.to_string();
+                    if !cur_id.is_empty() && !cur_names.contains(&cur_id) {
+                        cur_names.push(cur_id.clone());
+                    }
+                }
+                "Names" => {
+                    for n in v.split_whitespace() {
+                        let name_str = n.to_string();
+                        if !cur_names.contains(&name_str) {
+                            cur_names.push(name_str);
+                        }
+                    }
+                }
                 "ActiveState" => cur_active = v.to_string(),
                 "SubState" => cur_sub = v.to_string(),
                 "UnitFileState" => cur_file_state = v.to_string(),
@@ -219,13 +272,8 @@ pub async fn get_services_status(names: Vec<String>, user_mode: Option<bool>) ->
         }
     }
 
-    if !cur_name.is_empty() {
-        results.push(ServiceUnitStatus {
-            name: cur_name,
-            active_state: cur_active,
-            sub_state: cur_sub,
-            unit_file_state: cur_file_state,
-        });
+    if !cur_id.is_empty() || !cur_names.is_empty() {
+        flush_block(&mut results, &cur_id, &cur_names, &cur_active, &cur_sub, &cur_file_state);
     }
 
     Ok(results)
@@ -376,6 +424,33 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
                     protection_reason,
                 },
             );
+        }
+    }
+
+    // Synchronize alias units with their target canonical services
+    let alias_names: Vec<String> = all_services
+        .iter()
+        .filter(|(_, u)| u.unit_file_state == "alias" || u.active_state == "inactive")
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    for alias_name in alias_names {
+        if let Some(target_name) = resolve_service_alias(&alias_name, is_user) {
+            if let Some(target_unit) = all_services.get(&target_name) {
+                let target_active = target_unit.active_state.clone();
+                let target_sub = target_unit.sub_state.clone();
+                let target_load = target_unit.load_state.clone();
+                let target_desc = target_unit.description.clone();
+
+                if let Some(alias_unit) = all_services.get_mut(&alias_name) {
+                    alias_unit.active_state = target_active;
+                    alias_unit.sub_state = target_sub;
+                    alias_unit.load_state = target_load;
+                    if alias_unit.description.is_empty() && !target_desc.is_empty() {
+                        alias_unit.description = format!("{} (Alias -> {})", target_desc, target_name);
+                    }
+                }
+            }
         }
     }
 

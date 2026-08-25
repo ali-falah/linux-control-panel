@@ -6,13 +6,15 @@
     Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Sparkles, 
     AlertTriangle, ShieldAlert, Thermometer, ExternalLink, ChevronRight,
     Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
-    Zap, Layers, Package, Sliders, Play, RotateCcw, ShieldCheck, Database,
-    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X, GripVertical
+    Zap, Layers, Package, Sliders, Play, Square, RotateCcw, ShieldCheck, Database,
+    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X, GripVertical,
+    Copy, Globe
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { portal } from '../actions/portal.ts';
+  import { open as openUrl } from '@tauri-apps/plugin-shell';
 
 
 
@@ -208,6 +210,172 @@
   let lastSystemUpdate = $state<string>('');
   let failedServicesCount = $state<number>(0);
   let recentLogStream = $state<Array<{ time: string; service: string; level: string; message: string }>>([]);
+
+  // Service Action Execution State
+  let serviceActionRunning = $state<string | null>(null);
+
+  async function doServiceAction(serviceName: string, action: 'start' | 'stop' | 'restart') {
+    serviceActionRunning = `${serviceName}-${action}`;
+    try {
+      await invoke('unit_action', { name: serviceName, action, userMode: false });
+      uiStore.addToast(`Service ${serviceName} ${action}ed successfully`, 'success');
+      await fetchServicesWatchdog();
+    } catch (e) {
+      uiStore.addToast(`Failed to ${action} ${serviceName}: ${e}`, 'error');
+    } finally {
+      serviceActionRunning = null;
+    }
+  }
+
+  function confirmStopService(svc: ServiceDaemon) {
+    closeAllContextMenus();
+    if (isCriticalService(svc.name)) {
+      uiStore.addToast(`Cannot stop core critical system service "${svc.name}"`, 'error');
+      return;
+    }
+    uiStore.confirm(
+      `Stop Service "${svc.label || svc.name}"?`,
+      `Are you sure you want to stop "${svc.name}"? Active processes relying on this daemon will terminate immediately.`,
+      () => doServiceAction(svc.name, 'stop'),
+      true
+    );
+  }
+
+  function confirmRestartService(svc: ServiceDaemon) {
+    closeAllContextMenus();
+    uiStore.confirm(
+      `Restart Service "${svc.label || svc.name}"?`,
+      `Are you sure you want to restart "${svc.name}"? Connections or sessions handled by this service may reset.`,
+      () => doServiceAction(svc.name, 'restart'),
+      false
+    );
+  }
+
+  function confirmRestartFromLog(serviceName: string) {
+    closeAllContextMenus();
+    const unit = serviceName.endsWith('.service') ? serviceName : `${serviceName}.service`;
+    uiStore.confirm(
+      `Restart Service "${unit}"?`,
+      `Are you sure you want to restart "${unit}"?`,
+      () => doServiceAction(unit, 'restart'),
+      false
+    );
+  }
+
+  function confirmUnpinService(serviceName: string) {
+    closeAllContextMenus();
+    uiStore.confirm(
+      `Unpin "${serviceName}"?`,
+      `Remove "${serviceName}" from your Dashboard watchdog services grid? You can re-pin it anytime using the "+" button.`,
+      () => togglePinService(serviceName),
+      false
+    );
+  }
+
+  function isCriticalService(name: string): boolean {
+    const clean = name.replace(/\.service$/, '').toLowerCase();
+    return ['dbus', 'dbus-broker', 'polkit', 'systemd-journald', 'systemd-logind', 'systemd-udevd', 'init'].includes(clean);
+  }
+
+  function copyToClipboard(text: string, label = 'Copied to clipboard') {
+    navigator.clipboard.writeText(text);
+    uiStore.addToast(label, 'info');
+  }
+
+  async function searchWeb(query: string) {
+    if (!query.trim()) return;
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
+    try {
+      await openUrl(url);
+      uiStore.addToast('Opening web search in default browser...', 'info');
+    } catch {
+      try {
+        window.open(url, '_blank');
+      } catch (e) {
+        uiStore.addToast(`Failed to open web browser: ${e}`, 'error');
+      }
+    }
+  }
+
+  // 1. Service Watchdog Context Menu
+  let serviceContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    svc: ServiceDaemon | null;
+  }>({ x: 0, y: 0, show: false, svc: null });
+
+  function handleServiceContextMenu(e: MouseEvent, svc: ServiceDaemon) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 250;
+    const menuHeight = 320;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    serviceContextMenu = {
+      x,
+      y,
+      show: true,
+      svc
+    };
+  }
+
+  // 2. System Events Metrics Context Menu
+  let metricContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    type: 'errors' | 'warnings' | 'health';
+    count: number;
+  }>({ x: 0, y: 0, show: false, type: 'errors', count: 0 });
+
+  function handleMetricContextMenu(e: MouseEvent, type: 'errors' | 'warnings' | 'health', count = 0) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 270;
+    const menuHeight = 250;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    metricContextMenu = {
+      x,
+      y,
+      show: true,
+      type,
+      count
+    };
+  }
+
+  // 3. Log Ticker Line Context Menu
+  let logContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    log: { time: string; service: string; level: string; message: string } | null;
+  }>({ x: 0, y: 0, show: false, log: null });
+
+  function handleLogContextMenu(e: MouseEvent, log: { time: string; service: string; level: string; message: string }) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 290;
+    const menuHeight = 350;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    logContextMenu = {
+      x,
+      y,
+      show: true,
+      log
+    };
+  }
+
+  function closeAllContextMenus() {
+    serviceContextMenu.show = false;
+    metricContextMenu.show = false;
+    logContextMenu.show = false;
+  }
 
   // Sparkline history tracking
   let cpuHistory = $state<number[]>([15, 18, 14, 22, 28, 20, 35, 25, 30, 22, 19, 24]);
@@ -978,7 +1146,8 @@
               uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, '');
               uiStore.navigateTo('service-manager');
             }}
-            title="Inspect {svc.name} in Service Manager"
+            oncontextmenu={(e) => handleServiceContextMenu(e, svc)}
+            title="Inspect {svc.name} (Right-click to Start/Stop/Restart/Configure)"
           >
             <div class="watchdog-left">
               <span class="status-indicator-dot" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}></span>
@@ -1052,7 +1221,8 @@
               uiStore.preAppliedJournalSearch = '';
               uiStore.navigateTo('journal-logs', 'journal');
             }}
-            title="Click to view Critical Errors in Journal Logs"
+            oncontextmenu={(e) => handleMetricContextMenu(e, 'errors', systemEvents ? systemEvents.error_count || 12 : 12)}
+            title="Click to view Critical Errors in Journal Logs (Right-click for options)"
           >
             <div class="metric-num text-danger">{systemEvents ? systemEvents.error_count || 12 : 12}</div>
             <div class="metric-desc">Critical Errors</div>
@@ -1066,7 +1236,8 @@
               uiStore.preAppliedJournalSearch = '';
               uiStore.navigateTo('journal-logs', 'journal');
             }}
-            title="Click to view Warnings in Journal Logs"
+            oncontextmenu={(e) => handleMetricContextMenu(e, 'warnings', systemEvents ? systemEvents.warning_count || 210 : 210)}
+            title="Click to view Warnings in Journal Logs (Right-click for options)"
           >
             <div class="metric-num text-warn">{systemEvents ? systemEvents.warning_count || 210 : 210}</div>
             <div class="metric-desc">Warnings</div>
@@ -1080,7 +1251,8 @@
               uiStore.preAppliedJournalSearch = '';
               uiStore.navigateTo('journal-logs', 'journal');
             }}
-            title="Click to view all System Logs"
+            oncontextmenu={(e) => handleMetricContextMenu(e, 'health')}
+            title="Click to view all System Logs (Right-click for health options)"
           >
             <div class="metric-num text-success">98.5%</div>
             <div class="metric-desc">Health Rate</div>
@@ -1113,7 +1285,8 @@
                   uiStore.preAppliedJournalSearch = log.service || '';
                   uiStore.navigateTo('journal-logs', 'journal');
                 }}
-                title="Click to inspect '{log.service}' logs in Journal Viewer"
+                oncontextmenu={(e) => handleLogContextMenu(e, log)}
+                title="Click to inspect '{log.service}' logs (Right-click for log options)"
               >
                 <span class="log-ts">[{log.time}]</span>
                 <span class="log-svc">[{log.service}]</span>
@@ -1535,6 +1708,353 @@
         </Button>
       </div>
     </div>
+  </div>
+{/if}
+
+<!-- ══ Global Window Listeners for Context Menus ══ -->
+<svelte:window 
+  onclick={(e) => {
+    if (!(e.target as HTMLElement)?.closest('.custom-context-menu')) {
+      closeAllContextMenus();
+    }
+  }}
+  oncontextmenu={(e) => {
+    if (!(e.target as HTMLElement)?.closest('.watchdog-item, .metric-btn, .log-item-line, .custom-context-menu')) {
+      closeAllContextMenus();
+    }
+  }}
+  onkeydown={(e) => { if (e.key === 'Escape') closeAllContextMenus(); }} 
+/>
+
+<!-- ══ Services Watchdog Context Menu ══ -->
+{#if serviceContextMenu.show && serviceContextMenu.svc}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {serviceContextMenu.x}px; top: {serviceContextMenu.y}px; z-index: 99999; min-width: 250px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={serviceContextMenu.svc.name}>
+          {serviceContextMenu.svc.name}
+        </span>
+        {#if isCriticalService(serviceContextMenu.svc.name)}
+          <span class="protection-badge critical" style="font-size: 9px; padding: 1px 4px;">Core</span>
+        {/if}
+      </div>
+      <span class="badge {serviceContextMenu.svc.status === 'active' ? 'badge-success' : serviceContextMenu.svc.status === 'failed' ? 'badge-error' : 'badge-muted'}" style="font-size: 9.5px; padding: 1px 5px;">
+        {serviceContextMenu.svc.status}
+      </span>
+    </div>
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => confirmRestartService(serviceContextMenu.svc!)}
+      disabled={!!serviceActionRunning}
+    >
+      <RotateCcw size={14} style="color: var(--color-warning);" />
+      <span>Restart Service</span>
+    </button>
+
+    {#if serviceContextMenu.svc.status !== 'active'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => { const svc = serviceContextMenu.svc!; closeAllContextMenus(); doServiceAction(svc.name, 'start'); }}
+        disabled={!!serviceActionRunning}
+      >
+        <Play size={14} style="color: var(--color-success);" />
+        <span>Start Service</span>
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="context-menu-item text-danger"
+        onclick={() => confirmStopService(serviceContextMenu.svc!)}
+        disabled={isCriticalService(serviceContextMenu.svc.name) || !!serviceActionRunning}
+        title={isCriticalService(serviceContextMenu.svc.name) ? 'Cannot stop critical OS core unit' : ''}
+      >
+        <Square size={14} style="color: var(--color-error);" />
+        <span>{isCriticalService(serviceContextMenu.svc.name) ? 'Stop Service (Locked)' : 'Stop Service'}</span>
+      </button>
+    {/if}
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const name = serviceContextMenu.svc!.name;
+        closeAllContextMenus();
+        uiStore.serviceFilter = 'all';
+        uiStore.serviceSearchQuery = name.replace(/\.service$/, '');
+        uiStore.navigateTo('service-manager');
+      }}
+    >
+      <ArrowUpRight size={14} style="color: var(--color-accent);" />
+      <span>Inspect in Service Manager</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const name = serviceContextMenu.svc!.name;
+        closeAllContextMenus();
+        uiStore.preAppliedJournalPriority = 'all';
+        uiStore.preAppliedJournalSearch = name;
+        uiStore.navigateTo('journal-logs', 'journal');
+      }}
+    >
+      <FileText size={14} style="color: var(--color-accent);" />
+      <span>View Logs in Journal</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const name = serviceContextMenu.svc!.name;
+        closeAllContextMenus();
+        copyToClipboard(`systemctl status ${name}`, 'Copied systemctl status command');
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy Unit Name / CLI Command</span>
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item text-danger"
+      onclick={() => confirmUnpinService(serviceContextMenu.svc!.name)}
+    >
+      <Trash2 size={14} />
+      <span>Unpin from Dashboard</span>
+    </button>
+  </div>
+{/if}
+
+<!-- ══ System Events Metrics Context Menu ══ -->
+{#if metricContextMenu.show}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {metricContextMenu.x}px; top: {metricContextMenu.y}px; z-index: 99999; min-width: 260px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="padding: 6px 8px; font-size: 11.5px; font-weight: 700; color: var(--color-text-primary); border-bottom: 1px solid var(--color-border); margin-bottom: 4px;">
+      {#if metricContextMenu.type === 'errors'}
+        <span class="text-danger">Critical &amp; Emergency Logs</span>
+      {:else if metricContextMenu.type === 'warnings'}
+        <span class="text-warn">System Warnings</span>
+      {:else}
+        <span class="text-success">System Health Telemetry</span>
+      {/if}
+    </div>
+
+    {#if metricContextMenu.type === 'errors'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.preAppliedJournalPriority = '3';
+          uiStore.preAppliedJournalSearch = '';
+          uiStore.navigateTo('journal-logs', 'journal');
+        }}
+      >
+        <FileText size={14} style="color: var(--color-error);" />
+        <span>Open Journal Filtered to Critical (0-3)</span>
+      </button>
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard(`Critical System Errors: ${metricContextMenu.count}`, 'Copied error count summary');
+        }}
+      >
+        <Copy size={14} />
+        <span>Copy Error Count Summary</span>
+      </button>
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('security-auditor');
+        }}
+      >
+        <ShieldCheck size={14} style="color: var(--color-accent);" />
+        <span>Run Full Security Audit</span>
+      </button>
+    {:else if metricContextMenu.type === 'warnings'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.preAppliedJournalPriority = '4';
+          uiStore.preAppliedJournalSearch = '';
+          uiStore.navigateTo('journal-logs', 'journal');
+        }}
+      >
+        <FileText size={14} style="color: var(--color-warning);" />
+        <span>Open Journal Filtered to Warnings (4)</span>
+      </button>
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard(`System Warnings: ${metricContextMenu.count}`, 'Copied warning summary');
+        }}
+      >
+        <Copy size={14} />
+        <span>Copy Warning Count</span>
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('system-monitor', 'overview');
+        }}
+      >
+        <Activity size={14} style="color: var(--color-accent);" />
+        <span>Open System Monitor &amp; Resources</span>
+      </button>
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('security-auditor');
+        }}
+      >
+        <ShieldCheck size={14} style="color: var(--color-success);" />
+        <span>Inspect Security Audit Report</span>
+      </button>
+    {/if}
+  </div>
+{/if}
+
+<!-- ══ Log Ticker Line Context Menu ══ -->
+{#if logContextMenu.show && logContextMenu.log}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {logContextMenu.x}px; top: {logContextMenu.y}px; z-index: 99999; min-width: 280px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px; border-bottom: 1px solid var(--color-border); margin-bottom: 4px;">
+      <span style="font-size: 11px; font-weight: 700; font-family: var(--font-mono); color: var(--color-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px;" title={logContextMenu.log.service}>
+        [{logContextMenu.log.time}] [{logContextMenu.log.service}]
+      </span>
+      <span class="badge {logContextMenu.log.level === 'Err' || logContextMenu.log.level === 'Crit' ? 'badge-error' : logContextMenu.log.level === 'Warn' ? 'badge-warning' : 'badge-info'}" style="font-size: 9px; padding: 1px 4px;">
+        {logContextMenu.log.level}
+      </span>
+    </div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const svc = logContextMenu.log!.service;
+        closeAllContextMenus();
+        uiStore.preAppliedJournalPriority = 'all';
+        uiStore.preAppliedJournalSearch = svc;
+        uiStore.navigateTo('journal-logs', 'journal');
+      }}
+    >
+      <FileText size={14} style="color: var(--color-accent);" />
+      <span>Filter Journal by '{logContextMenu.log.service}'</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const msg = logContextMenu.log!.message;
+        closeAllContextMenus();
+        copyToClipboard(msg, 'Copied log message');
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy Log Message</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const l = logContextMenu.log!;
+        closeAllContextMenus();
+        copyToClipboard(`[${l.time}] [${l.service}] [${l.level}] ${l.message}`, 'Copied full log line');
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy Full Log Entry</span>
+    </button>
+
+    {#if logContextMenu.log.service && logContextMenu.log.service !== 'kernel' && logContextMenu.log.service !== 'system'}
+      <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const svc = logContextMenu.log!.service;
+          closeAllContextMenus();
+          uiStore.serviceFilter = 'all';
+          uiStore.serviceSearchQuery = svc.replace(/\.service$/, '');
+          uiStore.navigateTo('service-manager');
+        }}
+      >
+        <ArrowUpRight size={14} style="color: var(--color-accent);" />
+        <span>Inspect '{logContextMenu.log.service}' in Service Manager</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => confirmRestartFromLog(logContextMenu.log!.service)}
+      >
+        <RotateCcw size={14} style="color: var(--color-warning);" />
+        <span>Restart '{logContextMenu.log.service}'</span>
+      </button>
+    {/if}
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const query = `${logContextMenu.log!.service} ${logContextMenu.log!.message}`.trim();
+        closeAllContextMenus();
+        searchWeb(query);
+      }}
+    >
+      <Globe size={14} style="color: var(--color-text-secondary);" />
+      <span>Search Error on Web</span>
+    </button>
   </div>
 {/if}
 
@@ -2872,5 +3392,74 @@
   :global(html.light-mode) .log-stream-box {
     background: #F8FAFC !important;
     border-color: #E2E8F0 !important;
+  }
+
+  :global(html.light-mode) .custom-context-menu {
+    background: #FFFFFF !important;
+    border-color: #E2E8F0 !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15) !important;
+  }
+
+  :global(html.light-mode) .context-menu-item:hover:not(:disabled) {
+    background: #F1F5F9 !important;
+  }
+
+  /* Context Menu Styles */
+  .custom-context-menu {
+    background: rgba(15, 23, 42, 0.95);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: 6px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+  }
+
+  .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    transition: background 0.15s ease;
+  }
+
+  .context-menu-item:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .context-menu-item:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .context-menu-item.text-danger {
+    color: var(--color-error);
+  }
+
+  .context-menu-item.text-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.12);
+  }
+
+  .protection-badge.critical {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 4px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 </style>

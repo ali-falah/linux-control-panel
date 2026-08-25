@@ -5,10 +5,18 @@
   import { fade, fly } from 'svelte/transition';
 
   let terminalContainer: HTMLPreElement | null = $state(null);
+  let userHasScrolledUp = $state(false);
+
+  function handleScroll() {
+    if (!terminalContainer) return;
+    const { scrollTop, scrollHeight, clientHeight } = terminalContainer;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
+    userHasScrolledUp = !isAtBottom;
+  }
 
   $effect(() => {
-    // Auto-scroll terminal log to bottom as output streams
-    if (dnfStore.upgradeOutput && terminalContainer) {
+    // Auto-scroll terminal log to bottom as output streams unless user scrolled up
+    if (dnfStore.upgradeOutput && terminalContainer && !userHasScrolledUp) {
       terminalContainer.scrollTop = terminalContainer.scrollHeight;
     }
   });
@@ -126,7 +134,11 @@
 
       <!-- Terminal Body -->
       <div class="terminal-body">
-        <pre bind:this={terminalContainer} class="terminal-output">{dnfStore.upgradeOutput || 'Initializing DNF package manager transaction...\n'}</pre>
+        <pre
+          bind:this={terminalContainer}
+          onscroll={handleScroll}
+          class="drawer-terminal"
+        >{dnfStore.upgradeOutput || 'Initializing DNF package manager transaction...\n'}</pre>
       </div>
 
       <!-- Footer / Status Bar -->
@@ -412,10 +424,18 @@
     padding: 8px 16px;
   }
 
+  .terminal-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
   .drawer-terminal {
     flex: 1;
-    min-height: 320px;
-    max-height: 500px;
+    min-height: 280px;
+    max-height: calc(85vh - 170px);
     margin: 0;
     padding: 14px 16px;
     background: #020617;
@@ -424,8 +444,27 @@
     font-size: 12px;
     line-height: 1.5;
     overflow-y: auto;
+    overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .drawer-terminal::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+
+  .drawer-terminal::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.25);
+  }
+
+  .drawer-terminal::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+  }
+
+  .drawer-terminal::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.35);
   }
 
   :global(html.light-mode) .drawer-terminal {

@@ -25,14 +25,29 @@
   function updatePosition() {
     if (triggerBtn) {
       const rect = triggerBtn.getBoundingClientRect();
-      const top = rect.bottom + 4;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const spaceAbove = rect.top;
+      const openUpwards = spaceBelow < 280 && spaceAbove > spaceBelow;
+
+      let topStyle = '';
+      if (openUpwards) {
+        const bottom = Math.max(10, window.innerHeight - rect.top + 4);
+        topStyle = `bottom: ${bottom}px; top: auto; max-height: ${Math.max(160, spaceAbove - 20)}px;`;
+      } else {
+        const top = Math.max(10, rect.bottom + 4);
+        topStyle = `top: ${top}px; bottom: auto; max-height: ${Math.max(160, spaceBelow - 20)}px;`;
+      }
+
+      let leftRightStyle = '';
       if (align === 'right') {
         const right = Math.max(10, window.innerWidth - rect.right);
-        dropdownStyle = `position: fixed; top: ${top}px; right: ${right}px; left: auto; margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 280px;`;
+        leftRightStyle = `right: ${right}px; left: auto;`;
       } else {
-        const left = Math.max(10, rect.left);
-        dropdownStyle = `position: fixed; top: ${top}px; left: ${left}px; right: auto; margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 280px;`;
+        const left = Math.max(10, Math.min(rect.left, window.innerWidth - 290));
+        leftRightStyle = `left: ${left}px; right: auto;`;
       }
+
+      dropdownStyle = `position: fixed; ${topStyle} ${leftRightStyle} margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 290px; overflow-y: auto; overflow-x: hidden;`;
     }
   }
 
