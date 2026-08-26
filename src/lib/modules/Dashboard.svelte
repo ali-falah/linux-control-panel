@@ -8,11 +8,12 @@
     Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
     Zap, Layers, Package, Sliders, Play, Square, RotateCcw, ShieldCheck, Database,
     FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X, GripVertical,
-    Copy, Globe
+    Copy, Globe, Folder, FolderOpen, Flame
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
+  import { statusStore } from '../stores/status.svelte.ts';
   import { portal } from '../actions/portal.ts';
   import { open as openUrl } from '@tauri-apps/plugin-shell';
 
@@ -371,10 +372,151 @@
     };
   }
 
+  // 4. Top Active Processes Context Menu
+  let processContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    proc: ProcessItem | null;
+  }>({ x: 0, y: 0, show: false, proc: null });
+
+  function handleProcessContextMenu(e: MouseEvent, proc: ProcessItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 270;
+    const menuHeight = 360;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    processContextMenu = {
+      x,
+      y,
+      show: true,
+      proc
+    };
+  }
+
+  function confirmKillProcess(proc: ProcessItem, signal: number = 15) {
+    closeAllContextMenus();
+    if (proc.pid <= 100) {
+      uiStore.addToast(`Cannot terminate system PID ${proc.pid} (protected process).`, 'error');
+      return;
+    }
+    const isForce = signal === 9;
+    const signalName = isForce ? 'SIGKILL (Force Kill)' : 'SIGTERM (Safe Terminate)';
+    uiStore.confirm(
+      `${isForce ? 'Force Kill' : 'Terminate'} Process "${proc.name}" (PID ${proc.pid})?`,
+      `Are you sure you want to send ${signalName} to process "${proc.name}" (PID ${proc.pid}, user: ${proc.user})? Unsaved progress in this process will be terminated.`,
+      async () => {
+        try {
+          const res = await invoke<string>('kill_process', { pid: proc.pid, signal });
+          uiStore.addToast(res || `Process ${proc.name} (PID ${proc.pid}) terminated`, 'success');
+          await fetchSystemStats();
+        } catch (e) {
+          uiStore.addToast(`Failed to terminate process: ${e}`, 'error');
+        }
+      },
+      isForce
+    );
+  }
+
+  // 5. Storage & Disks Context Menu
+  interface StorageContextItem {
+    title: string;
+    mount?: string;
+    device: string;
+    fs_type?: string;
+    used_gb: number;
+    total_gb: number;
+    is_pool?: boolean;
+    is_drive?: boolean;
+  }
+
+  let storageContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    item: StorageContextItem | null;
+  }>({ x: 0, y: 0, show: false, item: null });
+
+  function handleStorageContextMenu(e: MouseEvent, item: StorageContextItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 270;
+    const menuHeight = 310;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    storageContextMenu = {
+      x,
+      y,
+      show: true,
+      item
+    };
+  }
+
+  // 6. App & Disk Footprint Context Menu
+  interface FootprintContextItem {
+    title: string;
+    path?: string;
+    size: string;
+    type: 'path' | 'flatpak' | 'rpm' | 'logs' | 'cache';
+    used_gb?: number;
+    total_gb?: number;
+    fs_type?: string;
+    device?: string;
+  }
+
+  let footprintContextMenu = $state<{
+    x: number;
+    y: number;
+    show: boolean;
+    item: FootprintContextItem | null;
+  }>({ x: 0, y: 0, show: false, item: null });
+
+  function handleFootprintContextMenu(e: MouseEvent, item: FootprintContextItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllContextMenus();
+    const menuWidth = 280;
+    const menuHeight = 330;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+    footprintContextMenu = {
+      x,
+      y,
+      show: true,
+      item
+    };
+  }
+
+  function confirmCleanDnfCache() {
+    closeAllContextMenus();
+    uiStore.confirm(
+      'Clean DNF Metadata & Package Caches?',
+      'This will expire and purge DNF package caches in /var/cache to free up disk space. DNF will re-download fresh metadata on the next package check.',
+      async () => {
+        statusStore.setBusy('Cleaning DNF package caches...');
+        try {
+          await invoke('run_makecache');
+          uiStore.addToast('DNF cache refreshed and cleaned successfully', 'success');
+        } catch (e) {
+          uiStore.addToast(`Failed to clean cache: ${e}`, 'error');
+        } finally {
+          statusStore.clearBusy();
+        }
+      },
+      false
+    );
+  }
+
   function closeAllContextMenus() {
     serviceContextMenu.show = false;
     metricContextMenu.show = false;
     logContextMenu.show = false;
+    processContextMenu.show = false;
+    storageContextMenu.show = false;
+    footprintContextMenu.show = false;
   }
 
   // Sparkline history tracking
@@ -990,7 +1132,8 @@
               uiStore.processSearchQuery = proc.name;
               uiStore.navigateTo('system-monitor', 'processes');
             }}
-            title="Inspect PID {proc.pid} ({proc.name}) in System Monitor"
+            oncontextmenu={(e) => handleProcessContextMenu(e, proc)}
+            title="Right-click for options or click to inspect PID {proc.pid} ({proc.name})"
           >
             <div class="proc-left-info">
               <span class="proc-name">{proc.name}</span>
@@ -1044,7 +1187,14 @@
       <div class="storage-card-stack">
         <!-- Physical Drive Header -->
         <div class="drive-subcard">
-          <div class="drive-subcard-header">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div 
+            class="drive-subcard-header clickable-storage-row"
+            oncontextmenu={(e) => handleStorageContextMenu(e, { title: 'Physical Drive (/dev/sda)', device: '/dev/sda', used_gb: 94.4, total_gb: 235.9, is_drive: true })}
+            onclick={() => openStoragePathModal('/', '/dev/sda', 94.4, 235.9, 'NVMe/SSD')}
+            title="Right-click for drive actions or click to inspect"
+            style="cursor: pointer;"
+          >
             <div style="display: flex; align-items: center; gap: 7px;">
               <HardDrive size={15} style="color: #3b82f6;" />
               <span class="drive-node">/dev/sda</span>
@@ -1056,7 +1206,14 @@
           <!-- Partitions Usage Bars -->
           <div class="partition-bars-stack">
             <!-- /boot partition -->
-            <div class="partition-bar-item">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div 
+              class="partition-bar-item clickable-storage-row"
+              oncontextmenu={(e) => handleStorageContextMenu(e, { title: '/boot Partition', mount: '/boot', device: '/dev/sda2', fs_type: 'ext4', used_gb: 0.528, total_gb: 1.9 })}
+              onclick={() => openStoragePathModal('/boot', '/dev/sda2', 0.528, 1.9, 'ext4')}
+              title="Right-click for options or click to inspect /boot"
+              style="cursor: pointer;"
+            >
               <div class="part-header-line">
                 <span class="part-mount">/boot</span>
                 <span class="part-dev">/dev/sda2 (ext4)</span>
@@ -1068,7 +1225,14 @@
             </div>
 
             <!-- BTRFS POOL /dev/sda3 -->
-            <div class="btrfs-pool-subcard">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div 
+              class="btrfs-pool-subcard clickable-storage-row"
+              oncontextmenu={(e) => handleStorageContextMenu(e, { title: 'BTRFS Storage Pool (/dev/sda3)', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 94.4, total_gb: 235.9, is_pool: true })}
+              onclick={() => openStoragePathModal('/', '/dev/sda3', 94.4, 235.9, 'btrfs')}
+              title="Right-click for options or click to inspect pool"
+              style="cursor: pointer;"
+            >
               <div class="btrfs-header-row">
                 <div style="display: flex; align-items: center; gap: 6px;">
                   <span class="btrfs-tag">BTRFS POOL</span>
@@ -1084,11 +1248,25 @@
 
               <!-- Tree breakdown -->
               <div class="tree-subvols">
-                <div class="tree-subvol-row">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div 
+                  class="tree-subvol-row clickable-storage-row"
+                  oncontextmenu={(e) => { e.stopPropagation(); handleStorageContextMenu(e, { title: 'Root Subvolume (/)', mount: '/', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 92.3, total_gb: 235.9 }); }}
+                  onclick={(e) => { e.stopPropagation(); openStoragePathModal('/', '/dev/sda3', 92.3, 235.9, 'btrfs'); }}
+                  title="Right-click for options or click to inspect /"
+                  style="cursor: pointer;"
+                >
                   <span><strong style="color:#00daf3;">├─</strong> <strong>/</strong> (root)</span>
                   <span class="subvol-size">92.3 GB</span>
                 </div>
-                <div class="tree-subvol-row">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div 
+                  class="tree-subvol-row clickable-storage-row"
+                  oncontextmenu={(e) => { e.stopPropagation(); handleStorageContextMenu(e, { title: 'User Files Subvolume (/home)', mount: '/home', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 92.3, total_gb: 235.9 }); }}
+                  onclick={(e) => { e.stopPropagation(); openStoragePathModal('/home', '/dev/sda3', 92.3, 235.9, 'btrfs'); }}
+                  title="Right-click for options or click to inspect /home"
+                  style="cursor: pointer;"
+                >
                   <span><strong style="color:#00daf3;">└─</strong> <strong>/home</strong></span>
                   <span class="subvol-size">92.3 GB</span>
                 </div>
@@ -1323,7 +1501,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/home', '/dev/sda3', 17.3, 235.9, 'btrfs')}
-          title="Inspect /home directory storage breakdown"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/home User Files', path: '/home', size: '17.3 GB', type: 'path', used_gb: 17.3, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
+          title="Right-click for options or click to inspect /home"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1344,7 +1523,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => uiStore.navigateTo('app-manager', 'Flatpak')}
-          title="Open Flatpak Apps in App Manager"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: 'Flatpak Desktop Apps', size: '3.5 GB', type: 'flatpak' })}
+          title="Right-click for options or click to open Flatpak Apps"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1365,7 +1545,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => uiStore.navigateTo('app-manager', 'RPM')}
-          title="Open Native RPM Packages in App Manager"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: 'Native RPM Packages', size: '1.8 GB', type: 'rpm' })}
+          title="Right-click for options or click to open RPM Packages"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1386,7 +1567,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/usr', '/dev/sda3', 4.2, 235.9, 'btrfs')}
-          title="Inspect /usr System Binaries storage breakdown"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/usr System Binaries', path: '/usr', size: '4.2 GB', type: 'path', used_gb: 4.2, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
+          title="Right-click for options or click to inspect /usr"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1407,7 +1589,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/var/log', '/dev/sda3', 1.4, 235.9, 'btrfs')}
-          title="Inspect /var/log System & Journal Logs storage breakdown"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/var/log System Logs', path: '/var/log', size: '1.4 GB', type: 'logs', used_gb: 1.4, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
+          title="Right-click for options or click to inspect /var/log"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1428,7 +1611,8 @@
           type="button"
           class="footprint-row-item clickable-row"
           onclick={() => openStoragePathModal('/var/cache', '/dev/sda3', 2.1, 235.9, 'btrfs')}
-          title="Inspect /var/cache DNF & Application Caches storage breakdown"
+          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/var/cache DNF Caches', path: '/var/cache', size: '2.1 GB', type: 'cache', used_gb: 2.1, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
+          title="Right-click for options or click to inspect /var/cache"
         >
           <div class="footprint-label-row">
             <div class="row-name-group">
@@ -1719,7 +1903,7 @@
     }
   }}
   oncontextmenu={(e) => {
-    if (!(e.target as HTMLElement)?.closest('.watchdog-item, .metric-btn, .log-item-line, .custom-context-menu')) {
+    if (!(e.target as HTMLElement)?.closest('.watchdog-item, .metric-btn, .log-item-line, .process-row-item, .clickable-storage-row, .footprint-row-item, .custom-context-menu')) {
       closeAllContextMenus();
     }
   }}
@@ -2055,6 +2239,510 @@
       <Globe size={14} style="color: var(--color-text-secondary);" />
       <span>Search Error on Web</span>
     </button>
+  </div>
+{/if}
+
+<!-- ══ Top Active Processes Context Menu ══ -->
+{#if processContextMenu.show && processContextMenu.proc}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {processContextMenu.x}px; top: {processContextMenu.y}px; z-index: 99999; min-width: 270px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+        <Activity size={14} style="color: #38bdf8; flex-shrink: 0;" />
+        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;" title={processContextMenu.proc.name}>
+          {processContextMenu.proc.name}
+        </span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 4px;">
+        <span class="badge badge-info" style="font-size: 9.5px; padding: 1px 5px; font-family: var(--font-mono);">PID {processContextMenu.proc.pid}</span>
+        <span class="badge badge-muted" style="font-size: 9px; padding: 1px 4px;">{processContextMenu.proc.user}</span>
+      </div>
+    </div>
+
+    <div style="padding: 2px 8px 6px; font-size: 11px; color: var(--color-text-secondary); display: flex; gap: 8px; font-family: var(--font-mono);">
+      <span style="color: {(processContextMenu.proc.cpu_percent || 0) > 10 ? 'var(--color-warning)' : 'var(--color-text-muted)'};">
+        {(processContextMenu.proc.cpu_percent || 0).toFixed(1)}% CPU
+      </span>
+      <span>·</span>
+      <span style="color: var(--color-text-muted);">
+        {(processContextMenu.proc.mem_percent ?? processContextMenu.proc.memory_percent ?? 0).toFixed(1)}% RAM
+      </span>
+    </div>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const proc = processContextMenu.proc!;
+        closeAllContextMenus();
+        uiStore.processSearchQuery = proc.name;
+        uiStore.navigateTo('system-monitor', 'processes');
+      }}
+    >
+      <ArrowUpRight size={14} style="color: var(--color-accent);" />
+      <span>Inspect in System Monitor</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const proc = processContextMenu.proc!;
+        closeAllContextMenus();
+        uiStore.journalUnitFilter = proc.name;
+        uiStore.navigateTo('journal-logs', 'journal');
+        uiStore.addToast(`Jumped to Journal logs for ${proc.name}`, 'info');
+      }}
+    >
+      <FileText size={14} style="color: #38bdf8;" />
+      <span>View Logs in Journal</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const name = processContextMenu.proc!.name;
+        closeAllContextMenus();
+        searchWeb(name + ' linux process');
+      }}
+    >
+      <Globe size={14} style="color: var(--color-text-secondary);" />
+      <span>Search Process on Web</span>
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const pid = processContextMenu.proc!.pid;
+        closeAllContextMenus();
+        copyToClipboard(pid.toString(), `Copied PID ${pid}`);
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy PID ({processContextMenu.proc.pid})</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const proc = processContextMenu.proc!;
+        closeAllContextMenus();
+        copyToClipboard(proc.cmdline || proc.name, `Copied command line`);
+      }}
+    >
+      <Terminal size={14} />
+      <span>Copy Command Line</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const pid = processContextMenu.proc!.pid;
+        closeAllContextMenus();
+        copyToClipboard(`ps -fp ${pid}`, `Copied CLI inspection command`);
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy `ps -fp {processContextMenu.proc.pid}`</span>
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item text-danger"
+      onclick={() => {
+        const proc = processContextMenu.proc!;
+        confirmKillProcess(proc, 15);
+      }}
+    >
+      <Square size={14} />
+      <span>Terminate (SIGTERM)</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item text-danger"
+      onclick={() => {
+        const proc = processContextMenu.proc!;
+        confirmKillProcess(proc, 9);
+      }}
+    >
+      <Flame size={14} />
+      <span>Force Kill (SIGKILL)</span>
+    </button>
+  </div>
+{/if}
+
+<!-- ══ Storage & Disks Context Menu ══ -->
+{#if storageContextMenu.show && storageContextMenu.item}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {storageContextMenu.x}px; top: {storageContextMenu.y}px; z-index: 99999; min-width: 270px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+        <HardDrive size={14} style="color: #3b82f6; flex-shrink: 0;" />
+        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={storageContextMenu.item.title}>
+          {storageContextMenu.item.title}
+        </span>
+      </div>
+      {#if storageContextMenu.item.fs_type}
+        <span class="badge badge-info" style="font-size: 9.5px; padding: 1px 5px; text-transform: uppercase;">
+          {storageContextMenu.item.fs_type}
+        </span>
+      {:else if storageContextMenu.item.is_drive}
+        <span class="badge badge-success" style="font-size: 9px; padding: 1px 4px;">NVMe/SSD</span>
+      {/if}
+    </div>
+
+    <div style="padding: 2px 8px 6px; font-size: 11px; color: var(--color-text-secondary); font-family: var(--font-mono);">
+      {formatStorageBytes(storageContextMenu.item.used_gb)} used of {formatStorageBytes(storageContextMenu.item.total_gb)} ({((storageContextMenu.item.used_gb / storageContextMenu.item.total_gb) * 100).toFixed(1)}%)
+    </div>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const it = storageContextMenu.item!;
+        closeAllContextMenus();
+        openStoragePathModal(it.mount || it.device, it.device, it.used_gb, it.total_gb, it.fs_type || 'btrfs');
+      }}
+    >
+      <Search size={14} style="color: var(--color-accent);" />
+      <span>Inspect Storage Path Breakdown</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        closeAllContextMenus();
+        uiStore.navigateTo('device-manager', 'list');
+      }}
+    >
+      <HardDrive size={14} style="color: #3b82f6;" />
+      <span>Open Device &amp; Disk Manager</span>
+    </button>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        closeAllContextMenus();
+        uiStore.navigateTo('device-manager', 'list');
+        uiStore.addToast('Jumped to Disk Health & Diagnostics', 'info');
+      }}
+    >
+      <Activity size={14} style="color: var(--color-success);" />
+      <span>Check SMART Health &amp; Diagnostics</span>
+    </button>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const it = storageContextMenu.item!;
+        closeAllContextMenus();
+        copyToClipboard(it.device, `Copied device node ${it.device}`);
+      }}
+    >
+      <Copy size={14} />
+      <span>Copy Device Node ({storageContextMenu.item.device})</span>
+    </button>
+
+    {#if storageContextMenu.item.mount}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const it = storageContextMenu.item!;
+          closeAllContextMenus();
+          copyToClipboard(it.mount!, `Copied mount point ${it.mount}`);
+        }}
+      >
+        <Folder size={14} />
+        <span>Copy Mount Point ({storageContextMenu.item.mount})</span>
+      </button>
+    {/if}
+
+    <button
+      type="button"
+      class="context-menu-item"
+      onclick={() => {
+        const it = storageContextMenu.item!;
+        closeAllContextMenus();
+        const cmd = it.mount ? `df -h ${it.mount}` : `lsblk -f ${it.device}`;
+        copyToClipboard(cmd, `Copied command ${cmd}`);
+      }}
+    >
+      <Terminal size={14} />
+      <span>Copy `{storageContextMenu.item.mount ? `df -h ${storageContextMenu.item.mount}` : `lsblk -f ${storageContextMenu.item.device}`}`</span>
+    </button>
+  </div>
+{/if}
+
+<!-- ══ App & Disk Footprint Context Menu ══ -->
+{#if footprintContextMenu.show && footprintContextMenu.item}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    use:portal
+    class="custom-context-menu"
+    style="position: fixed; left: {footprintContextMenu.x}px; top: {footprintContextMenu.y}px; z-index: 99999; min-width: 280px;"
+    onclick={(e) => e.stopPropagation()}
+    oncontextmenu={(e) => e.stopPropagation()}
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+        <Layers size={14} style="color: #a855f7; flex-shrink: 0;" />
+        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;" title={footprintContextMenu.item.title}>
+          {footprintContextMenu.item.title}
+        </span>
+      </div>
+      <span class="badge badge-info" style="font-size: 10px; padding: 1px 6px; font-family: var(--font-mono); font-weight: 600;">
+        {footprintContextMenu.item.size}
+      </span>
+    </div>
+
+    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+
+    {#if footprintContextMenu.item.type === 'flatpak'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('app-manager', 'Flatpak');
+        }}
+      >
+        <Package size={14} style="color: #38bdf8;" />
+        <span>Open Flatpak Apps in App Manager</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('app-manager', 'Duplicates');
+        }}
+      >
+        <Zap size={14} style="color: var(--color-warning);" />
+        <span>Scan for Unused / Duplicate Flatpaks</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard('flatpak list --app --columns=name,size,application', 'Copied flatpak list command');
+        }}
+      >
+        <Terminal size={14} />
+        <span>Copy `flatpak list` Command</span>
+      </button>
+
+    {:else if footprintContextMenu.item.type === 'rpm'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('app-manager', 'RPM');
+        }}
+      >
+        <Package size={14} style="color: #f59e0b;" />
+        <span>Open Native RPM Packages</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('repo-manager');
+        }}
+      >
+        <Database size={14} style="color: var(--color-accent);" />
+        <span>Manage DNF / RPM Repositories</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard('rpm -qa --qf "%{SIZE} %{NAME}\\n" | sort -rn | head -20', 'Copied RPM size query command');
+        }}
+      >
+        <Terminal size={14} />
+        <span>Copy Largest RPMs Query Command</span>
+      </button>
+
+    {:else if footprintContextMenu.item.type === 'logs'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('journal-logs', 'journal');
+        }}
+      >
+        <FileText size={14} style="color: #ec4899;" />
+        <span>Open System Journal Viewer</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const it = footprintContextMenu.item!;
+          closeAllContextMenus();
+          openStoragePathModal(it.path || '/var/log', it.device || '/dev/sda3', it.used_gb || 1.4, it.total_gb || 235.9, it.fs_type || 'btrfs');
+        }}
+      >
+        <Search size={14} style="color: var(--color-accent);" />
+        <span>Inspect `/var/log` Space Breakdown</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard('journalctl --disk-usage', 'Copied journalctl disk usage command');
+        }}
+      >
+        <Terminal size={14} />
+        <span>Copy `journalctl --disk-usage` Command</span>
+      </button>
+
+    {:else if footprintContextMenu.item.type === 'cache'}
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('repo-manager');
+        }}
+      >
+        <Database size={14} style="color: #14b8a6;" />
+        <span>Open Repository Manager</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => confirmCleanDnfCache()}
+      >
+        <RefreshCw size={14} style="color: var(--color-warning);" />
+        <span>Clean DNF Package &amp; Metadata Cache</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const it = footprintContextMenu.item!;
+          closeAllContextMenus();
+          openStoragePathModal(it.path || '/var/cache', it.device || '/dev/sda3', it.used_gb || 2.1, it.total_gb || 235.9, it.fs_type || 'btrfs');
+        }}
+      >
+        <Search size={14} style="color: var(--color-accent);" />
+        <span>Inspect `/var/cache` Space Breakdown</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          copyToClipboard('dnf clean all', 'Copied dnf clean all command');
+        }}
+      >
+        <Terminal size={14} />
+        <span>Copy `dnf clean all` Command</span>
+      </button>
+
+    {:else}
+      <!-- type === 'path' (/home, /usr) -->
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const it = footprintContextMenu.item!;
+          closeAllContextMenus();
+          openStoragePathModal(it.path || '/home', it.device || '/dev/sda3', it.used_gb || 17.3, it.total_gb || 235.9, it.fs_type || 'btrfs');
+        }}
+      >
+        <Search size={14} style="color: var(--color-accent);" />
+        <span>Inspect Storage Path Breakdown</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          closeAllContextMenus();
+          uiStore.navigateTo('device-manager', 'list');
+        }}
+      >
+        <HardDrive size={14} style="color: #3b82f6;" />
+        <span>Open Storage &amp; Device Manager</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const p = footprintContextMenu.item!.path || '/home';
+          closeAllContextMenus();
+          copyToClipboard(p, `Copied directory path ${p}`);
+        }}
+      >
+        <Folder size={14} />
+        <span>Copy Directory Path ({footprintContextMenu.item.path})</span>
+      </button>
+
+      <button
+        type="button"
+        class="context-menu-item"
+        onclick={() => {
+          const p = footprintContextMenu.item!.path || '/home';
+          closeAllContextMenus();
+          copyToClipboard(`du -sh ${p}/* | sort -rh | head -10`, 'Copied du breakdown command');
+        }}
+      >
+        <Terminal size={14} />
+        <span>Copy `du -sh {footprintContextMenu.item.path}/*` Command</span>
+      </button>
+    {/if}
   </div>
 {/if}
 

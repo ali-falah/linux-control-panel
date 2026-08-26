@@ -548,11 +548,14 @@
     SYSLOG_IDENTIFIER?: string;
     MESSAGE: string;
     count?: number;
+    _unique_id?: string;
+    [key: string]: any;
   }
 
   // Collapse consecutive duplicates
   let collapsedLogs = $derived.by(() => {
     const list: LogItem[] = [];
+    let idx = 0;
     for (const log of logs) {
       if (!log) continue;
       const last = list[list.length - 1];
@@ -562,7 +565,9 @@
         last.count = (last.count || 1) + 1;
         last.__REALTIME_TIMESTAMP = log.__REALTIME_TIMESTAMP;
       } else {
-        list.push({ ...log, count: 1 });
+        idx++;
+        const uniqueId = `${log.__REALTIME_TIMESTAMP || ''}_${unit}_${idx}`;
+        list.push({ ...log, _unique_id: uniqueId, count: 1 });
       }
     }
     return list;
@@ -985,7 +990,7 @@
               {#if logTopPadding > 0}
                 <tr style="height: {logTopPadding}px; padding: 0; margin: 0; border: none !important; line-height: 0; font-size: 0; pointer-events: none;"><td colspan="4" style="padding: 0; margin: 0; border: none !important; height: {logTopPadding}px; line-height: 0; font-size: 0;"></td></tr>
               {/if}
-              {#each visibleLogs as log (log.__REALTIME_TIMESTAMP + (log._SYSTEMD_UNIT || '') + (log.MESSAGE || ''))}
+              {#each visibleLogs as log (log._unique_id || log.__REALTIME_TIMESTAMP + (log._SYSTEMD_UNIT || '') + (log.MESSAGE || ''))}
                 {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
                 {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
                 <tr class="log-row {getPriorityClass(log.PRIORITY)}" onclick={() => openLogDrawer(log)} style="cursor: pointer;">

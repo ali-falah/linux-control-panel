@@ -91,11 +91,18 @@
   let speedResults = $state<SpeedResult[]>([]);
 
   function getDiagnosticForRepo(repoId: string, filePath: string): RepoDiagnostic | undefined {
-    return diagnostics.find(d => d.repo_id === repoId || d.file_path === filePath);
+    return diagnostics.find(d => 
+      d.repo_id === repoId || 
+      d.file_path === filePath ||
+      (Boolean(filePath) && Boolean(d.file_path) && (d.file_path.endsWith('/' + repoId) || filePath.endsWith('/' + d.repo_id)))
+    );
   }
 
   const deadReposCount = $derived(
     diagnostics.filter(d => d.status === 'unreachable' || d.status === 'corrupted' || d.status === 'empty').length
+  );
+  const activeDeadReposCount = $derived(
+    diagnostics.filter(d => (d.status === 'unreachable' || d.status === 'corrupted' || d.status === 'empty') && d.enabled).length
   );
   const slowReposCount = $derived(
     diagnostics.filter(d => d.status === 'slow').length
@@ -108,10 +115,14 @@
     repos.filter(r => {
       if (statusFilter === 'enabled' && !r.enabled) return false;
       if (statusFilter === 'disabled' && r.enabled) return false;
+      if (statusFilter === 'healthy') {
+        const diag = getDiagnosticForRepo(r.id, r.file_path);
+        return diag?.status === 'healthy';
+      }
       if (statusFilter === 'errors') {
         const diag = getDiagnosticForRepo(r.id, r.file_path);
         if (diag) {
-          return diag.status === 'unreachable' || diag.status === 'corrupted' || diag.status === 'empty';
+          return diag.status === 'unreachable' || diag.status === 'corrupted' || diag.status === 'empty' || diag.is_empty_file || diag.is_corrupted_syntax;
         }
         return !r.baseurl && !r.metalink && !r.mirrorlist;
       }
@@ -414,15 +425,15 @@
           <span class="badge badge-info" style="font-size: 11px;">{diagnostics.length} Probed</span>
         </div>
         <div style="display: flex; align-items: center; gap: 8px;">
-          {#if deadReposCount > 0}
+          {#if activeDeadReposCount > 0}
             <button
               type="button"
               class="btn btn-warning btn-sm"
               onclick={disableAllDeadRepos}
-              title="Bulk disable all unreachable, 404, or corrupted repositories to prevent DNF hangs"
+              title="Bulk disable all active unreachable, 404, or corrupted repositories to prevent DNF hangs"
             >
               <AlertTriangle size={13} />
-              <span>Disable {deadReposCount} Dead Repos</span>
+              <span>Disable {activeDeadReposCount} Active Dead Repos</span>
             </button>
           {/if}
           <button
@@ -452,8 +463,8 @@
         <button
           type="button"
           class="diag-metric-card healthy"
-          class:active={statusFilter === 'enabled'}
-          onclick={() => statusFilter = 'enabled'}
+          class:active={statusFilter === 'healthy'}
+          onclick={() => statusFilter = statusFilter === 'healthy' ? 'all' : 'healthy'}
         >
           <span class="metric-num text-success">{healthyReposCount}</span>
           <span class="metric-lbl">Healthy (&lt;1.5s)</span>
@@ -542,12 +553,12 @@
           <Database size={32} class="empty-state-icon" style="margin:0" />
         </div>
         <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
-          {filter ? 'No results found' : 'No Repositories'}
+          {filter ? 'No matching repositories found' : (statusFilter === 'errors' ? 'No Dead or Corrupted Repositories' : (statusFilter === 'slow' ? 'No Slow Repositories' : (statusFilter === 'disabled' ? 'No Disabled Repositories' : (statusFilter === 'enabled' ? 'No Enabled Repositories' : 'No Repositories'))))}
         </span>
         <span style="color:var(--color-text-muted); margin-top:8px;">
-          {filter ? 'Try adjusting your search criteria.' : 'No repositories found in /etc/yum.repos.d/.'}
+          {filter ? 'Try adjusting your search criteria.' : (statusFilter !== 'all' ? 'All repositories match your current healthy operating criteria.' : 'No repositories found in /etc/yum.repos.d/.')}
         </span>
-        {#if !filter}
+        {#if !filter && statusFilter === 'all'}
           <Button variant="outline" style="margin-top:24px;" onclick={() => showAddDialog = true}>
             <Plus size={14} /> Add Your First Repo
           </Button>

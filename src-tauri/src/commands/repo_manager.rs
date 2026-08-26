@@ -43,15 +43,27 @@ pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
             continue;
         }
 
+        let file_path = path.to_string_lossy().to_string();
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
                 log_to_file("WARN", &format!("Could not read {:?}: {e}", path));
+                let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                entries.push(RepoEntry {
+                    id: filename.clone(),
+                    name: filename,
+                    baseurl: String::new(),
+                    enabled: false,
+                    file_path: file_path.clone(),
+                    metalink: None,
+                    mirrorlist: None,
+                    gpgcheck: false,
+                    priority: None,
+                });
                 continue;
             }
         };
 
-        let file_path = path.to_string_lossy().to_string();
         let mut current_id = String::new();
         let mut current_name = String::new();
         let mut current_baseurl = String::new();
@@ -61,10 +73,12 @@ pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
         let mut current_gpgcheck = true;
         let mut current_priority: Option<u32> = None;
         let mut in_section = false;
+        let mut sections_found = 0;
 
         for line in content.lines() {
             let line = line.trim();
             if line.starts_with('[') && line.ends_with(']') {
+                sections_found += 1;
                 // Save previous section
                 if in_section && !current_id.is_empty() {
                     entries.push(RepoEntry {
@@ -112,6 +126,7 @@ pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
 
         // Save last section
         if in_section && !current_id.is_empty() {
+            sections_found += 1;
             entries.push(RepoEntry {
                 id: current_id.clone(),
                 name: if current_name.is_empty() {
@@ -126,6 +141,21 @@ pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
                 mirrorlist: current_mirrorlist.clone(),
                 gpgcheck: current_gpgcheck,
                 priority: current_priority,
+            });
+        }
+
+        if sections_found == 0 {
+            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown.repo".to_string());
+            entries.push(RepoEntry {
+                id: filename.clone(),
+                name: filename,
+                baseurl: String::new(),
+                enabled: false,
+                file_path: file_path.clone(),
+                metalink: None,
+                mirrorlist: None,
+                gpgcheck: false,
+                priority: None,
             });
         }
     }
@@ -396,18 +426,22 @@ async fn fetch_urls_from_metalink(url: &str) -> Vec<String> {
 
 async fn measure_url_speed(url: &str) -> Option<u32> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(4))
         .build()
         .ok()?;
 
     let start = std::time::Instant::now();
-    let res = client.get(url).send().await;
+    let res = client.get(url)
+        .header("User-Agent", "dnf/5")
+        .send()
+        .await;
+
     match res {
-        Ok(_) => {
+        Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
             let duration = start.elapsed().as_millis() as u32;
             Some(duration)
         }
-        Err(_) => None,
+        _ => None,
     }
 }
 
@@ -417,11 +451,13 @@ pub async fn test_repo_mirror_speeds(
     mirrorlist: Option<String>,
     metalink: Option<String>,
 ) -> Result<Vec<MirrorSpeedResult>, String> {
+    let (releasever, basearch) = get_system_repo_vars();
     let mut urls_to_test = Vec::new();
 
     if let Some(ref ml) = mirrorlist {
         if !ml.is_empty() {
-            let list_urls = fetch_urls_from_mirrorlist(ml).await;
+            let sub_ml = substitute_repo_vars(ml, &releasever, &basearch);
+            let list_urls = fetch_urls_from_mirrorlist(&sub_ml).await;
             urls_to_test.extend(list_urls);
         }
     }
@@ -429,14 +465,17 @@ pub async fn test_repo_mirror_speeds(
     if urls_to_test.is_empty() {
         if let Some(ref mt) = metalink {
             if !mt.is_empty() {
-                let meta_urls = fetch_urls_from_metalink(mt).await;
+                let sub_mt = substitute_repo_vars(mt, &releasever, &basearch);
+                let meta_urls = fetch_urls_from_metalink(&sub_mt).await;
                 urls_to_test.extend(meta_urls);
             }
         }
     }
 
     if urls_to_test.is_empty() && !baseurl.is_empty() {
-        urls_to_test.push(baseurl.clone());
+        let sub_base = substitute_repo_vars(&baseurl, &releasever, &basearch);
+        let probe_url = get_repo_probe_url(&sub_base);
+        urls_to_test.push(probe_url);
     }
 
     if urls_to_test.is_empty() {
@@ -517,6 +556,17 @@ fn substitute_repo_vars(url: &str, releasever: &str, basearch: &str) -> String {
        .replace("$basearch", basearch)
        .replace("$infra", "stock")
        .replace("$arch", basearch)
+}
+
+fn get_repo_probe_url(raw_url: &str) -> String {
+    let clean = raw_url.trim().trim_end_matches('/');
+    if clean.contains("metalink?") || clean.contains("mirrorlist?") 
+        || clean.ends_with(".xml") || clean.ends_with(".repo") 
+        || clean.contains("/metalink") || clean.contains("/mirrorlist") {
+        clean.to_string()
+    } else {
+        format!("{clean}/repodata/repomd.xml")
+    }
 }
 
 #[tauri::command]
@@ -747,8 +797,28 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
                 };
             };
 
+            let probe_url = get_repo_probe_url(&raw_url);
             let start = std::time::Instant::now();
-            let res = client_clone.get(&raw_url).send().await;
+            let mut res = client_clone.get(&probe_url)
+                .header("User-Agent", "dnf/5")
+                .send()
+                .await;
+
+            // If repomd.xml returned 404, fallback to checking raw_url in case server serves root
+            if let Ok(ref resp) = res {
+                if resp.status().as_u16() == 404 && probe_url != raw_url {
+                    if let Ok(fallback_resp) = client_clone.get(&raw_url)
+                        .header("User-Agent", "dnf/5")
+                        .send()
+                        .await 
+                    {
+                        if fallback_resp.status().is_success() || fallback_resp.status().is_redirection() {
+                            res = Ok(fallback_resp);
+                        }
+                    }
+                }
+            }
+
             let elapsed = start.elapsed().as_millis() as u32;
 
             match res {
@@ -772,7 +842,7 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
                             http_status: Some(status_code),
                             repomd_valid: true,
                             error_message: err_msg,
-                            tested_url: Some(raw_url),
+                            tested_url: Some(probe_url),
                             is_empty_file: false,
                             is_corrupted_syntax: false,
                         }
@@ -786,8 +856,8 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
                             latency_ms: Some(elapsed),
                             http_status: Some(status_code),
                             repomd_valid: false,
-                            error_message: Some(format!("HTTP 404 Not Found — repository is defunct, removed, or has invalid version path")),
-                            tested_url: Some(raw_url),
+                            error_message: Some(format!("HTTP 404 Not Found — repository metadata is defunct, removed, or has invalid version path")),
+                            tested_url: Some(probe_url),
                             is_empty_file: false,
                             is_corrupted_syntax: false,
                         }
@@ -802,7 +872,7 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
                             http_status: Some(status_code),
                             repomd_valid: false,
                             error_message: Some(format!("HTTP {} error from server", status_code)),
-                            tested_url: Some(raw_url),
+                            tested_url: Some(probe_url),
                             is_empty_file: false,
                             is_corrupted_syntax: false,
                         }
@@ -825,7 +895,7 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
                         http_status: None,
                         repomd_valid: false,
                         error_message: Some(err_str),
-                        tested_url: Some(raw_url),
+                        tested_url: Some(probe_url),
                         is_empty_file: false,
                         is_corrupted_syntax: false,
                     }
