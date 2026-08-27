@@ -1,35 +1,123 @@
 use std::fs;
 use std::path::PathBuf;
-
+pub mod utils;
 pub mod commands;
+pub mod error;
 
 use commands::{
-    copr_browser::{disable_copr, enable_copr, search_copr},
-    cron_manager::{add_cron_job, delete_cron_job, list_cron_jobs},
+    copr_browser::{disable_copr, enable_copr, search_copr, list_system_coprs},
+    cron_manager::{
+        list_cron_jobs, add_cron_job, delete_cron_job,
+        cron_list_timers, cron_toggle_timer,
+    },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
+        dnf_check_updates, dnf_run_upgrade, dnf_read_log,
+        dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
     firewall_manager::{
         get_firewall_state, get_zone_rules, modify_firewall_rule, toggle_panic_mode,
+        firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
+        firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
-    grub_manager::{read_grub_config, rebuild_grub, write_grub_config},
+    grub_manager::{read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
     hosts_manager::{read_hosts, write_hosts},
-    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo},
-    selinux_manager::{get_selinux_denials, get_selinux_status, set_selinux_state},
+    repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
+    selinux_manager::{
+        get_selinux_denials, get_selinux_status, set_selinux_state, set_selinux_mode,
+        selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override, selinux_apply_audit2allow,
+    },
     service_manager::{
-        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file,
+        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
+        get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
         list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
     },
     user_manager::{
         add_group, add_user, change_password, delete_group, delete_user, list_groups, list_users,
-        modify_user_group, toggle_sudo,
+        modify_user_group, toggle_sudo, user_get_active_sessions, user_kill_session, user_get_ssh_keys, user_save_ssh_keys,
+        toggle_lock_user,
+    },
+    nginx_manager::{
+        nginx_check_installed, nginx_service_status, nginx_service_action, nginx_test_config,
+        nginx_get_stats, nginx_list_sites, nginx_toggle_site, nginx_create_site, nginx_delete_site,
+        nginx_clone_site, nginx_request_cert,
+        nginx_list_configs, nginx_read_config, nginx_write_config, nginx_list_backups,
+        nginx_restore_backup, nginx_list_www, nginx_read_www_file, nginx_create_www_dir,
+        nginx_delete_www_entry, nginx_rename_www_entry, nginx_upload_www_file,
+        nginx_read_log, nginx_clear_log, nginx_list_log_files,
+        nginx_check_certbot, nginx_list_ssl_certs, nginx_renew_cert,
+        nginx_generate_reverse_proxy, nginx_get_log_analytics,
+    },
+    shell_env::{
+        shell_list_profile_files, shell_read_profile_file, shell_parse_all_exports,
+        shell_get_live_value, shell_write_var, shell_delete_var,
+        shell_write_profile_file, shell_create_profile_d_file,
+        shell_list_backups, shell_restore_backup,
+        shell_parse_path, shell_add_path_entry, shell_remove_path_entry,
+        shell_get_live_env, shell_source_file,
+    },
+    network_manager::{
+        network_get_interfaces, network_get_dns,
+        network_list_connections, network_get_connection,
+        network_save_connection, network_delete_connection,
+        network_up_connection, network_down_connection,
+        network_set_interface_state,
+        network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
+        network_test_ping, network_test_download, network_test_upload,
+    },
+    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test},
+    app_manager::{
+        list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
+        get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
+        scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
+    },
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
+    journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
+    security_auditor::{
+        security_run_audit,
+        security_fix_root_ssh, security_fix_ssh_param,
+        security_fix_password_policy, security_fix_firewall, security_fix_selinux,
+        security_fix_kernel_param, security_fix_auditd, security_fix_time_sync,
+        security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
+        security_fix_usbguard, security_fix_lock_account, security_fix_pam_faillock,
+        security_fix_umask, security_fix_ssh_idle_timeout, security_fix_blacklist_fs_modules,
+        security_fix_mask_ctrl_alt_del, security_fix_legal_banner, security_log_fix,
+    },
+    audit_log::{
+        get_auth_events, check_auditd_status, setup_auditd_rules,
+        get_command_audit_logs, get_runtime_threats
+    },
+    ssh_cert_vault::{
+        vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
+        vault_list_ssh_client_config, vault_save_ssh_client_config, vault_delete_ssh_client_host,
+        vault_list_known_hosts, vault_remove_known_host,
+        vault_list_authorized_keys, vault_add_authorized_key, vault_remove_authorized_key,
+        vault_get_sshd_hardening, vault_list_ssl_certs, vault_test_remote_ssl,
+        vault_get_fail2ban_status, vault_unban_ip, vault_ban_ip, vault_manage_fail2ban_service,
+    },
+    ai_advisor::{
+        ai_check_ollama_status, ai_explain_security_finding,
+        ai_load_settings, ai_save_settings,
+        ai_diagnose_log_error, ai_explain_dnf_conflict,
+        ai_generate_nginx_rule, ai_generate_firewall_rule,
+        ai_generate_terminal_command, ai_test_cloud_connection,
+        open_system_config_file,
+    },
+    pm2_manager::{
+        pm2_get_system_status, pm2_list_processes, pm2_process_action,
+        pm2_start_custom_process, pm2_save_dump, pm2_resurrect_dump,
+        pm2_get_saved_dump_apps, pm2_start_saved_app, pm2_delete_saved_app,
+        pm2_flush_logs, pm2_read_logs, pm2_clear_logs,
+        pm2_list_ecosystem_files, pm2_read_ecosystem_file,
+        pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
     },
 };
+use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
 /// Returns the app config directory, creating it if needed.
 pub fn config_dir() -> PathBuf {
@@ -56,14 +144,36 @@ pub fn log_to_file(level: &str, message: &str) {
         });
 }
 
-/// Check if a binary exists in PATH.
+/// Check if a binary exists in PATH with fast-path filesystem lookup and fallback.
 pub async fn binary_exists(name: &str) -> bool {
-    tokio::process::Command::new("which")
-        .arg(name)
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let standard_dirs = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"];
+    for dir in &standard_dirs {
+        let p = std::path::Path::new(dir).join(name);
+        if p.exists() {
+            return true;
+        }
+    }
+    
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let p = std::path::Path::new(dir).join(name);
+            if p.exists() {
+                return true;
+            }
+        }
+    }
+
+    let out = tokio::time::timeout(
+        tokio::time::Duration::from_millis(500),
+        crate::utils::privilege::tokio::Command::new("which")
+            .arg(name)
+            .output()
+    ).await;
+    
+    match out {
+        Ok(Ok(o)) => o.status.success(),
+        _ => false,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -79,6 +189,12 @@ pub fn run() {
             toggle_repo,
             add_repo,
             run_makecache,
+            save_repo_details,
+            test_repo_mirror_speeds,
+            validate_all_repos,
+            delete_repo,
+            clean_repo_cache,
+            bulk_disable_repos,
             // DNF History
             list_dnf_history,
             undo_transaction,
@@ -89,10 +205,17 @@ pub fn run() {
             dnf_autoremove,
             dnf_check,
             dnf_makecache_cmd,
+            dnf_check_updates,
+            dnf_run_upgrade,
+            dnf_read_log,
+            dnf_check_lock_status,
+            dnf_kill_lock,
+            dnf_cancel_upgrade,
             // Copr Browser
             search_copr,
             enable_copr,
             disable_copr,
+            list_system_coprs,
             // Flatpak vs RPM
             list_flatpaks,
             list_rpms,
@@ -110,6 +233,11 @@ pub fn run() {
             get_service_logs,
             read_unit_file,
             write_unit_file,
+            get_boot_blame,
+            get_boot_times,
+            get_boot_critical_chain,
+            get_unit_dependencies,
+            get_services_status,
             // Hosts Manager
             read_hosts,
             write_hosts,
@@ -119,31 +247,258 @@ pub fn run() {
             delete_user,
             change_password,
             toggle_sudo,
+            toggle_lock_user,
             list_groups,
             add_group,
             delete_group,
             modify_user_group,
+            user_get_active_sessions,
+            user_kill_session,
+            user_get_ssh_keys,
+            user_save_ssh_keys,
             // Firewall Manager
             get_firewall_state,
             get_zone_rules,
             modify_firewall_rule,
             toggle_panic_mode,
+            firewall_get_rich_rules,
+            firewall_get_zone_interfaces,
+            firewall_get_all_interfaces,
+            firewall_modify_rich_rule,
+            firewall_change_interface_zone,
+            firewall_check_port_listener,
             // GRUB Configurator
             read_grub_config,
             write_grub_config,
             rebuild_grub,
+            validate_grub_config,
+            grub_has_backup,
+            grub_restore_backup,
             // SELinux Manager
             get_selinux_status,
             set_selinux_state,
+            set_selinux_mode,
             get_selinux_denials,
+            selinux_get_booleans,
+            selinux_set_boolean,
+            selinux_explain_denial,
+            selinux_apply_policy_override,
+            selinux_apply_audit2allow,
             // Cron Manager
             list_cron_jobs,
             add_cron_job,
             delete_cron_job,
+            cron_list_timers,
+            cron_toggle_timer,
             // Environment Manager
             read_env_vars,
             write_env_vars,
+            // Nginx Manager
+            nginx_check_installed,
+            nginx_service_status,
+            nginx_service_action,
+            nginx_test_config,
+            nginx_get_stats,
+            nginx_list_sites,
+            nginx_toggle_site,
+            nginx_create_site,
+            nginx_delete_site,
+            nginx_clone_site,
+            nginx_request_cert,
+            nginx_list_configs,
+            nginx_read_config,
+            nginx_write_config,
+            nginx_list_backups,
+            nginx_restore_backup,
+            nginx_list_www,
+            nginx_read_www_file,
+            nginx_create_www_dir,
+            nginx_delete_www_entry,
+            nginx_rename_www_entry,
+            nginx_upload_www_file,
+            nginx_read_log,
+            nginx_clear_log,
+            nginx_list_log_files,
+            nginx_check_certbot,
+            nginx_list_ssl_certs,
+            nginx_renew_cert,
+            nginx_generate_reverse_proxy,
+            nginx_get_log_analytics,
+            // Shell Environment
+            shell_list_profile_files,
+            shell_read_profile_file,
+            shell_parse_all_exports,
+            shell_get_live_value,
+            shell_write_var,
+            shell_delete_var,
+            shell_write_profile_file,
+            shell_create_profile_d_file,
+            shell_list_backups,
+            shell_restore_backup,
+            shell_parse_path,
+            shell_add_path_entry,
+            shell_remove_path_entry,
+            shell_get_live_env,
+            shell_source_file,
+            // Advanced Network
+            network_get_interfaces,
+            network_get_dns,
+            network_list_connections,
+            network_get_connection,
+            network_save_connection,
+            network_delete_connection,
+            network_up_connection,
+            network_down_connection,
+            network_set_interface_state,
+            network_get_vpn_profiles,
+            network_import_vpn_profile,
+            network_create_vpn_profile,
+            network_test_ping,
+            network_test_download,
+            network_test_upload,
+            // Device Manager
+            device_get_all,
+            device_get_smart_drives,
+            device_get_smart_data,
+            device_get_topology,
+            device_trigger_self_test,
+            // App Manager
+            list_desktop_apps,
+            get_app_meta,
+            get_app_details,
+            uninstall_app,
+            get_flatpak_permissions,
+            set_flatpak_permission,
+            get_app_dependencies,
+            scan_local_appimages,
+            register_appimage,
+            launch_desktop_app,
+            reveal_in_file_manager,
+            // System Info
+            get_network_interfaces,
+            get_system_stats,
+            get_system_stats_history,
+            get_disk_usage,
+            get_process_list,
+            kill_process,
+            renice_process,
+            get_network_traffic,
+            get_smart_health,
+            get_os_info,
+            get_disk_io_stats,
+            get_active_connections,
+            get_current_user,
+            get_storage_distribution,
+            get_system_events,
+            get_network_details,
+            ping_gateway,
+            get_cpu_temperature,
+            get_last_system_update,
+            get_failed_services_count,
+            open_folder,
+            get_app_version,
+            // Privilege Manager
+            set_sudo_password,
+            clear_sudo_password,
+            check_sudo_status,
+            // Journal Viewer
+            get_journal_logs,
+            start_journal_live_stream,
+            stop_journal_live_stream,
+            export_journal_logs_to_file,
+            // Security Auditor
+            security_run_audit,
+            security_fix_root_ssh,
+            security_fix_ssh_param,
+            security_fix_password_policy,
+            security_fix_firewall,
+            security_fix_selinux,
+            security_fix_kernel_param,
+            security_fix_auditd,
+            security_fix_time_sync,
+            security_fix_tmp_sticky,
+            security_fix_passwd_perms,
+            security_fix_shadow_perms,
+            security_fix_usbguard,
+            security_fix_lock_account,
+            security_fix_pam_faillock,
+            security_fix_umask,
+            security_fix_ssh_idle_timeout,
+            security_fix_blacklist_fs_modules,
+            security_fix_mask_ctrl_alt_del,
+            security_fix_legal_banner,
+            security_log_fix,
+            // Audit Log
+            get_auth_events,
+            check_auditd_status,
+            setup_auditd_rules,
+            get_command_audit_logs,
+            get_runtime_threats,
+            // SSH & SSL Vault
+            vault_list_ssh_keys,
+            vault_generate_ssh_key,
+            vault_delete_ssh_key,
+            vault_list_ssh_client_config,
+            vault_save_ssh_client_config,
+            vault_delete_ssh_client_host,
+            vault_list_known_hosts,
+            vault_remove_known_host,
+            vault_list_authorized_keys,
+            vault_add_authorized_key,
+            vault_remove_authorized_key,
+            vault_get_sshd_hardening,
+            vault_list_ssl_certs,
+            vault_test_remote_ssl,
+            vault_get_fail2ban_status,
+            vault_unban_ip,
+            vault_ban_ip,
+            vault_manage_fail2ban_service,
+            // AI Advisor & Task Engine
+            ai_check_ollama_status,
+            ai_explain_security_finding,
+            ai_load_settings,
+            ai_save_settings,
+            ai_diagnose_log_error,
+            ai_explain_dnf_conflict,
+            ai_generate_nginx_rule,
+            ai_generate_firewall_rule,
+            ai_generate_terminal_command,
+            ai_test_cloud_connection,
+            open_system_config_file,
+            // PM2 Process Manager
+            pm2_get_system_status,
+            pm2_list_processes,
+            pm2_process_action,
+            pm2_start_custom_process,
+            pm2_save_dump,
+            pm2_resurrect_dump,
+            pm2_get_saved_dump_apps,
+            pm2_start_saved_app,
+            pm2_delete_saved_app,
+            pm2_flush_logs,
+            pm2_read_logs,
+            pm2_clear_logs,
+            pm2_list_ecosystem_files,
+            pm2_read_ecosystem_file,
+            pm2_write_ecosystem_file,
+            pm2_start_ecosystem,
+            pm2_get_startup_status,
         ])
+        .setup(|_app| {
+            tauri::async_runtime::spawn(async {
+                let _ = commands::service_manager::get_boot_times(Some(false)).await;
+                let _ = commands::service_manager::get_boot_blame(Some(false)).await;
+                let _ = commands::service_manager::get_boot_critical_chain(Some(false)).await;
+            });
+            Ok(())
+        })
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Ensure immediate clean exit without hanging on background threads or WebKit IPC
+                commands::journal_viewer::stop_journal_live_stream();
+                std::process::exit(0);
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

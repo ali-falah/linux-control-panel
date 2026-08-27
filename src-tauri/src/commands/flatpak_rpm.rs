@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::process::Command;
+use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
 
@@ -221,9 +221,27 @@ pub async fn remove_flatpak(app_id: String, system_wide: bool) -> Result<String,
     Ok(stdout)
 }
 
+const PROTECTED_PACKAGES: &[&str] = &[
+    "glibc", "systemd", "dnf", "dnf5", "kernel", "kernel-core", "kernel-modules",
+    "bash", "coreutils", "rpm", "sudo", "shadow-utils", "polkit", "dbus",
+    "util-linux", "pam", "filesystem", "libselinux", "glibc-common"
+];
+
+pub fn is_protected_package(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    if lower.starts_with("kernel") || lower.starts_with("systemd") || lower.starts_with("glibc") || lower.starts_with("dnf") {
+        return true;
+    }
+    PROTECTED_PACKAGES.contains(&lower.as_str())
+}
+
 /// Remove an RPM package
 #[tauri::command]
 pub async fn remove_rpm(name: String) -> Result<String, String> {
+    if is_protected_package(&name) {
+        return Err(format!("Action blocked: '{}' is a vital system package and cannot be removed.", name));
+    }
+
     if !binary_exists("dnf").await {
         return Err("dnf is not available on this system".to_string());
     }

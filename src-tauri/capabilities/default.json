@@ -10,6 +10,25 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-title",
     "dialog:default",
-    "shell:allow-open"
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        {
+          "name": "open-any-path-or-url",
+          "path": ".*"
+        }
+      ]
+    },
+    "shell:allow-spawn",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "pkexec",
+          "cmd": "pkexec",
+          "args": true
+        }
+      ]
+    }
   ]
 }

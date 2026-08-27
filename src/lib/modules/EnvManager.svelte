@@ -1,9 +1,19 @@
 <script lang="ts">
+  import { tableFeatures } from '../actions/tableFeatures';
+  import Button from '../components/ui/Button.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Table from '../components/ui/Table.svelte';
+  import Toggle from '../components/ui/Toggle.svelte';
+
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { Globe, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
+  import PageHeader from '../components/PageHeader.svelte';
+  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
 
   interface EnvVar {
     key: string;
@@ -12,18 +22,29 @@
   }
 
   let vars = $state<EnvVar[]>([]);
+  let originalVars = $state<EnvVar[]>([]);
   let loading = $state(true);
   let saving = $state(false);
+  let hasChanges = $state(false);
+  let showDiffModal = $state(false);
+
+  function serializeEnvVars(list: EnvVar[]): string {
+    return list
+      .filter(v => v.key.trim())
+      .map(v => `${v.key.trim()}="${v.value.trim()}"`)
+      .join('\n');
+  }
 
   async function loadVars() {
     loading = true;
     statusStore.setBusy('Reading /etc/environment…');
     try {
       vars = await invoke<EnvVar[]>('read_env_vars');
-      statusStore.setLastCommand('read /etc/environment', 0, true);
+      originalVars = JSON.parse(JSON.stringify(vars));
+      statusStore.setLastCommand('cat /etc/environment', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load environment variables: ${e}`, 'error');
-      statusStore.setLastCommand('read_env_vars', 1, false);
+      uiStore.addToast(`Failed to load env vars: ${e}`, 'error');
+      statusStore.setLastCommand('cat /etc/environment', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -39,12 +60,7 @@
   }
 
   function confirmSave() {
-    uiStore.confirm(
-      'Save Global Environment',
-      'Are you sure you want to save these variables to /etc/environment?\n\nThey will affect all users on the next login or reboot.',
-      () => doSave(),
-      true
-    );
+    showDiffModal = true;
   }
 
   async function doSave() {
@@ -54,10 +70,15 @@
     statusStore.setBusy('Saving /etc/environment…');
     try {
       await invoke('write_env_vars', { vars: validVars });
-      uiStore.addToast('Saved /etc/environment successfully', 'success');
+      statusStore.setLastCommand('echo "..." > /etc/environment', 0, true);
+      uiStore.addToast('/etc/environment saved successfully', 'success');
+      hasChanges = false;
+      originalVars = JSON.parse(JSON.stringify(vars));
+      showDiffModal = false;
       await loadVars();
     } catch (e) {
-      uiStore.addToast(`Failed to save environment variables: ${e}`, 'error');
+      uiStore.addToast(`Failed to save env vars: ${e}`, 'error');
+      statusStore.setLastCommand('echo "..." > /etc/environment', 1, false);
     } finally {
       saving = false;
       statusStore.clearBusy();
@@ -81,30 +102,26 @@
 </script>
 
 <div class="module-page">
-  <div class="module-header">
-    <div class="module-icon"><Globe size={20} /></div>
-    <div>
-      <h1 class="module-title">Environment Variables</h1>
-      <p class="module-subtitle">Manage system-wide environment variables (/etc/environment)</p>
-    </div>
-    <div style="margin-left:auto; display:flex; gap:8px">
-      <button class="btn btn-ghost" onclick={loadVars} disabled={loading || saving}>
-        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-      </button>
-      <button class="btn btn-primary" onclick={confirmSave} disabled={loading || saving}>
-        <Save size={14} /> Save Changes
-      </button>
-    </div>
-  </div>
+  <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={Globe}>
+    <Button variant="ghost" class="" onclick={loadVars} disabled={loading || saving}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    </Button>
+    <Button variant="primary" class="" onclick={confirmSave} disabled={loading || saving}>
+      <Save size={14} /> Save Changes
+    </Button>
+  </PageHeader>
 
   {#if loading && vars.length === 0}
-    <div style="padding:32px; display:flex; align-items:center; justify-content:center; gap:10px; color:var(--color-text-muted)">
-      <RefreshCw size={16} class="animate-spin-slow" /> Loading Environment…
+    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
+      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
+        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
+      </div>
+      <span style="font-weight:500">Loading Environment…</span>
     </div>
   {:else}
     <div class="card module-content-scroll" style="padding:0">
       <div class="table-wrap" style="border:none; border-radius:0">
-        <table>
+        <table use:tableFeatures>
           <thead>
             <tr>
               <th style="width:30%">Variable Name</th>
@@ -116,20 +133,20 @@
             {#each vars as v, i}
               <tr>
                 <td>
-                  <input class="w-full" style="font-family:var(--font-mono); font-weight:600; font-size:13px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
+                  <input class="input" style="font-family:var(--font-mono); font-weight:600; font-size:12px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
                 </td>
                 <td>
                   <div style="display:flex; gap:8px">
-                    <input class="w-full" style="font-family:var(--font-mono); font-size:13px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
-                    <button class="btn btn-sm btn-outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
+                    <input class="input" style="font-family:var(--font-mono); font-size:12px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
+                    <Button class="btn btn-sm -outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
                       <FolderOpen size={14} />
-                    </button>
+                    </Button>
                   </div>
                 </td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm btn-ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
+                  <Button class="btn btn-sm -ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
                     <Trash2 size={14} />
-                  </button>
+                  </Button>
                 </td>
               </tr>
             {/each}
@@ -137,10 +154,23 @@
         </table>
       </div>
       <div style="padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-raised)">
-        <button class="btn btn-outline" onclick={addVar}>
+        <Button variant="outline" class="" onclick={addVar}>
           <Plus size={14} /> Add Variable
-        </button>
+        </Button>
       </div>
     </div>
   {/if}
+
+  <!-- Config Diff Modal -->
+  <ConfigDiffModal
+    bind:show={showDiffModal}
+    filePath="/etc/environment"
+    title="Review /etc/environment Changes"
+    oldContent={serializeEnvVars(originalVars)}
+    newContent={serializeEnvVars(vars)}
+    warningMessage="Note: Global environment changes will take effect for all users upon next login or reboot."
+    isSaving={saving}
+    onconfirm={doSave}
+    oncancel={() => showDiffModal = false}
+  />
 </div>

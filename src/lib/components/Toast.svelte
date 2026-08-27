@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { CheckCircle, XCircle, AlertTriangle, Info, X } from '@lucide/svelte';
+  import {
+    CheckCircle,
+    XCircle,
+    AlertTriangle,
+    Info,
+    X,
+    FolderOpen
+  } from '@lucide/svelte';
   import type { Toast } from '../stores/ui.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
 
@@ -40,7 +47,22 @@
     {:else}<Info size={16} />
     {/if}
   </div>
-  <span class="toast-message">{toast.message}</span>
+  <div style="display:flex; flex-direction:column; gap:6px; flex:1;">
+    <span class="toast-message">{toast.message}</span>
+    {#if toast.actionLabel && toast.onAction}
+      <button
+        type="button"
+        class="toast-action-btn"
+        onclick={() => {
+          toast.onAction?.();
+          dismiss();
+        }}
+      >
+        <FolderOpen size={13} />
+        <span>{toast.actionLabel}</span>
+      </button>
+    {/if}
+  </div>
   <button class="toast-close" onclick={dismiss} aria-label="Dismiss notification">
     <X size={14} />
   </button>
@@ -53,13 +75,15 @@
     gap: 10px;
     padding: 12px 14px;
     border-radius: 10px;
-    border: 1px solid transparent;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2);
+    border: 1px solid var(--color-border);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25);
     max-width: 380px;
     animation: toastIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     transition: opacity 0.3s ease, transform 0.3s ease;
+    background: var(--color-bg-card);
+    color: var(--color-text-primary);
   }
 
   .toast.dismissed {
@@ -67,23 +91,23 @@
   }
 
   .toast-success {
-    background: rgba(15, 22, 15, 0.95);
-    border-color: rgba(34, 197, 94, 0.25);
+    background: var(--color-bg-card);
+    border-color: var(--color-success);
     color: var(--color-success);
   }
   .toast-error {
-    background: rgba(22, 10, 10, 0.95);
-    border-color: rgba(248, 113, 113, 0.25);
+    background: var(--color-bg-card);
+    border-color: var(--color-error);
     color: var(--color-error);
   }
   .toast-warning {
-    background: rgba(22, 18, 10, 0.95);
-    border-color: rgba(251, 191, 36, 0.25);
+    background: var(--color-bg-card);
+    border-color: var(--color-warning);
     color: var(--color-warning);
   }
   .toast-info {
-    background: rgba(10, 16, 22, 0.95);
-    border-color: rgba(56, 189, 248, 0.25);
+    background: var(--color-bg-card);
+    border-color: var(--color-info);
     color: var(--color-info);
   }
 
@@ -115,5 +139,28 @@
 
   .toast-close:hover {
     color: var(--color-text-primary);
+  }
+
+  .toast-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    margin-top: 2px;
+    background: rgba(0, 218, 243, 0.12);
+    border: 1px solid rgba(0, 218, 243, 0.3);
+    border-radius: 5px;
+    color: var(--color-accent);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    align-self: flex-start;
+    transition: all 0.15s ease;
+  }
+  .toast-action-btn:hover {
+    background: rgba(0, 218, 243, 0.22);
+    border-color: var(--color-accent);
+    transform: translateY(-1px);
   }
 </style>
