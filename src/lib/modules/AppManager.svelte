@@ -5,8 +5,10 @@
   import { 
     AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, 
     HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers,
-    Play, FolderOpen, Copy, Info
+    Play, FolderOpen, Copy, Info, Shield, Globe
   } from '@lucide/svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
+  import { open as openUrl } from '@tauri-apps/plugin-shell';
   import Button from '../components/ui/Button.svelte';
   import BulkActionBar from '../components/ui/BulkActionBar.svelte';
   import Input from '../components/ui/Input.svelte';
@@ -169,11 +171,21 @@
     e.preventDefault();
     e.stopPropagation();
     contextMenu = {
-      x: Math.min(e.clientX, window.innerWidth - 220),
-      y: Math.min(e.clientY, window.innerHeight - 240),
+      x: e.clientX,
+      y: e.clientY,
       show: true,
       app
     };
+  }
+
+  async function searchWeb(query: string) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    try {
+      await openUrl(url);
+      uiStore.addToast('Opening web search...', 'info');
+    } catch {
+      window.open(url, '_blank');
+    }
   }
 
   function closeContextMenu() {
@@ -1008,66 +1020,69 @@
   {/if}
 </div>
 
-<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
-
-{#if contextMenu.show && contextMenu.app}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div 
-    class="custom-context-menu" 
-    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div class="context-menu-header">
-      <span class="context-menu-title">{contextMenu.app.name}</span>
-      <span class="context-menu-badge">{contextMenu.app.source}</span>
-    </div>
-    <div class="context-menu-divider"></div>
-    <button 
-      type="button" 
-      class="context-menu-item"
-      onclick={() => handleLaunchApp(contextMenu.app!)}
-    >
-      <Play size={14} style="color: var(--color-success);" />
-      <span>Launch Application</span>
-    </button>
-    <button 
-      type="button" 
-      class="context-menu-item"
-      onclick={() => { const a = contextMenu.app!; closeContextMenu(); openDetails(a); }}
-    >
-      <Info size={14} style="color: var(--color-accent);" />
-      <span>Inspect Details</span>
-    </button>
-    <button 
-      type="button" 
-      class="context-menu-item"
-      onclick={() => handleOpenDesktopFile(contextMenu.app!)}
-      disabled={!contextMenu.app.file_path}
-    >
-      <FolderOpen size={14} style="color: var(--color-warning);" />
-      <span>Open Desktop File Location</span>
-    </button>
-    <button 
-      type="button" 
-      class="context-menu-item"
-      onclick={() => handleCopyAppId(contextMenu.app!)}
-    >
-      <Copy size={14} />
-      <span>Copy App ID / Name</span>
-    </button>
-    {#if contextMenu.app.source !== 'AppImage'}
-      <div class="context-menu-divider"></div>
-      <button 
-        type="button" 
-        class="context-menu-item text-danger"
-        onclick={() => { const a = contextMenu.app!; closeContextMenu(); confirmUninstall(a); }}
-      >
-        <Trash2 size={14} style="color: var(--color-error);" />
-        <span>Uninstall Application</span>
-      </button>
-    {/if}
-  </div>
+{#if contextMenu.app}
+  <ContextMenu
+    bind:isOpen={contextMenu.show}
+    x={contextMenu.x}
+    y={contextMenu.y}
+    title={contextMenu.app.name}
+    subtitle={contextMenu.app.exec || contextMenu.app.file_path || 'Desktop Application'}
+    badge={{ text: contextMenu.app.source, variant: contextMenu.app.source === 'Flatpak' ? 'info' : (contextMenu.app.source === 'RPM' ? 'warning' : 'muted') }}
+    icon={AppWindow}
+    items={[
+      {
+        label: 'Launch Application',
+        icon: Play,
+        action: () => handleLaunchApp(contextMenu.app!)
+      },
+      {
+        label: 'Inspect App Details',
+        icon: Info,
+        action: () => openDetails(contextMenu.app!)
+      },
+      ...(contextMenu.app.source === 'Flatpak' ? [{
+        label: 'Inspect Flatpak Sandbox Permissions',
+        icon: Shield,
+        action: () => {
+          openDetails(contextMenu.app!);
+          activeDetailTab = 'permissions';
+        }
+      }] : [{
+        label: 'Open Desktop File Location',
+        icon: FolderOpen,
+        disabled: !contextMenu.app.file_path,
+        action: () => handleOpenDesktopFile(contextMenu.app!)
+      }]),
+      {
+        label: 'Search App on Web',
+        icon: Globe,
+        action: () => searchWeb(`${contextMenu.app!.name} linux desktop application`)
+      },
+      { divider: true, label: '' },
+      {
+        label: `Copy App ID (${contextMenu.app.package_id || contextMenu.app.name})`,
+        icon: Copy,
+        action: () => handleCopyAppId(contextMenu.app!)
+      },
+      {
+        label: 'Copy Launch Command',
+        icon: Terminal,
+        action: () => {
+          navigator.clipboard.writeText(contextMenu.app!.exec || contextMenu.app!.name);
+          uiStore.addToast('Copied launch command to clipboard', 'info');
+        }
+      },
+      ...(contextMenu.app.source !== 'AppImage' ? [
+        { divider: true, label: '' },
+        {
+          label: 'Uninstall Application',
+          icon: Trash2,
+          danger: true,
+          action: () => confirmUninstall(contextMenu.app!)
+        }
+      ] : [])
+    ]}
+  />
 {/if}
 
 <!-- Bulk Action Bar for Installed Apps -->

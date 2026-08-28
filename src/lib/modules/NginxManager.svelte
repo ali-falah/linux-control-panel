@@ -26,6 +26,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
   import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import { portal } from '../actions/portal.ts';
 
@@ -1318,14 +1319,10 @@
   function handleSiteContextMenu(e: MouseEvent, site: NginxSite) {
     e.preventDefault();
     e.stopPropagation();
-    const menuWidth = 220;
-    const menuHeight = 310;
-    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
     siteContextMenu = {
       visible: true,
-      x,
-      y,
+      x: e.clientX,
+      y: e.clientY,
       site,
     };
   }
@@ -2120,7 +2117,13 @@
                   </thead>
                   <tbody>
                     {#each sites as site}
-                      <tr>
+                      <tr 
+                        class="ov-site-preview-row" 
+                        oncontextmenu={(e) => handleSiteContextMenu(e, site)}
+                        onclick={() => openSiteInspector(site)}
+                        style="cursor: pointer;"
+                        title="Right-click for actions or click to inspect {site.name}"
+                      >
                         <td>
                           <div style="display:flex; align-items:center; gap:8px;">
                             <Globe size={13} class="text-accent" />
@@ -2157,20 +2160,64 @@
                             {site.enabled ? 'Enabled' : 'Disabled'}
                           </span>
                         </td>
-                        <td style="text-align:right;">
-                          <div style="display:flex; justify-content:flex-end; gap:6px;">
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInspector(site)} title="Quick Inspect">
-                              <Eye size={11} />
-                              <span>Inspect</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInEditor(site)} title="Edit Config">
-                              <FileCode size={11} />
-                              <span>Edit</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => jumpToSiteLogs(site, 'analytics')} title="View Logs">
-                              <BarChart2 size={11} />
-                              <span>Logs</span>
-                            </Button>
+                        <td style="text-align:right;" onclick={(e) => e.stopPropagation()}>
+                          <div style="display:flex; justify-content:flex-end;">
+                            <KebabMenu align="right" title={`Actions for ${site.name}`}>
+                              <button class="menu-item" onclick={() => openSiteInspector(site)}>
+                                <Eye size={13} />
+                                <span>Quick Inspect</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => openSiteInEditor(site)}>
+                                <FileCode size={13} />
+                                <span>Edit Configuration</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => openCloneModal(site)}>
+                                <Copy size={13} />
+                                <span>Clone / Duplicate Site</span>
+                              </button>
+
+                              <button class="menu-item" onclick={() => jumpToSiteLogs(site, 'analytics')}>
+                                <BarChart2 size={13} />
+                                <span>View Logs &amp; Analytics</span>
+                              </button>
+
+                              {#if !site.has_ssl}
+                                <button class="menu-item" onclick={() => openQuickSsl(site)}>
+                                  <Sparkles size={13} class="text-accent" />
+                                  <span>Issue Let's Encrypt SSL</span>
+                                </button>
+                              {/if}
+
+                              {#if site.source === 'sites-available'}
+                                <button 
+                                  class="menu-item" 
+                                  onclick={() => toggleSite(site)}
+                                  disabled={toggleLoadingFor === site.name}
+                                >
+                                  {#if site.enabled}
+                                    <EyeOff size={13} />
+                                    <span>Disable Site</span>
+                                  {:else}
+                                    <Eye size={13} />
+                                    <span>Enable Site</span>
+                                  {/if}
+                                </button>
+                              {/if}
+
+                              <button class="menu-item" onclick={() => { navigator.clipboard.writeText(site.path); uiStore.addToast('Copied site path to clipboard', 'info'); }}>
+                                <Copy size={13} />
+                                <span>Copy Config Path</span>
+                              </button>
+
+                              <div class="menu-divider"></div>
+
+                              <button class="menu-item danger" onclick={() => confirmDeleteSite(site)}>
+                                <Trash2 size={13} />
+                                <span>Delete Virtual Host</span>
+                              </button>
+                            </KebabMenu>
                           </div>
                         </td>
                       </tr>
@@ -3652,75 +3699,79 @@
 {/snippet}
 
 <!-- ─── Sites Right-Click Context Menu ────────────────────────────────────── -->
-{#if siteContextMenu.visible && siteContextMenu.site}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div 
-    class="www-context-menu" 
-    style="top: {siteContextMenu.y}px; left: {siteContextMenu.x}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div class="context-menu-header">
-      <Globe size={13} class="text-accent" />
-      <span class="context-menu-title" title={siteContextMenu.site.name}>{siteContextMenu.site.name}</span>
-    </div>
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item" onclick={() => { openSiteInspector(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Eye size={13} />
-      <span>Quick Inspect</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openSiteInEditor(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <FileCode size={13} />
-      <span>Edit in Full Editor</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openCloneModal(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Clone Site Config</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { jumpToSiteLogs(siteContextMenu.site!, 'analytics'); closeSiteContextMenu(); }}>
-      <BarChart2 size={13} />
-      <span>View Logs &amp; Analytics</span>
-    </button>
-
-    {#if !siteContextMenu.site.has_ssl}
-      <button class="context-menu-item" onclick={() => { openQuickSsl(siteContextMenu.site!); closeSiteContextMenu(); }}>
-        <Sparkles size={13} class="text-accent" />
-        <span>Issue Let's Encrypt SSL</span>
-      </button>
-    {/if}
-
-    {#if siteContextMenu.site.source === 'sites-available'}
-      <button 
-        class="context-menu-item" 
-        onclick={() => { toggleSite(siteContextMenu.site!); closeSiteContextMenu(); }}
-        disabled={toggleLoadingFor === siteContextMenu.site.name}
-      >
-        {#if siteContextMenu.site.enabled}
-          <EyeOff size={13} />
-          <span>Disable Site</span>
-        {:else}
-          <Eye size={13} />
-          <span>Enable Site</span>
-        {/if}
-      </button>
-    {/if}
-
-    <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(siteContextMenu.site!.path); uiStore.addToast('Copied site path to clipboard', 'info'); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Copy Config Path</span>
-    </button>
-
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item danger" onclick={() => { confirmDeleteSite(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Trash2 size={13} />
-      <span>Delete Site</span>
-    </button>
-  </div>
+{#if siteContextMenu.site}
+  <ContextMenu
+    bind:isOpen={siteContextMenu.visible}
+    x={siteContextMenu.x}
+    y={siteContextMenu.y}
+    title={siteContextMenu.site.name}
+    subtitle={siteContextMenu.site.path}
+    badge={{
+      text: siteContextMenu.site.enabled ? 'ACTIVE SITE' : 'DISABLED',
+      variant: siteContextMenu.site.enabled ? 'success' : 'muted'
+    }}
+    icon={Globe}
+    items={[
+      {
+        label: 'Quick Inspect Site',
+        icon: Eye,
+        action: () => openSiteInspector(siteContextMenu.site!)
+      },
+      {
+        label: 'Edit in Configuration Editor',
+        icon: FileCode,
+        action: () => openSiteInEditor(siteContextMenu.site!)
+      },
+      {
+        label: 'Test Config Syntax (nginx -t)',
+        icon: CheckCircle,
+        action: () => runTest()
+      },
+      {
+        label: 'Safe Reload Nginx',
+        icon: RefreshCw,
+        action: () => testAndReload()
+      },
+      { divider: true, label: '' },
+      {
+        label: 'View Logs & Analytics',
+        icon: BarChart2,
+        action: () => jumpToSiteLogs(siteContextMenu.site!, 'analytics')
+      },
+      {
+        label: 'Clone Virtual Host Configuration',
+        icon: Copy,
+        action: () => openCloneModal(siteContextMenu.site!)
+      },
+      ...(!siteContextMenu.site.has_ssl ? [{
+        label: "Issue Let's Encrypt SSL",
+        icon: Sparkles,
+        color: 'var(--color-accent)',
+        action: () => openQuickSsl(siteContextMenu.site!)
+      }] : []),
+      ...(siteContextMenu.site.source === 'sites-available' ? [{
+        label: siteContextMenu.site.enabled ? 'Disable Virtual Host' : 'Enable Virtual Host',
+        icon: siteContextMenu.site.enabled ? EyeOff : Eye,
+        disabled: toggleLoadingFor === siteContextMenu.site.name,
+        action: () => toggleSite(siteContextMenu.site!)
+      }] : []),
+      { divider: true, label: '' },
+      {
+        label: 'Copy Config Path',
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(siteContextMenu.site!.path);
+          uiStore.addToast('Copied site path to clipboard', 'info');
+        }
+      },
+      {
+        label: 'Delete Virtual Host',
+        icon: Trash2,
+        danger: true,
+        action: () => confirmDeleteSite(siteContextMenu.site!)
+      }
+    ]}
+  />
 {/if}
 
 <!-- ─── WWW Right-Click Context Menu ──────────────────────────────────────── -->
@@ -4592,7 +4643,7 @@
     border-bottom: none;
   }
   .ov-sites-mini-table tr:hover {
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-hover, rgba(255, 255, 255, 0.04));
   }
 
   .version-display {

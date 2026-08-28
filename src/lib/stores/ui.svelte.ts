@@ -52,6 +52,9 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
+  accentColor = $state<'cyan' | 'emerald' | 'purple' | 'amber' | 'slate'>('cyan');
+  isOled = $state(false);
+  isDrawerDocked = $state(false);
   tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
@@ -245,7 +248,46 @@ class UIStore {
       } else {
         this.theme = 'dark';
       }
+
+      const savedAccent = localStorage.getItem('app_accent_color') as 'cyan' | 'emerald' | 'purple' | 'amber' | 'slate';
+      if (savedAccent) {
+        this.accentColor = savedAccent;
+      }
+
+      const savedOled = localStorage.getItem('app_oled_mode');
+      if (savedOled !== null) {
+        this.isOled = savedOled === 'true';
+      }
+
+      const savedDocked = localStorage.getItem('ui_drawer_docked');
+      if (savedDocked !== null) {
+        this.isDrawerDocked = savedDocked === 'true';
+      }
+
       this.applyTheme();
+    }
+  }
+
+  setAccentColor(accent: 'cyan' | 'emerald' | 'purple' | 'amber' | 'slate') {
+    this.accentColor = accent;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_accent_color', accent);
+      this.applyTheme();
+    }
+  }
+
+  toggleOled(enabled?: boolean) {
+    this.isOled = enabled !== undefined ? enabled : !this.isOled;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_oled_mode', String(this.isOled));
+      this.applyTheme();
+    }
+  }
+
+  toggleDrawerDocked(docked?: boolean) {
+    this.isDrawerDocked = docked !== undefined ? docked : !this.isDrawerDocked;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('ui_drawer_docked', String(this.isDrawerDocked));
     }
   }
 
@@ -266,6 +308,9 @@ class UIStore {
         document.documentElement.classList.remove('light-mode');
         document.documentElement.setAttribute('data-theme', 'dark');
       }
+
+      document.documentElement.setAttribute('data-accent', this.accentColor);
+      document.documentElement.setAttribute('data-oled', this.isOled ? 'true' : 'false');
     }
   }
 

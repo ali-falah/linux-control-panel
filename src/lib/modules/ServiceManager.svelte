@@ -18,6 +18,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -316,11 +317,9 @@
   function handleServiceContextMenu(e: MouseEvent, unit: ServiceUnit) {
     e.preventDefault();
     e.stopPropagation();
-    const menuWidth = 260;
-    const menuHeight = 440;
     contextMenu = {
-      x: Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 10)),
-      y: Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 10)),
+      x: e.clientX,
+      y: e.clientY,
       show: true,
       unit
     };
@@ -1673,151 +1672,93 @@
   {/if}
 </SideDrawer>
 
-<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
-
-{#if contextMenu.show && contextMenu.unit}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div 
-    class="custom-context-menu" 
-    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000; min-width: 240px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;" title={contextMenu.unit.name}>
-          {contextMenu.unit.name}
-        </span>
-        {#if contextMenu.unit.is_protected}
-          <span class="protection-badge {contextMenu.unit.protection_level}" style="font-size: 9px; padding: 1px 4px;">
-            {contextMenu.unit.protection_level === 'critical' ? 'Core' : 'Protected'}
-          </span>
-        {/if}
-      </div>
-      <span class="badge {activeStateBadge(contextMenu.unit.active_state)}" style="font-size: 9.5px; padding: 1px 5px;">
-        {contextMenu.unit.active_state}
-      </span>
-    </div>
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'restart'); }}
-      disabled={!!actionInProgress}
-    >
-      <RotateCcw size={14} style="color: var(--color-warning);" />
-      <span>Restart Service</span>
-    </button>
-
-    {#if contextMenu.unit.active_state !== 'active'}
-      <button 
-        type="button"
-        class="context-menu-item"
-        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'start'); }}
-        disabled={!!actionInProgress}
-      >
-        <Play size={14} style="color: var(--color-success);" />
-        <span>Start Service</span>
-      </button>
-    {:else}
-      <button 
-        type="button"
-        class="context-menu-item text-danger"
-        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'stop'); }}
-        disabled={contextMenu.unit.protection_level === 'critical' || !!actionInProgress}
-        title={contextMenu.unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : ''}
-      >
-        <Square size={14} style="color: var(--color-error);" />
-        <span>{contextMenu.unit.protection_level === 'critical' ? 'Stop Service (Locked)' : 'Stop Service'}</span>
-      </button>
-    {/if}
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { 
-        const u = contextMenu.unit!; 
-        closeContextMenu(); 
-        const nextAction = u.unit_file_state === 'enabled' ? 'disable' : 'enable';
-        confirmDoAction(u, nextAction); 
-      }}
-      disabled={contextMenu.unit.is_protected || !!actionInProgress}
-      title={contextMenu.unit.is_protected ? 'Protected system service cannot be modified' : ''}
-    >
-      <ShieldCheck size={14} style="color: var(--color-accent);" />
-      <span>{contextMenu.unit.is_protected ? 'Boot Autostart (Locked)' : (contextMenu.unit.unit_file_state === 'enabled' ? 'Disable at Boot' : 'Enable at Boot')}</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const u = contextMenu.unit!;
-        closeContextMenu();
-        uiStore.jumpToJournalService(u.name);
-        uiStore.setActiveTab('journal-logs');
-      }}
-    >
-      <Activity size={14} style="color: var(--color-info);" />
-      <span>View Service Logs (Journalctl)</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openEditor(u); }}
-    >
-      <Edit3 size={14} />
-      <span>Edit Service File</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openDependencies(u); }}
-    >
-      <GitFork size={14} />
-      <span>Inspect Dependencies</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const u = contextMenu.unit!;
-        closeContextMenu();
-        const maskAction = u.unit_file_state === 'masked' ? 'unmask' : 'mask';
-        confirmDoAction(u, maskAction);
-      }}
-      disabled={contextMenu.unit.is_protected || !!actionInProgress}
-      title={contextMenu.unit.is_protected ? 'Protected system service cannot be masked' : ''}
-    >
-      {#if contextMenu.unit.unit_file_state === 'masked'}
-        <Unlock size={14} style="color: var(--color-success);" />
-        <span>Unmask Service</span>
-      {:else}
-        <Lock size={14} style="color: var(--color-warning);" />
-        <span>{contextMenu.unit.is_protected ? 'Mask Service (Locked)' : 'Mask Service Unit'}</span>
-      {/if}
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = contextMenu.unit!.name;
-        navigator.clipboard.writeText(name);
-        uiStore.addToast(`Copied unit name: ${name}`, 'info');
-        closeContextMenu();
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Unit Name</span>
-    </button>
-  </div>
+{#if contextMenu.unit}
+  <ContextMenu
+    bind:isOpen={contextMenu.show}
+    x={contextMenu.x}
+    y={contextMenu.y}
+    title={contextMenu.unit.name}
+    subtitle={contextMenu.unit.description || 'Systemd Service Unit'}
+    badge={{ 
+      text: `${contextMenu.unit.active_state}${contextMenu.unit.is_protected ? ` · ${contextMenu.unit.protection_level}` : ''}`, 
+      variant: contextMenu.unit.active_state === 'active' ? 'success' : (contextMenu.unit.active_state === 'failed' ? 'error' : 'muted') 
+    }}
+    icon={Settings}
+    items={[
+      {
+        label: 'Restart Service',
+        icon: RotateCcw,
+        disabled: !!actionInProgress,
+        action: () => confirmDoAction(contextMenu.unit!, 'restart')
+      },
+      contextMenu.unit.active_state !== 'active' ? {
+        label: 'Start Service',
+        icon: Play,
+        disabled: !!actionInProgress,
+        action: () => confirmDoAction(contextMenu.unit!, 'start')
+      } : {
+        label: contextMenu.unit.protection_level === 'critical' ? 'Stop Service (Locked)' : 'Stop Service',
+        icon: Square,
+        danger: true,
+        disabled: contextMenu.unit.protection_level === 'critical' || !!actionInProgress,
+        action: () => confirmDoAction(contextMenu.unit!, 'stop')
+      },
+      {
+        label: contextMenu.unit.is_protected 
+          ? 'Boot Autostart (Locked)' 
+          : (contextMenu.unit.unit_file_state === 'enabled' ? 'Disable at Boot' : 'Enable at Boot'),
+        icon: ShieldCheck,
+        disabled: contextMenu.unit.is_protected || !!actionInProgress,
+        action: () => {
+          const nextAction = contextMenu.unit!.unit_file_state === 'enabled' ? 'disable' : 'enable';
+          confirmDoAction(contextMenu.unit!, nextAction);
+        }
+      },
+      { divider: true, label: '' },
+      {
+        label: 'View Inline Logs',
+        icon: FileText,
+        action: () => openLogs(contextMenu.unit!)
+      },
+      {
+        label: 'Open in Journal Logs',
+        icon: ArrowUpRight,
+        action: () => {
+          uiStore.jumpToJournalService(contextMenu.unit!.name);
+          uiStore.setActiveTab('journal-logs');
+        }
+      },
+      {
+        label: 'Edit Unit File',
+        icon: Edit3,
+        action: () => openEditor(contextMenu.unit!)
+      },
+      {
+        label: 'Inspect Dependencies',
+        icon: GitFork,
+        action: () => openDependencies(contextMenu.unit!)
+      },
+      { divider: true, label: '' },
+      {
+        label: contextMenu.unit.unit_file_state === 'masked' ? 'Unmask Service' : (contextMenu.unit.is_protected ? 'Mask Service (Locked)' : 'Mask Service Unit'),
+        icon: contextMenu.unit.unit_file_state === 'masked' ? Unlock : Lock,
+        danger: contextMenu.unit.unit_file_state !== 'masked',
+        disabled: contextMenu.unit.is_protected || !!actionInProgress,
+        action: () => {
+          const maskAction = contextMenu.unit!.unit_file_state === 'masked' ? 'unmask' : 'mask';
+          confirmDoAction(contextMenu.unit!, maskAction);
+        }
+      },
+      {
+        label: `Copy Unit Name (${contextMenu.unit.name})`,
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(contextMenu.unit!.name);
+          uiStore.addToast(`Copied unit name: ${contextMenu.unit!.name}`, 'info');
+        }
+      }
+    ]}
+  />
 {/if}
 
 <!-- Bulk Action Bar for Systemd Services -->
@@ -2553,8 +2494,8 @@
   }
 
   :global(html.light-mode) .pill-btn.active {
-    background: #2563EB;
-    color: #FFFFFF;
+    background: var(--color-accent);
+    color: var(--color-text-on-accent, #FFFFFF);
   }
 
   /* ── Custom Context Menu ────────────────────────────────────────── */

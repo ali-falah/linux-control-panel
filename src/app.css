@@ -130,6 +130,126 @@ html.light-mode, [data-theme="light"] {
   --color-module-icon-border: rgba(37, 99, 235, 0.20);
 }
 
+/* ─── OLED Pure Black Mode ─────────────────────────────────────────── */
+html[data-oled="true"]:not(.light-mode) {
+  --color-bg-base: #000000 !important;
+  --color-bg-surface: #050505 !important;
+  --color-bg-card: #080808 !important;
+  --color-bg-raised: #101010 !important;
+  --color-sidebar-bg: #000000 !important;
+  --color-sidebar-border: #141414 !important;
+  --color-border: #1f1f1f !important;
+  --color-border-subtle: #141414 !important;
+  --color-bg-input: #040404 !important;
+  --color-bg-drawer: #050505 !important;
+}
+
+/* ─── Accent Color Palettes ────────────────────────────────────────── */
+html[data-accent="cyan"]:not(.light-mode) {
+  --color-accent: #00daf3;
+  --color-accent-bright: #00e5ff;
+  --color-accent-soft: #c3f5ff;
+  --color-accent-glow: rgba(0, 218, 243, 0.25);
+  --color-accent-muted: rgba(0, 218, 243, 0.10);
+  --color-text-accent: #c3f5ff;
+  --color-text-on-accent: #00363d;
+}
+html[data-accent="cyan"].light-mode {
+  --color-accent: #0284c7;
+  --color-accent-bright: #0369a1;
+  --color-accent-soft: #38bdf8;
+  --color-accent-glow: rgba(2, 132, 199, 0.20);
+  --color-accent-muted: rgba(2, 132, 199, 0.08);
+  --color-text-accent: #0284c7;
+  --color-text-on-accent: #ffffff;
+}
+
+html[data-accent="emerald"]:not(.light-mode) {
+  --color-accent: #10b981;
+  --color-accent-bright: #34d399;
+  --color-accent-soft: #a7f3d0;
+  --color-accent-glow: rgba(16, 185, 129, 0.25);
+  --color-accent-muted: rgba(16, 185, 129, 0.12);
+  --color-text-accent: #6ee7b7;
+  --color-text-on-accent: #ffffff;
+}
+html[data-accent="emerald"].light-mode {
+  --color-accent: #059669;
+  --color-accent-bright: #047857;
+  --color-accent-soft: #10b981;
+  --color-accent-glow: rgba(5, 150, 105, 0.20);
+  --color-accent-muted: rgba(5, 150, 105, 0.08);
+  --color-text-accent: #059669;
+  --color-text-on-accent: #ffffff;
+}
+
+html[data-accent="purple"]:not(.light-mode) {
+  --color-accent: #a855f7;
+  --color-accent-bright: #c084fc;
+  --color-accent-soft: #e9d5ff;
+  --color-accent-glow: rgba(168, 85, 247, 0.25);
+  --color-accent-muted: rgba(168, 85, 247, 0.12);
+  --color-text-accent: #d8b4fe;
+  --color-text-on-accent: #ffffff;
+}
+html[data-accent="purple"].light-mode {
+  --color-accent: #9333ea;
+  --color-accent-bright: #7e22ce;
+  --color-accent-soft: #a855f7;
+  --color-accent-glow: rgba(147, 51, 234, 0.20);
+  --color-accent-muted: rgba(147, 51, 234, 0.08);
+  --color-text-accent: #9333ea;
+  --color-text-on-accent: #ffffff;
+}
+
+html[data-accent="amber"]:not(.light-mode) {
+  --color-accent: #f59e0b;
+  --color-accent-bright: #fbbf24;
+  --color-accent-soft: #fde68a;
+  --color-accent-glow: rgba(245, 158, 11, 0.25);
+  --color-accent-muted: rgba(245, 158, 11, 0.12);
+  --color-text-accent: #fcd34d;
+  --color-text-on-accent: #451a03;
+}
+html[data-accent="amber"].light-mode {
+  --color-accent: #d97706;
+  --color-accent-bright: #b45309;
+  --color-accent-soft: #f59e0b;
+  --color-accent-glow: rgba(217, 119, 6, 0.20);
+  --color-accent-muted: rgba(217, 119, 6, 0.08);
+  --color-text-accent: #d97706;
+  --color-text-on-accent: #ffffff;
+}
+
+html[data-accent="slate"]:not(.light-mode) {
+  --color-accent: #94a3b8;
+  --color-accent-bright: #cbd5e1;
+  --color-accent-soft: #f1f5f9;
+  --color-accent-glow: rgba(148, 163, 184, 0.25);
+  --color-accent-muted: rgba(148, 163, 184, 0.12);
+  --color-text-accent: #e2e8f0;
+  --color-text-on-accent: #0f172a;
+}
+html[data-accent="slate"].light-mode {
+  --color-accent: #475569;
+  --color-accent-bright: #334155;
+  --color-accent-soft: #64748b;
+  --color-accent-glow: rgba(71, 85, 105, 0.20);
+  --color-accent-muted: rgba(71, 85, 105, 0.08);
+  --color-text-accent: #334155;
+  --color-text-on-accent: #ffffff;
+}
+
+/* ─── Ultra-Wide Docked Split-Screen Layout ──────────────────────── */
+:root {
+  --docked-drawer-width: 540px;
+}
+
+.app-shell.drawer-docked-active .main-content {
+  padding-right: var(--docked-drawer-width);
+  transition: padding-right 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 html.light-mode input:not([type="checkbox"]),
 html.light-mode textarea,
 html.light-mode select {
@@ -145,14 +265,14 @@ html.light-mode input[type="checkbox"] {
 }
 
 html.light-mode input[type="checkbox"]:hover {
-  border-color: #2563EB !important;
+  border-color: var(--color-accent) !important;
   background: #F8FAFC !important;
 }
 
 html.light-mode input[type="checkbox"]:checked {
-  background: #2563EB !important;
-  border-color: #2563EB !important;
-  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3) !important;
+  background: var(--color-accent) !important;
+  border-color: var(--color-accent) !important;
+  box-shadow: 0 2px 6px var(--color-accent-glow) !important;
 }
 
 html.light-mode input[type="checkbox"]:checked::after {
@@ -162,7 +282,7 @@ html.light-mode input[type="checkbox"]:checked::after {
 html.light-mode input:not([type="checkbox"]):focus,
 html.light-mode textarea:focus,
 html.light-mode select:focus {
-  border-color: #2563EB !important;
+  border-color: var(--color-accent) !important;
   box-shadow: none !important;
 }
 
@@ -242,9 +362,9 @@ html.light-mode .tab-bar:hover {
 }
 
 html.light-mode .tab-btn.active {
-  background: #2563EB !important;
-  color: #FFFFFF !important;
-  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25) !important;
+  background: var(--color-accent) !important;
+  color: var(--color-text-on-accent, #FFFFFF) !important;
+  box-shadow: 0 2px 6px var(--color-accent-glow) !important;
 }
 
 html.light-mode table,
@@ -325,14 +445,14 @@ html.light-mode span[style*="color: #3b82f6"] {
 html.light-mode .tab-btn.active,
 html.light-mode .stat-card.active,
 html.light-mode .nav-tab.active {
-  background: #2563EB !important;
-  color: #FFFFFF !important;
-  border-color: #2563EB !important;
+  background: var(--color-accent) !important;
+  color: var(--color-text-on-accent, #FFFFFF) !important;
+  border-color: var(--color-accent) !important;
 }
 
 html.light-mode .tab-btn.active *,
 html.light-mode .stat-card.active * {
-  color: #FFFFFF !important;
+  color: var(--color-text-on-accent, #FFFFFF) !important;
 }
 
 html.light-mode span[style*="color: #f8fafc"],

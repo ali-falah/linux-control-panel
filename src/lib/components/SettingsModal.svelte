@@ -318,6 +318,86 @@
                   </div>
                 </button>
               </div>
+
+              <!-- Accent Color Palette -->
+              <div style="margin-top: 24px;">
+                <h4 style="margin: 0 0 6px 0; font-size: 13px; font-weight: 600; color: var(--color-text-primary);">Accent Color Theme</h4>
+                <p class="section-desc" style="margin-bottom: 12px;">Choose a dynamic primary accent color for active buttons, badges, highlights, and glow states.</p>
+
+                <div class="accent-color-grid">
+                  {#each [
+                    { id: 'cyan', name: 'Cyan Neon', color: '#00daf3', sub: 'Default electric obsidian' },
+                    { id: 'emerald', name: 'Emerald Forest', color: '#10b981', sub: 'Balanced natural green' },
+                    { id: 'purple', name: 'Purple Amethyst', color: '#a855f7', sub: 'Vibrant futuristic violet' },
+                    { id: 'amber', name: 'Electric Amber', color: '#f59e0b', sub: 'Warm energetic gold' },
+                    { id: 'slate', name: 'Slate Minimal', color: '#94a3b8', sub: 'Understated monochrome' }
+                  ] as acc}
+                    <button
+                      type="button"
+                      class="accent-card"
+                      class:active={uiStore.accentColor === acc.id}
+                      onclick={() => uiStore.setAccentColor(acc.id as any)}
+                    >
+                      <div class="accent-swatch" style="background: {acc.color}; box-shadow: 0 0 10px {acc.color}40;"></div>
+                      <div class="accent-info">
+                        <span class="accent-name">{acc.name}</span>
+                        <span class="accent-sub">{acc.sub}</span>
+                      </div>
+                      <div class="select-indicator" class:active={uiStore.accentColor === acc.id}>
+                        {#if uiStore.accentColor === acc.id}
+                          <Check size={12} />
+                        {/if}
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+
+              <!-- OLED Pitch-Black Mode -->
+              <div style="margin-top: 24px;">
+                <h4 style="margin: 0 0 6px 0; font-size: 13px; font-weight: 600; color: var(--color-text-primary);">OLED Display Optimization</h4>
+                <p class="section-desc" style="margin-bottom: 12px;">Fine-tuned for laptop battery life and true zero-nit contrast.</p>
+
+                <div 
+                  class="oled-toggle-card"
+                  class:enabled={uiStore.isOled && uiStore.theme === 'dark'}
+                  class:disabled={uiStore.theme === 'light'}
+                  onclick={() => {
+                    if (uiStore.theme === 'dark') {
+                      uiStore.toggleOled();
+                    } else {
+                      uiStore.toggleTheme();
+                      uiStore.toggleOled(true);
+                    }
+                  }}
+                >
+                  <div class="oled-card-left">
+                    <div class="oled-icon-box">
+                      <Moon size={18} />
+                    </div>
+                    <div>
+                      <div class="oled-title">OLED Pure Black Mode (#000000)</div>
+                      <div class="oled-desc">
+                        Turns off subpixels on OLED/AMOLED screens by converting the dark canvas into true pitch black.
+                        {#if uiStore.theme === 'light'}
+                          <span style="color: var(--color-warning);"> (Clicking will switch from Light mode to OLED Dark mode)</span>
+                        {/if}
+                      </div>
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={uiStore.isOled && uiStore.theme === 'dark'}
+                    onToggle={() => {
+                      if (uiStore.theme === 'dark') {
+                        uiStore.toggleOled();
+                      } else {
+                        uiStore.toggleTheme();
+                        uiStore.toggleOled(true);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
             </div>
 
           <!-- ── TAB 2: AI ASSISTANT & ENGINE ────────────────────────────── -->
@@ -983,6 +1063,123 @@
   :global(html.light-mode) .select-indicator.active {
     background: #2563EB;
     border-color: #2563EB;
+  }
+
+  /* ── Accent Color Palette & OLED Mode ── */
+  .accent-color-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+  }
+
+  .accent-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+  }
+
+  :global(html.light-mode) .accent-card {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+  }
+
+  .accent-card:hover {
+    border-color: var(--color-accent);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .accent-card.active {
+    border-color: var(--color-accent);
+    background: var(--color-active-bg);
+  }
+
+  .accent-swatch {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .accent-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .accent-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .accent-sub {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .oled-toggle-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    gap: 16px;
+  }
+
+  :global(html.light-mode) .oled-toggle-card {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+  }
+
+  .oled-toggle-card.enabled {
+    border-color: var(--color-accent);
+    background: var(--color-active-bg);
+  }
+
+  .oled-card-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .oled-icon-box {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .oled-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .oled-desc {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
   }
 
   /* ── AI Engine Tab ───────────────────────────────────────────────────────── */

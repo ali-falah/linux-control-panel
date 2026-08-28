@@ -899,9 +899,9 @@
   }
 
   :global(html.light-mode) .nav-badge {
-    background: #2563EB;
-    color: #FFFFFF !important;
-    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
+    background: var(--color-accent);
+    color: var(--color-text-on-accent, #FFFFFF) !important;
+    box-shadow: 0 1px 3px var(--color-accent-glow);
   }
 
   .sidebar.collapsed .nav-item {

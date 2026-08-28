@@ -1,10 +1,12 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network } from '@lucide/svelte';
+  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network, Globe, Sliders, Square, Flame, Terminal, FileText, ShieldAlert } from '@lucide/svelte';
   import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
+  import { open as openUrl } from '@tauri-apps/plugin-shell';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -231,8 +233,8 @@
     e.stopPropagation();
     procContextMenu.show = false;
     contextMenu = {
-      x: Math.min(e.clientX, window.innerWidth - 220),
-      y: Math.min(e.clientY, window.innerHeight - 180),
+      x: e.clientX,
+      y: e.clientY,
       show: true,
       conn
     };
@@ -243,11 +245,38 @@
     e.stopPropagation();
     contextMenu.show = false;
     procContextMenu = {
-      x: Math.min(e.clientX, window.innerWidth - 240),
-      y: Math.min(e.clientY, window.innerHeight - 300),
+      x: e.clientX,
+      y: e.clientY,
       show: true,
       proc
     };
+  }
+
+  async function searchWeb(query: string) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    try {
+      await openUrl(url);
+      uiStore.addToast('Opening web search...', 'info');
+    } catch {
+      window.open(url, '_blank');
+    }
+  }
+
+  function promptRenice(proc: any) {
+    const current = proc.priority ?? 0;
+    const input = prompt(`Change nice priority for "${proc.name}" (PID ${proc.pid})\nRange: -20 (highest priority, requires root) to 19 (lowest priority):`, String(current));
+    if (input === null) return;
+    const niceVal = parseInt(input.trim(), 10);
+    if (isNaN(niceVal) || niceVal < -20 || niceVal > 19) {
+      uiStore.addToast('Priority must be an integer between -20 and 19', 'error');
+      return;
+    }
+    invoke('renice_process', { pid: proc.pid, priority: niceVal })
+      .then(() => {
+        uiStore.addToast(`Priority of PID ${proc.pid} set to ${niceVal}`, 'success');
+        pollProcesses();
+      })
+      .catch((err) => uiStore.addToast(`Failed to renice process: ${err}`, 'error'));
   }
 
   async function openConnectionDetails(conn: any) {
@@ -1307,133 +1336,123 @@
   </div>
 </div>
 
-<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
-
-{#if contextMenu.show && contextMenu.conn}
-  <div 
-    class="custom-context-menu" 
-    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <button 
-      onclick={() => {
-        if (contextMenu.conn && contextMenu.conn.pid) {
+<!-- Context Menu: Active Connections -->
+<ContextMenu
+  bind:isOpen={contextMenu.show}
+  x={contextMenu.x}
+  y={contextMenu.y}
+  title={contextMenu.conn ? `${contextMenu.conn.protocol} ${contextMenu.conn.local_address}` : 'Connection'}
+  subtitle={contextMenu.conn ? `Process: ${contextMenu.conn.process_name || 'unknown'}` : ''}
+  badge={contextMenu.conn?.state ? { text: contextMenu.conn.state, variant: contextMenu.conn.state.toLowerCase().includes('listen') ? 'warning' : 'success' } : undefined}
+  icon={Wifi}
+  items={[
+    {
+      label: 'Show Connection Details',
+      icon: TerminalSquare,
+      action: () => {
+        if (contextMenu.conn) openConnectionDetails(contextMenu.conn);
+      }
+    },
+    {
+      label: `Copy Address (${contextMenu.conn?.local_address})`,
+      icon: Copy,
+      action: () => copyPid(contextMenu.conn?.local_address || '')
+    },
+    { divider: true, label: '' },
+    {
+      label: 'Kill Owning Process',
+      icon: Skull,
+      danger: true,
+      disabled: !contextMenu.conn?.pid,
+      action: () => {
+        if (contextMenu.conn?.pid) {
           killProcess(contextMenu.conn.pid, contextMenu.conn.process_name);
         }
-        closeContextMenu();
-      }}
-      disabled={!contextMenu.conn.pid}
-    >
-      <Skull size={13} style="margin-right: 8px; color: var(--color-error);" />
-      Kill Process
-    </button>
-    <button 
-      onclick={() => {
-        if (contextMenu.conn) {
-          openConnectionDetails(contextMenu.conn);
+      }
+    }
+  ]}
+/>
+
+<!-- Context Menu: Process Tree -->
+<ContextMenu
+  bind:isOpen={procContextMenu.show}
+  x={procContextMenu.x}
+  y={procContextMenu.y}
+  title={procContextMenu.proc?.name || 'Process'}
+  subtitle={procContextMenu.proc ? `${procContextMenu.proc.cpu_percent.toFixed(1)}% CPU · ${procContextMenu.proc.mem_percent.toFixed(1)}% RAM (${procContextMenu.proc.mem_rss_mb.toFixed(1)} MB)` : ''}
+  badge={procContextMenu.proc ? { text: `PID ${procContextMenu.proc.pid} · ${procContextMenu.proc.user}`, variant: procContextMenu.proc.user === 'root' ? 'error' : 'info' } : undefined}
+  icon={Activity}
+  items={[
+    {
+      label: 'Inspect Details',
+      icon: Activity,
+      action: () => {
+        if (procContextMenu.proc) openProcessInspector(procContextMenu.proc);
+      }
+    },
+    {
+      label: 'View Unit Logs in Journal',
+      icon: FileText,
+      action: () => {
+        if (procContextMenu.proc) {
+          uiStore.journalUnitFilter = procContextMenu.proc.name;
+          uiStore.navigateTo('journal-logs', 'journal');
         }
-        closeContextMenu();
-      }}
-    >
-      <TerminalSquare size={13} style="margin-right: 8px; color: var(--color-info);" />
-      Show Details
-    </button>
-  </div>
-{/if}
-
-{#if procContextMenu.show && procContextMenu.proc}
-  <div 
-    class="custom-context-menu" 
-    style="position: fixed; left: {procContextMenu.x}px; top: {procContextMenu.y}px; z-index: 10000; min-width: 230px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={procContextMenu.proc.name}>
-        {procContextMenu.proc.name}
-      </span>
-      <span style="font-size: 9.5px; font-weight: 600; font-family: var(--font-mono); padding: 1px 5px; border-radius: 3px; background: rgba(0, 218, 243, 0.12); color: var(--color-accent);">
-        PID {procContextMenu.proc.pid}
-      </span>
-    </div>
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      onclick={() => {
-        const p = procContextMenu.proc!;
-        closeContextMenu();
-        openProcessInspector(p);
-      }}
-    >
-      <TerminalSquare size={13} style="margin-right: 8px; color: var(--color-accent);" />
-      Inspect Details
-    </button>
-
-    <button 
-      type="button"
-      onclick={() => {
-        copyPid(procContextMenu.proc!.pid);
-        closeContextMenu();
-      }}
-    >
-      <Copy size={13} style="margin-right: 8px;" />
-      Copy PID ({procContextMenu.proc.pid})
-    </button>
-
-    <button 
-      type="button"
-      onclick={() => {
-        navigator.clipboard.writeText(procContextMenu.proc!.name);
-        uiStore.addToast(`Copied process name: ${procContextMenu.proc!.name}`, 'info');
-        closeContextMenu();
-      }}
-    >
-      <Copy size={13} style="margin-right: 8px;" />
-      Copy Name
-    </button>
-
-    <button 
-      type="button"
-      onclick={() => {
-        const p = procContextMenu.proc!;
-        closeContextMenu();
-        uiStore.jumpToJournalService(p.name);
-        uiStore.setActiveTab('journal-logs');
-      }}
-    >
-      <Activity size={13} style="margin-right: 8px; color: var(--color-info);" />
-      View Unit Logs in Journalctl
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      onclick={() => {
-        const p = procContextMenu.proc!;
-        closeContextMenu();
-        killProcess(p.pid, p.name, 15);
-      }}
-      style="color: var(--color-warning);"
-    >
-      <Skull size={13} style="margin-right: 8px; color: var(--color-warning);" />
-      Send SIGTERM (Terminate)
-    </button>
-
-    <button 
-      type="button"
-      onclick={() => {
-        const p = procContextMenu.proc!;
-        closeContextMenu();
-        killProcess(p.pid, p.name, 9);
-      }}
-      style="color: var(--color-error);"
-    >
-      <Skull size={13} style="margin-right: 8px; color: var(--color-error);" />
-      Send SIGKILL (Force Kill)
-    </button>
-  </div>
-{/if}
+      }
+    },
+    {
+      label: 'Search Process on Web',
+      icon: Globe,
+      action: () => {
+        if (procContextMenu.proc) searchWeb(`${procContextMenu.proc.name} linux process`);
+      }
+    },
+    { divider: true, label: '' },
+    {
+      label: `Copy PID (${procContextMenu.proc?.pid})`,
+      icon: Copy,
+      action: () => {
+        if (procContextMenu.proc) copyPid(procContextMenu.proc.pid);
+      }
+    },
+    {
+      label: 'Copy Command Line',
+      icon: Terminal,
+      action: () => {
+        if (procContextMenu.proc) {
+          navigator.clipboard.writeText(procContextMenu.proc.cmdline || procContextMenu.proc.name);
+          uiStore.addToast('Copied command line', 'info');
+        }
+      }
+    },
+    {
+      label: 'Adjust Priority (Renice)',
+      icon: Sliders,
+      action: () => {
+        if (procContextMenu.proc) promptRenice(procContextMenu.proc);
+      }
+    },
+    { divider: true, label: '' },
+    {
+      label: 'Soft Kill (SIGTERM)',
+      icon: Square,
+      danger: true,
+      disabled: procContextMenu.proc && procContextMenu.proc.pid <= 100,
+      action: () => {
+        if (procContextMenu.proc) killProcess(procContextMenu.proc.pid, procContextMenu.proc.name, 15);
+      }
+    },
+    {
+      label: 'Force Kill (SIGKILL)',
+      icon: Flame,
+      danger: true,
+      disabled: procContextMenu.proc && procContextMenu.proc.pid <= 100,
+      action: () => {
+        if (procContextMenu.proc) killProcess(procContextMenu.proc.pid, procContextMenu.proc.name, 9);
+      }
+    }
+  ]}
+/>
 
 <SideDrawer bind:isOpen={isDrawerOpen} title="Connection Details" width="450px">
   {#if selectedConnection}

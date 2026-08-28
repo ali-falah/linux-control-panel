@@ -59,7 +59,7 @@
   <meta name="description" content="A comprehensive Linux system management desktop application" />
 </svelte:head>
 
-<div class="app-shell">
+<div class="app-shell" class:drawer-docked-active={uiStore.isDrawerDocked}>
   <Sidebar />
 
   <main class="main-content">
