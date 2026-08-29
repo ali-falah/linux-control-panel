@@ -604,3 +604,231 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     log_to_file("INFO", "DNF upgrade completed successfully");
     Ok(())
 }
+
+// ─── DNF Dry Run Data Types & Command ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnfPackageDiff {
+    pub name: String,
+    pub arch: String,
+    pub old_version: Option<String>,
+    pub new_version: String,
+    pub repo: String,
+    pub size: String,
+    pub action: String, // "Upgrade" | "Install" | "Remove" | "Downgrade" | "Obsolete"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnfDryRunResult {
+    pub packages: Vec<DnfPackageDiff>,
+    pub total_download_size: String,
+    pub disk_space_change: String,
+    pub to_upgrade_count: usize,
+    pub to_install_count: usize,
+    pub to_remove_count: usize,
+    pub to_downgrade_count: usize,
+    pub raw_output: String,
+}
+
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip until ending letter
+            if let Some(&'[') = chars.peek() {
+                chars.next();
+                for next_c in chars.by_ref() {
+                    if next_c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
+    let clean_text = strip_ansi_codes(raw_text);
+    let mut packages: Vec<DnfPackageDiff> = Vec::new();
+    let mut current_action: Option<String> = None;
+    let mut total_download_size = String::new();
+    let mut disk_space_change = String::new();
+
+    let mut to_upgrade_count = 0;
+    let mut to_install_count = 0;
+    let mut to_remove_count = 0;
+    let mut to_downgrade_count = 0;
+
+    for line in clean_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("upgrading:") || lower == "upgrades" {
+            current_action = Some("Upgrade".to_string());
+            continue;
+        } else if lower.starts_with("installing dependencies:") || lower.starts_with("installing:") || lower == "installing" {
+            current_action = Some("Install".to_string());
+            continue;
+        } else if lower.starts_with("removing:") || lower == "removing" {
+            current_action = Some("Remove".to_string());
+            continue;
+        } else if lower.starts_with("downgrading:") || lower == "downgrading" {
+            current_action = Some("Downgrade".to_string());
+            continue;
+        } else if lower.starts_with("obsoleting:") || lower == "obsoleting" {
+            current_action = Some("Obsolete".to_string());
+            continue;
+        } else if lower.starts_with("transaction summary:") || lower.starts_with("transaction summary") {
+            current_action = None;
+            continue;
+        }
+
+        if lower.contains("need to download") {
+            if let Some(pos) = line.find("Need to download") {
+                total_download_size = line[pos + "Need to download".len()..].trim().trim_end_matches('.').to_string();
+            }
+        } else if lower.starts_with("total download size:") {
+            total_download_size = trimmed["Total download size:".len()..].trim().to_string();
+        } else if lower.starts_with("after this operation,") {
+            disk_space_change = trimmed.to_string();
+        }
+
+        if let Some(ref action) = current_action {
+            // Replacement line in DNF5: "replacing bluez x86_64 0:5.87-4.fc44 updates 3.9 MiB"
+            if trimmed.starts_with("replacing ") || trimmed.starts_with("obsoleted by ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let old_ver = parts[3].to_string();
+                    if let Some(last_pkg) = packages.last_mut() {
+                        last_pkg.old_version = Some(old_ver);
+                    }
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("Package ") || trimmed.starts_with("===") || trimmed.starts_with("---") {
+                continue;
+            }
+
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let name = parts[0].to_string();
+                let arch = parts[1].to_string();
+                let version = parts[2].to_string();
+                let repo = parts[3].to_string();
+                let size = if parts.len() >= 5 { parts[4..].join(" ") } else { "-".to_string() };
+
+                match action.as_str() {
+                    "Upgrade" => to_upgrade_count += 1,
+                    "Install" => to_install_count += 1,
+                    "Remove" => to_remove_count += 1,
+                    "Downgrade" => to_downgrade_count += 1,
+                    _ => {}
+                }
+
+                packages.push(DnfPackageDiff {
+                    name,
+                    arch,
+                    old_version: None,
+                    new_version: version,
+                    repo,
+                    size,
+                    action: action.clone(),
+                });
+            }
+        }
+    }
+
+    if total_download_size.is_empty() {
+        total_download_size = "0 B".to_string();
+    }
+
+    DnfDryRunResult {
+        packages,
+        total_download_size,
+        disk_space_change,
+        to_upgrade_count,
+        to_install_count,
+        to_remove_count,
+        to_downgrade_count,
+        raw_output: raw_text.to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResult, String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let pw_opt = {
+        let guard = crate::utils::privilege::SUDO_PASSWORD.lock().unwrap();
+        guard.clone()
+    };
+
+    let mut cmd = if let Some(ref _pw) = pw_opt {
+        let mut c = tokio::process::Command::new("sudo");
+        c.arg("-S").arg("--prompt=").arg("dnf");
+        c
+    } else {
+        tokio::process::Command::new("dnf")
+    };
+
+    cmd.arg("--color=never")
+       .arg("upgrade")
+       .arg("--assumeno");
+
+    if !packages.is_empty() {
+        cmd.args(&packages);
+    }
+
+    cmd.arg("--allowerasing")
+       .arg("--nogpgcheck")
+       .arg("--setopt=timeout=60");
+
+    cmd.stdin(Stdio::piped())
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn DNF dry-run: {e}"))?;
+
+    if let (Some(pw), Some(mut stdin)) = (pw_opt, child.stdin.take()) {
+        let mut p = pw;
+        p.push('\n');
+        let _ = stdin.write_all(p.as_bytes()).await;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| format!("Error waiting for DNF dry-run: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let full_text = format!("{}\n{}", stdout, stderr);
+
+    let parsed = parse_dnf_dry_run(&full_text);
+
+    // If no packages were parsed, check if DNF failed with a conflict or problem
+    if parsed.packages.is_empty() {
+        let has_critical_error = full_text.lines().any(|l| {
+            let tr = l.trim();
+            tr.starts_with("Error: ") || tr.starts_with("Problem: ") || tr.starts_with("Errors during downloading")
+        });
+
+        if has_critical_error {
+            let errors: Vec<&str> = full_text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| l.starts_with("Error: ") || l.starts_with("Problem: ") || l.starts_with("Errors during downloading"))
+                .collect();
+            if !errors.is_empty() {
+                return Err(errors.join("\n"));
+            }
+        }
+    }
+
+    Ok(parsed)
+}

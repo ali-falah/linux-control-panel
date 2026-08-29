@@ -441,7 +441,6 @@
   <!-- ── Page Header ────────────────────────────────────────────────────────── -->
   <PageHeader 
     title="SSH &amp; SSL Vault" 
-    subtitle="Manage cryptographic identities, SSH server posture, client profiles, and TLS certificates" 
     icon={Lock}
   >
     <div class="header-actions">

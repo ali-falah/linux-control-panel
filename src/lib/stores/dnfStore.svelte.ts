@@ -11,6 +11,27 @@ export interface DnfLockInfo {
   lock_path: string | null;
 }
 
+export interface DnfPackageDiff {
+  name: string;
+  arch: string;
+  old_version: string | null;
+  new_version: string;
+  repo: string;
+  size: string;
+  action: string; // "Upgrade" | "Install" | "Remove" | "Downgrade" | "Obsolete"
+}
+
+export interface DnfDryRunResult {
+  packages: DnfPackageDiff[];
+  total_download_size: string;
+  disk_space_change: string;
+  to_upgrade_count: number;
+  to_install_count: number;
+  to_remove_count: number;
+  to_downgrade_count: number;
+  raw_output: string;
+}
+
 const HANG_THRESHOLD_MS = 60_000;
 
 class DnfStore {
@@ -22,6 +43,13 @@ class DnfStore {
   hangWarning = $state(false);
   lockInfo = $state<DnfLockInfo | null>(null);
   showFloatingDrawer = $state(false);
+
+  // Dry-run Diff Preview State
+  isDryRunning = $state(false);
+  dryRunResult = $state<DnfDryRunResult | null>(null);
+  dryRunError = $state<string | null>(null);
+  showDryRunModal = $state(false);
+  pendingUpgradePackages = $state<string[]>([]);
 
   private lastOutputTime = 0;
   private hangCheckInterval: any = null;
@@ -166,6 +194,44 @@ class DnfStore {
 
   closeDrawer() {
     this.showFloatingDrawer = false;
+  }
+
+  // ── Dry Run Flow ──────────────────────────────────────────────────────────
+
+  async requestUpgrade(packages: string[] = []) {
+    this.pendingUpgradePackages = [...packages];
+    this.showDryRunModal = true;
+    this.isDryRunning = true;
+    this.dryRunError = null;
+    this.dryRunResult = null;
+    statusStore.setBusy('Calculating DNF upgrade dry-run diff…');
+
+    try {
+      const result = await invoke<DnfDryRunResult>('dnf_dry_run_upgrade', { packages });
+      this.dryRunResult = result;
+      statusStore.clearBusy();
+    } catch (e: any) {
+      const msg = typeof e === 'string' ? e : e?.message || String(e);
+      this.dryRunError = msg;
+      statusStore.clearBusy();
+      uiStore.addToast(`Dry-run calculation failed: ${msg}`, 'error');
+    } finally {
+      this.isDryRunning = false;
+    }
+  }
+
+  confirmAndExecuteUpgrade() {
+    this.showDryRunModal = false;
+    const pkgs = [...this.pendingUpgradePackages];
+    this.openDrawer();
+    this.startUpgrade(pkgs);
+  }
+
+  closeDryRunModal() {
+    this.showDryRunModal = false;
+    this.dryRunResult = null;
+    this.dryRunError = null;
+    this.isDryRunning = false;
   }
 }
 

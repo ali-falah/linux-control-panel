@@ -511,7 +511,7 @@
 <!-- ─── Page ────────────────────────────────────────────────────────────── -->
 <div class="module-page">
   <!-- Header -->
-  <PageHeader title="Shell Environment" subtitle="Manage bash profile files, exported variables, and PATH" icon={Terminal}>
+  <PageHeader title="Shell Environment" icon={Terminal}>
     {#if aiStore.enabled && !showAiAssistant}
       <Button variant="ghost" size="sm" onclick={() => showAiAssistant = true} title="Open AI Terminal Assistant">
         <Sparkles size={14} style="color: var(--color-accent);" /> AI Assistant

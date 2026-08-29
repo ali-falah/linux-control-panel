@@ -3,6 +3,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { Terminal, RefreshCw, X, AlertTriangle, ExternalLink, OctagonX, CheckCircle2 } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
+  import DnfDryRunModal from './DnfDryRunModal.svelte';
 
   let terminalContainer: HTMLPreElement | null = $state(null);
   let userHasScrolledUp = $state(false);
@@ -165,6 +166,8 @@
     </div>
   </div>
 {/if}
+
+<DnfDryRunModal />
 
 <style>
   .dnf-widget-container {

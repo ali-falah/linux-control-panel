@@ -909,7 +909,7 @@
 <div class="dashboard-page">
   <!-- ── Top Header Toolbar (Fixed) ── -->
   <div class="dashboard-header-fixed">
-    <PageHeader title="Dashboard" subtitle="System Telemetry & Overview" />
+    <PageHeader title="Dashboard" />
   </div>
 
   <!-- ── Scrollable Dashboard Content ── -->

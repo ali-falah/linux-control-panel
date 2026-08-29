@@ -873,7 +873,6 @@
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
   <PageHeader 
     title="PM2 Manager" 
-    subtitle="Node.js process monitoring, cluster balancing, and real-time logs" 
     icon={Layers}
   >
     <div class="header-action-btns">

@@ -777,7 +777,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Monitoring" subtitle="Real-time system health and process management." icon={Activity}>
+  <PageHeader title="Monitoring" icon={Activity}>
     <TabGroup
       tabs={[
         { id: 'overview', label: 'Overview' },

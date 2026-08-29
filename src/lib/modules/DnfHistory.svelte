@@ -12,7 +12,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
+  import { History, RefreshCw, Undo2, Calendar, Package, Search, Layers } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
   import { AlertTriangle, Lock, Ban, Sparkles } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -212,8 +212,7 @@
   async function startUpgrade() {
     if (selectedUpdates.size === 0) return;
     const pkgs = Array.from(selectedUpdates).map(p => p.trim()).filter(Boolean);
-    await dnfStore.startUpgrade(pkgs);
-    selectedUpdates.clear();
+    await dnfStore.requestUpgrade(pkgs);
   }
 
   // ─── History ─────────────────────────────────────────────────────────────────
@@ -399,7 +398,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="DNF Manager" subtitle="Manage packages, view history, and perform maintenance" icon={Package}>
+  <PageHeader title="DNF Manager" icon={Package}>
     {#if activeTab === 'history'}
       <Button variant="outline" size="sm" onclick={loadHistory} disabled={loadingHistory}>
         <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
@@ -445,9 +444,20 @@
       {:else if activeTab === 'updates'}
         <span style="font-size:13px; color:var(--color-text-secondary);">{updates.length} updates available</span>
         {#if updates.length > 0}
-          <Button variant="primary" size="sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0 || dnfStore.isUpgrading}>
-            <RefreshCw size={13} class={dnfStore.isUpgrading ? 'animate-spin-slow' : ''} />
-            Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
+          <Button 
+            variant="primary" 
+            size="sm" 
+            onclick={startUpgrade} 
+            disabled={selectedUpdates.size === 0 || dnfStore.isUpgrading || dnfStore.isDryRunning}
+            title="Preview changes with DNF dry-run before upgrading"
+          >
+            {#if dnfStore.isDryRunning}
+              <RefreshCw size={13} class="animate-spin-slow" />
+              <span>Calculating Diff…</span>
+            {:else}
+              <Layers size={13} />
+              <span>Preview &amp; Upgrade ({selectedUpdates.size})</span>
+            {/if}
           </Button>
         {/if}
       {:else if activeTab === 'packages'}

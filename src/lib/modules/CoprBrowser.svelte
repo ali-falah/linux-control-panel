@@ -140,7 +140,7 @@
 
 <div class={embedded ? 'copr-tab-content' : 'module-page'} style={embedded ? '' : 'overflow-y: auto; padding-bottom: 24px;'}>
   {#if !embedded}
-    <PageHeader title="Copr Browser" subtitle="Search and manage Fedora Copr repositories" icon={LayoutGrid} />
+    <PageHeader title="Copr Browser" icon={LayoutGrid} />
   {/if}
 
   <!-- Sub-Tabs Navigation -->

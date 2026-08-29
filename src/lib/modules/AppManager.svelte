@@ -568,7 +568,7 @@
 {/if}
 
 <div class="module-page" class:panel-open={selectedAppForDetails}>
-  <PageHeader title="App Manager" subtitle="Manage installed graphical applications" icon={LayoutGrid}>
+  <PageHeader title="App Manager" icon={LayoutGrid}>
     <Button variant="ghost" onclick={loadApps} disabled={loading || isUninstalling}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
     </Button>

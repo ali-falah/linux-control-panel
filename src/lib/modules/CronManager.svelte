@@ -148,7 +148,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs, and systemd timers" icon={Clock}>
+  <PageHeader title="Scheduled Tasks" icon={Clock}>
     <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
       <Button class="btn btn-sm {view === 'cron' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'cron'}>Cron Jobs</Button>
       <Button class="btn btn-sm {view === 'timers' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'timers'}>Systemd Timers</Button>

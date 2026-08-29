@@ -178,7 +178,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Hosts Manager" subtitle="Edit /etc/hosts — requires polkit authentication to save" icon={Globe}>
+  <PageHeader title="Hosts Manager" icon={Globe}>
     <Button variant="ghost" class="" onclick={load} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>

@@ -1594,7 +1594,6 @@
   <!-- Header -->
   <PageHeader 
     title="Nginx Manager" 
-    subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
     icon={Server} 
   >
     {#if activeTab === 'logs'}

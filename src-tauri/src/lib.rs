@@ -13,7 +13,7 @@ use commands::{
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
-        dnf_check_updates, dnf_run_upgrade, dnf_read_log,
+        dnf_check_updates, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
@@ -207,6 +207,7 @@ pub fn run() {
             dnf_makecache_cmd,
             dnf_check_updates,
             dnf_run_upgrade,
+            dnf_dry_run_upgrade,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,

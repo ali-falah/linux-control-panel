@@ -329,7 +329,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Firewall Manager" subtitle="Manage firewalld zones, open ports, and allowed services" icon={Shield}>
+  <PageHeader title="Firewall Manager" icon={Shield}>
     {#if aiStore.enabled}
       <Button variant="outline" size="sm" onclick={() => showAiPromptBox = !showAiPromptBox} title="Generate firewalld rule with AI">
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Rule Generator

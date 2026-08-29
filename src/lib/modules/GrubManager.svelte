@@ -244,7 +244,7 @@
 </script>
 
 <div class="module-page" style="overflow-y: auto; padding-bottom: 40px;">
-  <PageHeader title="GRUB Configurator" subtitle="Safely manage bootloader settings, kernel parameters, and system recovery" icon={TerminalSquare}>
+  <PageHeader title="GRUB Configurator" icon={TerminalSquare}>
     {#if hasBackup}
       <Button variant="outline" onclick={confirmRestoreBackup} disabled={loading || saving || rebuilding || restoringBackup}>
         <History size={14} /> Restore Backup

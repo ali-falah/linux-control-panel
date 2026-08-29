@@ -339,7 +339,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Users & Groups" subtitle="Manage local accounts, passwords, privileges, and groups" icon={Users}>
+  <PageHeader title="Users & Groups" icon={Users}>
     <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
       <Button class="btn btn-sm {view === 'users' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'users'}>Users</Button>
       <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>

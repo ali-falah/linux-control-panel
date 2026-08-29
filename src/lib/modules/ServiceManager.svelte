@@ -871,7 +871,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
+  <PageHeader title="Service Manager" icon={Settings}>
     <div style="display:flex; align-items:center; gap:10px;">
       {#if mainTab === 'services'}
         <!-- Single Toggleable Scope Button -->

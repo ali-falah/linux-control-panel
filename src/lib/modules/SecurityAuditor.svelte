@@ -753,7 +753,7 @@
 
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
 <div class="module-page security-auditor">
-  <PageHeader title="Security Auditor" subtitle="System Hardening &amp; Security Audit" icon={Shield}>
+  <PageHeader title="Security Auditor" icon={Shield}>
     {#if report}
       <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
         {effectiveScore}% — {getScoreLabel(effectiveScore)}

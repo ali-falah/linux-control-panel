@@ -430,7 +430,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Advanced Network" icon={Wifi} description="Manage network interfaces, connection profiles, subnets, and routing" />
+  <PageHeader title="Advanced Network" icon={Wifi} />
 
   {#if selectedConnectionUuid !== null}
     <!-- ══════════════════════════════════════════════════════════════════════════

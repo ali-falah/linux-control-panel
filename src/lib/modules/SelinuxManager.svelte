@@ -231,7 +231,7 @@
 </script>
 
 <div class="module-page" style="overflow-y: auto; padding-bottom: 40px;">
-  <PageHeader title="SELinux Manager" subtitle="Manage Security-Enhanced Linux state and view access denials" icon={ShieldAlert}>
+  <PageHeader title="SELinux Manager" icon={ShieldAlert}>
     {#if status && status.status !== 'disabled'}
       <TabGroup
         tabs={[

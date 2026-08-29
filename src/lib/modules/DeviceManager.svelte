@@ -258,7 +258,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Device Manager" icon={HardDrive} description="Hardware inventory, disk diagnostics & motherboard topology">
+  <PageHeader title="Device Manager" icon={HardDrive}>
     <TabGroup
       tabs={[
         { id: 'list', label: 'Device Inventory' },

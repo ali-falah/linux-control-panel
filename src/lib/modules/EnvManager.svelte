@@ -102,7 +102,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={Globe}>
+  <PageHeader title="Environment Variables" icon={Globe}>
     <Button variant="ghost" class="" onclick={loadVars} disabled={loading || saving}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
