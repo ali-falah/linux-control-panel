@@ -326,11 +326,15 @@
 
                 <div class="accent-color-grid">
                   {#each [
-                    { id: 'cyan', name: 'Cyan Neon', color: '#00daf3', sub: 'Default electric obsidian' },
-                    { id: 'emerald', name: 'Emerald Forest', color: '#10b981', sub: 'Balanced natural green' },
-                    { id: 'purple', name: 'Purple Amethyst', color: '#a855f7', sub: 'Vibrant futuristic violet' },
-                    { id: 'amber', name: 'Electric Amber', color: '#f59e0b', sub: 'Warm energetic gold' },
-                    { id: 'slate', name: 'Slate Minimal', color: '#94a3b8', sub: 'Understated monochrome' }
+                    { id: 'cyan', name: 'Cyan Neon', color: '#00daf3', sub: 'Electric obsidian' },
+                    { id: 'emerald', name: 'Emerald Forest', color: '#10b981', sub: 'Natural green' },
+                    { id: 'sapphire', name: 'Sapphire Blue', color: '#3b82f6', sub: 'Royal azure' },
+                    { id: 'mint', name: 'Icy Mint', color: '#2dd4bf', sub: 'Crisp seafoam' },
+                    { id: 'purple', name: 'Purple Amethyst', color: '#a855f7', sub: 'Futuristic violet' },
+                    { id: 'amber', name: 'Electric Amber', color: '#f59e0b', sub: 'Energetic gold' },
+                    { id: 'rose', name: 'Rose Crimson', color: '#f43f5e', sub: 'Vivid ruby' },
+                    { id: 'indigo', name: 'Royal Indigo', color: '#6366f1', sub: 'Cosmic violet' },
+                    { id: 'slate', name: 'Slate Minimal', color: '#94a3b8', sub: 'Understated mono' }
                   ] as acc}
                     <button
                       type="button"
@@ -698,10 +702,10 @@
   }
 
   .settings-modal {
-    width: 800px;
-    height: 520px;
-    max-width: calc(100vw - 32px);
-    max-height: calc(100vh - 40px);
+    width: 1040px;
+    height: 624px;
+    max-width: min(1040px, calc(100vw - 32px));
+    max-height: min(650px, calc(100vh - 40px));
     background: var(--color-bg-card, #0b1726);
     border: 1px solid var(--color-border);
     border-radius: 16px;
@@ -719,7 +723,7 @@
   /* ── Sidebar Pane (Left) ─────────────────────────────────────────────────── */
 
   .sidebar-pane {
-    width: 210px;
+    width: 230px;
     background: rgba(0, 0, 0, 0.22);
     border-right: 1px solid var(--color-border);
     display: flex;
@@ -1068,21 +1072,23 @@
   /* ── Accent Color Palette & OLED Mode ── */
   .accent-color-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
   }
 
   .accent-card {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
+    gap: 8px;
+    padding: 7px 10px;
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     cursor: pointer;
     text-align: left;
     transition: all 0.15s ease;
+    min-height: 40px;
+    box-sizing: border-box;
   }
 
   :global(html.light-mode) .accent-card {
@@ -1093,16 +1099,26 @@
   .accent-card:hover {
     border-color: var(--color-accent);
     background: rgba(255, 255, 255, 0.03);
+    transform: translateY(-1px);
+  }
+
+  :global(html.light-mode) .accent-card:hover {
+    background: #F1F5F9;
   }
 
   .accent-card.active {
     border-color: var(--color-accent);
-    background: var(--color-active-bg);
+    background: var(--color-accent-muted);
+  }
+
+  :global(html.light-mode) .accent-card.active {
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
 
   .accent-swatch {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
     flex-shrink: 0;
   }
@@ -1112,16 +1128,20 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-width: 0;
   }
 
   .accent-name {
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
     color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .accent-sub {
-    font-size: 10.5px;
+    font-size: 10px;
     color: var(--color-text-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -1148,7 +1168,12 @@
 
   .oled-toggle-card.enabled {
     border-color: var(--color-accent);
-    background: var(--color-active-bg);
+    background: var(--color-accent-muted);
+  }
+
+  :global(html.light-mode) .oled-toggle-card.enabled {
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
 
   .oled-card-left {
@@ -1161,13 +1186,20 @@
     width: 36px;
     height: 36px;
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid var(--color-border);
+    background: var(--color-accent-muted);
+    border: 1px solid var(--color-accent-glow);
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--color-accent);
     flex-shrink: 0;
+    transition: all 0.2s ease;
+  }
+
+  :global(html.light-mode) .oled-icon-box {
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
+    color: var(--color-accent);
   }
 
   .oled-title {

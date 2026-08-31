@@ -43,6 +43,8 @@ export interface VisitedItem {
   category: string;
 }
 
+export type AccentColor = 'cyan' | 'emerald' | 'purple' | 'amber' | 'rose' | 'indigo' | 'sapphire' | 'mint' | 'slate';
+
 class UIStore {
   activeTab = $state<TabId>('system-dashboard');
   /** Recently visited tabs history for sidebar submenu */
@@ -52,7 +54,7 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
-  accentColor = $state<'cyan' | 'emerald' | 'purple' | 'amber' | 'slate'>('cyan');
+  accentColor = $state<AccentColor>('cyan');
   isOled = $state(false);
   isDrawerDocked = $state(false);
   tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
@@ -268,7 +270,7 @@ class UIStore {
     }
   }
 
-  setAccentColor(accent: 'cyan' | 'emerald' | 'purple' | 'amber' | 'slate') {
+  setAccentColor(accent: AccentColor) {
     this.accentColor = accent;
     if (typeof window !== 'undefined') {
       localStorage.setItem('app_accent_color', accent);
