@@ -6,6 +6,7 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -149,16 +150,20 @@
 
 <div class="module-page">
   <PageHeader title="Scheduled Tasks" icon={Clock}>
-    <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
-      <Button class="btn btn-sm {view === 'cron' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'cron'}>Cron Jobs</Button>
-      <Button class="btn btn-sm {view === 'timers' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'timers'}>Systemd Timers</Button>
-    </div>
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <TabGroup
+      size="sm"
+      tabs={[
+        { id: 'cron', label: 'Cron Jobs' },
+        { id: 'timers', label: 'Systemd Timers' }
+      ]}
+      bind:activeTab={view}
+    />
+    <Button variant="ghost" size="sm" onclick={loadData} disabled={loading}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
     {#if view === 'cron'}
-      <Button variant="primary" onclick={() => showAdd = true}>
-        <Plus size={14} /> Add Job
+      <Button variant="primary" size="sm" onclick={() => showAdd = true}>
+        <Plus size={13} /> Add Job
       </Button>
     {/if}
   </PageHeader>

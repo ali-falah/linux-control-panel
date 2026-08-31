@@ -323,6 +323,7 @@
     display: flex;
     flex-direction: column;
     margin: -24px -24px 8px -24px;
+    padding-top: 6px;
   }
 
   .page-header {

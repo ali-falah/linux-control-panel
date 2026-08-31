@@ -57,7 +57,15 @@ class UIStore {
   accentColor = $state<AccentColor>('cyan');
   isOled = $state(false);
   isDrawerDocked = $state(false);
-  tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
+  tableDensity = $state<'compact' | 'normal' | 'spacious'>((() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('app_table_density') as 'compact' | 'normal' | 'spacious';
+      if (saved === 'compact' || saved === 'normal' || saved === 'spacious') {
+        return saved;
+      }
+    }
+    return 'normal';
+  })());
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
   /** Target subtab to activate when navigating into a module */

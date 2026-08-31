@@ -1395,6 +1395,7 @@
                       inactiveLabel="Paused"
                       activeIcon={RotateCw}
                       inactiveIcon={RotateCw}
+                      spinWhenActive={true}
                       activeTitle="Live auto polling is active (2s). Click to pause."
                       inactiveTitle="Live auto polling is paused. Click to enable 2s live polling."
                     />

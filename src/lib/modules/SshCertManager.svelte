@@ -9,9 +9,7 @@
   import { invokeSafe } from '../utils/ipc';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
-  import KpiCard from '../components/ui/KpiCard.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
-  import GuideBanner from '../components/ui/GuideBanner.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -448,13 +446,25 @@
   }
 </script>
 
-<div class="module-root">
-  <!-- ── Page Header ────────────────────────────────────────────────────────── -->
+<div class="module-page ssh-vault-page">
+  <!-- ── Page Header (Clean & Uncrowded) ───────────────────────────────────── -->
   <PageHeader 
     title="SSH &amp; SSL Vault" 
     icon={Lock}
   >
     <div class="header-actions">
+      {#if expiringCertsCount > 0}
+        <span class="vault-status-pill warning" title="{expiringCertsCount} SSL certificate(s) expiring soon or expired">
+          <AlertTriangle size={12} />
+          <span>{expiringCertsCount} Expiring</span>
+        </span>
+      {:else if fail2banStatus?.is_active}
+        <span class="vault-status-pill active" title="Fail2ban threat defense is active with {fail2banStatus.total_banned_ips} banned IPs">
+          <ShieldCheck size={12} />
+          <span>Shield Active</span>
+        </span>
+      {/if}
+
       <Button 
         variant="outline" 
         size="sm"
@@ -463,73 +473,72 @@
         title="Reload all SSH keys, configs, SSL certs, and fail2ban data"
       >
         <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} />
-        <span>Refresh All</span>
+        <span>Refresh</span>
       </Button>
     </div>
   </PageHeader>
 
-  <!-- ── Top KPI Stat Overview Cards ────────────────────────────────────────── -->
-  <div class="kpi-grid">
-    <KpiCard
-      icon={Key}
-      value={sshKeys.length}
-      label="SSH Key Pairs"
-      subtext="In ~/.ssh/ directory"
-      active={activeTab === 'keys'}
-      onclick={() => activeTab = 'keys'}
+  <!-- ── Dedicated Sub-Navigation & Action Bar ─────────────────────────────── -->
+  <div class="vault-subnav-bar">
+    <TabGroup
+      size="sm"
+      tabs={[
+        { id: 'keys', label: 'SSH Keys', count: sshKeys.length, icon: Key },
+        { id: 'client_config', label: 'Client Config', count: clientHosts.length, icon: Laptop },
+        { id: 'known_hosts', label: 'Known Hosts', count: knownHosts.length, icon: Globe },
+        { id: 'authorized', label: 'Authorized & SSHD', count: authorizedKeys.length, icon: ShieldCheck },
+        { id: 'certs', label: 'SSL Certificates', count: sslCerts.length, icon: FileKey },
+        { id: 'threats', label: 'Threat Defense', count: fail2banStatus?.total_banned_ips ?? 0, icon: ShieldAlert }
+      ]}
+      bind:activeTab
     />
 
-    <KpiCard
-      icon={Laptop}
-      value={clientHosts.length}
-      label="Client Profiles"
-      subtext="Host aliases configured"
-      active={activeTab === 'client_config'}
-      onclick={() => activeTab = 'client_config'}
-    />
-
-    <KpiCard
-      icon={Globe}
-      value={knownHosts.length}
-      label="Known Hosts"
-      subtext="Remembered host keys"
-      active={activeTab === 'known_hosts'}
-      onclick={() => activeTab = 'known_hosts'}
-    />
-
-    <KpiCard
-      icon={FileKey}
-      value={sslCerts.length}
-      label="SSL Certificates"
-      subtext={expiringCertsCount > 0 ? `${expiringCertsCount} expiring / expired` : 'All valid & healthy'}
-      statusType={expiringCertsCount > 0 ? 'warning' : 'success'}
-      active={activeTab === 'certs'}
-      onclick={() => activeTab = 'certs'}
-    />
-
-    <KpiCard
-      icon={ShieldAlert}
-      value={fail2banStatus?.total_banned_ips ?? 0}
-      label="Threat Defense"
-      subtext={fail2banStatus?.is_active ? `Active (${fail2banStatus?.jails?.length || 0} jails)` : 'Fail2ban Inactive'}
-      statusType={fail2banStatus?.is_active ? 'success' : 'muted'}
-      active={activeTab === 'threats'}
-      onclick={() => activeTab = 'threats'}
-    />
+    <div class="subnav-actions">
+      {#if activeTab === 'keys'}
+        <Button variant="primary" size="sm" onclick={() => showGenModal = true}>
+          <Plus size={13} /> Generate SSH Key
+        </Button>
+      {:else if activeTab === 'client_config'}
+        <Button variant="primary" size="sm" onclick={() => showAddClientModal = true}>
+          <Plus size={13} /> Add Host Profile
+        </Button>
+      {:else if activeTab === 'known_hosts'}
+        {#if knownHosts.length > 0}
+          <Button variant="danger" size="sm" onclick={handleClearKnownHosts} title="Remove all stored host keys in ~/.ssh/known_hosts">
+            <Trash2 size={13} /> Flush Known Hosts
+          </Button>
+        {/if}
+      {:else if activeTab === 'authorized'}
+        <Button variant="primary" size="sm" onclick={() => showAddAuthModal = true}>
+          <Plus size={13} /> Add Authorized Key
+        </Button>
+      {:else if activeTab === 'certs'}
+        <Button variant="primary" size="sm" onclick={() => showTestSslModal = true}>
+          <Globe size={13} /> Test Live TLS Port
+        </Button>
+      {:else if activeTab === 'threats'}
+        {#if fail2banStatus?.is_installed}
+          <Button variant="outline" size="sm" onclick={() => handleControlFail2ban('restart')} title="Restart fail2ban service daemon">
+            <RotateCw size={13} /> Restart Service
+          </Button>
+          <Button 
+            variant="primary" 
+            size="sm" 
+            onclick={() => { 
+              if (fail2banStatus?.jails && fail2banStatus.jails.length > 0) { 
+                banJailName = fail2banStatus.jails[0].jail_name; 
+              } else { 
+                banJailName = 'sshd'; 
+              } 
+              showBanModal = true; 
+            }}
+          >
+            <Ban size={13} /> Manually Ban IP
+          </Button>
+        {/if}
+      {/if}
+    </div>
   </div>
-
-  <!-- ── Navigation Tabs ────────────────────────────────────────────────────── -->
-  <TabGroup
-    tabs={[
-      { id: 'keys', label: 'SSH Keys', count: sshKeys.length },
-      { id: 'client_config', label: 'SSH Client Config', count: clientHosts.length },
-      { id: 'known_hosts', label: 'Known Hosts', count: knownHosts.length },
-      { id: 'authorized', label: 'Authorized & SSHD', count: authorizedKeys.length },
-      { id: 'certs', label: 'SSL Certificates', count: sslCerts.length },
-      { id: 'threats', label: 'Threat Defense', count: fail2banStatus?.total_banned_ips ?? 0 }
-    ]}
-    bind:activeTab
-  />
 
   <!-- ── Tab Body Content ──────────────────────────────────────────────────── -->
   <div class="tab-main-body">
@@ -538,16 +547,6 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'keys'}
       <div class="tab-panel">
-        <!-- Feature Context & Action Header -->
-        <GuideBanner
-          icon={Key}
-          title="Local SSH Cryptographic Key Vault"
-          description="Private/public key pairs located in ~/.ssh/. Ed25519 is recommended for optimal performance and modern cryptography."
-          actionLabel="Generate SSH Key"
-          actionIcon={Plus}
-          onAction={() => showGenModal = true}
-        />
-
         <!-- Filter & Table Card -->
         <div class="card table-card">
           <div class="table-toolbar">
@@ -657,15 +656,6 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'client_config'}
       <div class="tab-panel">
-        <GuideBanner
-          icon={Laptop}
-          title="SSH Client Host Aliases (~/.ssh/config)"
-          description="Configure server shortcuts with custom ports, usernames, and specific identity keys. Connect with a single ssh <alias> command."
-          actionLabel="Add Host Profile"
-          actionIcon={Plus}
-          onAction={() => showAddClientModal = true}
-        />
-
         <div class="card table-card">
           <div class="table-toolbar">
             <SearchBar
@@ -753,15 +743,6 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'known_hosts'}
       <div class="tab-panel">
-        <GuideBanner
-          icon={Globe}
-          title="Remote Server Fingerprints (~/.ssh/known_hosts)"
-          description="Stored cryptographic fingerprints of servers you have connected to. Removing an entry resolves Host key verification failed warnings after a remote OS reinstallation."
-          actionLabel={knownHosts.length > 0 ? 'Flush Known Hosts' : ''}
-          actionIcon={knownHosts.length > 0 ? Trash2 : undefined}
-          onAction={knownHosts.length > 0 ? handleClearKnownHosts : undefined}
-        />
-
         <div class="card table-card">
           <div class="table-toolbar">
             <SearchBar
@@ -830,19 +811,12 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'authorized'}
       <div class="tab-panel">
-        <GuideBanner
-          icon={ShieldCheck}
-          title="Authorized Remote Keys & Daemon Hardening Posture"
-          description="The ~/.ssh/authorized_keys file controls which remote machines can log in. Keep your OpenSSH daemon hardened against brute-force attacks."
-          actionLabel="Add Authorized Key"
-          actionIcon={Plus}
-          onAction={() => showAddAuthModal = true}
-        />
-
         <!-- Authorized Keys Table Card -->
         <div class="card table-card">
-          <div class="card-header-bar">
-            <h3 class="card-section-title">Authorized Public Keys ({authorizedKeys.length})</h3>
+          <div class="table-toolbar" style="display: flex; align-items: center; justify-content: space-between;">
+            <div style="font-size: 12px; font-weight: 600; color: var(--color-text-secondary);">
+              Authorized Public Keys ({authorizedKeys.length})
+            </div>
           </div>
 
           <div class="table-wrap">
@@ -1010,46 +984,38 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'certs'}
       <div class="tab-panel">
-        <GuideBanner
-          icon={FileKey}
-          title="SSL / TLS Web & Server Certificates"
-          description="Discovered certificates across Let's Encrypt (/etc/letsencrypt/live), Nginx, and local trust stores. Includes real-time expiration monitoring."
-          actionLabel="Test Live TLS Port"
-          actionIcon={Globe}
-          onAction={() => showTestSslModal = true}
-        />
-
         <div class="card table-card">
           <div class="table-toolbar">
-            <SearchBar
-              bind:value={certSearch}
-              placeholder="Search domain, issuer, or SANs..."
-              count={filteredSslCerts.length}
-              total={sslCerts.length}
-            />
-
-            <div class="filter-chip-group">
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'all'} 
-                onclick={() => certFilter = 'all'}
-              >
-                All ({sslCerts.length})
-              </button>
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'valid'} 
-                onclick={() => certFilter = 'valid'}
-              >
-                Valid ({sslCerts.filter(c => !c.is_expired).length})
-              </button>
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'expiring'} 
-                onclick={() => certFilter = 'expiring'}
-              >
-                ⚠️ Expiring / Expired ({expiringCertsCount})
-              </button>
+            <div style="display: flex; align-items: center; gap: 10px; flex: 1;">
+              <SearchBar
+                bind:value={certSearch}
+                placeholder="Search domain, issuer, or SANs..."
+                count={filteredSslCerts.length}
+                total={sslCerts.length}
+              />
+              <div class="filter-chip-group">
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'all'} 
+                  onclick={() => certFilter = 'all'}
+                >
+                  All ({sslCerts.length})
+                </button>
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'valid'} 
+                  onclick={() => certFilter = 'valid'}
+                >
+                  Valid ({sslCerts.filter(c => !c.is_expired).length})
+                </button>
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'expiring'} 
+                  onclick={() => certFilter = 'expiring'}
+                >
+                  Expiring ({expiringCertsCount})
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1073,7 +1039,7 @@
                         icon={FileKey}
                         title="No SSL Certificates Found"
                         description={certSearch ? 'No certificates matched your search filter.' : 'No active server certificates found in /etc/letsencrypt, /etc/nginx/ssl, or ~/.local/share/mkcert.'}
-                        actionLabel="Test Remote TLS Endpoint"
+                        actionLabel={!certSearch ? 'Test Remote TLS Endpoint' : ''}
                         actionIcon={Globe}
                         onAction={() => showTestSslModal = true}
                       />
@@ -1146,38 +1112,6 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'threats'}
       <div class="tab-panel">
-        <GuideBanner
-          icon={ShieldAlert}
-          title="Fail2ban Intrusion Prevention & IP Jail Defense"
-          description="Automatically scans authentication logs for abusive login attempts and updates firewall rules to drop malicious traffic."
-        />
-        <div class="header-actions" style="margin-top: -8px; margin-bottom: 8px; justify-content: flex-end;">
-          {#if fail2banStatus?.is_installed}
-            <Button 
-              variant="outline" 
-              size="sm"
-              onclick={() => handleControlFail2ban('restart')}
-              title="Restart fail2ban service daemon"
-            >
-              <RotateCw size={13} /> Restart Service
-            </Button>
-            <Button 
-              variant="primary" 
-              size="sm"
-              onclick={() => {
-                if (fail2banStatus?.jails && fail2banStatus.jails.length > 0) {
-                  banJailName = fail2banStatus.jails[0].jail_name;
-                } else {
-                  banJailName = 'sshd';
-                }
-                showBanModal = true;
-              }}
-            >
-              <Ban size={13} /> Manually Ban IP
-            </Button>
-          {/if}
-        </div>
-
         {#if !fail2banStatus?.is_installed}
           <div class="card p-5 text-center">
             <ShieldAlert size={36} class="text-muted mx-auto mb-2" />
@@ -1592,14 +1526,14 @@
 
 <style>
   /* ── Layout Root ─────────────────────────────────────────────────────────── */
-  .module-root {
+  .module-page.ssh-vault-page {
     display: flex;
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
-    gap: 9px;
-    padding: 16px 20px;
+    gap: 10px;
+    padding: 24px;
     box-sizing: border-box;
     background: transparent;
   }
@@ -1623,23 +1557,43 @@
     gap: 8px;
   }
 
-  /* ── KPI Stat Cards Grid Layout ─────────────────────────────────────────── */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 6px;
+  /* ── Subnav Bar ─────────────────────────────────────────────────────────── */
+  .vault-subnav-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 0 2px 0;
+    flex-wrap: wrap;
   }
 
-  @media (max-width: 1080px) {
-    .kpi-grid {
-      grid-template-columns: repeat(3, 1fr);
-    }
+  .subnav-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  @media (max-width: 720px) {
-    .kpi-grid {
-      grid-template-columns: 1fr;
-    }
+  .vault-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+
+  .vault-status-pill.warning {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: var(--color-warning);
+  }
+
+  .vault-status-pill.active {
+    background: rgba(16, 185, 129, 0.12);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: var(--color-success);
   }
 
   /* ── Table Card & Toolbar ───────────────────────────────────────────────── */

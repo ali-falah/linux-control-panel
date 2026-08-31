@@ -335,15 +335,16 @@
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Rule Generator
       </Button>
     {/if}
-    <Button variant="ghost" class="" onclick={loadState} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <Button variant="ghost" size="sm" onclick={loadState} disabled={loading}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
     {#if state?.is_running}
       <Button 
-        class="btn {state.is_panic ? 'btn-success' : '-danger'}" 
+        variant={state.is_panic ? 'primary' : 'danger'}
+        size="sm"
         onclick={confirmTogglePanic}
       >
-        <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
+        <Power size={13} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
       </Button>
     {/if}
   </PageHeader>

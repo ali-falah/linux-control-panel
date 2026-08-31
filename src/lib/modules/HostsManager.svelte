@@ -179,22 +179,23 @@
 
 <div class="module-page">
   <PageHeader title="Hosts Manager" icon={Globe}>
-    <Button variant="ghost" class="" onclick={load} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <Button variant="ghost" size="sm" onclick={load} disabled={loading}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button variant="outline" class="" onclick={() => showAddForm = true}>
-      <Plus size={14} /> Add Entry
+    <Button variant="outline" size="sm" onclick={() => showAddForm = true}>
+      <Plus size={13} /> Add Entry
     </Button>
     <Button
-      variant="primary" class=""
+      variant="primary"
+      size="sm"
       onclick={confirmSave}
       disabled={saving || !hasChanges}
       style={hasChanges ? 'animation: pulse-glow 2s infinite; box-shadow: 0 0 12px var(--color-accent-glow);' : ''}
     >
       {#if saving}
-        <RefreshCw size={14} class="animate-spin-slow" /> Saving…
+        <RefreshCw size={13} class="animate-spin-slow" /> Saving…
       {:else}
-        <Save size={14} /> {hasChanges ? 'Save Changes' : 'Saved'}
+        <Save size={13} /> {hasChanges ? 'Save Changes' : 'Saved'}
       {/if}
     </Button>
   </PageHeader>

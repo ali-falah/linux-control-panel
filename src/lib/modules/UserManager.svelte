@@ -6,6 +6,7 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { Users, UserPlus, Key, Shield, ShieldOff, Trash2, RefreshCw, Layers, Lock, Unlock } from '@lucide/svelte';
@@ -340,21 +341,25 @@
 
 <div class="module-page">
   <PageHeader title="Users & Groups" icon={Users}>
-    <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
-      <Button class="btn btn-sm {view === 'users' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'users'}>Users</Button>
-      <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>
-      <Button class="btn btn-sm {view === 'sessions' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'sessions'}>Sessions</Button>
-    </div>
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <TabGroup
+      size="sm"
+      tabs={[
+        { id: 'users', label: 'Users' },
+        { id: 'groups', label: 'Groups' },
+        { id: 'sessions', label: 'Sessions' }
+      ]}
+      bind:activeTab={view}
+    />
+    <Button variant="ghost" size="sm" onclick={loadData} disabled={loading}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
     {#if view === 'users'}
-      <Button variant="primary" onclick={() => showAddUser = !showAddUser}>
-        <UserPlus size={14} /> Add User
+      <Button variant="primary" size="sm" onclick={() => showAddUser = !showAddUser}>
+        <UserPlus size={13} /> Add User
       </Button>
     {:else}
-      <Button variant="primary" onclick={() => showAddGroup = !showAddGroup}>
-        <Layers size={14} /> Add Group
+      <Button variant="primary" size="sm" onclick={() => showAddGroup = !showAddGroup}>
+        <Layers size={13} /> Add Group
       </Button>
     {/if}
   </PageHeader>

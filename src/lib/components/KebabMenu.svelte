@@ -180,6 +180,29 @@
     color: var(--color-text-primary);
   }
   
+  :global(.menu-dropdown .menu-item.primary-action) {
+    color: var(--color-accent);
+    font-weight: 600;
+  }
+  
+  :global(.menu-dropdown .menu-item.primary-action:hover) {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
+    color: var(--color-accent);
+  }
+
+  :global(.menu-dropdown .menu-item:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  :global(.menu-dropdown .menu-divider) {
+    height: 1px;
+    background: var(--color-border);
+    margin: 4px 0;
+    width: 100%;
+  }
+  
   :global(.menu-dropdown .menu-item.danger),
   :global(.menu-dropdown .menu-item.text-danger) {
     color: var(--color-error);

@@ -573,8 +573,8 @@
 
 <div class="module-page">
   <PageHeader title="App Manager" icon={LayoutGrid}>
-    <Button variant="ghost" onclick={loadApps} disabled={loading || isUninstalling}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
+    <Button variant="ghost" size="sm" onclick={loadApps} disabled={loading || isUninstalling}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Refresh
     </Button>
   </PageHeader>
 

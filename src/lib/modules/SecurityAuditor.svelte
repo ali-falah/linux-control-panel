@@ -762,7 +762,7 @@
       <div bind:this={exportDropdownRef} class="export-dropdown-wrap">
         <Button variant="outline" size="sm" onclick={() => showExportDropdown = !showExportDropdown} title="Export Audit Report Options">
           <Download size={14} />
-          Export Report
+          Export
           <ChevronDown size={12} />
         </Button>
         {#if showExportDropdown}
@@ -781,7 +781,7 @@
     {/if}
     <Button variant="outline" size="sm" onclick={() => runAudit(true)} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'spin' : ''} />
-      {loading ? 'Scanning...' : 'Rescan System'}
+      {loading ? 'Scanning...' : 'Refresh'}
     </Button>
   </PageHeader>
 

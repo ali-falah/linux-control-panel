@@ -15,6 +15,7 @@
 
   onMount(() => {
     uiStore.initTheme();
+    uiStore.initTableDensity();
     uiStore.initSearchHistory();
     uiStore.initVisibilityListener();
     dnfStore.initGlobalListeners();

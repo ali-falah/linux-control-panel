@@ -5,6 +5,7 @@
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import {
@@ -273,25 +274,34 @@
   let units = $state<ServiceUnit[]>([]);
   let loading = $state(false);
   let filter = $state(uiStore.serviceSearchQuery || '');
+  if (uiStore.serviceSearchQuery) {
+    uiStore.serviceSearchQuery = '';
+  }
   let statusFilter = $state<'active' | 'failed' | 'all'>(
     uiStore.serviceFilter === 'failed' ? 'failed' : 'all'
   );
+  if (uiStore.serviceFilter) {
+    uiStore.serviceFilter = '';
+  }
 
   $effect(() => {
-    if (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services') {
-      mainTab = uiStore.targetSubTab;
-    }
-    if (uiStore.serviceSearchQuery !== undefined && uiStore.serviceSearchQuery !== null) {
-      filter = uiStore.serviceSearchQuery;
-      if (uiStore.serviceSearchQuery !== '') {
-        mainTab = 'services';
+    if (uiStore.targetSubTab) {
+      if (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services') {
+        mainTab = uiStore.targetSubTab;
       }
+      uiStore.targetSubTab = '';
+    }
+    if (uiStore.serviceSearchQuery) {
+      filter = uiStore.serviceSearchQuery;
+      mainTab = 'services';
+      uiStore.serviceSearchQuery = '';
     }
     if (uiStore.serviceFilter) {
       if (uiStore.serviceFilter === 'failed') statusFilter = 'failed';
       else if (uiStore.serviceFilter === 'active') statusFilter = 'active';
       else if (uiStore.serviceFilter === 'all') statusFilter = 'all';
       mainTab = 'services';
+      uiStore.serviceFilter = '';
     }
   });
 
@@ -1040,34 +1050,26 @@
         />
       {/if}
 
-      <div class="header-tab-bar">
-        <button class="header-tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
-          <Settings size={12} /> Services
-          <span class="header-tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
-        </button>
-        <button class="header-tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
-          <Rocket size={12} /> Autostart
-          <span class="header-tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
-        </button>
-        <button class="header-tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
-          <Activity size={12} /> Boot Analyzer
-          {#if blameEntries.length > 0}
-            <span class="header-tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
-          {/if}
-        </button>
-      </div>
+      <TabGroup
+        size="sm"
+        tabs={[
+          { id: 'services', label: 'Services', count: units.length, icon: Settings },
+          { id: 'autostart', label: 'Autostart', count: autostartEntries.length, icon: Rocket },
+          { id: 'boot_analyzer', label: 'Boot Analyzer', count: blameEntries.length > 0 ? blameEntries.length : undefined, icon: Activity }
+        ]}
+        bind:activeTab={mainTab}
+      />
 
-      <button 
-        type="button"
-        class="header-refresh-btn" 
-        class:refreshing={isRefreshing || loading || autostartLoading || loadingBlame}
+      <Button 
+        variant="outline"
+        size="sm"
         disabled={isRefreshing || loading || autostartLoading || loadingBlame}
         onclick={handleRefresh}
         title={(isRefreshing || loading || autostartLoading || loadingBlame) ? "Refreshing data…" : "Refresh"}
       >
         <RefreshCw size={13} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
         <span>{(isRefreshing || loading || autostartLoading || loadingBlame) ? 'Refreshing…' : 'Refresh'}</span>
-      </button>
+      </Button>
     </div>
   </PageHeader>
 

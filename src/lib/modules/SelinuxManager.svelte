@@ -234,6 +234,7 @@
   <PageHeader title="SELinux Manager" icon={ShieldAlert}>
     {#if status && status.status !== 'disabled'}
       <TabGroup
+        size="sm"
         tabs={[
           { id: 'status', label: 'Status & Denials' },
           { id: 'booleans', label: booleans.length > 0 ? `SELinux Booleans (${booleans.length})` : 'SELinux Booleans' }
@@ -241,8 +242,8 @@
         bind:activeTab={activeTab}
       />
     {/if}
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <Button variant="ghost" size="sm" onclick={loadData} disabled={loading}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
   </PageHeader>
 

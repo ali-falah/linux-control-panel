@@ -302,12 +302,15 @@
   $effect(() => {
     if (uiStore.preAppliedJournalPriority && uiStore.preAppliedJournalPriority !== 'all') {
       filterPriority = uiStore.preAppliedJournalPriority;
+      uiStore.preAppliedJournalPriority = 'all';
     }
-    if (uiStore.preAppliedJournalSearch !== undefined && uiStore.preAppliedJournalSearch !== null) {
+    if (uiStore.preAppliedJournalSearch) {
       searchQuery = uiStore.preAppliedJournalSearch;
+      uiStore.preAppliedJournalSearch = '';
     }
-    if (uiStore.preAppliedJournalUnit !== undefined && uiStore.preAppliedJournalUnit !== null) {
+    if (uiStore.preAppliedJournalUnit) {
       currentUnitFilter = uiStore.preAppliedJournalUnit;
+      uiStore.preAppliedJournalUnit = '';
     }
   });
 
@@ -882,7 +885,6 @@
       <!-- Refresh -->
       <button class="log-action-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh">
         <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
-        <span>Refresh</span>
       </button>
 
       <!-- Clear view -->

@@ -103,11 +103,11 @@
 
 <div class="module-page">
   <PageHeader title="Environment Variables" icon={Globe}>
-    <Button variant="ghost" class="" onclick={loadVars} disabled={loading || saving}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <Button variant="ghost" size="sm" onclick={loadVars} disabled={loading || saving}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button variant="primary" class="" onclick={confirmSave} disabled={loading || saving}>
-      <Save size={14} /> Save Changes
+    <Button variant="primary" size="sm" onclick={confirmSave} disabled={loading || saving}>
+      <Save size={13} /> Save Changes
     </Button>
   </PageHeader>
 

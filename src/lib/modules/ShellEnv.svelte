@@ -553,11 +553,11 @@
       </Button>
     {/if}
     {#if activeTab === 'variables'}
-      <Button variant="outline" onclick={loadVarGroups} disabled={varsLoading}>
-        <RefreshCw size={14} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
+      <Button variant="outline" size="sm" onclick={loadVarGroups} disabled={varsLoading}>
+        <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
       </Button>
-      <Button variant="primary" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
-        <Plus size={14} /> Add Variable
+      <Button variant="primary" size="sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
+        <Plus size={13} /> Add Variable
       </Button>
     {/if}
   </PageHeader>

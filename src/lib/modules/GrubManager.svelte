@@ -246,18 +246,18 @@
 <div class="module-page" style="overflow-y: auto; padding-bottom: 40px;">
   <PageHeader title="GRUB Configurator" icon={TerminalSquare}>
     {#if hasBackup}
-      <Button variant="outline" onclick={confirmRestoreBackup} disabled={loading || saving || rebuilding || restoringBackup}>
-        <History size={14} /> Restore Backup
+      <Button variant="outline" size="sm" onclick={confirmRestoreBackup} disabled={loading || saving || rebuilding || restoringBackup}>
+        <History size={13} /> Restore Backup
       </Button>
     {/if}
-    <Button variant="ghost" onclick={loadConfig} disabled={loading || saving || rebuilding}>
-      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
+    <Button variant="ghost" size="sm" onclick={loadConfig} disabled={loading || saving || rebuilding}>
+      <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button class="btn -warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || !validation.isValid}>
-      <RefreshCw size={14} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
+    <Button variant="secondary" size="sm" class="btn-warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || !validation.isValid}>
+      <RefreshCw size={13} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
     </Button>
-    <Button variant="primary" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding || !validation.isValid}>
-      <Save size={14} /> Save Changes
+    <Button variant="primary" size="sm" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding || !validation.isValid}>
+      <Save size={13} /> Save Changes
     </Button>
   </PageHeader>
 

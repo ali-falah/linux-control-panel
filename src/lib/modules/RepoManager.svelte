@@ -9,7 +9,7 @@
   import Toggle from '../components/ui/Toggle.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database, Settings, Activity, ShieldAlert, AlertTriangle, CheckCircle2, Trash2, Zap, HelpCircle, FileX } from '@lucide/svelte';
+  import { Package, RefreshCw, Plus, ToggleLeft, ToggleRight, Link, Search, Database, Settings, Activity, ShieldAlert, AlertTriangle, CheckCircle2, Trash2, Zap, HelpCircle, FileX, X } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -73,7 +73,7 @@
   // Diagnostics State
   let validating = $state(false);
   let diagnostics = $state<RepoDiagnostic[]>([]);
-  let showDiagnosticsBanner = $state(false);
+  let showDiagnosticsBanner = $state(true);
 
   // Edit Side Drawer State
   let editOpen = $state(false);
@@ -370,6 +370,7 @@
   <PageHeader title="Repo Manager" icon={Package}>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap: wrap;">
       <TabGroup
+        size="sm"
         tabs={[
           { id: 'repos', label: 'RPM Repos' },
           { id: 'copr', label: 'COPR Packages' }
@@ -379,25 +380,21 @@
       />
 
       {#if activeTab === 'repos'}
-        <button
-          type="button"
-          class="btn {validating ? 'btn-ghost' : 'btn-secondary'} btn-sm"
-          onclick={runDiagnostics}
-          disabled={validating || loading}
-          title="Probe all repository mirrors for latency, HTTP 404s, repomd integrity, and syntax errors"
-        >
-          <Activity size={14} class={validating ? 'animate-spin-slow text-accent' : 'text-accent'} />
-          <span>{validating ? 'Validating Mirrors...' : 'Validate & Diagnose Repos'}</span>
-        </button>
-
-        <Button variant="primary" onclick={() => showAddDialog = true}>
-          <Plus size={14} /> Add Repo
-        </Button>
-
-        <KebabMenu>
-          <button class="menu-item" onclick={runDiagnostics} disabled={validating}>
-            <Activity size={14} /> Test All Mirror Speeds
+        <KebabMenu align="right" title="Repository Actions">
+          <button class="menu-item primary-action" onclick={() => showAddDialog = true}>
+            <Plus size={14} /> Add New Repository
           </button>
+          <div class="menu-divider"></div>
+          <button class="menu-item" onclick={() => { showDiagnosticsBanner = true; runDiagnostics(); }} disabled={validating || loading}>
+            <Activity size={14} class={validating ? 'animate-spin-slow text-accent' : 'text-accent'} />
+            <span>{validating ? 'Validating Mirrors...' : 'Validate & Diagnose Repos'}</span>
+          </button>
+          {#if diagnostics.length > 0 && !showDiagnosticsBanner}
+            <button class="menu-item" onclick={() => showDiagnosticsBanner = true}>
+              <Activity size={14} class="text-accent" />
+              <span>Show Diagnostics Panel</span>
+            </button>
+          {/if}
           <button class="menu-item" onclick={makecache} disabled={loading}>
             <RefreshCw size={14} /> Run dnf makecache
           </button>
@@ -414,17 +411,17 @@
   {:else}
 
   <!-- Diagnostics & Mirror Health Overview Banner -->
-  {#if diagnostics.length > 0}
-    <div class="card diagnostics-banner" style="padding: 14px 18px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 12px; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--color-border);">
+  {#if diagnostics.length > 0 && showDiagnosticsBanner}
+    <div class="card diagnostics-banner" style="padding: 10px 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--color-border);">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
         <div style="display: flex; align-items: center; gap: 8px;">
-          <Activity size={18} style="color: var(--color-accent);" />
-          <span style="font-weight: 700; font-size: 13.5px; color: var(--color-text-primary);">
+          <Activity size={16} style="color: var(--color-accent);" />
+          <span style="font-weight: 700; font-size: 13px; color: var(--color-text-primary);">
             Repository Health &amp; Mirror Speed Diagnostics
           </span>
-          <span class="badge badge-info" style="font-size: 11px;">{diagnostics.length} Probed</span>
+          <span class="badge badge-info" style="font-size: 10.5px; padding: 2px 6px;">{diagnostics.length} Probed</span>
         </div>
-        <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="display: flex; align-items: center; gap: 6px;">
           {#if activeDeadReposCount > 0}
             <button
               type="button"
@@ -433,7 +430,7 @@
               title="Bulk disable all active unreachable, 404, or corrupted repositories to prevent DNF hangs"
             >
               <AlertTriangle size={13} />
-              <span>Disable {activeDeadReposCount} Active Dead Repos</span>
+              <span>Disable {activeDeadReposCount} Dead Repos</span>
             </button>
           {/if}
           <button
@@ -443,8 +440,17 @@
             disabled={validating}
             title="Re-run speed and health tests on all repository mirrors"
           >
-            <RefreshCw size={13} class={validating ? 'animate-spin-slow' : ''} />
+            <RefreshCw size={12} class={validating ? 'animate-spin-slow' : ''} />
             <span>Re-validate</span>
+          </button>
+          <button
+            type="button"
+            class="diag-close-btn"
+            onclick={() => showDiagnosticsBanner = false}
+            title="Hide Diagnostics Container"
+            aria-label="Hide Diagnostics"
+          >
+            <X size={14} />
           </button>
         </div>
       </div>
@@ -492,7 +498,7 @@
   {/if}
 
   <!-- Controls: Stats & Search -->
-  <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; margin-bottom: 16px;">
+  <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:wrap; margin-bottom: 12px;">
     <!-- Stats -->
     {#if repos.length > 0}
       <div class="stat-cards" style="margin: 0;">
@@ -894,10 +900,30 @@
     border-radius: 12px;
   }
 
+  .diag-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .diag-close-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+    border-color: var(--color-border-hover);
+  }
+
   .diag-metrics-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    gap: 10px;
+    gap: 8px;
   }
 
   .diag-metric-card {
@@ -905,7 +931,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 8px 12px;
+    padding: 5px 10px;
+    min-height: 40px;
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -924,35 +951,37 @@
   }
 
   .diag-metric-card .metric-num {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 700;
-    line-height: 1.2;
+    line-height: 1.15;
   }
 
   .diag-metric-card .metric-lbl {
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-top: 2px;
+    letter-spacing: 0.03em;
+    margin-top: 1px;
   }
 
   /* Stat cards */
   .stat-cards {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     flex-wrap: wrap;
     align-items: stretch;
   }
   .stat-card {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
+    gap: 6px;
+    padding: 4px 12px;
+    height: 32px;
+    box-sizing: border-box;
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
-    border-radius: 10px;
+    border-radius: 8px;
     color: var(--color-text-primary);
     font-family: inherit;
     cursor: pointer;
@@ -966,7 +995,7 @@
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
     color: #FFFFFF !important;
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
   }
   .stat-card.active * {
     color: #FFFFFF !important;
@@ -977,7 +1006,7 @@
     font-weight: 700;
   }
   .stat-value {
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 700;
     line-height: 1;
     color: var(--color-text-primary);
@@ -986,7 +1015,7 @@
   .stat-value.disabled { color: var(--color-text-muted); }
   .stat-value.errors { color: #f87171; }
   .stat-label {
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;

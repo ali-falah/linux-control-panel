@@ -13,6 +13,7 @@
     icon?: any;
     size?: 'sm' | 'md';
     class?: string;
+    spinWhenActive?: boolean;
     onclick?: (e: MouseEvent, active: boolean) => void;
     children?: Snippet;
   }
@@ -28,6 +29,7 @@
     icon,
     size = 'sm',
     class: className = '',
+    spinWhenActive = false,
     onclick,
     children,
     disabled = false,
@@ -66,7 +68,7 @@
   {:else}
     {#if currentIcon}
       {@const IconComp = currentIcon}
-      <IconComp size={size === 'sm' ? 12 : 14} class="toggle-btn-icon" />
+      <IconComp size={size === 'sm' ? 12 : 14} class="toggle-btn-icon {active && spinWhenActive ? 'spinning animate-spin-slow' : ''}" />
     {/if}
     {#if currentLabel}
       <span class="toggle-btn-label">{currentLabel}</span>
@@ -93,6 +95,22 @@
     transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
     user-select: none;
     flex-shrink: 0;
+  }
+
+  :global(.ui-toggle-button .toggle-btn-icon.spinning),
+  :global(.ui-toggle-button .toggle-btn-icon.animate-spin-slow) {
+    animation: spinSlow 1.5s linear infinite !important;
+    transform-origin: center center;
+    display: inline-block;
+  }
+
+  @keyframes spinSlow {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .ui-toggle-button.size-md {

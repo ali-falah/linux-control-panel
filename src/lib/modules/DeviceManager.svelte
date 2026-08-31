@@ -260,6 +260,7 @@
 <div class="module-page">
   <PageHeader title="Device Manager" icon={HardDrive}>
     <TabGroup
+      size="sm"
       tabs={[
         { id: 'list', label: 'Device Inventory' },
         { id: 'smart', label: 'Disk Diagnostics (S.M.A.R.T)' },
