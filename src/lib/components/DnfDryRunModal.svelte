@@ -1,8 +1,9 @@
 <script lang="ts">
   import { dnfStore, type DnfPackageDiff } from '../stores/dnfStore.svelte.ts';
+  import SearchBar from './ui/SearchBar.svelte';
   import { 
     X, AlertTriangle, CheckCircle2, ArrowRight, Download, HardDrive, 
-    RefreshCw, Package, Play, ShieldAlert, Terminal, Search, Filter, Layers
+    RefreshCw, Package, Play, ShieldAlert, Terminal, Layers
   } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
 
@@ -15,7 +16,11 @@
     let list = dnfStore.dryRunResult.packages;
 
     if (actionFilter !== 'all') {
-      list = list.filter(p => p.action === actionFilter);
+      if (actionFilter === 'Upgrade') {
+        list = list.filter(p => p.action === 'Upgrade' || p.action === 'Obsolete');
+      } else {
+        list = list.filter(p => p.action === actionFilter);
+      }
     }
 
     if (searchQuery.trim()) {
@@ -72,10 +77,27 @@
       <!-- Modal Body -->
       <div class="modal-body">
         {#if dnfStore.isDryRunning}
+          <!-- Premium Cybernetic Loading Experience -->
           <div class="loading-state">
-            <RefreshCw size={26} class="spinner text-accent" />
-            <h4>Calculating Transaction Graph…</h4>
-            <p>DNF is checking repository metadata, resolving dependencies, and testing transaction locks.</p>
+            <div class="loader-visual-container">
+              <div class="loader-radar-pulse"></div>
+              <div class="loader-ring-outer"></div>
+              <div class="loader-ring-inner"></div>
+              <div class="loader-core-icon">
+                <Layers size={24} class="text-accent" />
+              </div>
+            </div>
+
+            <h4 class="shimmer-title">Calculating Transaction Graph…</h4>
+            <p class="loading-subtext">
+              DNF is checking repository metadata, resolving dependency conflict trees, and testing transaction locks.
+            </p>
+
+            <div class="loading-progress-chips">
+              <span class="step-chip active"><span class="pulse-dot"></span> Metadata Check</span>
+              <span class="step-chip active"><span class="pulse-dot"></span> Dependency Solver</span>
+              <span class="step-chip"><span class="pulse-dot"></span> Diff Assembly</span>
+            </div>
           </div>
 
         {:else if dnfStore.dryRunError}
@@ -89,14 +111,22 @@
           </div>
 
         {:else if dnfStore.dryRunResult}
-          <!-- KPI Summary Cards -->
+          <!-- Compact KPI Summary Cards -->
           <div class="kpi-grid">
-            <div class="kpi-card" class:active-filter={actionFilter === 'Upgrade'} onclick={() => actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'}>
+            <div 
+              class="kpi-card" 
+              class:active-filter={actionFilter === 'Upgrade'} 
+              onclick={() => actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'}
+            >
               <div class="kpi-label">Packages Upgrading</div>
               <div class="kpi-val text-accent">{dnfStore.dryRunResult.to_upgrade_count}</div>
             </div>
 
-            <div class="kpi-card" class:active-filter={actionFilter === 'Install'} onclick={() => actionFilter = actionFilter === 'Install' ? 'all' : 'Install'}>
+            <div 
+              class="kpi-card" 
+              class:active-filter={actionFilter === 'Install'} 
+              onclick={() => actionFilter = actionFilter === 'Install' ? 'all' : 'Install'}
+            >
               <div class="kpi-label">New Dependencies</div>
               <div class="kpi-val text-info">{dnfStore.dryRunResult.to_install_count}</div>
             </div>
@@ -122,31 +152,24 @@
           <!-- Danger Callout if removals detected -->
           {#if dnfStore.dryRunResult.to_remove_count > 0}
             <div class="danger-warning-banner">
-              <ShieldAlert size={18} class="text-error flex-shrink-0" />
+              <ShieldAlert size={16} class="text-error flex-shrink-0" />
               <div>
                 <strong>Package Removal Warning:</strong>
-                Dependency solver resolved conflicts that require removing 
+                Dependency solver resolved conflicts requiring removal of 
                 <span class="badge badge-error">{dnfStore.dryRunResult.to_remove_count} package(s)</span>.
                 Inspect the removals in the table below before confirming.
               </div>
             </div>
           {/if}
 
-          <!-- Filter & Search Bar -->
+          <!-- Filter & Search Bar with Standard SearchBar Component -->
           <div class="table-toolbar">
-            <div class="search-box">
-              <Search size={14} class="search-icon" />
-              <input 
-                type="text" 
+            <div class="search-wrapper">
+              <SearchBar 
+                bind:value={searchQuery} 
                 placeholder="Filter packages by name, repo…" 
-                bind:value={searchQuery}
-                class="search-input"
+                style="margin: 0; width: 400px;" 
               />
-              {#if searchQuery}
-                <button class="clear-btn" onclick={() => searchQuery = ''}>
-                  <X size={12} />
-                </button>
-              {/if}
             </div>
 
             <div class="filter-pills">
@@ -187,12 +210,12 @@
             </div>
           </div>
 
-          <!-- Transaction Diff Table -->
+          <!-- Transaction Diff Table (Expanded & Flexible) -->
           <div class="diff-table-container">
             {#if dnfStore.dryRunResult.packages.length === 0}
               <div class="empty-state">
                 <CheckCircle2 size={32} class="text-success" />
-                <h4 style="margin: 4px 0; color: var(--color-text-primary);">System is Fully Up to Date</h4>
+                <h4 style="margin: 6px 0 2px; color: var(--color-text-primary); font-size: 14px;">System is Fully Up to Date</h4>
                 <p style="margin: 0; font-size: 12px; color: var(--color-text-muted);">
                   DNF verified that all packages are at their latest version. Zero modifications required.
                 </p>
@@ -309,7 +332,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: 20px;
   }
 
   .backdrop-surface {
@@ -320,34 +343,37 @@
     -webkit-backdrop-filter: blur(8px);
   }
 
+  /* Spacious Sizing: width (1120px), height (90vh / max 94vh) */
   .dry-run-modal {
     position: relative;
     z-index: 10001;
-    width: 100%;
-    max-width: 860px;
-    max-height: 88vh;
+    width: 1120px;
+    max-width: calc(100vw - 36px);
+    height: 90vh;
+    max-height: 94vh;
     display: flex;
     flex-direction: column;
     background: var(--color-bg-card, #0f172a);
     border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 12px;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(0, 218, 243, 0.1);
+    border-radius: 16px;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.65), 0 0 35px var(--color-accent-glow, rgba(0, 218, 243, 0.12));
     overflow: hidden;
   }
 
   :global(html.light-mode) .dry-run-modal {
     background: #FFFFFF;
     border-color: #CBD5E1;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.18);
   }
 
   .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 20px;
+    padding: 14px 20px;
     border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
     background: rgba(255, 255, 255, 0.02);
+    flex-shrink: 0;
   }
 
   .header-title-group {
@@ -357,8 +383,8 @@
   }
 
   .header-icon-box {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     border-radius: 8px;
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     display: flex;
@@ -397,42 +423,168 @@
   .modal-body {
     flex: 1;
     overflow-y: auto;
-    padding: 16px 20px;
+    padding: 14px 20px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 12px;
+    min-height: 0;
   }
 
+  /* ── Cybernetic Futuristic Loader Animation ────────────────────────── */
   .loading-state, .error-state {
-    padding: 40px 20px;
+    flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
     text-align: center;
+    padding: 40px 20px;
   }
 
-  .spinner {
-    animation: spin 1.2s linear infinite;
+  .loader-visual-container {
+    position: relative;
+    width: 76px;
+    height: 76px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 12px;
   }
 
-  @keyframes spin {
+  .loader-radar-pulse {
+    position: absolute;
+    inset: -8px;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--color-accent-glow, rgba(16, 185, 129, 0.28)) 0%, transparent 70%);
+    animation: radarPulse 2.2s ease-out infinite;
+  }
+
+  .loader-ring-outer {
+    position: absolute;
+    inset: 2px;
+    border-radius: 50%;
+    border: 2px dashed var(--color-accent);
+    opacity: 0.7;
+    animation: spinClockwise 6s linear infinite;
+  }
+
+  .loader-ring-inner {
+    position: absolute;
+    inset: 12px;
+    border-radius: 50%;
+    border: 2.5px solid transparent;
+    border-top-color: var(--color-accent);
+    border-bottom-color: var(--color-accent-bright, #34d399);
+    animation: spinCounter 1.6s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+  }
+
+  .loader-core-icon {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    filter: drop-shadow(0 0 8px var(--color-accent));
+    animation: iconBreathe 2.2s ease-in-out infinite;
+  }
+
+  @keyframes radarPulse {
+    0% { transform: scale(0.85); opacity: 0.8; }
+    50% { transform: scale(1.3); opacity: 0.25; }
+    100% { transform: scale(0.85); opacity: 0.8; }
+  }
+
+  @keyframes spinClockwise {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
   }
 
+  @keyframes spinCounter {
+    from { transform: rotate(360deg); }
+    to { transform: rotate(0deg); }
+  }
+
+  @keyframes iconBreathe {
+    0%, 100% { transform: scale(1); opacity: 0.9; }
+    50% { transform: scale(1.15); opacity: 1; }
+  }
+
+  .shimmer-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 0;
+    background: linear-gradient(90deg, var(--color-text-primary) 0%, var(--color-accent) 50%, var(--color-text-primary) 100%);
+    background-size: 200% auto;
+    color: transparent;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: textShimmer 2.5s linear infinite;
+  }
+
+  @keyframes textShimmer {
+    to { background-position: 200% center; }
+  }
+
+  .loading-subtext {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    max-width: 460px;
+    margin: 6px 0 0;
+    line-height: 1.4;
+  }
+
+  .loading-progress-chips {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .step-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+  }
+
+  .step-chip.active {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted, rgba(16, 185, 129, 0.12));
+  }
+
+  .pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    box-shadow: 0 0 6px var(--color-accent);
+    animation: pulseDot 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulseDot {
+    0%, 100% { opacity: 0.4; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+  }
+
+  /* ── Compact Single-Row KPI Cards ──────────────────────────────────── */
   .kpi-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .kpi-card {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
-    border-radius: 8px;
-    padding: 10px 12px;
+    border-radius: 6px;
+    padding: 6px 12px;
     cursor: pointer;
     transition: all 0.15s ease;
   }
@@ -453,17 +605,20 @@
   }
 
   .kpi-label {
-    font-size: 10.5px;
+    font-size: 9.5px;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-muted);
-    margin-bottom: 4px;
+    margin-bottom: 2px;
+    line-height: 1.1;
   }
 
   .kpi-val {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 700;
     font-family: var(--font-mono);
+    line-height: 1.2;
   }
 
   .danger-warning-banner {
@@ -472,10 +627,11 @@
     gap: 10px;
     background: rgba(239, 68, 68, 0.12);
     border: 1px solid rgba(239, 68, 68, 0.35);
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 12px;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 11.5px;
     color: #FCA5A5;
+    flex-shrink: 0;
   }
 
   :global(html.light-mode) .danger-warning-banner {
@@ -489,41 +645,12 @@
     justify-content: space-between;
     align-items: center;
     gap: 12px;
+    flex-shrink: 0;
   }
 
-  .search-box {
-    position: relative;
+  .search-wrapper {
     flex: 1;
-    max-width: 320px;
-  }
-
-  .search-icon {
-    position: absolute;
-    left: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--color-text-muted);
-  }
-
-  .search-input {
-    width: 100%;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    padding: 6px 28px 6px 30px;
-    font-size: 11.5px;
-    color: var(--color-text-primary);
-  }
-
-  .clear-btn {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
+    max-width: 340px;
   }
 
   .filter-pills {
@@ -535,8 +662,8 @@
     background: transparent;
     border: 1px solid var(--color-border);
     border-radius: 20px;
-    padding: 4px 10px;
-    font-size: 11px;
+    padding: 3px 9px;
+    font-size: 10.5px;
     color: var(--color-text-secondary);
     cursor: pointer;
     transition: all 0.15s ease;
@@ -548,11 +675,13 @@
     background: var(--color-accent);
   }
 
+  /* ── Diff Table Container (Expanded) ───────────────────────────────── */
   .diff-table-container {
     border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
     border-radius: 8px;
     overflow-y: auto;
-    max-height: 380px;
+    flex: 1;
+    min-height: 200px;
   }
 
   .diff-table {
@@ -563,7 +692,7 @@
 
   .diff-table th {
     background: rgba(255, 255, 255, 0.03);
-    padding: 8px 12px;
+    padding: 9px 14px;
     font-weight: 600;
     color: var(--color-text-muted);
     text-align: left;
@@ -578,7 +707,7 @@
   }
 
   .diff-table td {
-    padding: 7px 12px;
+    padding: 8px 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   }
 
@@ -678,7 +807,8 @@
   }
 
   .raw-toggle-wrap {
-    margin-top: 4px;
+    margin-top: 2px;
+    flex-shrink: 0;
   }
 
   .raw-toggle-btn {
@@ -705,7 +835,7 @@
     border-radius: 6px;
     font-family: var(--font-mono);
     font-size: 10.5px;
-    max-height: 160px;
+    max-height: 150px;
     overflow-y: auto;
     white-space: pre-wrap;
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -718,6 +848,7 @@
     padding: 12px 20px;
     background: rgba(255, 255, 255, 0.02);
     border-top: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
+    flex-shrink: 0;
   }
 
   .disk-change-indicator {
@@ -734,12 +865,14 @@
     gap: 10px;
   }
 
-  .empty-filter {
-    padding: 30px;
+  .empty-state, .empty-filter {
+    padding: 40px;
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     color: var(--color-text-muted);
+    text-align: center;
   }
 </style>

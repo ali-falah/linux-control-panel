@@ -232,6 +232,7 @@ class DnfStore {
     this.dryRunResult = null;
     this.dryRunError = null;
     this.isDryRunning = false;
+    statusStore.clearBusy();
   }
 }
 

@@ -781,16 +781,16 @@
   }
 
   .nav-tab-btn.active {
-    background: rgba(37, 99, 235, 0.15);
-    border-color: rgba(37, 99, 235, 0.3);
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
     color: var(--color-accent);
     font-weight: 600;
   }
 
   :global(html.light-mode) .nav-tab-btn.active {
-    background: #EFF6FF;
-    border-color: #BFDBFE;
-    color: #2563EB;
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
+    color: var(--color-accent);
   }
 
   .nav-label {
@@ -934,12 +934,12 @@
 
   .theme-card.selected {
     border-color: var(--color-accent);
-    background: rgba(37, 99, 235, 0.06);
+    background: var(--color-accent-muted);
   }
 
   :global(html.light-mode) .theme-card.selected {
-    border-color: #2563EB;
-    background: #EFF6FF;
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
 
   .theme-preview {
@@ -1013,7 +1013,7 @@
   .preview-line { height: 3px; border-radius: 2px; }
   .line-accent { background: var(--color-accent); width: 60%; }
   .line-text { background: rgba(255,255,255,0.2); width: 85%; }
-  .line-accent-light { background: #2563EB; width: 60%; }
+  .line-accent-light { background: var(--color-accent); width: 60%; }
   .line-text-light { background: #94A3B8; width: 85%; }
 
   .theme-card-footer {
@@ -1061,8 +1061,8 @@
   }
 
   :global(html.light-mode) .select-indicator.active {
-    background: #2563EB;
-    border-color: #2563EB;
+    background: var(--color-accent);
+    border-color: var(--color-accent);
   }
 
   /* ── Accent Color Palette & OLED Mode ── */
@@ -1198,8 +1198,8 @@
   }
 
   .master-ai-card.enabled {
-    background: rgba(37, 99, 235, 0.08);
-    border-color: rgba(37, 99, 235, 0.25);
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
   }
 
   :global(html.light-mode) .master-ai-card {
@@ -1208,8 +1208,8 @@
   }
 
   :global(html.light-mode) .master-ai-card.enabled {
-    background: #EFF6FF;
-    border-color: #BFDBFE;
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
   }
 
   .master-ai-info {
@@ -1222,7 +1222,7 @@
     width: 36px;
     height: 36px;
     border-radius: 8px;
-    background: rgba(37, 99, 235, 0.12);
+    background: var(--color-accent-muted);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1276,12 +1276,12 @@
 
   .provider-card.selected {
     border-color: var(--color-accent);
-    background: rgba(37, 99, 235, 0.08);
+    background: var(--color-accent-muted);
   }
 
   :global(html.light-mode) .provider-card.selected {
-    border-color: #2563EB;
-    background: #EFF6FF;
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
 
   .provider-card-top {
@@ -1312,8 +1312,8 @@
   }
 
   :global(html.light-mode) .provider-radio.active {
-    background: #2563EB;
-    border-color: #2563EB;
+    background: var(--color-accent);
+    border-color: var(--color-accent);
   }
 
   .provider-name {

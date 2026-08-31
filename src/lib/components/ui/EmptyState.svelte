@@ -106,7 +106,7 @@
   }
 
   :global(html.light-mode) .empty-action-btn {
-    background: #2563EB;
+    background: var(--color-accent);
     color: #FFFFFF;
   }
 

@@ -11,6 +11,7 @@
     total?: number;
     class?: string;
     style?: string;
+    onkeydown?: (e: KeyboardEvent) => void;
   }
 
   let { 
@@ -21,7 +22,8 @@
     count,
     total,
     class: className = '',
-    style = ''
+    style = '',
+    onkeydown
   }: Props = $props();
 
   let internalInput = $state(value);
@@ -59,6 +61,7 @@
       e.stopPropagation();
       handleClear();
     }
+    onkeydown?.(e);
   }
 
   onDestroy(() => {
@@ -128,8 +131,8 @@
   }
 
   .search-bar-input-wrap:focus-within {
-    border-color: var(--color-accent);
-    box-shadow: 0 0 0 2px rgba(0, 218, 243, 0.15);
+    border-color: var(--color-accent) !important;
+    box-shadow: 0 0 0 2px var(--color-accent-muted, rgba(16, 185, 129, 0.15)) !important;
   }
 
   .search-icon {
@@ -137,10 +140,15 @@
     flex-shrink: 0;
   }
 
-  .search-input {
-    background: transparent;
-    border: none;
-    outline: none;
+  .search-input,
+  .search-input:focus,
+  :global(html.light-mode) .search-input,
+  :global(html.light-mode) .search-input:focus {
+    background: transparent !important;
+    border: none !important;
+    border-color: transparent !important;
+    outline: none !important;
+    box-shadow: none !important;
     height: 100%;
     font-size: 12px;
     color: var(--color-text-primary);
@@ -151,7 +159,7 @@
   }
 
   :global(html.light-mode) .search-input {
-    color: #0F172A;
+    color: #0F172A !important;
   }
 
   .clear-btn {

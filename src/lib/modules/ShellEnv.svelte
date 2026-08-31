@@ -9,6 +9,8 @@
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Play, Copy, Check, X } from '@lucide/svelte';
@@ -114,9 +116,35 @@
   let backups = $state<ShellBackup[]>([]);
   let backupsLoading = $state(false);
   let showBackupsFor = $state<string | null>(null);
+  let showBackupsDrawer = $state(false);
+  let profileFileSearch = $state('');
+  let backupSearch = $state('');
   let newProfileDName = $state('');
   let showNewFileForm = $state(false);
   let wordWrap = $state(true);
+
+  let filteredProfileFiles = $derived.by(() => {
+    if (!profileFileSearch.trim()) return profileFiles;
+    const q = profileFileSearch.toLowerCase().trim();
+    return profileFiles.filter(f =>
+      f.display_name.toLowerCase().includes(q) ||
+      f.path.toLowerCase().includes(q)
+    );
+  });
+
+  let filteredBackups = $derived.by(() => {
+    let list = backups;
+    if (showBackupsFor && showBackupsFor !== 'all') {
+      list = list.filter(b => b.original_path === showBackupsFor);
+    }
+    if (!backupSearch.trim()) return list;
+    const q = backupSearch.toLowerCase().trim();
+    return list.filter(b =>
+      b.filename.toLowerCase().includes(q) ||
+      b.original_path.toLowerCase().includes(q) ||
+      b.timestamp.toLowerCase().includes(q)
+    );
+  });
 
   // Preview tab
   let liveEnv = $state<LiveEnvVar[]>([]);
@@ -445,6 +473,13 @@
         }
       },
     );
+  }
+
+  function openBackupsVault(forFile?: string) {
+    showBackupsFor = forFile || 'all';
+    backupSearch = '';
+    loadBackups();
+    showBackupsDrawer = true;
   }
 
   async function createProfileDFile() {
@@ -886,9 +921,32 @@
     <!-- ══ PROFILE FILES ══════════════════════════════════════════════════ -->
     {:else if activeTab === 'files'}
       <div class="files-layout">
-        <!-- File list -->
+        <!-- File list sidebar -->
         <div class="files-sidebar">
+          <!-- Sidebar Header -->
+          <div class="files-sidebar-header">
+            <div class="sidebar-header-title">
+              <Folder size={13} style="color: var(--color-accent);" />
+              <span>Profile Scripts</span>
+            </div>
+            <button 
+              type="button"
+              class="sidebar-action-btn"
+              onclick={() => (showNewFileForm = !showNewFileForm)} 
+              title="Create custom script in /etc/profile.d/"
+            >
+              <Plus size={13} />
+            </button>
+          </div>
 
+          <!-- Quick File Filter -->
+          <div class="files-sidebar-filter">
+            <SearchBar 
+              bind:value={profileFileSearch} 
+              placeholder="Filter files…" 
+              style="width: 100%; margin: 0;" 
+            />
+          </div>
 
           {#if showNewFileForm}
             <div class="new-file-form">
@@ -898,57 +956,60 @@
             </div>
           {/if}
 
-          {#if filesLoading}
-            <div class="center-state"><div class="spinner-sm"></div></div>
-          {:else}
-            {#each [false, true] as isSystem}
-              {@const group = profileFiles.filter(f => f.is_system === isSystem)}
-              {#if group.length > 0}
-                <div class="file-group-label">{isSystem ? '/etc/profile.d/' : 'User files'}</div>
-                {#each group as f}
-                  <button
-                    class="file-item"
-                    class:selected={selectedFile?.path === f.path}
-                    onclick={() => openFile(f)}
-                    id={`shell-file-${f.path}`}
-                  >
-                    <FileCode size={12} />
-                    <span class="file-item-name">{f.display_name}</span>
-                    <span class="file-item-lines">{f.line_count}L</span>
-                  </button>
-                {/each}
-              {/if}
-            {/each}
-          {/if}
-
-          <div class="files-sidebar-sep"></div>
-          <Button variant="outline" size="sm" class="sidebar-backup-btn" onclick={() => { showBackupsFor = 'all'; loadBackups(); }} id="shell-show-backups">
-            <ArchiveRestore size={12} /> Backups
-          </Button>
-
-          {#if showBackupsFor}
-            <div class="backup-list">
-              <div class="backup-list-header">
-                <span>Backups</span>
-                <Button variant="ghost" size="sm" onclick={() => (showBackupsFor = null)}>✕</Button>
-              </div>
-              {#if backupsLoading}
-                <div class="center-state"><div class="spinner-sm"></div></div>
-              {:else if backups.length === 0}
-                <p class="empty-state" style="font-size:12px">No backups</p>
-              {:else}
-                {#each backups as bk}
-                  <div class="backup-item">
-                    <div class="backup-name">{bk.filename}</div>
-                    <div class="backup-ts">{bk.timestamp}</div>
-                    <Button class="btn btn-sm -outline" onclick={() => confirmRestoreBackup(bk)} id={`shell-restore-${bk.filename}`}>
-                      <ArchiveRestore size={11} /> Restore
-                    </Button>
+          <!-- Scrollable File Tree Area -->
+          <div class="files-tree-scroll">
+            {#if filesLoading}
+              <div class="center-state"><div class="spinner-sm"></div></div>
+            {:else}
+              {#each [false, true] as isSystem}
+                {@const group = filteredProfileFiles.filter(f => f.is_system === isSystem)}
+                {#if group.length > 0}
+                  <div class="file-group-label">
+                    <span>{isSystem ? '/etc/profile.d/' : 'User Files'}</span>
+                    <span class="file-group-count">{group.length}</span>
                   </div>
-                {/each}
+                  {#each group as f}
+                    <button
+                      type="button"
+                      class="file-item"
+                      class:selected={selectedFile?.path === f.path}
+                      onclick={() => openFile(f)}
+                      id={`shell-file-${f.path}`}
+                      title={f.path}
+                    >
+                      <FileCode size={13} class="file-icon" />
+                      <span class="file-item-name">{f.display_name}</span>
+                      <span class="file-item-lines">{f.line_count}L</span>
+                    </button>
+                  {/each}
+                {/if}
+              {/each}
+              {#if filteredProfileFiles.length === 0 && profileFileSearch}
+                <div class="no-files-found">
+                  <span>No matching files</span>
+                </div>
               {/if}
-            </div>
-          {/if}
+            {/if}
+          </div>
+
+          <!-- Pinned Clean Sidebar Footer -->
+          <div class="files-sidebar-footer">
+            <Button 
+              variant="secondary" 
+              size="sm" 
+              onclick={() => openBackupsVault('all')} 
+              id="shell-show-backups"
+              style="width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 7px 12px;"
+            >
+              <div style="display: flex; align-items: center; gap: 7px;">
+                <ArchiveRestore size={14} style="color: var(--color-accent);" />
+                <span style="font-size: 12px; font-weight: 600;">Backup Vault</span>
+              </div>
+              {#if backups.length > 0}
+                <span class="badge-count">{backups.length}</span>
+              {/if}
+            </Button>
+          </div>
         </div>
 
         <!-- Editor panel -->
@@ -963,6 +1024,16 @@
               </span>
               <div class="editor-tools">
                 <span class="text-muted text-xs">{selectedFile.last_modified}</span>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onclick={() => openBackupsVault(selectedFile?.path)} 
+                  title="View backup revisions for this file"
+                  style="display: flex; align-items: center; gap: 5px; font-size: 11px;"
+                >
+                  <ArchiveRestore size={12} />
+                  <span>Revisions</span>
+                </Button>
                 <Button variant="ghost" class=" btn-sm" onclick={() => (wordWrap = !wordWrap)} id="shell-word-wrap">
                   Wrap: {wordWrap ? 'On' : 'Off'}
                 </Button>
@@ -995,12 +1066,81 @@
             {/if}
           {:else}
             <div class="editor-empty">
-              <FileCode size={40} />
-              <p>Select a profile file to edit</p>
+              <EmptyState
+                icon={FileCode}
+                title="No Profile File Selected"
+                description="Select a user profile or /etc/profile.d/ system script from the sidebar to view, edit, or restore previous versions."
+              />
             </div>
           {/if}
         </div>
       </div>
+
+      <!-- Backup Vault SideDrawer -->
+      <SideDrawer bind:isOpen={showBackupsDrawer} title={showBackupsFor && showBackupsFor !== 'all' ? `Revisions: ${selectedFile?.display_name || 'File'}` : "Profile Backups Vault"} width="480px">
+        <div class="drawer-content-wrap">
+          <div class="drawer-top-toolbar">
+            <div style="flex:1;">
+              <SearchBar bind:value={backupSearch} placeholder="Search backup archives…" style="width: 100%; margin: 0;" />
+            </div>
+            <Button variant="ghost" size="sm" onclick={loadBackups} disabled={backupsLoading} title="Refresh backup snapshots">
+              <RefreshCw size={12} class={backupsLoading ? 'animate-spin' : ''} />
+            </Button>
+          </div>
+
+          {#if showBackupsFor && showBackupsFor !== 'all'}
+            <div class="file-filter-badge-row">
+              <span class="text-muted text-xs">Filtered to:</span>
+              <code class="filter-code">{showBackupsFor}</code>
+              <Button variant="ghost" size="sm" onclick={() => (showBackupsFor = 'all')} style="padding: 2px 6px; font-size: 10px;">
+                Show All
+              </Button>
+            </div>
+          {/if}
+
+          {#if backupsLoading}
+            <div class="center-state" style="padding: 40px 0;"><div class="spinner-sm"></div></div>
+          {:else if filteredBackups.length === 0}
+            <div style="padding: 30px 10px;">
+              <EmptyState
+                icon={ArchiveRestore}
+                title={backupSearch ? "No matching backups" : "No backups available"}
+                description={backupSearch ? "Try adjusting your search terms." : "Every time you save modifications to shell scripts or profile files, an automated rollback snapshot is securely preserved here."}
+              />
+            </div>
+          {:else}
+            <div class="backups-card-list">
+              {#each filteredBackups as bk}
+                <div class="backup-vault-card">
+                  <div class="backup-vault-card-header">
+                    <div class="backup-vault-name">
+                      <FileCode size={13} style="color: var(--color-accent);" />
+                      <span>{bk.filename}</span>
+                    </div>
+                    <span class="backup-vault-time">{bk.timestamp}</span>
+                  </div>
+                  <div class="backup-vault-target">
+                    <span class="text-muted">Target:</span>
+                    <code>{bk.original_path}</code>
+                  </div>
+                  <div class="backup-vault-actions">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onclick={() => confirmRestoreBackup(bk)}
+                      id={`shell-restore-${bk.filename}`}
+                      style="display: flex; align-items: center; gap: 5px; font-size: 11px; padding: 4px 10px;"
+                    >
+                      <ArchiveRestore size={12} />
+                      Restore Snapshot
+                    </Button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </SideDrawer>
 
     <!-- ══ LIVE PREVIEW ════════════════════════════════════════════════════ -->
     {:else if activeTab === 'preview'}
@@ -1261,52 +1401,121 @@
   /* ─── Files tab ──────────────────────────────────────────────────── */
   .files-layout { display: flex; height: 100%; overflow: hidden; }
   .files-sidebar {
-    width: 240px; min-width: 240px;
+    width: 250px; min-width: 250px;
     border-right: 1px solid var(--color-border);
     display: flex; flex-direction: column;
-    overflow-y: auto; padding: 8px 0;
+    height: 100%;
+    background: var(--color-bg-card);
   }
   .files-sidebar-header {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 4px 12px 8px;
+    padding: 10px 12px;
     font-size: 11px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.06em;
-    color: var(--color-text-muted);
+    color: var(--color-text-primary);
     border-bottom: 1px solid var(--color-border);
-    margin-bottom: 4px;
+    background: var(--color-bg-surface);
   }
-  .files-sidebar-sep { border-top: 1px solid var(--color-border); margin: 8px 12px; }
-  :global(.sidebar-backup-btn) { margin: 0 12px 8px; }
+  .sidebar-header-title {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .sidebar-action-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px;
+    border: 1px solid var(--color-border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .sidebar-action-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    background: var(--color-accent-muted);
+  }
+  .files-sidebar-filter {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+  }
+
   .new-file-form {
-    display: flex; gap: 6px; padding: 8px 12px; align-items: center;
+    display: flex; gap: 6px; padding: 8px 10px; align-items: center;
     border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
   }
-  .new-file-form input { flex: 1; padding: 5px 8px; font-size: 12px; }
+  .new-file-form input { flex: 1; padding: 4px 8px; font-size: 11px; }
+  .files-tree-scroll {
+    flex: 1; min-height: 0;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
   .file-group-label {
-    padding: 6px 12px 3px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px 4px;
     font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-    text-transform: uppercase; color: #475569;
+    text-transform: uppercase; color: var(--color-text-muted);
+  }
+  .file-group-count {
+    font-size: 9.5px; opacity: 0.7;
   }
   .file-item {
     display: flex; align-items: center; gap: 7px;
-    padding: 7px 12px;
+    padding: 6px 12px;
     border: none; background: transparent;
     color: var(--color-text-secondary);
     font-size: 12px; font-family: var(--font-mono);
     cursor: pointer; text-align: left;
-    transition: background 0.15s, color 0.15s;
-    white-space: nowrap; overflow: hidden;
+    transition: all 0.15s ease;
+    width: 100%;
+    box-sizing: border-box;
+    border-left: 2px solid transparent;
   }
   .file-item:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-  .file-item.selected { background: var(--color-active-bg); color: var(--color-accent-soft); }
-  .file-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .file-item-lines { font-size: 10px; color: var(--color-text-muted); flex-shrink: 0; }
+  .file-item.selected {
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+    border-left-color: var(--color-accent);
+    font-weight: 600;
+  }
+  .file-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-item-lines {
+    font-size: 10px; color: var(--color-text-muted); flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  :global(html.light-mode) .file-item-lines {
+    background: #E2E8F0;
+  }
+  .no-files-found {
+    padding: 20px 12px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .files-sidebar-footer {
+    padding: 8px 10px;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+    flex-shrink: 0;
+  }
+  .badge-count {
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent-glow);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 10px;
+  }
 
   .files-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   .editor-toolbar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 16px; border-bottom: 1px solid var(--color-border);
+    padding: 8px 14px; border-bottom: 1px solid var(--color-border);
     flex-shrink: 0; gap: 12px;
+    background: var(--color-bg-card);
   }
   .editor-tools { display: flex; gap: 8px; align-items: center; }
   .editor-filename {
@@ -1316,7 +1525,7 @@
   }
   .unsaved-warning {
     display: flex; align-items: center; gap: 6px;
-    padding: 6px 16px;
+    padding: 6px 14px;
     background: var(--color-warning-muted); color: var(--color-warning);
     font-size: 12px; border-bottom: 1px solid rgba(245,158,11,0.2);
     flex-shrink: 0;
@@ -1324,7 +1533,7 @@
   .editor-empty {
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    gap: 12px; color: var(--color-text-muted);
+    padding: 40px;
   }
   .code-editor {
     flex: 1; resize: none; border: none; outline: none;
@@ -1334,22 +1543,70 @@
     padding: 16px; overflow-y: auto;
     white-space: pre;
   }
+  :global(html.light-mode) .code-editor {
+    background: #FFFFFF;
+  }
   .code-editor.wrap { white-space: pre-wrap; word-break: break-all; }
 
-  .backup-list { display: flex; flex-direction: column; }
-  .backup-list-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 4px 12px; font-size: 11px; font-weight: 600;
-    color: var(--color-text-muted);
-    border-top: 1px solid var(--color-border);
+  /* ─── Backups Vault Drawer ────────────────────────────────────────── */
+  .drawer-content-wrap {
+    display: flex; flex-direction: column; height: 100%; gap: 12px;
   }
-  .backup-item {
-    display: flex; flex-direction: column; gap: 3px;
-    padding: 8px 12px; border-bottom: 1px solid var(--color-border);
+  .drawer-top-toolbar {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .file-filter-badge-row {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--color-bg-input);
+    padding: 4px 10px; border-radius: 6px;
+    border: 1px solid var(--color-border);
     font-size: 11px;
   }
-  .backup-name { font-family: var(--font-mono); color: var(--color-text-primary); font-size: 10px; word-break: break-all; }
-  .backup-ts { color: var(--color-text-muted); font-size: 10px; }
+  .filter-code {
+    color: var(--color-accent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .backups-card-list {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; flex: 1; min-height: 0;
+    padding-right: 4px;
+  }
+  .backup-vault-card {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 10px 12px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    transition: all 0.15s ease;
+  }
+  .backup-vault-card:hover {
+    border-color: var(--color-accent);
+    background: var(--color-bg-hover);
+  }
+  .backup-vault-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px;
+  }
+  .backup-vault-name {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 11.5px;
+    font-weight: 600; color: var(--color-text-primary);
+  }
+  .backup-vault-time {
+    font-size: 10.5px; color: var(--color-text-muted);
+  }
+  .backup-vault-target {
+    font-size: 11px; color: var(--color-text-muted);
+    word-break: break-all;
+  }
+  .backup-vault-target code {
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--color-text-secondary); margin-left: 4px;
+  }
+  .backup-vault-actions {
+    display: flex; justify-content: flex-end; margin-top: 4px;
+  }
 
   /* ─── Preview tab ────────────────────────────────────────────────── */
   .preview-toolbar {

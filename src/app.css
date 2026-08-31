@@ -58,12 +58,12 @@
   --color-border: #3b494c;
   /* outline-variant             */
   --color-border-subtle: rgba(59, 73, 76, 0.6);
-  --color-border-hover: rgba(0, 218, 243, 0.25);
-  --color-border-focus: rgba(0, 218, 243, 0.7);
+  --color-border-hover: var(--color-accent-glow);
+  --color-border-focus: var(--color-accent);
 
   /* ── Active State ─────────────────────────────────────────────────── */
-  --color-active-bg: rgba(0, 218, 243, 0.08);
-  --color-active-border: rgba(0, 218, 243, 0.3);
+  --color-active-bg: var(--color-accent-muted);
+  --color-active-border: var(--color-accent);
 
   /* ── Component Specific Tokens ───────────────────────────────────── */
   --color-bg-input: rgba(1, 15, 31, 0.6);
@@ -114,10 +114,10 @@ html.light-mode, [data-theme="light"] {
   --color-border: #EDEEF1;           /* Lightened Border #EDEEF1 */
   --color-border-subtle: #F5F6F8;    /* Subtle Canvas Border */
   --color-border-hover: #CBD5E1;     /* Slate-300 Hover Border */
-  --color-border-focus: #2563EB;
+  --color-border-focus: var(--color-accent);
 
-  --color-active-bg: rgba(37, 99, 235, 0.08);
-  --color-active-border: rgba(37, 99, 235, 0.35);
+  --color-active-bg: var(--color-accent-muted);
+  --color-active-border: var(--color-accent);
 
   /* Component Specific Tokens — Light Mode */
   --color-bg-input: #FFFFFF;
@@ -126,8 +126,8 @@ html.light-mode, [data-theme="light"] {
   --color-tab-bar-bg: #EEF0F4;
   --color-text-on-accent: #FFFFFF;
   --color-module-title: #0F172A;
-  --color-module-icon-bg: rgba(37, 99, 235, 0.08);
-  --color-module-icon-border: rgba(37, 99, 235, 0.20);
+  --color-module-icon-bg: var(--color-accent-muted);
+  --color-module-icon-border: var(--color-accent-glow);
 }
 
 /* ─── OLED Pure Black Mode ─────────────────────────────────────────── */
@@ -279,11 +279,11 @@ html.light-mode input[type="checkbox"]:checked::after {
   border-color: #FFFFFF !important;
 }
 
-html.light-mode input:not([type="checkbox"]):focus,
+html.light-mode input:not([type="checkbox"]):not(.search-input):not(.file-filter-input):focus,
 html.light-mode textarea:focus,
 html.light-mode select:focus {
   border-color: var(--color-accent) !important;
-  box-shadow: none !important;
+  box-shadow: 0 0 0 2px var(--color-accent-muted) !important;
 }
 
 html.light-mode input::placeholder,
@@ -800,19 +800,58 @@ html.modal-open-scroll-lock .content-area {
   color: var(--color-accent);
 }
 
-/* Outline — border with cyan tint */
+/* Secondary */
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-accent-muted, rgba(16, 185, 129, 0.1));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  transform: translateY(-1px);
+}
+
+:global(html.light-mode) .btn-secondary {
+  background: #FFFFFF;
+  border-color: #CBD5E1;
+  color: #334155;
+}
+
+:global(html.light-mode) .btn-secondary:hover:not(:disabled) {
+  background: var(--color-accent-muted, rgba(5, 150, 105, 0.08));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Outline — border with dynamic theme accent */
 .btn-outline {
   background: transparent;
   color: var(--color-accent);
-  border: 1px solid rgba(0, 218, 243, 0.3);
+  border: 1px solid var(--color-accent-glow, rgba(16, 185, 129, 0.3));
 }
 
 .btn-outline:hover:not(:disabled) {
-  background: rgba(0, 218, 243, 0.06);
-  border-color: rgba(0, 218, 243, 0.5);
-  color: var(--color-accent-soft);
-  box-shadow: 0 0 10px rgba(0, 218, 243, 0.15);
+  background: var(--color-accent-muted, rgba(16, 185, 129, 0.08));
+  border-color: var(--color-accent);
+  color: var(--color-accent-bright, var(--color-accent));
+  box-shadow: 0 0 10px var(--color-accent-glow, rgba(16, 185, 129, 0.15));
   transform: translateY(-1px);
+}
+
+:global(html.light-mode) .btn-outline {
+  background: #FFFFFF;
+  border-color: var(--color-accent-glow, rgba(5, 150, 105, 0.3));
+  color: var(--color-accent);
+}
+
+:global(html.light-mode) .btn-outline:hover:not(:disabled) {
+  background: var(--color-accent-muted, rgba(5, 150, 105, 0.08));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  box-shadow: 0 2px 8px var(--color-accent-glow, rgba(5, 150, 105, 0.15));
 }
 
 /* Danger */
@@ -848,16 +887,13 @@ html.modal-open-scroll-lock .content-area {
   font-family: var(--font-sans);
   outline: none;
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+  box-shadow: none;
 }
 
 .input:focus {
   background: var(--color-bg-card);
   border-color: var(--color-accent);
-  box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.15),
-    0 0 0 2px var(--color-accent-muted),
-    0 0 8px var(--color-accent-glow);
+  box-shadow: 0 0 0 2px var(--color-accent-muted);
 }
 
 .input::placeholder {
@@ -899,7 +935,7 @@ input[type="number"]:focus,
 input[type="password"]:focus {
   background: var(--color-bg-card);
   border-color: var(--color-accent);
-  box-shadow: none;
+  box-shadow: 0 0 0 2px var(--color-accent-muted);
 }
 
 input[type="text"]::placeholder,
@@ -923,15 +959,22 @@ input[type="password"]::placeholder {
 .search-bar:focus-within {
   background: var(--color-bg-card);
   border-color: var(--color-accent);
-  box-shadow: none;
+  box-shadow: 0 0 0 2px var(--color-accent-muted);
 }
 
 .search-bar input,
 .search-bar input:focus,
-.search-bar input:hover {
+.search-bar input:hover,
+.search-bar-input-wrap input,
+.search-bar-input-wrap input:focus,
+.search-bar-input-wrap input:hover,
+.search-input,
+.search-input:focus,
+.search-input:hover {
   flex: 1;
   background: transparent !important;
   border: none !important;
+  border-color: transparent !important;
   outline: none !important;
   color: var(--color-text-primary) !important;
   font-size: 13px !important;
@@ -941,7 +984,9 @@ input[type="password"]::placeholder {
   box-shadow: none !important;
 }
 
-.search-bar input::placeholder {
+.search-bar input::placeholder,
+.search-bar-input-wrap input::placeholder,
+.search-input::placeholder {
   color: var(--color-text-muted);
 }
 

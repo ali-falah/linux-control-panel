@@ -159,7 +159,7 @@
   }
 
   :global(html.light-mode) .guide-action-btn {
-    background: #2563EB;
+    background: var(--color-accent);
     color: #FFFFFF;
   }
 

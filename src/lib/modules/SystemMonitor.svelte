@@ -14,6 +14,7 @@
   import Card from '../components/ui/Card.svelte';
   import Table from '../components/ui/Table.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
 
   let currentTab = $state<'overview' | 'processes'>(
@@ -1145,35 +1146,40 @@
     {:else}
       <!-- Processes Tab (Pure Tree View) -->
       <div class="table-container" style="flex:1; min-height:0; display:flex; flex-direction:column;">
-        <div class="table-toolbar" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--color-bg-card);">
-          <!-- Left: Search Box -->
-          <div class="search-box" style="flex:1; min-width:240px; max-width:340px; position:relative;">
-            <input type="text" placeholder="Search processes by name, PID, or user..." bind:value={processSearch} />
+        <div class="table-toolbar" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:8px 12px; background:var(--color-bg-card);">
+          <!-- Left: Search Box + Process Stats Next to Input -->
+          <div style="display:flex; align-items:center; gap:12px; flex:1; min-width:260px;">
+            <SearchBar 
+              bind:value={processSearch} 
+              placeholder="Search processes by name, PID, or user..." 
+              style="flex: 1; max-width: 320px; margin: 0;" 
+            />
+
+            <div class="toolbar-stats" style="font-size:12px; color:var(--color-text-muted); white-space:nowrap;">
+              Showing <strong style="color:var(--color-text-primary);">{treeVisibleProcesses.length}</strong> processes ({processes.length} total)
+            </div>
           </div>
 
-          <!-- Middle: Expand / Collapse Actions -->
-          <div style="display:flex; align-items:center; gap:6px;">
-            <button
+          <!-- Right: Reusable System Buttons with Theme Accent -->
+          <div style="display:flex; align-items:center; gap:8px;">
+            <Button
               type="button"
-              class="toolbar-tree-btn"
+              variant="outline"
+              size="sm"
               onclick={expandAllTree}
               title="Expand all process branches"
             >
               Expand All
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              class="toolbar-tree-btn"
+              variant="outline"
+              size="sm"
               onclick={collapseAllTree}
               title="Collapse all process branches"
             >
               Collapse All
-            </button>
-          </div>
-
-          <!-- Right: Process Stats -->
-          <div class="toolbar-stats" style="font-size:12px; color:var(--color-text-muted);">
-            Showing <strong>{treeVisibleProcesses.length}</strong> processes ({processes.length} total)
+            </Button>
           </div>
         </div>
 
@@ -1938,9 +1944,9 @@
     transition: all 0.15s ease;
   }
   .toolbar-tree-btn:hover {
-    background: rgba(59, 130, 246, 0.12);
+    background: var(--color-accent-muted, rgba(16, 185, 129, 0.12));
     color: var(--color-accent);
-    border-color: rgba(59, 130, 246, 0.4);
+    border-color: var(--color-accent);
   }
   :global(html.light-mode) .toolbar-tree-btn {
     background: #FFFFFF;
@@ -1948,9 +1954,9 @@
     color: #475569;
   }
   :global(html.light-mode) .toolbar-tree-btn:hover {
-    background: #EFF6FF;
-    border-color: #93C5FD;
-    color: #2563EB;
+    background: var(--color-accent-muted, rgba(5, 150, 105, 0.08));
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   /* ── Process Tree Hierarchy Styles ─────────────────────────────────── */

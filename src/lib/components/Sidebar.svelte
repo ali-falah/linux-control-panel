@@ -8,10 +8,15 @@
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
   import { getVersion } from '@tauri-apps/api/app';
+  import SearchBar from './ui/SearchBar.svelte';
 
   let appVersion = $state('...');
   let currentUsername = $state('user');
   let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
+  let logoSrc = $derived.by(() => {
+    const accent = uiStore.accentColor || 'cyan';
+    return `/brand/app-icon-${accent}.png`;
+  });
   
   $effect(() => {
     getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
@@ -172,7 +177,12 @@
   <!-- Logo -->
   <button class="sidebar-logo" onclick={() => uiStore.toggleSidebar()} title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
     <div class="logo-icon">
-      <img src="/app-icon.png" alt="Control Panel" class="logo-img" />
+      <img 
+        src={logoSrc} 
+        alt="Control Panel" 
+        class="logo-img" 
+        onerror={(e) => ((e.currentTarget as HTMLImageElement).src = '/app-icon.png')} 
+      />
     </div>
     {#if !uiStore.sidebarCollapsed}
       <div class="logo-text">
@@ -189,13 +199,12 @@
 
   <!-- Search Input -->
   {#if !uiStore.sidebarCollapsed}
-    <div class="sidebar-search">
-      <Search size={14} class="search-icon" />
-      <input
-        type="text"
-        placeholder="Filter modules…"
+    <div class="sidebar-search-wrap">
+      <SearchBar
         bind:value={searchQuery}
+        placeholder="Filter modules…"
         onkeydown={handleSearchKeydown}
+        style="width: 100%; margin: 0;"
       />
     </div>
   {/if}
@@ -646,12 +655,12 @@
     overflow: visible;
     background: transparent;
     border: none;
-    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.35));
+    filter: drop-shadow(0 0 6px var(--color-accent-glow, rgba(0, 218, 243, 0.35)));
     transition: transform 0.18s ease, filter 0.18s ease;
   }
   .sidebar-logo:hover .logo-icon {
     transform: scale(1.08);
-    filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.65));
+    filter: drop-shadow(0 0 12px var(--color-accent-glow, rgba(0, 218, 243, 0.65)));
   }
 
   .logo-img {
@@ -694,77 +703,10 @@
   }
 
   /* ── Search ───────────────────────────────────────────────────────── */
-  .sidebar-search {
+  .sidebar-search-wrap {
     margin: 4px 6px 12px;
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 10px;
     flex-shrink: 0;
-    background: var(--color-bg-raised, var(--color-bg-input));
-    border-radius: 6px;
-    border: 1px solid var(--color-border);
-    transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
     animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-  .sidebar-search:hover {
-    border-color: var(--color-border-hover);
-  }
-  .sidebar-search:focus-within {
-    background: var(--color-bg-card);
-    border-color: var(--color-accent);
-    box-shadow: 0 0 0 2px var(--color-accent-muted);
-  }
-  .sidebar-search input,
-  .sidebar-search input:focus,
-  .sidebar-search input:hover {
-    width: 100%;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-    padding: 8px 0 !important;
-    color: var(--color-text-primary);
-    font-size: 12px;
-    font-weight: 500;
-    outline: none !important;
-  }
-  .sidebar-search input::placeholder {
-    color: var(--color-text-muted);
-    font-weight: 400;
-  }
-  .sidebar-search :global(.search-icon) {
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  /* Light Mode Sidebar Search Overrides */
-  :global(html.light-mode) .sidebar-search {
-    background: #F1F5F9 !important;
-    border: 1px solid #E2E8F0 !important;
-    border-radius: 8px !important;
-  }
-  :global(html.light-mode) .sidebar-search:hover {
-    border-color: #CBD5E1 !important;
-    background: #E2E8F0 !important;
-  }
-  :global(html.light-mode) .sidebar-search:focus-within {
-    background: #FFFFFF !important;
-    border-color: #2563EB !important;
-    box-shadow: none !important;
-  }
-  :global(html.light-mode) .sidebar-search input {
-    background: transparent !important;
-    border: none !important;
-    color: #0F172A !important;
-  }
-  :global(html.light-mode) .sidebar-search input::placeholder {
-    color: #64748B !important;
-  }
-  :global(html.light-mode) .sidebar-search :global(.search-icon) {
-    color: #64748B !important;
   }
 
   /* ── Grouped nav ──────────────────────────────────────────────────── */

@@ -651,10 +651,18 @@ fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
-fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
-    let clean_text = strip_ansi_codes(raw_text);
+fn is_known_architecture(arch: &str) -> bool {
+    matches!(
+        arch,
+        "x86_64" | "i686" | "i386" | "noarch" | "aarch64" | "armv7hl" | "armv6hl" | "ppc64le" | "s390x" | "riscv64" | "src"
+    )
+}
+
+fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult {
+    let clean_text = strip_ansi_codes(stdout_text);
     let mut packages: Vec<DnfPackageDiff> = Vec::new();
     let mut current_action: Option<String> = None;
+    let mut in_summary_section = false;
     let mut total_download_size = String::new();
     let mut disk_space_change = String::new();
 
@@ -670,6 +678,34 @@ fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
         }
 
         let lower = trimmed.to_lowercase();
+
+        // 1. Transaction Summary Section Boundary
+        if lower.contains("transaction summary") {
+            in_summary_section = true;
+            current_action = None;
+            continue;
+        }
+
+        // 2. Metrics Extractors (works anywhere in output)
+        if lower.contains("need to download") {
+            if let Some(pos) = line.find("Need to download") {
+                total_download_size = line[pos + "Need to download".len()..].trim().trim_end_matches('.').to_string();
+            }
+            continue;
+        } else if lower.starts_with("total download size:") {
+            total_download_size = trimmed["Total download size:".len()..].trim().to_string();
+            continue;
+        } else if lower.starts_with("after this operation") {
+            disk_space_change = trimmed.to_string();
+            continue;
+        }
+
+        // Once inside the summary section, NEVER parse packages
+        if in_summary_section {
+            continue;
+        }
+
+        // 3. Action Section Headers (Package List Zone only)
         if lower.starts_with("upgrading:") || lower == "upgrades" {
             current_action = Some("Upgrade".to_string());
             continue;
@@ -685,39 +721,47 @@ fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
         } else if lower.starts_with("obsoleting:") || lower == "obsoleting" {
             current_action = Some("Obsolete".to_string());
             continue;
-        } else if lower.starts_with("transaction summary:") || lower.starts_with("transaction summary") {
-            current_action = None;
-            continue;
         }
 
-        if lower.contains("need to download") {
-            if let Some(pos) = line.find("Need to download") {
-                total_download_size = line[pos + "Need to download".len()..].trim().trim_end_matches('.').to_string();
-            }
-        } else if lower.starts_with("total download size:") {
-            total_download_size = trimmed["Total download size:".len()..].trim().to_string();
-        } else if lower.starts_with("after this operation,") {
-            disk_space_change = trimmed.to_string();
-        }
-
+        // 4. Package Rows within active action section
         if let Some(ref action) = current_action {
-            // Replacement line in DNF5: "replacing bluez x86_64 0:5.87-4.fc44 updates 3.9 MiB"
+            // Replacement tracking (DNF5 `replacing <pkg> <arch> <ver>` or DNF4 `obsoleted by`)
             if trimmed.starts_with("replacing ") || trimmed.starts_with("obsoleted by ") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let old_ver = parts[3].to_string();
+                let old_ver = if parts.len() >= 4 && is_known_architecture(parts[2]) {
+                    Some(parts[3].to_string())
+                } else if parts.len() >= 3 && parts[2].chars().any(|c| c.is_ascii_digit()) {
+                    Some(parts[2].to_string())
+                } else if parts.len() >= 4 {
+                    Some(parts[3].to_string())
+                } else {
+                    None
+                };
+                if let Some(ver) = old_ver {
                     if let Some(last_pkg) = packages.last_mut() {
-                        last_pkg.old_version = Some(old_ver);
+                        last_pkg.old_version = Some(ver);
                     }
                 }
                 continue;
             }
 
+            // Skip headers or divider lines
             if trimmed.starts_with("Package ") || trimmed.starts_with("===") || trimmed.starts_with("---") {
                 continue;
             }
 
+            // Skip common informational sentence lines
+            if lower.starts_with("updating and")
+                || lower.starts_with("repositories loaded")
+                || lower.starts_with("operation aborted")
+                || lower.starts_with("nothing to do")
+                || lower.starts_with("complete!")
+            {
+                continue;
+            }
+
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            // A genuine package line MUST have at least: [name, arch, version, repo]
             if parts.len() >= 4 {
                 let name = parts[0].to_string();
                 let arch = parts[1].to_string();
@@ -725,23 +769,31 @@ fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
                 let repo = parts[3].to_string();
                 let size = if parts.len() >= 5 { parts[4..].join(" ") } else { "-".to_string() };
 
-                match action.as_str() {
-                    "Upgrade" => to_upgrade_count += 1,
-                    "Install" => to_install_count += 1,
-                    "Remove" => to_remove_count += 1,
-                    "Downgrade" => to_downgrade_count += 1,
-                    _ => {}
-                }
+                // STRICT VALIDATION:
+                // parts[1] must be a recognized architecture (e.g. x86_64, noarch, aarch64)
+                // parts[2] must contain numbers (e.g. 1.94.117-1, 0:5.87-6.fc44)
+                let is_arch = is_known_architecture(&arch);
+                let is_version = version.chars().any(|c| c.is_ascii_digit());
 
-                packages.push(DnfPackageDiff {
-                    name,
-                    arch,
-                    old_version: None,
-                    new_version: version,
-                    repo,
-                    size,
-                    action: action.clone(),
-                });
+                if is_arch && is_version {
+                    match action.as_str() {
+                        "Upgrade" | "Obsolete" => to_upgrade_count += 1,
+                        "Install" => to_install_count += 1,
+                        "Remove" => to_remove_count += 1,
+                        "Downgrade" => to_downgrade_count += 1,
+                        _ => {}
+                    }
+
+                    packages.push(DnfPackageDiff {
+                        name,
+                        arch,
+                        old_version: None,
+                        new_version: version,
+                        repo,
+                        size,
+                        action: action.clone(),
+                    });
+                }
             }
         }
     }
@@ -758,7 +810,7 @@ fn parse_dnf_dry_run(raw_text: &str) -> DnfDryRunResult {
         to_install_count,
         to_remove_count,
         to_downgrade_count,
-        raw_output: raw_text.to_string(),
+        raw_output: full_raw_text.to_string(),
     }
 }
 
@@ -809,7 +861,7 @@ pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResul
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let full_text = format!("{}\n{}", stdout, stderr);
 
-    let parsed = parse_dnf_dry_run(&full_text);
+    let parsed = parse_dnf_dry_run(&stdout, &full_text);
 
     // If no packages were parsed, check if DNF failed with a conflict or problem
     if parsed.packages.is_empty() {
@@ -819,11 +871,21 @@ pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResul
         });
 
         if has_critical_error {
-            let errors: Vec<&str> = full_text
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| l.starts_with("Error: ") || l.starts_with("Problem: ") || l.starts_with("Errors during downloading"))
-                .collect();
+            let mut errors = Vec::new();
+            let mut in_err = false;
+            for line in full_text.lines() {
+                let tr = line.trim();
+                if tr.starts_with("Error: ") || tr.starts_with("Problem: ") || tr.starts_with("Errors during downloading") {
+                    in_err = true;
+                }
+                if in_err {
+                    if tr.is_empty() && errors.len() >= 3 {
+                        in_err = false;
+                    } else if !tr.is_empty() {
+                        errors.push(tr);
+                    }
+                }
+            }
             if !errors.is_empty() {
                 return Err(errors.join("\n"));
             }
