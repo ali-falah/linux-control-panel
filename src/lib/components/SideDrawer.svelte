@@ -24,7 +24,7 @@
     headerActions?: Snippet;
   } = $props();
 
-  let isWideScreen = $state(typeof window !== 'undefined' ? window.innerWidth >= 1350 : false);
+  let isWideScreen = $state(typeof window !== 'undefined' ? window.innerWidth >= 1100 : false);
 
   function close() {
     isOpen = false;
@@ -33,7 +33,7 @@
   $effect(() => {
     if (typeof window !== 'undefined') {
       const onResize = () => {
-        isWideScreen = window.innerWidth >= 1350;
+        isWideScreen = window.innerWidth >= 1100;
       };
       window.addEventListener('resize', onResize);
       return () => window.removeEventListener('resize', onResize);
