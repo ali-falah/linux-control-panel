@@ -9,6 +9,7 @@
   let {
     isOpen = $bindable(false),
     title,
+    subtitle = '',
     width = '500px',
     dockable = true,
     children = undefined,
@@ -16,6 +17,7 @@
   }: {
     isOpen: boolean;
     title: string;
+    subtitle?: string;
     width?: string;
     dockable?: boolean;
     children?: Snippet;
@@ -49,6 +51,31 @@
   });
 
   const isDockedActive = $derived(isOpen && dockable && uiStore.isDrawerDocked && isWideScreen);
+
+  $effect(() => {
+    if (typeof document !== 'undefined') {
+      const shell = document.querySelector('.app-shell') as HTMLElement | null;
+      if (shell) {
+        if (isDockedActive) {
+          const currentWidth = width || '500px';
+          shell.style.setProperty('--docked-drawer-width', currentWidth);
+          shell.classList.add('drawer-docked-active');
+        } else {
+          shell.classList.remove('drawer-docked-active');
+          shell.style.removeProperty('--docked-drawer-width');
+        }
+      }
+      return () => {
+        if (typeof document !== 'undefined') {
+          const s = document.querySelector('.app-shell') as HTMLElement | null;
+          if (s) {
+            s.classList.remove('drawer-docked-active');
+            s.style.removeProperty('--docked-drawer-width');
+          }
+        }
+      };
+    }
+  });
 </script>
 
 {#if isOpen}
@@ -67,38 +94,43 @@
     <div 
       class="drawer" 
       class:docked-drawer={isDockedActive}
-      style="width: {isDockedActive ? 'var(--docked-drawer-width, 540px)' : width}; max-width: 100vw;"
+      style="width: {width || '500px'}; max-width: 100vw;"
       transition:fly={{ x: 500, duration: 250, easing: cubicOut }}
       onwheel={(e) => e.stopPropagation()}
     >
       <div class="drawer-header">
-        <div class="drawer-title-group">
-          <h2 class="drawer-title">{title}</h2>
-          {#if isDockedActive}
-            <span class="badge badge-info" style="font-size: 10px; font-weight: 600;">SPLIT VIEW</span>
-          {/if}
+        <div class="drawer-title-group" title={subtitle ? `${title} — ${subtitle}` : title}>
+          <div class="drawer-title-stack">
+            <h2 class="drawer-title" title={title}>{title}</h2>
+            {#if subtitle}
+              <span class="drawer-subtitle truncate" title={subtitle}>{subtitle}</span>
+            {/if}
+          </div>
         </div>
         <div class="drawer-header-actions">
+          {#if isDockedActive}
+            <span class="badge badge-info split-view-badge" title="Drawer is currently docked in side-by-side split screen mode">SPLIT VIEW</span>
+          {/if}
           {#if headerActions}
             {@render headerActions()}
           {/if}
           {#if dockable && isWideScreen}
             <button 
               type="button"
-              class="btn btn-icon btn-ghost" 
+              class="drawer-icon-btn" 
               onclick={() => uiStore.toggleDrawerDocked()} 
               title={uiStore.isDrawerDocked ? "Undock Drawer (Overlay Mode)" : "Dock as Split Screen (Side-by-Side)"}
               aria-label="Toggle Dock Split View"
             >
               {#if uiStore.isDrawerDocked}
-                <PanelRightClose size={18} style="color: var(--color-accent);" />
+                <PanelRightClose size={15} style="color: var(--color-accent);" />
               {:else}
-                <Columns2 size={18} />
+                <Columns2 size={15} />
               {/if}
             </button>
           {/if}
-          <button type="button" class="btn btn-icon btn-ghost" onclick={close} aria-label="Close">
-            <X size={20} />
+          <button type="button" class="drawer-icon-btn" onclick={close} aria-label="Close" title="Close Drawer">
+            <X size={15} />
           </button>
         </div>
       </div>
@@ -161,9 +193,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: 12px 18px;
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
+    gap: 12px;
   }
 
   .drawer-title-group {
@@ -171,29 +204,100 @@
     align-items: center;
     gap: 8px;
     overflow: hidden;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .drawer-title-stack {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+    gap: 1px;
   }
 
   .drawer-title {
     margin: 0;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--color-text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  .drawer-subtitle {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .split-view-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    padding: 0 7px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
   
   .drawer-header-actions {
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .drawer-icon-btn,
+  :global(.drawer-icon-btn) {
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card, rgba(255, 255, 255, 0.05));
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .drawer-icon-btn:hover,
+  :global(.drawer-icon-btn:hover) {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
+  }
+
+  :global(html.light-mode) .drawer-icon-btn,
+  :global(html.light-mode .drawer-icon-btn) {
+    background: #FFFFFF;
+    border-color: #CBD5E1;
+    color: #64748B;
+  }
+
+  :global(html.light-mode) .drawer-icon-btn:hover,
+  :global(html.light-mode .drawer-icon-btn:hover) {
+    background: #F1F5F9;
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .drawer-content {
     flex: 1;
     overflow-y: auto;
-    padding: 20px;
+    padding: 16px 18px;
     display: flex;
     flex-direction: column;
+    gap: 10px;
   }
 </style>

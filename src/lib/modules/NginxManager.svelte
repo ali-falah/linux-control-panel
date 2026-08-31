@@ -4030,7 +4030,7 @@
 </SideDrawer>
 
 <!-- ══ SITE INSPECTOR DRAWER ═════════════════════════════════════════════════ -->
-<SideDrawer bind:isOpen={showInspectDrawer} title="Site Inspector — {inspectingSite?.name || 'Config'}" width="680px">
+<SideDrawer bind:isOpen={showInspectDrawer} title="Site Inspector — {inspectingSite?.name || 'Config'}" width="680px" dockable={true}>
   {#if inspectingSite}
     <div style="display:flex; flex-direction:column; gap:16px; padding-top:4px;">
       <!-- Metadata Bar -->

@@ -434,7 +434,7 @@
     {/if}
   {/if}
 
-  <SideDrawer bind:isOpen={showTroubleshooter} title="AVC Denial Troubleshooter" width="540px">
+  <SideDrawer bind:isOpen={showTroubleshooter} title="AVC Denial Troubleshooter" width="540px" dockable={true}>
     {#if selectedDenial}
       <div style="display:flex; flex-direction:column; gap:16px; padding:8px 0;">
         <div>

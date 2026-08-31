@@ -95,7 +95,7 @@ use commands::{
     ssh_cert_vault::{
         vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
         vault_list_ssh_client_config, vault_save_ssh_client_config, vault_delete_ssh_client_host,
-        vault_list_known_hosts, vault_remove_known_host,
+        vault_list_known_hosts, vault_remove_known_host, vault_clear_known_hosts,
         vault_list_authorized_keys, vault_add_authorized_key, vault_remove_authorized_key,
         vault_get_sshd_hardening, vault_list_ssl_certs, vault_test_remote_ssl,
         vault_get_fail2ban_status, vault_unban_ip, vault_ban_ip, vault_manage_fail2ban_service,
@@ -444,6 +444,7 @@ pub fn run() {
             vault_delete_ssh_client_host,
             vault_list_known_hosts,
             vault_remove_known_host,
+            vault_clear_known_hosts,
             vault_list_authorized_keys,
             vault_add_authorized_key,
             vault_remove_authorized_key,

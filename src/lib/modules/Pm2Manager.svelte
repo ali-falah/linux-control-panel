@@ -21,6 +21,7 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import Table from '../components/ui/Table.svelte';
+  import ToggleButton from '../components/ui/ToggleButton.svelte';
   import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import { tableFeatures } from '../actions/tableFeatures.ts';
   import { portal } from '../actions/portal.ts';
@@ -1388,15 +1389,15 @@
                       style="margin: 0; width: 160px;"
                     />
 
-                    <Button
-                      variant={logAutoRefresh ? 'primary' : 'outline'}
-                      size="sm"
-                      onclick={() => logAutoRefresh = !logAutoRefresh}
-                      title="Toggle live auto polling"
-                    >
-                      <RotateCw size={12} class={logAutoRefresh ? 'spin' : ''} />
-                      <span>{logAutoRefresh ? 'Live (2s)' : 'Paused'}</span>
-                    </Button>
+                    <ToggleButton
+                      bind:active={logAutoRefresh}
+                      activeLabel="Live (2s)"
+                      inactiveLabel="Paused"
+                      activeIcon={RotateCw}
+                      inactiveIcon={RotateCw}
+                      activeTitle="Live auto polling is active (2s). Click to pause."
+                      inactiveTitle="Live auto polling is paused. Click to enable 2s live polling."
+                    />
 
                     <KebabMenu align="right" title="Application & Log Options">
                       <button class="menu-item" onclick={() => showProcessDrawer = true}>
@@ -1808,6 +1809,7 @@
     bind:isOpen={showProcessDrawer}
     title="{selectedProcess.name} (#{selectedProcess.pm_id})"
     width="640px"
+    dockable={true}
   >
     {#snippet headerActions()}
       <div class="drawer-actions-row">

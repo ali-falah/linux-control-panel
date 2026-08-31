@@ -430,6 +430,17 @@ pub fn vault_remove_known_host(line_number: usize) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn vault_clear_known_hosts() -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let kh_file = Path::new(&home).join(".ssh").join("known_hosts");
+
+    if kh_file.exists() {
+        fs::write(&kh_file, "").map_err(|e| e.to_string())?;
+    }
+    Ok("All known host records cleared successfully".to_string())
+}
+
 // ─── 4. Authorized Keys ────────────────────────────────────────────────────────
 
 #[tauri::command]

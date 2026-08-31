@@ -15,6 +15,7 @@
   import Table from '../components/ui/Table.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import ToggleButton from '../components/ui/ToggleButton.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
 
   let currentTab = $state<'overview' | 'processes'>(
@@ -59,6 +60,15 @@
       if (uiStore.processSearchQuery !== '') {
         currentTab = 'processes';
       }
+    }
+  });
+
+  let prevTab = $state(currentTab);
+  $effect(() => {
+    if (currentTab !== prevTab) {
+      isDrawerOpen = false;
+      isProcessDrawerOpen = false;
+      prevTab = currentTab;
     }
   });
 
@@ -788,13 +798,15 @@
       style="margin-right: 8px;"
     />
     <div style="display:flex; gap: 8px;">
-      <Button onclick={() => isPaused = !isPaused} variant={isPaused ? 'primary' : 'ghost'}>
-        {#if isPaused}
-          <Play size={14} style="margin-right: 4px;" /> Resume
-        {:else}
-          <Pause size={14} style="margin-right: 4px;" /> Pause
-        {/if}
-      </Button>
+      <ToggleButton
+        bind:active={isPaused}
+        activeLabel="Resume"
+        inactiveLabel="Pause"
+        activeIcon={Play}
+        inactiveIcon={Pause}
+        activeTitle="Live monitoring is paused. Click to resume."
+        inactiveTitle="Live monitoring is running. Click to pause."
+      />
       <Button onclick={forceRefresh} variant="primary" disabled={isRefreshing}>
         <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
         Refresh
@@ -1067,17 +1079,17 @@
                   </div>
                 </div>
 
-                <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px;">
-                  <Table tableAction={tableFeatures} class="active-conn-table" style="flex: 1; min-height: 0; overflow-y: auto;">
+                <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px; width: 100%;">
+                  <Table tableAction={tableFeatures} class="active-conn-table" style="flex: 1; min-height: 0; overflow-y: auto; width: 100%;">
                     <thead>
                       <tr>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Proto</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer; width:55px;">Proto</th>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Local</th>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Remote</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">State</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">PID</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer; width:75px;">State</th>
+                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer; width:65px;">PID</th>
                         <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Process</th>
-                        <th style="padding:6px; text-align:right; color:var(--color-text-secondary);">Action</th>
+                        <th style="padding:6px; text-align:right; color:var(--color-text-secondary); width:50px;">Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1088,20 +1100,20 @@
                           onclick={() => openConnectionDetails(conn)}
                           oncontextmenu={(e) => handleConnectionContextMenu(e, conn)}
                         >
-                          <td style="padding:6px; color:var(--color-text-primary); font-family:var(--font-mono); font-size:11px;">{conn.protocol}</td>
-                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.local_address}>
+                          <td style="padding:6px; color:var(--color-text-primary); font-family:var(--font-mono); font-size:11px; white-space:nowrap;">{conn.protocol}</td>
+                          <td style="padding:6px; color:var(--color-text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; font-family:var(--font-mono); font-size:11px;" title={conn.local_address}>
                             {conn.local_address}
                           </td>
-                          <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.remote_address}>
+                          <td style="padding:6px; color:var(--color-text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; font-family:var(--font-mono); font-size:11px;" title={conn.remote_address}>
                             {conn.remote_address}
                           </td>
-                          <td style="padding:6px;">
+                          <td style="padding:6px; white-space:nowrap;">
                             <span style="font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:var(--font-mono); background:{isListen ? 'var(--color-warning-muted, rgba(245,158,11,0.15))' : 'var(--color-success-muted, rgba(34,197,94,0.15))'}; color:{isListen ? 'var(--color-warning)' : 'var(--color-success)'};">
                               {conn.state}
                             </span>
                           </td>
-                          <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono); font-size:11px;">{conn.pid || '-'}</td>
-                          <td style="padding:6px; color:var(--color-text-secondary); font-size:11px;">{conn.process_name}</td>
+                          <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono); font-size:11px; white-space:nowrap;">{conn.pid || '-'}</td>
+                          <td style="padding:6px; color:var(--color-text-secondary); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:140px;" title={conn.process_name}>{conn.process_name}</td>
                           <td style="padding:6px; text-align:right;" onclick={(e) => e.stopPropagation()}>
                             <KebabMenu align="right">
                               <button
@@ -1223,9 +1235,19 @@
                 class:depth-1={item.depth === 1}
                 class:depth-2={item.depth === 2}
                 class:depth-3={item.depth >= 3}
-                onclick={() => item.hasChildren ? toggleTreeExpand(p.pid) : undefined}
+                class:row-split-interactive={isProcessDrawerOpen}
+                class:selected-unit={inspectedProcess?.pid === p.pid && isProcessDrawerOpen}
+                onclick={(e) => {
+                  const target = e.target as HTMLElement | null;
+                  if (target?.closest('button, input, select, textarea, a, .form-checkbox, .action-btn, .kebab-trigger, .menu-item, .tree-node-trigger, .pid-copy-btn, [data-no-row-click]')) return;
+                  if (isProcessDrawerOpen) {
+                    openProcessInspector(p);
+                  } else if (item.hasChildren) {
+                    toggleTreeExpand(p.pid);
+                  }
+                }}
                 oncontextmenu={(e) => handleProcContextMenu(e, p)}
-                style="cursor: {item.hasChildren ? 'pointer' : 'default'};"
+                style="cursor: {isProcessDrawerOpen || item.hasChildren ? 'pointer' : 'default'};"
               >
                 <td class="col-pid" onclick={(e) => e.stopPropagation()}>
                   <div class="pid-badge-container">
@@ -1553,7 +1575,7 @@
 </SideDrawer>
 
 <!-- Process Inspector Side Drawer -->
-<SideDrawer bind:isOpen={isProcessDrawerOpen} title="Process Inspector — {inspectedProcess?.name || 'Process'}" width="580px">
+<SideDrawer bind:isOpen={isProcessDrawerOpen} title="Process Inspector — {inspectedProcess?.name || 'Process'}" width="580px" dockable={true}>
   {#if inspectedProcess}
     <div style="display:flex; flex-direction:column; gap:16px; padding:4px;">
 
@@ -1825,11 +1847,17 @@
   /* 2-column layout */
   .monitor-layout {
     display: grid;
-    grid-template-columns: 4fr 10fr;
+    grid-template-columns: minmax(220px, 300px) 1fr;
     gap: 10px;
     align-items: stretch;
     height: 100%;
     min-height: 0;
+    width: 100%;
+  }
+
+  :global(.drawer-docked-active) .monitor-layout {
+    grid-template-columns: minmax(200px, 240px) 1fr;
+    gap: 8px;
   }
   .monitor-column-left {
     display: flex;

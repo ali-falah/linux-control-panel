@@ -10,7 +10,8 @@
   import {
     Settings, RefreshCw, Search, Play, Square, RotateCcw,
     FileText, ShieldBan, ShieldCheck, ShieldAlert, Rocket, ChevronRight, User, Server, Activity, Network, GitFork, Link2,
-    Copy, Edit3, Lock, Unlock, Clock, Cpu, HardDrive, Layers, ArrowUpRight, GitBranch, ListOrdered, Timer
+    Copy, Edit3, Lock, Unlock, Clock, Cpu, HardDrive, Layers, ArrowUpRight, GitBranch, ListOrdered, Timer,
+    Terminal, X, AlertTriangle, CheckCircle2, Info
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -27,6 +28,7 @@
   import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import Stepper from '../components/ui/Stepper.svelte';
   import Select from '../components/ui/Select.svelte';
+  import ToggleButton from '../components/ui/ToggleButton.svelte';
   import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
@@ -293,11 +295,160 @@
     }
   });
 
+  let prevMainTab = $state(mainTab);
+  $effect(() => {
+    if (mainTab !== prevMainTab) {
+      panelOpen = false;
+      activePanel = null;
+      prevMainTab = mainTab;
+    }
+  });
+
   let selectedUnit = $state<ServiceUnit | null>(null);
   let activePanel = $state<'logs' | 'editor' | 'dependencies' | null>(null);
   let panelOpen = $state(false);
   let logs = $state('');
   let logsLoading = $state(false);
+
+  // ─── Service Drawer Human-Readable Log State ───────────────────────────────
+  interface ParsedServiceLog {
+    raw: string;
+    lineNumber: number;
+    timestamp: string;
+    fullTimestamp?: string;
+    process: string;
+    level: 'error' | 'warning' | 'info' | 'notice' | 'debug';
+    levelLabel: string;
+    message: string;
+    badgeType: 'danger' | 'warning' | 'accent' | 'success' | 'neutral';
+  }
+
+  let logSearch = $state('');
+  let logLevelFilter = $state<'all' | 'error' | 'warning' | 'info'>('all');
+  let logLineLimit = $state<string>('100');
+  let logViewMode = $state<'formatted' | 'raw'>('formatted');
+  let logContainerRef = $state<HTMLDivElement | null>(null);
+
+  function parseJournalLogLine(line: string, index: number): ParsedServiceLog {
+    let timestamp = '';
+    let fullTimestamp = '';
+    let process = '';
+    let message = line;
+    let level: 'error' | 'warning' | 'info' | 'notice' | 'debug' = 'info';
+    let levelLabel = 'INFO';
+    let badgeType: 'danger' | 'warning' | 'accent' | 'success' | 'neutral' = 'neutral';
+
+    // 1. Syslog / Journal short-precise regex: (Month Day Time) (Host) (Process[PID]): (Message)
+    const syslogMatch = line.match(/^([A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+([^\s:]+)\s+([^:]+):\s*(.*)$/);
+    // 2. ISO timestamp regex: "2026-08-31T10:06:22.373684+03:00 host process[123]: message"
+    const isoMatch = !syslogMatch ? line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?)\s+([^\s:]+)\s+([^:]+):\s*(.*)$/) : null;
+
+    if (syslogMatch) {
+      fullTimestamp = syslogMatch[1];
+      const timeOnly = syslogMatch[1].split(/\s+/)[2] || syslogMatch[1];
+      timestamp = timeOnly.length > 12 ? timeOnly.slice(0, 12) : timeOnly;
+      process = syslogMatch[3].trim();
+      message = syslogMatch[4];
+    } else if (isoMatch) {
+      fullTimestamp = isoMatch[1];
+      const timeOnly = isoMatch[1].split('T')[1]?.split(/[+-Z]/)[0] || isoMatch[1];
+      timestamp = timeOnly.length > 12 ? timeOnly.slice(0, 12) : timeOnly;
+      process = isoMatch[3].trim();
+      message = isoMatch[4];
+    }
+
+    // Check for internal tags like "<info>", "<warn>", "<err>", "<notice>", "<debug>"
+    const tagMatch = message.match(/^<([a-z]+)>\s*(?:\[\d+(?:\.\d+)?\]\s*)?(.*)$/i);
+    if (tagMatch) {
+      const rawTag = tagMatch[1].toLowerCase();
+      message = tagMatch[2];
+      if (['err', 'error', 'crit', 'alert', 'emerg'].includes(rawTag)) {
+        level = 'error';
+        levelLabel = 'ERR';
+        badgeType = 'danger';
+      } else if (['warn', 'warning'].includes(rawTag)) {
+        level = 'warning';
+        levelLabel = 'WARN';
+        badgeType = 'warning';
+      } else if (['notice', 'info'].includes(rawTag)) {
+        level = 'info';
+        levelLabel = rawTag === 'notice' ? 'NOTE' : 'INFO';
+        badgeType = 'accent';
+      } else if (rawTag === 'debug') {
+        level = 'debug';
+        levelLabel = 'DEBUG';
+        badgeType = 'neutral';
+      }
+    }
+
+    // Inspect message content for errors / notices
+    const lowerMsg = message.toLowerCase();
+    if (level === 'info') {
+      if (lowerMsg.includes('failed to') || lowerMsg.includes('fatal:') || lowerMsg.includes('error:') || lowerMsg.includes('crash') || lowerMsg.includes('segfault') || lowerMsg.includes('aborted') || lowerMsg.includes('exception:')) {
+        level = 'error';
+        levelLabel = 'ERR';
+        badgeType = 'danger';
+      } else if (lowerMsg.includes('warning:') || lowerMsg.includes('warn:') || lowerMsg.includes('deprecated') || lowerMsg.includes('timeout') || lowerMsg.includes('timed out')) {
+        level = 'warning';
+        levelLabel = 'WARN';
+        badgeType = 'warning';
+      } else if (lowerMsg.startsWith('started ') || lowerMsg.startsWith('starting ') || lowerMsg.includes('successfully') || lowerMsg.includes('active (running)')) {
+        level = 'notice';
+        levelLabel = lowerMsg.startsWith('started') ? 'STARTED' : 'ACTIVE';
+        badgeType = 'success';
+      } else if (lowerMsg.startsWith('stopped ') || lowerMsg.startsWith('stopping ')) {
+        level = 'notice';
+        levelLabel = 'STOPPED';
+        badgeType = 'neutral';
+      }
+    }
+
+    return {
+      raw: line,
+      lineNumber: index + 1,
+      timestamp: timestamp || '—',
+      fullTimestamp,
+      process: process || '',
+      level,
+      levelLabel,
+      message,
+      badgeType
+    };
+  }
+
+  let parsedLogEntries = $derived.by(() => {
+    if (!logs) return [];
+    const lines = logs.split('\n');
+    const result: ParsedServiceLog[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].trim();
+      if (l) {
+        result.push(parseJournalLogLine(l, i));
+      }
+    }
+    return result;
+  });
+
+  let filteredLogs = $derived.by(() => {
+    return parsedLogEntries.filter(entry => {
+      if (logLevelFilter === 'error' && entry.level !== 'error') return false;
+      if (logLevelFilter === 'warning' && entry.level !== 'warning') return false;
+      if (logLevelFilter === 'info' && entry.level !== 'info' && entry.level !== 'notice') return false;
+
+      if (logSearch.trim()) {
+        const q = logSearch.toLowerCase().trim();
+        const matchMsg = entry.message.toLowerCase().includes(q);
+        const matchProc = entry.process.toLowerCase().includes(q);
+        const matchTs = entry.timestamp.toLowerCase().includes(q);
+        if (!matchMsg && !matchProc && !matchTs) return false;
+      }
+
+      return true;
+    });
+  });
+
+  let logErrorCount = $derived(parsedLogEntries.filter(e => e.level === 'error').length);
+  let logWarnCount = $derived(parsedLogEntries.filter(e => e.level === 'warning').length);
   let unitFileContent = $state('');
   let unitFileLoading = $state(false);
   let actionInProgress = $state<string | null>(null);
@@ -550,18 +701,20 @@
     }
   }
 
-  async function openLogs(unit: ServiceUnit) {
+  async function openLogs(unit: ServiceUnit, customLines?: number | string) {
     selectedUnit = unit;
     activePanel = 'logs';
     panelOpen = true;
     logsLoading = true;
+    if (customLines !== undefined) logLineLimit = String(customLines);
+    const lineCount = Number(customLines || logLineLimit || 100);
     logs = '';
     try {
-      logs = await invoke<string>('get_service_logs', { name: unit.name, lines: 100, userMode: userScope });
-      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 0, true);
+      logs = await invoke<string>('get_service_logs', { name: unit.name, lines: lineCount, userMode: userScope });
+      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n ${lineCount}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load logs: ${e}`, 'error');
-      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 1, false);
+      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n ${lineCount}`, 1, false);
     } finally {
       logsLoading = false;
     }
@@ -874,21 +1027,17 @@
   <PageHeader title="Service Manager" icon={Settings}>
     <div style="display:flex; align-items:center; gap:10px;">
       {#if mainTab === 'services'}
-        <!-- Single Toggleable Scope Button -->
-        <button 
-          class="scope-toggle-btn"
-          class:active={userScope}
-          onclick={() => { userScope = !userScope; load(); }}
-          title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
-        >
-          {#if userScope}
-            <User size={12} />
-            <span>User Scope</span>
-          {:else}
-            <Server size={12} />
-            <span>System Scope</span>
-          {/if}
-        </button>
+        <!-- Single Toggleable Scope Button using reusable ToggleButton -->
+        <ToggleButton
+          bind:active={userScope}
+          activeLabel="User Scope"
+          inactiveLabel="System Scope"
+          activeIcon={User}
+          inactiveIcon={Server}
+          activeTitle="Viewing User Services (--user). Click to switch to System Services."
+          inactiveTitle="Viewing System Services. Click to switch to User Services."
+          onclick={() => load()}
+        />
       {/if}
 
       <div class="header-tab-bar">
@@ -1050,15 +1199,22 @@
     <SideDrawer
       bind:isOpen={panelOpen}
       title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : (activePanel === 'dependencies' ? `Dependencies — ${selectedUnit?.name}` : `Unit File — ${selectedUnit?.name}`)}
+      subtitle={selectedUnit?.description || ''}
       width="640px"
     >
       {#snippet headerActions()}
         {#if activePanel === 'logs' && selectedUnit}
-          <Button variant="outline" class="btn-sm" onclick={() => uiStore.jumpToJournalService(selectedUnit!.name)}>
-            <FileText size={13} /> Full Journal ↗
-          </Button>
+          <button
+            type="button"
+            class="drawer-icon-btn"
+            onclick={() => uiStore.jumpToJournalService(selectedUnit!.name)}
+            title="Open Full Service Journal in Journal Viewer"
+            aria-label="Open Full Journal"
+          >
+            <FileText size={15} />
+          </button>
         {:else if activePanel === 'editor'}
-          <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
+          <Button variant="primary" size="sm" onclick={confirmSaveUnitFile}
             disabled={saving || editedContent === unitFileContent}>
             {saving ? 'Saving…' : 'Save Override'}
           </Button>
@@ -1066,31 +1222,184 @@
       {/snippet}
 
       {#if selectedUnit?.is_protected}
-        <div class="drawer-protection-alert {selectedUnit.protection_level}">
-          {#if selectedUnit.protection_level === 'critical'}
-            <ShieldAlert size={18} class="protection-alert-icon critical" />
-            <div class="protection-alert-text">
-              <strong style="color: var(--color-error); font-size: 12.5px;">Critical Operating System Core</strong>
-              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit is critical for operating system integrity. Masking, disabling, or stopping is strictly locked.'}</span>
-            </div>
-          {:else}
-            <ShieldCheck size={18} class="protection-alert-icon essential" />
-            <div class="protection-alert-text">
-              <strong style="color: var(--color-accent); font-size: 12.5px;">Protected Infrastructure Service</strong>
-              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit provides essential security, network, or display services. Guarded against accidental masking or disablement.'}</span>
-            </div>
-          {/if}
+        <div 
+          class="drawer-protection-banner {selectedUnit.protection_level}" 
+          title={selectedUnit.protection_reason || (selectedUnit.protection_level === 'critical' ? 'Critical Operating System Core: Masking, disabling, or stopping is strictly locked.' : 'Protected Infrastructure Service: Guarded against accidental masking or disablement.')}
+        >
+          <div class="protection-banner-left">
+            {#if selectedUnit.protection_level === 'critical'}
+              <ShieldAlert size={14} class="protection-alert-icon critical flex-shrink-0" />
+              <strong class="protection-banner-title critical">Critical System Core:</strong>
+            {:else}
+              <ShieldCheck size={14} class="protection-alert-icon essential flex-shrink-0" />
+              <strong class="protection-banner-title essential">Protected Infrastructure:</strong>
+            {/if}
+            <span class="protection-banner-desc truncate">
+              {selectedUnit.protection_reason || 'Essential system service. Masking/disabling restricted.'}
+            </span>
+          </div>
+          <span class="protection-banner-info-btn" title={selectedUnit.protection_reason || 'Essential system infrastructure service. Masking or disabling will cause loss of network, security, or display access.'}>
+            <Info size={13} />
+          </span>
         </div>
       {/if}
 
       {#if activePanel === 'logs'}
-        {#if logsLoading}
-          <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-            <RefreshCw size={14} class="animate-spin-slow" /> Loading logs…
+        <div class="service-logs-wrap">
+          <!-- Logs Filter & Controls Bar (Single Line Compact Layout) -->
+          <div class="service-logs-toolbar">
+            <!-- Search Box with Clean Inner Input -->
+            <div class="logs-search-wrapper">
+              <Search size={13} class="logs-search-icon" />
+              <input
+                type="text"
+                class="logs-search-input font-mono"
+                placeholder="Filter log stream..."
+                bind:value={logSearch}
+              />
+              {#if logSearch}
+                <button class="logs-search-clear" onclick={() => logSearch = ''} title="Clear search filter">
+                  <X size={11} />
+                </button>
+              {/if}
+            </div>
+
+            <!-- Controls: Reusable Select dropdowns, view mode, reload, copy -->
+            <div class="logs-toolbar-controls">
+              <!-- Severity Level Dropdown Filter with Reusable Select -->
+              <div class="logs-select-wrap">
+                <Select
+                  bind:value={logLevelFilter}
+                  class="logs-select-control font-mono"
+                  title="Filter by severity level"
+                >
+                  <option value="all">All Logs ({parsedLogEntries.length})</option>
+                  <option value="error">🔴 Errors ({logErrorCount})</option>
+                  <option value="warning">🟡 Warnings ({logWarnCount})</option>
+                  <option value="info">🔵 Info &amp; System</option>
+                </Select>
+              </div>
+
+              <!-- Line Limit Dropdown with Reusable Select -->
+              <div class="logs-select-wrap lines-select">
+                <Select
+                  bind:value={logLineLimit}
+                  onchange={() => { if (selectedUnit) openLogs(selectedUnit, Number(logLineLimit)); }}
+                  class="logs-select-control font-mono"
+                  title="Fetch line limit from systemd journal"
+                >
+                  <option value="50">50 lines</option>
+                  <option value="100">100 lines</option>
+                  <option value="250">250 lines</option>
+                  <option value="500">500 lines</option>
+                </Select>
+              </div>
+
+              <!-- View mode toggle: Single ToggleButton for Formatted vs Raw -->
+              <ToggleButton
+                class="logs-format-toggle"
+                active={logViewMode === 'raw'}
+                activeLabel="Raw"
+                inactiveLabel="Formatted"
+                activeIcon={FileCode}
+                inactiveIcon={Sparkles}
+                activeTitle="Viewing raw terminal console output. Click for structured formatted view."
+                inactiveTitle="Viewing human-readable structured logs. Click for raw console view."
+                onclick={(_, active) => { logViewMode = active ? 'raw' : 'formatted'; }}
+              />
+
+              <!-- Compact Kebab Menu for Actions (Refresh & Copy) -->
+              <KebabMenu align="right" title="More log actions">
+                <button
+                  type="button"
+                  class="menu-item"
+                  onclick={() => { if (selectedUnit) openLogs(selectedUnit); }}
+                  disabled={logsLoading}
+                >
+                  <RefreshCw size={13} class={logsLoading ? 'animate-spin-slow' : ''} style="color: var(--color-accent);" />
+                  <span>Refresh Logs</span>
+                </button>
+                <button
+                  type="button"
+                  class="menu-item"
+                  onclick={() => {
+                    const textToCopy = logViewMode === 'formatted'
+                      ? filteredLogs.map(e => `[${e.timestamp}] [${e.levelLabel}] ${e.process ? `(${e.process}) ` : ''}${e.message}`).join('\n')
+                      : logs;
+                    navigator.clipboard.writeText(textToCopy);
+                    uiStore.addToast('Logs copied to clipboard', 'info');
+                  }}
+                >
+                  <Copy size={13} style="color: var(--color-info);" />
+                  <span>Copy Logs</span>
+                </button>
+              </KebabMenu>
+            </div>
           </div>
-        {:else}
-          <pre class="log-output">{logs || 'No log output found.'}</pre>
-        {/if}
+
+          <!-- Logs Output Area -->
+          {#if logsLoading}
+            <div class="logs-loading-state">
+              <RefreshCw size={18} class="animate-spin-slow text-accent" />
+              <span>Querying systemd journald stream for <code>{selectedUnit?.name}</code>…</span>
+            </div>
+          {:else if parsedLogEntries.length === 0}
+            <div class="logs-empty-state">
+              <Terminal size={32} class="text-muted" />
+              <h4>No Log Output Available</h4>
+              <p>No recent log messages recorded in journald for <code>{selectedUnit?.name}</code>.</p>
+              <Button variant="outline" size="sm" class="mt-2" onclick={() => { if (selectedUnit) openLogs(selectedUnit); }}>
+                <RefreshCw size={12} /> Reload Logs
+              </Button>
+            </div>
+          {:else if logViewMode === 'raw'}
+            <pre class="log-output-raw">{logs}</pre>
+          {:else if filteredLogs.length === 0}
+            <div class="logs-empty-state">
+              <Search size={28} class="text-muted" />
+              <h4>No Matching Log Lines</h4>
+              <p>No entries match the filter "<strong>{logSearch || logLevelFilter}</strong>".</p>
+              <Button variant="outline" size="sm" class="mt-2" onclick={() => { logSearch = ''; logLevelFilter = 'all'; }}>
+                Clear Filters
+              </Button>
+            </div>
+          {:else}
+            <!-- Formatted Human-Readable Log Stream -->
+            <div class="human-logs-list" bind:this={logContainerRef}>
+              {#each filteredLogs as entry}
+                <div class="human-log-row {entry.level}">
+                  <span class="human-log-line-num font-mono">{entry.lineNumber}</span>
+                  
+                  <span class="human-log-time font-mono" title={entry.fullTimestamp || entry.timestamp}>
+                    {entry.timestamp}
+                  </span>
+
+                  <span class="human-log-badge badge-{entry.badgeType}">
+                    {entry.levelLabel}
+                  </span>
+
+                  {#if entry.process}
+                    <span class="human-log-process font-mono" title={entry.process}>
+                      {entry.process}
+                    </span>
+                  {/if}
+
+                  <span class="human-log-message">
+                    {entry.message}
+                  </span>
+                </div>
+              {/each}
+            </div>
+
+            <!-- Footer summary -->
+            <div class="logs-footer-summary">
+              <span>Showing {filteredLogs.length} of {parsedLogEntries.length} log lines</span>
+              {#if selectedUnit}
+                <span class="font-mono text-muted">journalctl {userScope ? '--user' : ''} -u {selectedUnit.name} -n {logLineLimit}</span>
+              {/if}
+            </div>
+          {/if}
+        </div>
       {:else if activePanel === 'dependencies'}
         {#if depsLoading}
           <div style="padding:24px;color:var(--color-text-muted);display:flex;align-items:center;justify-content:center;gap:8px">
@@ -1245,7 +1554,20 @@
           </thead>
           <tbody>
             {#each paginatedUnits as unit (unit.name)}
-              <tr class:selected-unit={selectedUnit?.name === unit.name || selectedUnitNames.has(unit.name)} oncontextmenu={(e) => handleServiceContextMenu(e, unit)}>
+              <tr 
+                class:selected-unit={selectedUnit?.name === unit.name || selectedUnitNames.has(unit.name)} 
+                class="row-split-interactive"
+                oncontextmenu={(e) => handleServiceContextMenu(e, unit)}
+                onclick={(e) => {
+                  const target = e.target as HTMLElement | null;
+                  if (target?.closest('button, input, select, textarea, a, .form-checkbox, .action-btn, .kebab-trigger, .menu-item, [data-no-row-click]')) return;
+                  if (panelOpen) {
+                    if (activePanel === 'logs') openLogs(unit);
+                    else if (activePanel === 'editor') openEditor(unit);
+                    else if (activePanel === 'dependencies') openDependencies(unit);
+                  }
+                }}
+              >
                 <td style="text-align: center;" onclick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
@@ -1270,7 +1592,7 @@
                     {/if}
                   </div>
                   {#if unit.description}
-                    <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px">{unit.description}</div>
+                    <div style="font-size:11px;color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px" title={unit.description}>{unit.description}</div>
                   {/if}
                 </td>
                 <td>
@@ -3074,5 +3396,420 @@
 
   :global(html.light-mode) .terminal-preview-card pre {
     color: #0f172a !important;
+  }
+
+  /* ── Service Drawer Protection Banner (Compact) ───────────────────────── */
+  .drawer-protection-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.3;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .drawer-protection-banner.critical {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    color: var(--color-error);
+  }
+
+  .drawer-protection-banner.essential,
+  .drawer-protection-banner:not(.critical) {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
+    border: 1px solid var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .protection-banner-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .protection-banner-title {
+    font-weight: 700;
+    white-space: nowrap;
+    font-size: 11.5px;
+  }
+
+  .protection-banner-desc {
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    opacity: 0.9;
+  }
+
+  .protection-banner-info-btn {
+    opacity: 0.7;
+    cursor: help;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    color: inherit;
+  }
+  .protection-banner-info-btn:hover { opacity: 1; }
+
+  /* ── Service Drawer Human-Readable Log Viewer ───────────────────────────── */
+  .service-logs-wrap {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 480px;
+    gap: 8px;
+  }
+
+  .service-logs-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--color-bg-base, rgba(0, 0, 0, 0.2));
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+
+  .logs-search-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: var(--color-bg-card, rgba(255, 255, 255, 0.05));
+    border: 1px solid var(--color-border);
+    flex: 1 1 70px;
+    min-width: 60px;
+    transition: all 0.15s ease;
+  }
+
+  .logs-search-wrapper:focus-within {
+    border-color: var(--color-accent) !important;
+    box-shadow: 0 0 0 2px var(--color-accent-muted) !important;
+    background: var(--color-bg-card) !important;
+  }
+
+  .logs-search-icon {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .logs-search-wrapper input,
+  .logs-search-wrapper input:focus,
+  .logs-search-wrapper input:focus-visible,
+  .logs-search-wrapper input:active,
+  .logs-search-input,
+  .logs-search-input:focus,
+  .logs-search-input:focus-visible,
+  .logs-search-input:active {
+    border: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    -webkit-box-shadow: none !important;
+    font-size: 11px !important;
+    color: var(--color-text-primary) !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    height: 100% !important;
+    width: 100% !important;
+  }
+
+  .logs-search-clear {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 2px;
+    flex-shrink: 0;
+  }
+  .logs-search-clear:hover { color: var(--color-text-primary); }
+
+  .logs-toolbar-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px !important;
+    flex-shrink: 0;
+  }
+
+  .logs-toolbar-controls :global(.logs-format-toggle),
+  .logs-toolbar-controls :global(.ui-toggle-button) {
+    margin-left: 6px !important;
+    margin-right: 2px !important;
+  }
+
+  .logs-select-wrap {
+    min-width: 105px;
+    max-width: 122px;
+  }
+
+  .logs-select-wrap.lines-select {
+    min-width: 76px;
+    max-width: 84px;
+    margin-right: 2px;
+  }
+
+  .logs-select-wrap :global(.ui-select-trigger) {
+    height: 28px !important;
+    min-height: 28px !important;
+    padding: 0 6px !important;
+    font-size: 11px !important;
+    border-radius: 6px !important;
+    background: var(--color-bg-card, rgba(255, 255, 255, 0.05)) !important;
+    border: 1px solid var(--color-border) !important;
+  }
+
+  .logs-select-wrap :global(.ui-select-trigger:hover) {
+    border-color: var(--color-accent) !important;
+  }
+
+  .logs-select-wrap :global(.ui-select-value) {
+    font-size: 10.5px !important;
+    font-family: var(--font-mono) !important;
+  }
+
+  .logs-select-wrap :global(.ui-select-option) {
+    font-size: 11px !important;
+    padding: 5px 8px !important;
+    font-family: var(--font-mono) !important;
+  }
+
+  .logs-toolbar-controls :global(.trigger-btn) {
+    width: 28px !important;
+    height: 28px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 6px !important;
+    background: var(--color-bg-card, rgba(255, 255, 255, 0.05)) !important;
+    border: 1px solid var(--color-border) !important;
+    color: var(--color-text-secondary) !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+  }
+  .logs-toolbar-controls :global(.trigger-btn:hover),
+  .logs-toolbar-controls :global(.trigger-btn[aria-expanded="true"]) {
+    border-color: var(--color-accent) !important;
+    color: var(--color-accent) !important;
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)) !important;
+  }
+
+  :global(html.light-mode) .logs-toolbar-controls :global(.trigger-btn) {
+    background: #FFFFFF !important;
+    border-color: #E2E8F0 !important;
+    color: #475569 !important;
+  }
+  :global(html.light-mode) .logs-toolbar-controls :global(.trigger-btn:hover),
+  :global(html.light-mode) .logs-toolbar-controls :global(.trigger-btn[aria-expanded="true"]) {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)) !important;
+    border-color: var(--color-accent) !important;
+    color: var(--color-accent) !important;
+  }
+
+  .human-logs-list {
+    flex: 1;
+    min-height: 380px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+
+  .human-log-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    transition: background 0.1s ease;
+    border-left: 2px solid transparent;
+  }
+
+  .human-log-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .human-log-row.error {
+    background: rgba(239, 68, 68, 0.08);
+    border-left-color: #EF4444;
+  }
+
+  .human-log-row.warning {
+    background: rgba(245, 158, 11, 0.08);
+    border-left-color: #F59E0B;
+  }
+
+  .human-log-row.notice {
+    background: rgba(16, 185, 129, 0.05);
+    border-left-color: #10B981;
+  }
+
+  .human-log-line-num {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    opacity: 0.5;
+    min-width: 22px;
+    text-align: right;
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .human-log-time {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .human-log-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    line-height: 1.3;
+  }
+
+  .human-log-badge.badge-danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: #EF4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  .human-log-badge.badge-warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #F59E0B;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+  }
+
+  .human-log-badge.badge-accent {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+
+  .human-log-badge.badge-success {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10B981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+
+  .human-log-badge.badge-neutral {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+  }
+
+  .human-log-process {
+    font-size: 10px;
+    color: var(--color-accent);
+    background: rgba(0, 0, 0, 0.3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--color-border);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .human-log-message {
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+    word-break: break-word;
+    flex: 1;
+    font-size: 11px;
+  }
+
+  .log-output-raw {
+    font-size: 11px;
+    flex: 1;
+    min-height: 380px;
+    overflow-y: auto;
+    padding: 12px;
+    margin: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: var(--font-mono);
+  }
+
+  .logs-loading-state {
+    padding: 40px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+  }
+
+  .logs-empty-state {
+    padding: 40px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--color-text-muted);
+    gap: 6px;
+  }
+  .logs-empty-state h4 { margin: 0; color: var(--color-text-primary); font-size: 13.5px; }
+  .logs-empty-state p { margin: 0; font-size: 12px; max-width: 320px; }
+
+  .logs-footer-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 6px;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+
+  :global(html.light-mode) .service-logs-toolbar {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+  }
+
+  :global(html.light-mode) .logs-search-wrapper,
+  :global(html.light-mode) .logs-select-filter,
+  :global(html.light-mode) .view-mode-pill,
+  :global(html.light-mode) .log-tool-btn {
+    background: #FFFFFF;
+    border-color: #CBD5E1;
+  }
+
+  :global(html.light-mode) .human-logs-list,
+  :global(html.light-mode) .log-output-raw {
+    background: #F8FAFC;
+    border-color: #E2E8F0;
+  }
+
+  :global(html.light-mode) .human-log-row:hover {
+    background: #EDF2F7;
+  }
+
+  :global(html.light-mode) .human-log-process {
+    background: #EEF2F6;
+    border-color: #CBD5E1;
   }
 </style>

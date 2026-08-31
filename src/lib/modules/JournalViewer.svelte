@@ -14,6 +14,7 @@
   import Badge from '../components/ui/Badge.svelte';
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
+  import ToggleButton from '../components/ui/ToggleButton.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -907,16 +908,20 @@
             <option value="6">Info+</option>
           </Select>
 
-          <!-- Live Follow Toggle -->
-          <button 
-            type="button"
-            class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
-            onclick={toggleLiveFollow} 
-            title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
+          <!-- Live Follow Toggle using reusable ToggleButton -->
+          <ToggleButton
+            active={isLiveFollowing}
+            activeLabel="Live Following"
+            inactiveLabel="Live Follow"
+            activeTitle="Streaming new logs in real-time. Click to pause."
+            inactiveTitle="Follow new logs in real-time. Click to start live stream."
+            onclick={toggleLiveFollow}
           >
-            <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
-            <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
-          </button>
+            {#snippet children()}
+              <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
+              <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
+            {/snippet}
+          </ToggleButton>
         {/if}
 
         <!-- Export Logs Dropdown -->
@@ -1212,135 +1217,137 @@
 
       <!-- Tab 4: Threats -->
       {:else if activeTab === 'threats'}
-        {#if threatsError && threatsError.includes('Root privileges')}
-          <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to run threat correlation analysis.</div>
-            </div>
-          </div>
-        {/if}
-        {#if filteredThreats.length === 0}
-          <div style="display:flex; flex-direction:column; gap:16px; padding:12px 8px; box-sizing:border-box; width:100%;">
-            <!-- Status Card -->
-            <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:12px; padding:20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px;">
-              <div style="display:flex; align-items:center; gap:16px;">
-                <div style="width:44px; height:44px; border-radius:50%; background:rgba(34,197,94,0.12); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-                  <ShieldCheck size={26} color="var(--color-success)" />
-                </div>
-                <div>
-                  <div style="font-size:15px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
-                    No Active Runtime Threats Detected
-                    <span style="font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; background:rgba(34,197,94,0.15); color:var(--color-success); font-family:var(--font-mono);">PROTECTED</span>
-                  </div>
-                  <div style="font-size:12px; color:var(--color-text-muted); margin-top:2px;">
-                    The real-time threat correlation engine evaluated authentication & audit logs for the selected range with 0 security violations.
-                  </div>
-                </div>
-              </div>
-              <Button variant="ghost" style="font-size:11px;" onclick={fetchThreats}>
-                <RefreshCw size={13} class={loadingThreats ? 'animate-spin-slow' : ''} /> Rescan Logs
-              </Button>
-            </div>
-
-            <!-- Active Safeguard Rules Grid -->
-            <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
-              <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
-                Active Correlation Rules & Safeguards (6 Active)
-              </div>
-              <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags users failing sudo credentials ≥ 3 times. (Status: Clean)</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Detects IP-based SSH login dictionary attacks ≥ 5 attempts. (Status: Clean)</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Alerts immediately if setenforce 0 is executed. (Status: Clean)</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags flush attacks (iptables -F or nft flush). (Status: Clean)</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Monitors unauthorized writes to /etc/passwd & shadow. (Status: Clean)</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags elevated commands executed without standard sudo. (Status: Clean)</div>
-                  </div>
-                </div>
+        <div class="threats-scroll-wrap">
+          {#if threatsError && threatsError.includes('Root privileges')}
+            <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
+              <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+              <div>
+                <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
+                <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to run threat correlation analysis.</div>
               </div>
             </div>
-          </div>
-        {:else}
-          <div style="display:flex; flex-direction:column; gap:12px; padding: 8px; box-sizing: border-box; width: 100%;">
-            {#each filteredThreats as threat}
-              <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; box-sizing: border-box; width: 100%;">
-                <div style="display:flex; flex-direction:column; gap:6px;">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <ShieldAlert size={16} color={threat.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)'} />
-                    <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: var(--color-text-primary);">
-                      {@html highlight(threat.title, searchQuery)}
-                    </h3>
-                    <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="font-size: 9px; text-transform: uppercase;">
-                      {threat.severity}
-                    </Badge>
-                    <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">{threat.timestamp}</span>
+          {/if}
+          {#if filteredThreats.length === 0}
+            <div style="display:flex; flex-direction:column; gap:16px; padding:12px 8px; box-sizing:border-box; width:100%;">
+              <!-- Status Card -->
+              <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:12px; padding:20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px;">
+                <div style="display:flex; align-items:center; gap:16px;">
+                  <div style="width:44px; height:44px; border-radius:50%; background:rgba(34,197,94,0.12); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                    <ShieldCheck size={26} color="var(--color-success)" />
                   </div>
-                  <p style="font-size: 12px; color: var(--color-text-secondary); margin: 4px 0 0 0; line-height: 1.5;">
-                    {@html highlight(threat.description, searchQuery)}
-                  </p>
-                  <div style="margin-top: 8px;">
-                    <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: rgba(255,255,255,0.05); color: var(--color-text-muted);">
-                      {threat.category}
-                    </Badge>
+                  <div>
+                    <div style="font-size:15px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
+                      No Active Runtime Threats Detected
+                      <span style="font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; background:rgba(34,197,94,0.15); color:var(--color-success); font-family:var(--font-mono);">PROTECTED</span>
+                    </div>
+                    <div style="font-size:12px; color:var(--color-text-muted); margin-top:2px;">
+                      The real-time threat correlation engine evaluated authentication & audit logs for the selected range with 0 security violations.
+                    </div>
                   </div>
                 </div>
-                <Button 
-                  variant="ghost" 
-                  style="font-size: 11px; height: 26px; padding: 0 10px; border-color: rgba(255,255,255,0.15);" 
-                  onclick={() => {
-                    uiStore.securityCategoryFilter = 'Runtime Threats';
-                    uiStore.securitySeverityFilter = 'all';
-                    uiStore.setActiveTab('security-auditor');
-                  }}
-                >
-                  Investigate
+                <Button variant="ghost" style="font-size:11px;" onclick={fetchThreats}>
+                  <RefreshCw size={13} class={loadingThreats ? 'animate-spin-slow' : ''} /> Rescan Logs
                 </Button>
               </div>
-            {/each}
-          </div>
-        {/if}
+
+              <!-- Active Safeguard Rules Grid -->
+              <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
+                <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
+                  Active Correlation Rules & Safeguards (6 Active)
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Flags users failing sudo credentials ≥ 3 times. (Status: Clean)</div>
+                    </div>
+                  </div>
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Detects IP-based SSH login dictionary attacks ≥ 5 attempts. (Status: Clean)</div>
+                    </div>
+                  </div>
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Alerts immediately if setenforce 0 is executed. (Status: Clean)</div>
+                    </div>
+                  </div>
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Flags flush attacks (iptables -F or nft flush). (Status: Clean)</div>
+                    </div>
+                  </div>
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Monitors unauthorized writes to /etc/passwd & shadow. (Status: Clean)</div>
+                    </div>
+                  </div>
+                  <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                    <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                    <div>
+                      <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
+                      <div style="font-size:11px; color:var(--color-text-muted);">Flags elevated commands executed without standard sudo. (Status: Clean)</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {:else}
+            <div style="display:flex; flex-direction:column; gap:12px; padding: 8px; box-sizing: border-box; width: 100%;">
+              {#each filteredThreats as threat}
+                <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; box-sizing: border-box; width: 100%;">
+                  <div style="display:flex; flex-direction:column; gap:6px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <ShieldAlert size={16} color={threat.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)'} />
+                      <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: var(--color-text-primary);">
+                        {@html highlight(threat.title, searchQuery)}
+                      </h3>
+                      <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="font-size: 9px; text-transform: uppercase;">
+                        {threat.severity}
+                      </Badge>
+                      <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">{threat.timestamp}</span>
+                    </div>
+                    <p style="font-size: 12px; color: var(--color-text-secondary); margin: 4px 0 0 0; line-height: 1.5;">
+                      {@html highlight(threat.description, searchQuery)}
+                    </p>
+                    <div style="margin-top: 8px;">
+                      <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: rgba(255,255,255,0.05); color: var(--color-text-muted);">
+                        {threat.category}
+                      </Badge>
+                    </div>
+                  </div>
+                  <Button 
+                    variant="ghost" 
+                    style="font-size: 11px; height: 26px; padding: 0 10px; border-color: rgba(255,255,255,0.15);" 
+                    onclick={() => {
+                      uiStore.securityCategoryFilter = 'Runtime Threats';
+                      uiStore.securitySeverityFilter = 'all';
+                      uiStore.setActiveTab('security-auditor');
+                    }}
+                  >
+                    Investigate
+                  </Button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>
 </div>
 
 {#if selectedLog}
-  <SideDrawer bind:isOpen={isLogDrawerOpen} title="Log Entry Details" width="580px">
+  <SideDrawer bind:isOpen={isLogDrawerOpen} title="Log Entry Details" width="580px" dockable={true}>
     {#snippet headerActions()}
       <div style="display: flex; align-items: center; gap: 6px; margin-right: 8px;">
         <button
@@ -1833,6 +1840,18 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+  }
+
+  .threats-scroll-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 8px 12px 24px 12px;
   }
 
   .empty-state {

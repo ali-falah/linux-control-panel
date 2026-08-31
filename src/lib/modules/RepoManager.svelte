@@ -739,7 +739,7 @@
 {/if}
 
 <!-- Edit Repository Drawer -->
-<SideDrawer bind:isOpen={editOpen} title="Repository Configurations" width="550px">
+<SideDrawer bind:isOpen={editOpen} title="Repository Configurations" width="550px" dockable={true}>
   {#if selectedRepo}
     <div style="display:flex; flex-direction:column; gap:16px; flex:1;">
       

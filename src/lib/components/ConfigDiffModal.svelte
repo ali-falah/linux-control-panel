@@ -5,6 +5,7 @@
     Columns, Rows, ShieldAlert, ArrowRight, RefreshCw, Eye
   } from '@lucide/svelte';
   import Button from './ui/Button.svelte';
+  import ToggleButton from './ui/ToggleButton.svelte';
 
   interface Props {
     show?: boolean;
@@ -156,27 +157,17 @@
         </div>
 
         <div class="diff-header-actions">
-          <!-- View mode toggle -->
-          <div class="view-mode-toggle">
-            <button
-              type="button"
-              class="toggle-btn {viewMode === 'unified' ? 'active' : ''}"
-              onclick={() => viewMode = 'unified'}
-              title="Unified diff view"
-            >
-              <Rows size={13} />
-              <span>Unified</span>
-            </button>
-            <button
-              type="button"
-              class="toggle-btn {viewMode === 'split' ? 'active' : ''}"
-              onclick={() => viewMode = 'split'}
-              title="Side-by-side split view"
-            >
-              <Columns size={13} />
-              <span>Split</span>
-            </button>
-          </div>
+          <!-- View mode toggle using reusable ToggleButton -->
+          <ToggleButton
+            active={viewMode === 'split'}
+            activeLabel="Split View"
+            inactiveLabel="Unified Diff"
+            activeIcon={Columns}
+            inactiveIcon={Rows}
+            activeTitle="Viewing side-by-side split view. Click for unified diff."
+            inactiveTitle="Viewing unified diff view. Click for side-by-side split view."
+            onclick={(_, active) => { viewMode = active ? 'split' : 'unified'; }}
+          />
 
           <button class="diff-close-btn" onclick={oncancel} aria-label="Close dialog">
             <X size={18} />
