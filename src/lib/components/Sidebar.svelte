@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
@@ -13,7 +13,7 @@
   let currentUsername = $state('user');
   let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
   
-  $effect(() => {
+  onMount(() => {
     getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
     invoke<string>('get_current_user')
       .then(u => { if (u) currentUsername = u; })
@@ -54,16 +54,18 @@
 
   $effect(() => {
     const tab = uiStore.activeTab;
-    untrack(() => {
-      if (tab) {
+    if (tab && !uiStore.sidebarCollapsed) {
+      untrack(() => {
         for (const group of groups) {
           if (group.items.some(i => i.id === tab)) {
-            expandedCategory = group.label;
+            if (expandedCategory !== group.label) {
+              expandedCategory = group.label;
+            }
             break;
           }
         }
-      }
-    });
+      });
+    }
   });
 
   let hoveredGroup = $state<string | null>(null);
@@ -71,19 +73,28 @@
 
   function handleGroupMouseEnter(groupLabel: string) {
     if (!uiStore.sidebarCollapsed) return;
-    if (hoverTimeout) clearTimeout(hoverTimeout);
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+      hoverTimeout = null;
+    }
+    if (hoveredGroup === groupLabel) return;
     hoveredGroup = groupLabel;
   }
 
   function handleGroupMouseLeave() {
     if (!uiStore.sidebarCollapsed) return;
+    if (hoverTimeout) clearTimeout(hoverTimeout);
     hoverTimeout = setTimeout(() => {
       hoveredGroup = null;
-    }, 60);
+      hoverTimeout = null;
+    }, 180);
   }
 
   function handleFlyoutMouseEnter() {
-    if (hoverTimeout) clearTimeout(hoverTimeout);
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+      hoverTimeout = null;
+    }
   }
 
   function handleFlyoutMouseLeave() {
@@ -205,7 +216,7 @@
     {#if uiStore.sidebarCollapsed}
       <!-- Collapsed Mode: Category Icons with Nested Flyout Menu -->
       <div class="collapsed-categories-list">
-        {#each groups as group}
+        {#each groups as group (group.label)}
           {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
           <div
             class="collapsed-cat-wrapper"
@@ -476,6 +487,7 @@
     justify-content: center;
     color: var(--color-text-muted);
     transition: color 0.15s ease, transform 0.15s ease;
+    pointer-events: none;
   }
 
   .collapsed-cat-btn:hover .collapsed-cat-icon,
@@ -496,14 +508,23 @@
     border-radius: 10px;
     padding: 6px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 16px var(--color-accent-glow);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    animation: flyout-appear 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: flyout-appear 0.08s ease-out both;
+  }
+
+  /* Invisible hover bridge to prevent mouseleave when moving across the 10px offset gap */
+  .flyout-menu-panel::before {
+    content: '';
+    position: absolute;
+    left: -16px;
+    top: -8px;
+    bottom: -8px;
+    width: 18px;
+    background: transparent;
   }
 
   @keyframes flyout-appear {
-    from { opacity: 0; transform: translateX(-6px) scale(0.97); }
-    to   { opacity: 1; transform: translateX(0) scale(1); }
+    from { opacity: 0; }
+    to   { opacity: 1; }
   }
 
   .flyout-arrow {

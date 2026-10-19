@@ -1246,9 +1246,7 @@
     bottom: 0;
     background: rgba(0, 0, 0, 0.45);
     z-index: 9998;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    animation: fade-in 0.2s ease-out forwards;
+    animation: fade-in 0.2s ease-out both;
   }
 
   .side-panel {
@@ -1264,7 +1262,7 @@
     display: flex;
     flex-direction: column;
     box-shadow: -12px 0 36px rgba(0, 0, 0, 0.4);
-    animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .panel-header {
@@ -1390,8 +1388,6 @@
     padding: 6px;
     min-width: 220px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
     display: flex;
     flex-direction: column;
     gap: 2px;

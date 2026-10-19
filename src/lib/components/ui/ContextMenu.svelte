@@ -165,8 +165,6 @@
 <style>
   .custom-context-menu {
     background: rgba(15, 23, 42, 0.95);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--color-border);
     border-radius: 10px;
     padding: 6px;
@@ -176,6 +174,10 @@
     gap: 2px;
     max-height: calc(100vh - 24px);
     overflow-y: auto;
+  }
+
+  :global(body > .custom-context-menu),
+  :global(.custom-context-menu.portal-mounted) {
     animation: contextMenuFade 0.12s cubic-bezier(0.16, 1, 0.3, 1);
   }
 

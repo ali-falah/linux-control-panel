@@ -164,8 +164,6 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.55);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     z-index: 99991;
   }
 
@@ -180,8 +178,6 @@
     z-index: 99992;
     display: flex;
     flex-direction: column;
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
   }
 
   .drawer.docked-drawer {

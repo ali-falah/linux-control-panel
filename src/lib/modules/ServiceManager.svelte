@@ -275,20 +275,29 @@
   );
 
   $effect(() => {
-    if (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services') {
-      mainTab = uiStore.targetSubTab;
+    if (uiStore.targetSubTab && (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services')) {
+      if (mainTab !== uiStore.targetSubTab) {
+        mainTab = uiStore.targetSubTab;
+      }
     }
     if (uiStore.serviceSearchQuery !== undefined && uiStore.serviceSearchQuery !== null) {
-      filter = uiStore.serviceSearchQuery;
-      if (uiStore.serviceSearchQuery !== '') {
+      if (filter !== uiStore.serviceSearchQuery) {
+        filter = uiStore.serviceSearchQuery;
+      }
+      if (uiStore.serviceSearchQuery !== '' && mainTab !== 'services') {
         mainTab = 'services';
       }
     }
     if (uiStore.serviceFilter) {
-      if (uiStore.serviceFilter === 'failed') statusFilter = 'failed';
-      else if (uiStore.serviceFilter === 'active') statusFilter = 'active';
-      else if (uiStore.serviceFilter === 'all') statusFilter = 'all';
-      mainTab = 'services';
+      const targetStatus: 'active' | 'failed' | 'all' = 
+        uiStore.serviceFilter === 'failed' ? 'failed' : 
+        (uiStore.serviceFilter === 'active' ? 'active' : 'all');
+      if (statusFilter !== targetStatus) {
+        statusFilter = targetStatus;
+      }
+      if (mainTab !== 'services') {
+        mainTab = 'services';
+      }
     }
   });
 
@@ -794,7 +803,10 @@
   }
 
   $effect(() => {
-    if (!panelOpen) { activePanel = null; selectedUnit = null; }
+    if (!panelOpen) {
+      if (activePanel !== null) activePanel = null;
+      if (selectedUnit !== null) selectedUnit = null;
+    }
   });
 
   // ─── XDG Autostart state ───────────────────────────────────────────────────
@@ -3184,8 +3196,6 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

@@ -3999,8 +3999,6 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     z-index: 99990;
     display: flex;
     align-items: center;
@@ -4095,7 +4093,6 @@
   /* Context Menu Styles */
   .custom-context-menu {
     background: rgba(15, 23, 42, 0.95);
-    backdrop-filter: blur(16px);
     border: 1px solid var(--color-border);
     border-radius: 10px;
     padding: 6px;

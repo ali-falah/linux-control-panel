@@ -50,14 +50,17 @@
     }
   }
 
-  $effect(() => {
-    if (selectEl) {
-      syncOptions();
-      const observer = new MutationObserver(syncOptions);
-      observer.observe(selectEl, { childList: true, subtree: true, characterData: true });
-      return () => observer.disconnect();
-    }
-  });
+  function initSelect(node: HTMLSelectElement) {
+    selectEl = node;
+    syncOptions();
+    const observer = new MutationObserver(syncOptions);
+    observer.observe(node, { childList: true, subtree: true, characterData: true });
+    return {
+      destroy() {
+        observer.disconnect();
+      }
+    };
+  }
 
   $effect(() => {
     if (isOpen) {
@@ -128,6 +131,7 @@
 <div bind:this={containerEl} class="ui-select-container {className}">
   <!-- Hidden native select for reactive binding and option extraction -->
   <select
+    use:initSelect
     bind:this={selectEl}
     {id}
     bind:value

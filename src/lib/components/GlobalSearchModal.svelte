@@ -1337,14 +1337,12 @@
     right: 0;
     bottom: 0;
     background: rgba(0, 0, 0, 0.72);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     z-index: 99995;
     display: flex;
     align-items: flex-start;
     justify-content: center;
     padding-top: 8vh;
-    animation: fadeIn 0.15s ease-out;
+    animation: fadeIn 0.15s ease-out both;
   }
 
   .search-modal {
@@ -1357,7 +1355,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    animation: slideDown 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: slideDown 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .search-header {
