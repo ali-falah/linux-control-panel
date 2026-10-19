@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
@@ -24,20 +24,15 @@ pub struct MirrorSpeedResult {
     pub speed_ms: Option<u32>,
 }
 
-/// Parse all .repo files from /etc/yum.repos.d/
+/// Parse all .repo files from /etc/yum.repos.d/ and .list/.sources from /etc/apt/
 #[tauri::command]
 pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
-    let repo_dir = PathBuf::from("/etc/yum.repos.d");
-    if !repo_dir.exists() {
-        return Ok(vec![]);
-    }
-
     let mut entries = Vec::new();
 
-    let dir_entries =
-        fs::read_dir(&repo_dir).map_err(|e| format!("Failed to read /etc/yum.repos.d: {e}"))?;
-
-    for entry in dir_entries.flatten() {
+    let repo_dir = PathBuf::from("/etc/yum.repos.d");
+    if repo_dir.exists() {
+        if let Ok(dir_entries) = fs::read_dir(&repo_dir) {
+            for entry in dir_entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("repo") {
             continue;
@@ -158,14 +153,202 @@ pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
                 priority: None,
             });
         }
+            }
+        }
     }
+
+    parse_apt_repos(&mut entries);
 
     Ok(entries)
 }
 
-/// Enable or disable a specific repo section in its .repo file via pkexec + sed
+fn parse_apt_repos(entries: &mut Vec<RepoEntry>) {
+    let sources_list = PathBuf::from("/etc/apt/sources.list");
+    if sources_list.exists() {
+        parse_apt_list_file(&sources_list, entries);
+    }
+
+    let list_d = PathBuf::from("/etc/apt/sources.list.d");
+    if list_d.exists() {
+        if let Ok(dir) = fs::read_dir(&list_d) {
+            for entry in dir.flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "list" {
+                    parse_apt_list_file(&path, entries);
+                } else if ext == "sources" {
+                    parse_apt_sources_file(&path, entries);
+                }
+            }
+        }
+    }
+}
+
+fn parse_apt_list_file(path: &Path, entries: &mut Vec<RepoEntry>) {
+    let file_path = path.to_string_lossy().to_string();
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("apt").to_string();
+
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_commented = trimmed.starts_with('#');
+        let unhashed = trimmed.trim_start_matches('#').trim();
+
+        if unhashed.starts_with("deb ") || unhashed.starts_with("deb-src ") {
+            let parts: Vec<&str> = unhashed.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let (url_idx, suite_idx) = if parts.len() > 1 && parts[1].starts_with('[') {
+                    let mut i = 1;
+                    while i < parts.len() && !parts[i].ends_with(']') {
+                        i += 1;
+                    }
+                    (i + 1, i + 2)
+                } else {
+                    (1, 2)
+                };
+
+                let baseurl = parts.get(url_idx).unwrap_or(&"").to_string();
+                let suite = parts.get(suite_idx).unwrap_or(&"").to_string();
+                let components = if suite_idx + 1 < parts.len() {
+                    parts[suite_idx + 1..].join(" ")
+                } else {
+                    String::new()
+                };
+
+                let id = format!("{}-{}-{}", filename, suite, idx);
+                let name = if components.is_empty() {
+                    format!("APT: {} {}", baseurl, suite)
+                } else {
+                    format!("APT: {} ({} {})", baseurl, suite, components)
+                };
+
+                entries.push(RepoEntry {
+                    id,
+                    name,
+                    baseurl,
+                    enabled: !is_commented,
+                    file_path: file_path.clone(),
+                    metalink: None,
+                    mirrorlist: None,
+                    gpgcheck: true,
+                    priority: None,
+                });
+            }
+        }
+    }
+}
+
+fn parse_apt_sources_file(path: &Path, entries: &mut Vec<RepoEntry>) {
+    let file_path = path.to_string_lossy().to_string();
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("sources").to_string();
+
+    let mut uris = String::new();
+    let mut suites = String::new();
+    let mut enabled = true;
+    let mut stanza_idx = 0;
+
+    let flush_stanza = |entries: &mut Vec<RepoEntry>, uris: &str, suites: &str, enabled: bool, idx: usize| {
+        if !uris.is_empty() {
+            let id = format!("{}-stanza-{}", filename, idx);
+            let name = format!("APT deb822: {} ({})", uris, suites);
+            entries.push(RepoEntry {
+                id,
+                name,
+                baseurl: uris.to_string(),
+                enabled,
+                file_path: file_path.clone(),
+                metalink: None,
+                mirrorlist: None,
+                gpgcheck: true,
+                priority: None,
+            });
+        }
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            flush_stanza(entries, &uris, &suites, enabled, stanza_idx);
+            stanza_idx += 1;
+            uris.clear();
+            suites.clear();
+            enabled = true;
+            continue;
+        }
+
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim().to_lowercase();
+            let val = v.trim();
+            match key.as_str() {
+                "uris" => uris = val.to_string(),
+                "suites" => suites = val.to_string(),
+                "enabled" => enabled = val.to_lowercase() != "no",
+                _ => {}
+            }
+        }
+    }
+
+    flush_stanza(entries, &uris, &suites, enabled, stanza_idx);
+}
+
+/// Enable or disable a specific repo in its file (.repo, .list, or .sources) via pkexec + sed
 #[tauri::command]
 pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String) -> Result<(), String> {
+    if file_path.ends_with(".sources") {
+        let val = if enabled { "yes" } else { "no" };
+        let script = format!("s/^Enabled:\\s*.*/Enabled: {}/I", val);
+        let output = Command::new("pkexec")
+            .args(["sed", "-i", &script, &file_path])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Failed to toggle .sources repo: {err}"));
+        }
+        log_to_file("INFO", &format!("Toggled .sources repo {repo_id} enabled={enabled}"));
+        return Ok(());
+    }
+
+    if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
+        if enabled {
+            let output = Command::new("pkexec")
+                .args(["sed", "-i", "s/^#\\s*\\(deb\\s.*\\)/\\1/", &file_path])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr).to_string();
+                return Err(format!("Failed to enable .list repo: {err}"));
+            }
+        } else {
+            let output = Command::new("pkexec")
+                .args(["sed", "-i", "s/^\\(deb\\s.*\\)/# \\1/", &file_path])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr).to_string();
+                return Err(format!("Failed to disable .list repo: {err}"));
+            }
+        }
+        log_to_file("INFO", &format!("Toggled .list repo {repo_id} enabled={enabled}"));
+        return Ok(());
+    }
+
     let enabled_str = if enabled { "1" } else { "0" };
 
     // Use sed to update enabled= under the specific [repo_id] section
@@ -191,54 +374,96 @@ pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String) -> R
     Ok(())
 }
 
-/// Add a repo by URL using dnf config-manager
+/// Add a repo by URL using dnf config-manager or add-apt-repository
 #[tauri::command]
 pub async fn add_repo(url: String) -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
+    if url.trim().is_empty() {
+        return Err("URL cannot be empty".to_string());
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "config-manager", "--add-repo", &url])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "config-manager", "--add-repo", &url])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("add_repo failed: {stderr}"));
-        return Err(format!("Failed to add repo: {stderr}"));
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("add_repo failed: {stderr}"));
+            return Err(format!("Failed to add repo: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Added repo: {url}"));
+        return Ok(stdout);
     }
 
-    log_to_file("INFO", &format!("Added repo: {url}"));
-    Ok(stdout)
+    if binary_exists("add-apt-repository").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/add-apt-repository", "-y", &url])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("add_repo failed: {stderr}"));
+            return Err(format!("Failed to add repo: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Added repo: {url}"));
+        return Ok(stdout);
+    }
+
+    Err("Neither dnf nor add-apt-repository is available on this system".to_string())
 }
 
-/// Run dnf makecache to refresh metadata
+/// Run dnf makecache or apt-get update to refresh metadata
 #[tauri::command]
 pub async fn run_makecache() -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "makecache"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("makecache failed: {stderr}"));
+            return Err(format!("dnf makecache failed: {stderr}"));
+        }
+
+        log_to_file("INFO", "Ran dnf makecache");
+        return Ok(stdout);
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "makecache"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("apt-get").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/apt-get", "update"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("makecache failed: {stderr}"));
-        return Err(format!("dnf makecache failed: {stderr}"));
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("apt update failed: {stderr}"));
+            return Err(format!("apt-get update failed: {stderr}"));
+        }
+
+        log_to_file("INFO", "Ran apt-get update");
+        return Ok(stdout);
     }
 
-    log_to_file("INFO", "Ran dnf makecache");
-    Ok(stdout)
+    Err("Neither dnf nor apt-get is available on this system".to_string())
 }
 
 #[tauri::command]
@@ -982,24 +1207,41 @@ pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn clean_repo_cache(repo_id: String) -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available".to_string());
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "clean", "expire-cache", "--repo", &repo_id])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(format!("dnf clean failed: {stderr}"));
+        }
+
+        return Ok(stdout);
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "clean", "expire-cache", "--repo", &repo_id])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("apt-get").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/apt-get", "clean"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        return Err(format!("dnf clean failed: {stderr}"));
+        if !output.status.success() {
+            return Err(format!("apt-get clean failed: {stderr}"));
+        }
+
+        return Ok(stdout);
     }
 
-    Ok(stdout)
+    Err("Neither dnf nor apt-get is available on this system".to_string())
 }
 
 #[tauri::command]

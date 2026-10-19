@@ -223,17 +223,61 @@ pub async fn rebuild_grub() -> Result<String, String> {
         return Err("Cannot rebuild GRUB: /etc/default/grub is empty. Please restore backup first.".to_string());
     }
 
-    // Determine grub output path. Fedora/RHEL uses /boot/grub2/grub.cfg
-    let output = Command::new("pkexec")
-        .args(["/usr/sbin/grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"])
-        .output()
-        .await
-        .map_err(|e| format!("pkexec failed: {}", e))?;
+    // Debian / Ubuntu uses update-grub
+    if crate::binary_exists("update-grub").await {
+        let output = Command::new("pkexec")
+            .arg("update-grub")
+            .output()
+            .await
+            .map_err(|e| format!("pkexec update-grub failed: {}", e))?;
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        return Ok("Successfully rebuilt GRUB bootloader configuration via update-grub".to_string());
     }
 
-    Ok("Successfully rebuilt GRUB bootloader configuration".to_string())
+    // Fedora/RHEL uses grub2-mkconfig -o /boot/grub2/grub.cfg
+    if crate::binary_exists("grub2-mkconfig").await {
+        let cfg_path = if std::path::Path::new("/boot/grub2").exists() {
+            "/boot/grub2/grub.cfg"
+        } else {
+            "/boot/grub/grub.cfg"
+        };
+        let output = Command::new("pkexec")
+            .args(["/usr/sbin/grub2-mkconfig", "-o", cfg_path])
+            .output()
+            .await
+            .map_err(|e| format!("pkexec grub2-mkconfig failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        return Ok("Successfully rebuilt GRUB bootloader configuration".to_string());
+    }
+
+    // Generic / Arch uses grub-mkconfig
+    if crate::binary_exists("grub-mkconfig").await {
+        let cfg_path = if std::path::Path::new("/boot/grub").exists() {
+            "/boot/grub/grub.cfg"
+        } else {
+            "/boot/grub2/grub.cfg"
+        };
+        let output = Command::new("pkexec")
+            .args(["grub-mkconfig", "-o", cfg_path])
+            .output()
+            .await
+            .map_err(|e| format!("pkexec grub-mkconfig failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        return Ok("Successfully rebuilt GRUB bootloader configuration".to_string());
+    }
+
+    Err("Neither update-grub, grub2-mkconfig, nor grub-mkconfig found".to_string())
 }
 

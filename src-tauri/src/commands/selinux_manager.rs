@@ -57,38 +57,61 @@ fn get_boolean_criticality(name: &str) -> (bool, Option<String>) {
 
 #[tauri::command]
 pub async fn get_selinux_status() -> Result<SelinuxStatus, String> {
-    if !crate::binary_exists("sestatus").await {
-        return Err("sestatus not found. Is SELinux installed?".to_string());
+    if crate::binary_exists("sestatus").await {
+        let output = Command::new("sestatus")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run sestatus: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let mut status = String::new();
+        let mut current_mode = String::new();
+        let mut config_mode = String::new();
+
+        for line in stdout.lines() {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim();
+                let val = v.trim().to_string();
+                match key {
+                    "SELinux status" => status = val,
+                    "Current mode" => current_mode = val,
+                    "Mode from config file" => config_mode = val,
+                    _ => {}
+                }
+            }
+        }
+
+        return Ok(SelinuxStatus {
+            status,
+            current_mode,
+            config_mode,
+        });
     }
 
-    let output = Command::new("sestatus")
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run sestatus: {}", e))?;
+    // AppArmor detection for Debian / Ubuntu
+    if crate::binary_exists("aa-status").await || std::path::Path::new("/sys/kernel/security/apparmor").exists() {
+        let output = Command::new("aa-status")
+            .output()
+            .await;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let is_loaded = stdout.contains("apparmor module is loaded");
+            let has_enforce = stdout.contains("in enforce mode");
 
-    let mut status = String::new();
-    let mut current_mode = String::new();
-    let mut config_mode = String::new();
-
-    for line in stdout.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim();
-            let val = v.trim().to_string();
-            match key {
-                "SELinux status" => status = val,
-                "Current mode" => current_mode = val,
-                "Mode from config file" => config_mode = val,
-                _ => {}
-            }
+            return Ok(SelinuxStatus {
+                status: if is_loaded { "enabled (AppArmor)".to_string() } else { "disabled".to_string() },
+                current_mode: if has_enforce { "enforcing".to_string() } else { "complain".to_string() },
+                config_mode: "apparmor".to_string(),
+            });
         }
     }
 
     Ok(SelinuxStatus {
-        status,
-        current_mode,
-        config_mode,
+        status: "disabled".to_string(),
+        current_mode: "not installed".to_string(),
+        config_mode: "none".to_string(),
     })
 }
 
@@ -145,76 +168,136 @@ pub async fn set_selinux_mode(mode: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_selinux_denials() -> Result<Vec<Denial>, String> {
-    let output = Command::new("pkexec")
-        .args(["/usr/sbin/ausearch", "-m", "AVC", "-ts", "recent"])
-        .output()
-        .await
-        .map_err(|e| format!("pkexec ausearch failed: {}", e))?;
+    if crate::binary_exists("ausearch").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/sbin/ausearch", "-m", "AVC", "-ts", "recent"])
+            .output()
+            .await;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut denials = Vec::new();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut denials = Vec::new();
 
-    for event in stdout.split("----") {
-        let event = event.trim();
-        if event.is_empty() || event == "<no matches>" {
-            continue;
-        }
+                for event in stdout.split("----") {
+                    let event = event.trim();
+                    if event.is_empty() || event == "<no matches>" {
+                        continue;
+                    }
 
-        let mut scontext = String::new();
-        let mut tcontext = String::new();
-        let mut tclass = String::new();
-        let mut timestamp = String::new();
+                    let mut scontext = String::new();
+                    let mut tcontext = String::new();
+                    let mut tclass = String::new();
+                    let mut timestamp = String::new();
 
-        if let Some(msg_idx) = event.find("msg='audit(") {
-            let ts_start = msg_idx + 11;
-            if let Some(ts_end) = event[ts_start..].find(':') {
-                timestamp = event[ts_start..ts_start + ts_end].to_string();
+                    if let Some(msg_idx) = event.find("msg='audit(") {
+                        let ts_start = msg_idx + 11;
+                        if let Some(ts_end) = event[ts_start..].find(':') {
+                            timestamp = event[ts_start..ts_start + ts_end].to_string();
+                        }
+                    }
+
+                    if let Some(idx) = event.find("scontext=") {
+                        let rest = &event[idx + 9..];
+                        scontext = rest
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .trim_matches('"')
+                            .trim_matches('\'')
+                            .to_string();
+                    }
+                    if let Some(idx) = event.find("tcontext=") {
+                        let rest = &event[idx + 9..];
+                        tcontext = rest
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .trim_matches('"')
+                            .trim_matches('\'')
+                            .to_string();
+                    }
+                    if let Some(idx) = event.find("tclass=") {
+                        let rest = &event[idx + 7..];
+                        tclass = rest.split_whitespace().next().unwrap_or("").to_string();
+                    }
+
+                    if !scontext.is_empty() {
+                        denials.push(Denial {
+                            raw: event.to_string(),
+                            timestamp,
+                            scontext,
+                            tcontext,
+                            tclass,
+                        });
+                    }
+                }
+
+                return Ok(denials);
             }
-        }
-
-        if let Some(idx) = event.find("scontext=") {
-            let rest = &event[idx + 9..];
-            scontext = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-        }
-        if let Some(idx) = event.find("tcontext=") {
-            let rest = &event[idx + 9..];
-            tcontext = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-        }
-        if let Some(idx) = event.find("tclass=") {
-            let rest = &event[idx + 7..];
-            tclass = rest.split_whitespace().next().unwrap_or("").to_string();
-        }
-
-        if !scontext.is_empty() {
-            denials.push(Denial {
-                raw: event.to_string(),
-                timestamp,
-                scontext,
-                tcontext,
-                tclass,
-            });
         }
     }
 
-    Ok(denials)
+    // AppArmor denials from journalctl
+    if crate::binary_exists("journalctl").await {
+        let output = Command::new("journalctl")
+            .args(["-k", "--grep=apparmor=\"DENIED\"", "-n", "30", "--no-pager"])
+            .output()
+            .await;
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut denials = Vec::new();
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || !trimmed.contains("apparmor=\"DENIED\"") {
+                    continue;
+                }
+
+                let mut scontext = String::new();
+                let mut tcontext = String::new();
+                let mut tclass = String::new();
+
+                if let Some(idx) = trimmed.find("profile=\"") {
+                    let rest = &trimmed[idx + 9..];
+                    if let Some(end) = rest.find('"') {
+                        scontext = rest[..end].to_string();
+                    }
+                }
+                if let Some(idx) = trimmed.find("name=\"") {
+                    let rest = &trimmed[idx + 6..];
+                    if let Some(end) = rest.find('"') {
+                        tcontext = rest[..end].to_string();
+                    }
+                }
+                if let Some(idx) = trimmed.find("operation=\"") {
+                    let rest = &trimmed[idx + 11..];
+                    if let Some(end) = rest.find('"') {
+                        tclass = rest[..end].to_string();
+                    }
+                }
+
+                let timestamp = trimmed.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+
+                denials.push(Denial {
+                    raw: trimmed.to_string(),
+                    timestamp,
+                    scontext: if scontext.is_empty() { "AppArmor".to_string() } else { scontext },
+                    tcontext,
+                    tclass,
+                });
+            }
+            return Ok(denials);
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 #[tauri::command]
 pub async fn selinux_get_booleans() -> Result<Vec<SelinuxBoolean>, String> {
     if !crate::binary_exists("getsebool").await {
-        return Err("getsebool command is not available".to_string());
+        return Ok(Vec::new());
     }
 
     let output = Command::new("getsebool")

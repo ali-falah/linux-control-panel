@@ -98,9 +98,21 @@
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
+  let distroPrettyName = $state('Linux');
+
+  async function loadDistro() {
+    try {
+      const d = await invoke<{ pretty_name: string }>('get_distro_info');
+      if (d?.pretty_name) distroPrettyName = d.pretty_name;
+    } catch {
+      distroPrettyName = 'Linux';
+    }
+  }
+
   $effect(() => {
     checkSudoStatus();
     loadInterfaces();
+    loadDistro();
 
     const handleReqRoot = () => {
       if (!hasRoot) {
@@ -202,7 +214,7 @@
         {/if}
       </span>
     {:else}
-      <span class="ts-pill muted">Fedora / RHEL</span>
+      <span class="ts-pill muted">{distroPrettyName}</span>
     {/if}
   </div>
 </footer>

@@ -107,9 +107,9 @@
       label: 'Apps & Software',
       icon: Package,
       items: [
-        { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid, desc: 'Flatpak & RPM applications' },
-        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database, desc: 'Repositories & COPR Packages' },
-        { id: 'dnf-history',   label: 'DNF Manager',    icon: Package, desc: 'Package history & updates' },
+        { id: 'app-manager',   label: 'App Manager',    icon: LayoutGrid, desc: 'Flatpak, RPM & DEB applications' },
+        { id: 'repo-manager',  label: 'Repo Manager',   icon: Database, desc: 'Repositories & Community Packages' },
+        { id: 'dnf-history',   label: 'Packages & Updates', icon: Package, desc: 'Package history & updates' },
       ],
     },
     {
@@ -136,7 +136,7 @@
       items: [
         { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
-        { id: 'selinux-manager',  label: 'SELinux Manager',  icon: ShieldCheck, desc: 'Security policies & contexts' },
+        { id: 'selinux-manager',  label: 'SELinux & AppArmor', icon: ShieldCheck, desc: 'Security policies & MAC' },
         { id: 'journal-logs',     label: 'Journal Logs',     icon: FileText, desc: 'Systemd Journal logs' },
         { id: 'user-manager',     label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
       ],

@@ -13,7 +13,7 @@ use commands::{
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
-        dnf_check_updates, dnf_run_upgrade, dnf_read_log,
+        dnf_check_updates, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
@@ -35,7 +35,8 @@ use commands::{
         get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
-        list_autostart_entries, list_systemd_units, toggle_autostart, toggle_service_unit,
+        delete_autostart_entry, list_autostart_entries, list_systemd_units, save_autostart_entry,
+        toggle_autostart, toggle_service_unit,
     },
     user_manager::{
         add_group, add_user, change_password, delete_group, delete_user, list_groups, list_users,
@@ -76,7 +77,7 @@ use commands::{
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
     security_auditor::{
         security_run_audit,
@@ -95,7 +96,7 @@ use commands::{
     ssh_cert_vault::{
         vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
         vault_list_ssh_client_config, vault_save_ssh_client_config, vault_delete_ssh_client_host,
-        vault_list_known_hosts, vault_remove_known_host,
+        vault_list_known_hosts, vault_remove_known_host, vault_clear_known_hosts,
         vault_list_authorized_keys, vault_add_authorized_key, vault_remove_authorized_key,
         vault_get_sshd_hardening, vault_list_ssl_certs, vault_test_remote_ssl,
         vault_get_fail2ban_status, vault_unban_ip, vault_ban_ip, vault_manage_fail2ban_service,
@@ -207,6 +208,7 @@ pub fn run() {
             dnf_makecache_cmd,
             dnf_check_updates,
             dnf_run_upgrade,
+            dnf_dry_run_upgrade,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,
@@ -227,6 +229,8 @@ pub fn run() {
             list_autostart_entries,
             toggle_service_unit,
             toggle_autostart,
+            save_autostart_entry,
+            delete_autostart_entry,
             // Service Manager
             list_all_units,
             unit_action,
@@ -385,6 +389,7 @@ pub fn run() {
             get_network_traffic,
             get_smart_health,
             get_os_info,
+            get_distro_info,
             get_disk_io_stats,
             get_active_connections,
             get_current_user,
@@ -443,6 +448,7 @@ pub fn run() {
             vault_delete_ssh_client_host,
             vault_list_known_hosts,
             vault_remove_known_host,
+            vault_clear_known_hosts,
             vault_list_authorized_keys,
             vault_add_authorized_key,
             vault_remove_authorized_key,

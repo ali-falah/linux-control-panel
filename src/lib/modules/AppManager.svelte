@@ -586,7 +586,7 @@
       <TabGroup 
         tabs={[
           {id: 'All', label: 'All Sources'},
-          {id: 'RPM', label: 'RPM'},
+          {id: 'RPM', label: 'RPM / DEB'},
           {id: 'Flatpak', label: 'Flatpak'},
           {id: 'AppImage', label: 'AppImage'},
           ...(apps.some(a => a.source === 'Waydroid') ? [{id: 'Waydroid', label: 'Waydroid'}] : []),

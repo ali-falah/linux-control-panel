@@ -858,6 +858,144 @@
     }
   }
 
+  // ─── Autostart Add / Edit Modal State & Actions ────────────────────────────
+  let showAutostartModal = $state(false);
+  let isEditingAutostart = $state(false);
+  let autostartSaving = $state(false);
+  let autostartOriginalFilePath = $state<string | null>(null);
+
+  let autostartForm = $state({
+    name: '',
+    exec: '',
+    comment: '',
+    enabled: true
+  });
+
+  let autostartFormTouched = $state({
+    name: false,
+    exec: false
+  });
+
+  let autostartFormErrors = $derived.by(() => {
+    const errors: Record<string, string> = {};
+    const name = autostartForm.name.trim();
+    if (!name) {
+      errors.name = 'Application name is required.';
+    } else if (name.includes('\n') || name.includes('\r')) {
+      errors.name = 'Application name cannot contain newline characters.';
+    }
+
+    const exec = autostartForm.exec.trim();
+    if (!exec) {
+      errors.exec = 'Command / Executable path is required.';
+    } else if (exec.includes('\n') || exec.includes('\r')) {
+      errors.exec = 'Command cannot contain newline characters.';
+    }
+
+    if (autostartForm.comment.includes('\n') || autostartForm.comment.includes('\r')) {
+      errors.comment = 'Comment cannot contain newline characters.';
+    }
+
+    return errors;
+  });
+
+  let isAutostartFormValid = $derived(!autostartFormErrors.name && !autostartFormErrors.exec && !autostartFormErrors.comment);
+
+  function openAddAutostartModal() {
+    isEditingAutostart = false;
+    autostartOriginalFilePath = null;
+    autostartForm = {
+      name: '',
+      exec: '',
+      comment: '',
+      enabled: true
+    };
+    autostartFormTouched = { name: false, exec: false };
+    showAutostartModal = true;
+  }
+
+  function openEditAutostartModal(entry: AutostartEntry) {
+    isEditingAutostart = true;
+    autostartOriginalFilePath = entry.file_path;
+    autostartForm = {
+      name: entry.name,
+      exec: entry.exec,
+      comment: entry.comment || '',
+      enabled: entry.enabled
+    };
+    autostartFormTouched = { name: false, exec: false };
+    showAutostartModal = true;
+  }
+
+  async function browseAutostartExecBinary() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: 'Select Executable Binary / Script'
+      });
+      if (selected && typeof selected === 'string') {
+        autostartForm.exec = selected;
+        autostartFormTouched.exec = true;
+        if (!autostartForm.name.trim()) {
+          const base = selected.split('/').pop()?.replace(/\.[^/.]+$/, '') || '';
+          if (base) {
+            autostartForm.name = base;
+            autostartFormTouched.name = true;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Autostart browse dialog error:', err);
+    }
+  }
+
+  async function saveAutostart() {
+    autostartFormTouched.name = true;
+    autostartFormTouched.exec = true;
+    if (!isAutostartFormValid) return;
+
+    autostartSaving = true;
+    try {
+      await invoke('save_autostart_entry', {
+        originalFilePath: autostartOriginalFilePath,
+        name: autostartForm.name.trim(),
+        exec: autostartForm.exec.trim(),
+        comment: autostartForm.comment.trim(),
+        enabled: autostartForm.enabled
+      });
+      uiStore.addToast(
+        isEditingAutostart
+          ? `Autostart "${autostartForm.name.trim()}" updated successfully`
+          : `Autostart "${autostartForm.name.trim()}" created successfully`,
+        'success'
+      );
+      showAutostartModal = false;
+      await loadAutostart();
+    } catch (e) {
+      uiStore.addToast(`Failed to save autostart entry: ${e}`, 'error');
+    } finally {
+      autostartSaving = false;
+    }
+  }
+
+  function deleteAutostart(entry: AutostartEntry) {
+    uiStore.confirm(
+      'Delete Autostart Entry',
+      `Are you sure you want to remove "${entry.name}" from autostart? This will permanently delete its .desktop configuration file.`,
+      async () => {
+        try {
+          await invoke('delete_autostart_entry', { filePath: entry.file_path });
+          uiStore.addToast(`Autostart "${entry.name}" deleted`, 'success');
+          await loadAutostart();
+        } catch (e) {
+          uiStore.addToast(`Failed to delete autostart entry: ${e}`, 'error');
+        }
+      },
+      true
+    );
+  }
+
   // ─── Init ──────────────────────────────────────────────────────────────────
 
   $effect(() => {
@@ -979,6 +1117,15 @@
         style="min-width:260px; max-width:380px; margin:0;" 
       />
       <div class="header-spacer"></div>
+      <Button
+        variant="primary"
+        size="sm"
+        onclick={openAddAutostartModal}
+        title="Add new autostart application"
+      >
+        <Plus size={14} />
+        <span>Add Autostart</span>
+      </Button>
     </div>
   {:else if mainTab === 'boot_analyzer'}
     <div class="header-row">
@@ -1397,6 +1544,7 @@
               <th>Command</th>
               <th>Comment</th>
               <th style="text-align:center">Enabled</th>
+              <th style="text-align:right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1420,6 +1568,28 @@
                   >
                     <span class="ui-toggle-thumb"></span>
                   </button>
+                </td>
+                <td style="text-align:right">
+                  <div style="display:flex; justify-content:flex-end; gap:4px; align-items:center;">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => openEditAutostartModal(entry)}
+                      title="Edit autostart entry"
+                      style="padding:4px 6px;"
+                    >
+                      <Edit3 size={13} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => deleteAutostart(entry)}
+                      title="Delete autostart entry"
+                      style="padding:4px 6px; color:var(--color-error, #f43f5e);"
+                    >
+                      <Trash2 size={13} />
+                    </Button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -1868,6 +2038,132 @@
     }}
     oncancel={() => showUnitDiffModal = false}
   />
+{/if}
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: ADD / EDIT AUTOSTART APPLICATION -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+{#if showAutostartModal}
+  <div use:portal class="modal-backdrop" onclick={() => showAutostartModal = false} role="presentation">
+    <div class="modal-card" style="max-width: 520px;" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <Rocket size={18} class="text-accent" />
+          <h3>{isEditingAutostart ? 'Edit Autostart Application' : 'Add Autostart Application'}</h3>
+        </div>
+        <button class="modal-close-btn" onclick={() => showAutostartModal = false}>×</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Application Name -->
+        <div class="form-group">
+          <label for="autostart-name-input" class="form-label">
+            Application Name <span class="text-rose">*</span>
+          </label>
+          <input
+            id="autostart-name-input"
+            type="text"
+            placeholder="e.g. Discord or Custom Script"
+            bind:value={autostartForm.name}
+            oninput={() => autostartFormTouched.name = true}
+            class="form-input"
+            class:input-error={autostartFormTouched.name && autostartFormErrors.name}
+          />
+          {#if autostartFormTouched.name && autostartFormErrors.name}
+            <span class="form-error-msg">{autostartFormErrors.name}</span>
+          {/if}
+        </div>
+
+        <!-- Command / Executable -->
+        <div class="form-group">
+          <label for="autostart-exec-input" class="form-label">
+            Command / Executable <span class="text-rose">*</span>
+          </label>
+          <div class="input-browse-wrap">
+            <input
+              id="autostart-exec-input"
+              type="text"
+              placeholder="e.g. /usr/bin/discord or custom-daemon.sh"
+              bind:value={autostartForm.exec}
+              oninput={() => autostartFormTouched.exec = true}
+              class="form-input font-mono"
+              class:input-error={autostartFormTouched.exec && autostartFormErrors.exec}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={browseAutostartExecBinary}
+              title="Browse for executable binary or script"
+              type="button"
+            >
+              <Folder size={13} />
+              <span>Browse…</span>
+            </Button>
+          </div>
+          {#if autostartFormTouched.exec && autostartFormErrors.exec}
+            <span class="form-error-msg">{autostartFormErrors.exec}</span>
+          {:else}
+            <span class="form-help">Absolute path to executable binary, script, or command</span>
+          {/if}
+        </div>
+
+        <!-- Comment / Description -->
+        <div class="form-group">
+          <label for="autostart-comment-input" class="form-label">
+            Comment / Description <span class="text-muted" style="font-weight: normal;">(Optional)</span>
+          </label>
+          <input
+            id="autostart-comment-input"
+            type="text"
+            placeholder="e.g. Automatically launch on session login"
+            bind:value={autostartForm.comment}
+            class="form-input"
+            class:input-error={autostartFormErrors.comment}
+          />
+          {#if autostartFormErrors.comment}
+            <span class="form-error-msg">{autostartFormErrors.comment}</span>
+          {/if}
+        </div>
+
+        <!-- Enable Autostart Toggle -->
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:var(--color-bg-surface); border:1px solid var(--color-border-subtle); border-radius:8px; margin-top:4px;">
+          <div style="display:flex; flex-direction:column; gap:2px;">
+            <span style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Enable Autostart</span>
+            <span style="font-size:11px; color:var(--color-text-muted);">Launch this application automatically when you log in</span>
+          </div>
+          <button
+            type="button"
+            class="ui-toggle"
+            class:on={autostartForm.enabled}
+            onclick={() => autostartForm.enabled = !autostartForm.enabled}
+            aria-checked={autostartForm.enabled}
+            role="switch"
+          >
+            <span class="ui-toggle-thumb"></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <Button
+          variant="outline"
+          onclick={() => showAutostartModal = false}
+          disabled={autostartSaving}
+        >
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          onclick={saveAutostart}
+          disabled={!isAutostartFormValid || autostartSaving}
+          loading={autostartSaving}
+        >
+          <Check size={14} />
+          <span>{isEditingAutostart ? 'Save Changes' : 'Add Application'}</span>
+        </Button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <!-- ═════════════════════════════════════════════════════════════════════════ -->

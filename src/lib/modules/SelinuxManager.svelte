@@ -231,7 +231,7 @@
 </script>
 
 <div class="module-page" style="overflow-y: auto; padding-bottom: 40px;">
-  <PageHeader title="SELinux Manager" subtitle="Manage Security-Enhanced Linux state and view access denials" icon={ShieldAlert}>
+  <PageHeader title="SELinux & AppArmor" subtitle="Manage Mandatory Access Control (MAC) state and view access denials" icon={ShieldAlert}>
     {#if status && status.status !== 'disabled'}
       <TabGroup
         tabs={[
@@ -251,7 +251,7 @@
       <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
         <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
       </div>
-      <span style="font-weight:500">Loading SELinux State…</span>
+      <span style="font-weight:500">Loading MAC Security State…</span>
     </div>
   {:else if status}
     {#if activeTab === 'status'}
@@ -261,8 +261,8 @@
           <div style="padding:12px; border-radius:8px; background:rgba(255, 71, 87, 0.1); color:var(--color-danger); display:flex; align-items:center; gap:12px">
             <Power size={20} />
             <div>
-              <div style="font-weight:600; font-size:13px;">SELinux is Disabled</div>
-              <div style="font-size:12px;">Your system does not have SELinux active. Reboot may be required to enable it.</div>
+              <div style="font-weight:600; font-size:13px;">{status.config_mode === 'apparmor' ? 'AppArmor' : 'SELinux'} is Disabled / Inactive</div>
+              <div style="font-size:12px;">Your system does not have active Mandatory Access Control policies running.</div>
             </div>
           </div>
         {:else}

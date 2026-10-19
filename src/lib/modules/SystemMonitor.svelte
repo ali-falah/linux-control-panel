@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network } from '@lucide/svelte';
+  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network, PanelLeftClose, PanelLeftOpen } from '@lucide/svelte';
   import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
@@ -18,6 +18,18 @@
     uiStore.targetSubTab === 'processes' ? 'processes' : 'overview'
   );
   let currentUser = $state('unknown');
+  let resourceSidebarCollapsed = $state<boolean>((() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('app_monitor_resources_collapsed') === 'true';
+    }
+    return false;
+  })());
+
+  $effect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_monitor_resources_collapsed', String(resourceSidebarCollapsed));
+    }
+  });
 
   // Overview Stats
   let stats = $state<any>(null);
@@ -775,12 +787,24 @@
   <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 6px 8px; overflow: hidden;">
     {#if currentTab === 'overview'}
       {#if stats}
-        <div class="monitor-layout">
+        <div class="monitor-layout" class:resources-collapsed={resourceSidebarCollapsed}>
           <!-- COLUMN 1: Resource Usage & Disk I/O -->
-          <div class="monitor-column-left">
-            <!-- Core Resource Usage -->
-            <Card title="Core Resource Usage" icon={Cpu} class="monitor-panel">
-              <div class="panel-scroll">
+          {#if !resourceSidebarCollapsed}
+            <div class="monitor-column-left">
+              <!-- Core Resource Usage -->
+              <Card title="Core Resource Usage" icon={Cpu} class="monitor-panel">
+                {#snippet headerActions()}
+                  <button
+                    type="button"
+                    class="sidebar-collapse-toggle-btn"
+                    onclick={() => resourceSidebarCollapsed = true}
+                    title="Collapse sidebar (Expand Network & Connections to full width)"
+                    aria-label="Collapse sidebar"
+                  >
+                    <PanelLeftClose size={13} />
+                  </button>
+                {/snippet}
+                <div class="panel-scroll">
                 <!-- CPU -->
                 <div class="metric-block" style="display:flex; flex-direction:column; gap:8px;">
                   <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600; align-items: center;">
@@ -958,9 +982,24 @@
               </div>
             </Card>
           </div>
+          {/if}
 
           <!-- COLUMN 2: Network & Connections -->
           <Card title="Network & Connections" icon={Wifi} class="monitor-panel" style="display: flex; flex-direction: column; height: 100%; min-height: 0;">
+            {#snippet headerActions()}
+              {#if resourceSidebarCollapsed}
+                <button
+                  type="button"
+                  class="sidebar-collapse-toggle-btn expand-active"
+                  onclick={() => resourceSidebarCollapsed = false}
+                  title="Show Resource Usage Sidebar"
+                  aria-label="Show Resource Usage Sidebar"
+                >
+                  <PanelLeftOpen size={13} />
+                  <span>Show Resources (CPU / Disks)</span>
+                </button>
+              {/if}
+            {/snippet}
             <div style="display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0;">
               <div>
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
@@ -1805,6 +1844,57 @@
     align-items: stretch;
     height: 100%;
     min-height: 0;
+    width: 100%;
+    transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .monitor-layout.resources-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-collapse-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+  }
+
+  .sidebar-collapse-toggle-btn:hover {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    transform: translateY(-0.5px);
+  }
+
+  .sidebar-collapse-toggle-btn.expand-active {
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    font-weight: 600;
+    padding: 0 8px;
+  }
+
+  :global(html.light-mode) .sidebar-collapse-toggle-btn {
+    background: #F1F5F9;
+    border-color: #CBD5E1;
+    color: #475569;
+  }
+
+  :global(html.light-mode) .sidebar-collapse-toggle-btn:hover,
+  :global(html.light-mode) .sidebar-collapse-toggle-btn.expand-active {
+    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
   .monitor-column-left {
     display: flex;

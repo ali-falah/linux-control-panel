@@ -48,7 +48,7 @@ class UIStore {
   /** Recently visited tabs history for sidebar submenu */
   recentTabs = $state<TabId[]>([]);
   /** Navigation history stack — used by PageHeader back button */
-  private navHistory = $state<TabId[]>([]);
+  navHistory = $state<TabId[]>([]);
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');

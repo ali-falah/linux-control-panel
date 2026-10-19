@@ -83,54 +83,94 @@ pub async fn search_copr(query: String) -> Result<Vec<CoprProject>, String> {
     Ok(projects)
 }
 
-/// Enable a Copr repo via dnf copr enable
+/// Enable a Copr or PPA repo
 #[tauri::command]
 pub async fn enable_copr(repo: String) -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "copr", "enable", &repo, "-y"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("enable_copr {repo} failed: {stderr}"));
+            return Err(format!("Failed to enable Copr repo: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Enabled Copr repo: {repo}"));
+        return Ok(stdout);
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "copr", "enable", &repo, "-y"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("add-apt-repository").await {
+        let repo_arg = if repo.starts_with("ppa:") { repo.clone() } else { format!("ppa:{}", repo) };
+        let output = Command::new("pkexec")
+            .args(["add-apt-repository", "-y", &repo_arg])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run add-apt-repository: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("enable_copr {repo} failed: {stderr}"));
-        return Err(format!("Failed to enable Copr repo: {stderr}"));
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("enable PPA {repo} failed: {stderr}"));
+            return Err(format!("Failed to add PPA repository: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Enabled PPA repo: {repo}"));
+        return Ok(stdout);
     }
 
-    log_to_file("INFO", &format!("Enabled Copr repo: {repo}"));
-    Ok(stdout)
+    Err("Neither dnf nor add-apt-repository is available on this system".to_string())
 }
 
-/// Disable a Copr repo via dnf copr disable
+/// Disable a Copr or PPA repo
 #[tauri::command]
 pub async fn disable_copr(repo: String) -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "copr", "disable", &repo, "-y"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("disable_copr {repo} failed: {stderr}"));
+            return Err(format!("Failed to disable Copr repo: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Disabled Copr repo: {repo}"));
+        return Ok(stdout);
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "copr", "disable", &repo, "-y"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("add-apt-repository").await {
+        let repo_arg = if repo.starts_with("ppa:") { repo.clone() } else { format!("ppa:{}", repo) };
+        let output = Command::new("pkexec")
+            .args(["add-apt-repository", "--remove", "-y", &repo_arg])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run add-apt-repository --remove: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("disable_copr {repo} failed: {stderr}"));
-        return Err(format!("Failed to disable Copr repo: {stderr}"));
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("disable PPA {repo} failed: {stderr}"));
+            return Err(format!("Failed to disable PPA repo: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Disabled PPA repo: {repo}"));
+        return Ok(stdout);
     }
 
-    log_to_file("INFO", &format!("Disabled Copr repo: {repo}"));
-    Ok(stdout)
+    Err("Neither dnf nor add-apt-repository is available on this system".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +183,7 @@ pub struct SystemCoprRepo {
     pub baseurl: String,
 }
 
-/// List all installed COPR repositories from /etc/yum.repos.d/*.repo
+/// List all installed COPR or PPA repositories
 #[tauri::command]
 pub async fn list_system_coprs() -> Result<Vec<SystemCoprRepo>, String> {
     let repos = crate::commands::repo_manager::list_repos().await?;
@@ -153,7 +193,10 @@ pub async fn list_system_coprs() -> Result<Vec<SystemCoprRepo>, String> {
         let is_copr = repo.id.to_lowercase().contains("copr")
             || repo.file_path.to_lowercase().contains("copr")
             || repo.baseurl.to_lowercase().contains("copr")
-            || repo.baseurl.to_lowercase().contains("fedorainfracloud.org");
+            || repo.baseurl.to_lowercase().contains("fedorainfracloud.org")
+            || repo.id.to_lowercase().contains("ppa")
+            || repo.file_path.to_lowercase().contains("ppa")
+            || repo.baseurl.to_lowercase().contains("launchpad");
 
         if !is_copr {
             continue;

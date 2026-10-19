@@ -9,6 +9,12 @@
   import { invokeSafe } from '../utils/ipc';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
+  import Button from '../components/ui/Button.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import Card from '../components/ui/Card.svelte';
   import { portal } from '../actions/portal.ts';
 
   // ─── Types ───────────────────────────────────────────────────────────────────
@@ -278,7 +284,7 @@
       uiStore.showToast('Please provide a filename for the key', 'warning');
       return;
     }
-    const res = await invokeSafe<{ filename: string; public_key: string }>('vault_generate_ssh_key', {
+    const res = await invokeSafe<string>('vault_generate_ssh_key', {
       keyType: genKeyType,
       bits: genBits,
       filename: genFilename.trim(),
@@ -287,7 +293,7 @@
     });
 
     if (res) {
-      generatedKeyResult = { filename: res.filename, publicKey: res.public_key };
+      generatedKeyResult = { filename: genFilename.trim(), publicKey: res };
       showGenModal = false;
       uiStore.showToast('SSH key pair generated successfully', 'success');
       loadSshKeys();
@@ -296,7 +302,7 @@
 
   async function handleDeleteKey(keyName: string) {
     if (!confirm(`Are you sure you want to delete SSH key pair "${keyName}"? This action cannot be undone.`)) return;
-    const res = await invokeSafe<string>('vault_delete_ssh_key', { keyName });
+    const res = await invokeSafe<string>('vault_delete_ssh_key', { name: keyName });
     if (res) {
       uiStore.showToast(res, 'success');
       loadSshKeys();
@@ -309,17 +315,20 @@
       return;
     }
 
-    const res = await invokeSafe<string>('vault_add_ssh_client_host', {
+    const newHost: SshClientHost = {
       host: newHostAlias.trim(),
       hostname: newHostName.trim(),
-      user: newHostUser.trim() || null,
-      port: newHostPort.trim() || null,
-      identityFile: newHostKey.trim() || null,
-      proxyJump: newHostProxy.trim() || null,
-      extraConfig: newHostExtra.trim() || null,
-    });
+      user: newHostUser.trim(),
+      port: newHostPort.trim() || '22',
+      identity_file: newHostKey.trim(),
+      proxy_jump: newHostProxy.trim(),
+      extra_config: newHostExtra.trim(),
+    };
 
-    if (res) {
+    const updatedHosts = [...clientHosts.filter(h => h.host !== newHostAlias.trim()), newHost];
+    const res = await invokeSafe('vault_save_ssh_client_config', { hosts: updatedHosts });
+
+    if (res !== null) {
       uiStore.showToast('Host alias saved to ~/.ssh/config', 'success');
       showAddClientModal = false;
       newHostAlias = '';
@@ -335,16 +344,16 @@
 
   async function handleDeleteClientHost(host: string) {
     if (!confirm(`Remove host profile "${host}" from ~/.ssh/config?`)) return;
-    const res = await invokeSafe<string>('vault_delete_ssh_client_host', { host });
-    if (res) {
-      uiStore.showToast(res, 'success');
+    const res = await invokeSafe('vault_delete_ssh_client_host', { hostName: host });
+    if (res !== null) {
+      uiStore.showToast(`Removed host profile "${host}"`, 'success');
       loadClientConfig();
     }
   }
 
   async function handleRemoveKnownHost(lineNumber: number, host: string) {
-    const res = await invokeSafe<string>('vault_remove_known_host', { lineNumber });
-    if (res) {
+    const res = await invokeSafe('vault_remove_known_host', { lineNumber });
+    if (res !== null) {
       uiStore.showToast(`Removed entry for ${host}`, 'success');
       loadKnownHosts();
     }
@@ -364,7 +373,7 @@
       uiStore.showToast('Please paste a valid SSH public key', 'warning');
       return;
     }
-    const res = await invokeSafe<string>('vault_add_authorized_key', { publicKey: newAuthPubKey.trim() });
+    const res = await invokeSafe<string>('vault_add_authorized_key', { pubKey: newAuthPubKey.trim() });
     if (res) {
       uiStore.showToast(res, 'success');
       showAddAuthModal = false;
@@ -429,173 +438,106 @@
   }
 
   async function handleControlFail2ban(action: 'start' | 'restart') {
-    const res = await invokeSafe<string>('vault_control_fail2ban', { action });
-    if (res) {
-      uiStore.showToast(res, 'success');
+    const res = await invokeSafe('vault_manage_fail2ban_service', { action });
+    if (res !== null) {
+      uiStore.showToast(`Fail2ban service ${action} executed`, 'success');
       loadFail2banStatus();
     }
   }
 </script>
 
-<div class="module-root">
-  <!-- ── Page Header ────────────────────────────────────────────────────────── -->
+<div class="module-page ssh-vault-page">
+  <!-- ── Page Header (Clean & Uncrowded) ───────────────────────────────────── -->
   <PageHeader 
     title="SSH &amp; SSL Vault" 
-    subtitle="Manage cryptographic identities, SSH server posture, client profiles, and TLS certificates" 
     icon={Lock}
   >
     <div class="header-actions">
-      <button 
-        class="btn btn-secondary btn-sm" 
+      {#if expiringCertsCount > 0}
+        <span class="vault-status-pill warning" title="{expiringCertsCount} SSL certificate(s) expiring soon or expired">
+          <AlertTriangle size={12} />
+          <span>{expiringCertsCount} Expiring</span>
+        </span>
+      {:else if fail2banStatus?.is_active}
+        <span class="vault-status-pill active" title="Fail2ban threat defense is active with {fail2banStatus.total_banned_ips} banned IPs">
+          <ShieldCheck size={12} />
+          <span>Shield Active</span>
+        </span>
+      {/if}
+
+      <Button 
+        variant="outline" 
+        size="sm"
         onclick={loadAllData} 
         disabled={loading}
-        title="Reload all SSH keys, configs, SSL certs, and Fail2ban posture"
+        title="Reload all SSH keys, configs, SSL certs, and fail2ban data"
       >
         <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} />
-        <span>Refresh All</span>
-      </button>
+        <span>Refresh</span>
+      </Button>
     </div>
   </PageHeader>
 
-  <!-- ── Top KPI Stat Overview Cards ────────────────────────────────────────── -->
-  <div class="kpi-grid">
-    <div class="kpi-card" onclick={() => activeTab = 'keys'} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && (activeTab = 'keys')}>
-      <div class="kpi-icon-wrap accent">
-        <Key size={18} />
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-title">SSH Key Pairs</div>
-        <div class="kpi-value">{sshKeys.length}</div>
-        <div class="kpi-desc">In ~/.ssh/ directory</div>
-      </div>
+  <!-- ── Dedicated Sub-Navigation & Action Bar ─────────────────────────────── -->
+  <div class="vault-subnav-bar">
+    <TabGroup
+      size="sm"
+      tabs={[
+        { id: 'keys', label: 'SSH Keys', count: sshKeys.length, icon: Key },
+        { id: 'client_config', label: 'Client Config', count: clientHosts.length, icon: Laptop },
+        { id: 'known_hosts', label: 'Known Hosts', count: knownHosts.length, icon: Globe },
+        { id: 'authorized', label: 'Authorized & SSHD', count: authorizedKeys.length, icon: ShieldCheck },
+        { id: 'certs', label: 'SSL Certificates', count: sslCerts.length, icon: FileKey },
+        { id: 'threats', label: 'Threat Defense', count: fail2banStatus?.total_banned_ips ?? 0, icon: ShieldAlert }
+      ]}
+      bind:activeTab
+    />
+
+    <div class="subnav-actions">
+      {#if activeTab === 'keys'}
+        <Button variant="primary" size="sm" onclick={() => showGenModal = true}>
+          <Plus size={13} /> Generate SSH Key
+        </Button>
+      {:else if activeTab === 'client_config'}
+        <Button variant="primary" size="sm" onclick={() => showAddClientModal = true}>
+          <Plus size={13} /> Add Host Profile
+        </Button>
+      {:else if activeTab === 'known_hosts'}
+        {#if knownHosts.length > 0}
+          <Button variant="danger" size="sm" onclick={handleClearKnownHosts} title="Remove all stored host keys in ~/.ssh/known_hosts">
+            <Trash2 size={13} /> Flush Known Hosts
+          </Button>
+        {/if}
+      {:else if activeTab === 'authorized'}
+        <Button variant="primary" size="sm" onclick={() => showAddAuthModal = true}>
+          <Plus size={13} /> Add Authorized Key
+        </Button>
+      {:else if activeTab === 'certs'}
+        <Button variant="primary" size="sm" onclick={() => showTestSslModal = true}>
+          <Globe size={13} /> Test Live TLS Port
+        </Button>
+      {:else if activeTab === 'threats'}
+        {#if fail2banStatus?.is_installed}
+          <Button variant="outline" size="sm" onclick={() => handleControlFail2ban('restart')} title="Restart fail2ban service daemon">
+            <RotateCw size={13} /> Restart Service
+          </Button>
+          <Button 
+            variant="primary" 
+            size="sm" 
+            onclick={() => { 
+              if (fail2banStatus?.jails && fail2banStatus.jails.length > 0) { 
+                banJailName = fail2banStatus.jails[0].jail_name; 
+              } else { 
+                banJailName = 'sshd'; 
+              } 
+              showBanModal = true; 
+            }}
+          >
+            <Ban size={13} /> Manually Ban IP
+          </Button>
+        {/if}
+      {/if}
     </div>
-
-    <div class="kpi-card" onclick={() => activeTab = 'client_config'} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && (activeTab = 'client_config')}>
-      <div class="kpi-icon-wrap primary">
-        <Laptop size={18} />
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-title">Client Profiles</div>
-        <div class="kpi-value">{clientHosts.length}</div>
-        <div class="kpi-desc">Host aliases configured</div>
-      </div>
-    </div>
-
-    <div class="kpi-card" onclick={() => activeTab = 'known_hosts'} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && (activeTab = 'known_hosts')}>
-      <div class="kpi-icon-wrap info">
-        <Globe size={18} />
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-title">Known Hosts</div>
-        <div class="kpi-value">{knownHosts.length}</div>
-        <div class="kpi-desc">Remembered host keys</div>
-      </div>
-    </div>
-
-    <div class="kpi-card" onclick={() => activeTab = 'certs'} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && (activeTab = 'certs')}>
-      <div class="kpi-icon-wrap {expiringCertsCount > 0 ? 'warning' : 'success'}">
-        <FileKey size={18} />
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-title">SSL Certificates</div>
-        <div class="kpi-value">{sslCerts.length}</div>
-        <div class="kpi-desc">
-          {#if expiringCertsCount > 0}
-            <span class="text-warning">⚠️ {expiringCertsCount} expiring / expired</span>
-          {:else}
-            <span class="text-success">All valid &amp; healthy</span>
-          {/if}
-        </div>
-      </div>
-    </div>
-
-    <div class="kpi-card" onclick={() => activeTab = 'threats'} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && (activeTab = 'threats')}>
-      <div class="kpi-icon-wrap {fail2banStatus?.is_active ? 'success' : 'muted'}">
-        <ShieldAlert size={18} />
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-title">Threat Defense</div>
-        <div class="kpi-value">{fail2banStatus?.total_banned_ips ?? 0}</div>
-        <div class="kpi-desc">
-          {fail2banStatus?.is_active ? `Fail2ban Active (${fail2banStatus?.jails?.length || 0} jails)` : 'Fail2ban Inactive'}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── Navigation Tabs ────────────────────────────────────────────────────── -->
-  <div class="tab-bar-nav">
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'keys'} 
-      onclick={() => activeTab = 'keys'}
-    >
-      <Key size={15} />
-      <span>SSH Keys</span>
-      {#if sshKeys.length > 0}
-        <span class="tab-pill">{sshKeys.length}</span>
-      {/if}
-    </button>
-
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'client_config'} 
-      onclick={() => activeTab = 'client_config'}
-    >
-      <Laptop size={15} />
-      <span>SSH Client Config</span>
-      {#if clientHosts.length > 0}
-        <span class="tab-pill">{clientHosts.length}</span>
-      {/if}
-    </button>
-
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'known_hosts'} 
-      onclick={() => activeTab = 'known_hosts'}
-    >
-      <Globe size={15} />
-      <span>Known Hosts</span>
-      {#if knownHosts.length > 0}
-        <span class="tab-pill">{knownHosts.length}</span>
-      {/if}
-    </button>
-
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'authorized'} 
-      onclick={() => activeTab = 'authorized'}
-    >
-      <ShieldCheck size={15} />
-      <span>Authorized &amp; SSHD</span>
-      {#if authorizedKeys.length > 0}
-        <span class="tab-pill">{authorizedKeys.length}</span>
-      {/if}
-    </button>
-
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'certs'} 
-      onclick={() => activeTab = 'certs'}
-    >
-      <FileKey size={15} />
-      <span>SSL Certificates</span>
-      {#if sslCerts.length > 0}
-        <span class="tab-pill" class:pill-warn={expiringCertsCount > 0}>{sslCerts.length}</span>
-      {/if}
-    </button>
-
-    <button 
-      class="tab-nav-btn" 
-      class:active={activeTab === 'threats'} 
-      onclick={() => activeTab = 'threats'}
-    >
-      <ShieldAlert size={15} />
-      <span>Threat Defense</span>
-      {#if (fail2banStatus?.total_banned_ips ?? 0) > 0}
-        <span class="tab-pill pill-danger">{fail2banStatus?.total_banned_ips}</span>
-      {/if}
-    </button>
   </div>
 
   <!-- ── Tab Body Content ──────────────────────────────────────────────────── -->
@@ -605,39 +547,15 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'keys'}
       <div class="tab-panel">
-        <!-- Feature Context & Action Header -->
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <Key size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>Local SSH Cryptographic Key Vault</h4>
-              <p>
-                Private/public key pairs located in <code>~/.ssh/</code>. Ed25519 is recommended for optimal performance and modern cryptography.
-              </p>
-            </div>
-          </div>
-          <button class="btn btn-primary" onclick={() => showGenModal = true}>
-            <Plus size={14} /> Generate SSH Key
-          </button>
-        </div>
-
         <!-- Filter & Table Card -->
         <div class="card table-card">
           <div class="table-toolbar">
-            <div class="search-input-wrap">
-              <Search size={14} class="search-icon" />
-              <input 
-                type="text" 
-                placeholder="Search key name, algorithm, or fingerprint..." 
-                bind:value={keySearch} 
-              />
-              {#if keySearch}
-                <button class="clear-search-btn" onclick={() => keySearch = ''}><X size={13} /></button>
-              {/if}
-            </div>
-            <span class="table-count-label">Showing {filteredSshKeys.length} of {sshKeys.length} keys</span>
+            <SearchBar
+              bind:value={keySearch}
+              placeholder="Search key name, algorithm, or fingerprint..."
+              count={filteredSshKeys.length}
+              total={sshKeys.length}
+            />
           </div>
 
           <div class="table-wrap">
@@ -655,19 +573,15 @@
               <tbody>
                 {#if filteredSshKeys.length === 0}
                   <tr>
-                    <td colspan="6" class="empty-cell">
-                      <div class="empty-state-box">
-                        <Key size={32} class="empty-icon" />
-                        <div class="empty-title">No SSH Keys Found</div>
-                        <div class="empty-desc">
-                          {keySearch ? 'No keys matched your search filter.' : 'Generate a new Ed25519 key pair to start passwordless SSH authentication.'}
-                        </div>
-                        {#if !keySearch}
-                          <button class="btn btn-primary btn-sm mt-2" onclick={() => showGenModal = true}>
-                            <Plus size={13} /> Generate Key
-                          </button>
-                        {/if}
-                      </div>
+                    <td colspan="6" class="empty-cell" style="padding: 24px 0 !important;">
+                      <EmptyState
+                        icon={Key}
+                        title="No SSH Keys Found"
+                        description={keySearch ? 'No keys matched your search filter.' : 'Generate a new Ed25519 key pair to start passwordless SSH authentication.'}
+                        actionLabel={!keySearch ? 'Generate Key' : ''}
+                        actionIcon={Plus}
+                        onAction={() => showGenModal = true}
+                      />
                     </td>
                   </tr>
                 {:else}
@@ -708,22 +622,24 @@
                         {/if}
                       </td>
                       <td>
-                        <button 
-                          class="btn-text" 
+                        <Button 
+                          variant="ghost" 
+                          size="sm"
                           onclick={() => copyToClipboard(key.public_key, `${key.name}.pub`)}
                           title="Copy public key contents to paste into remote servers or GitHub"
                         >
                           <Copy size={13} /> Copy Public Key
-                        </button>
+                        </Button>
                       </td>
                       <td style="text-align: right;">
-                        <button 
-                          class="btn btn-danger btn-sm" 
+                        <Button 
+                          variant="danger" 
+                          size="sm"
                           onclick={() => handleDeleteKey(key.name)}
                           title="Permanently delete this key pair from ~/.ssh/"
                         >
                           <Trash2 size={13} /> Delete
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   {/each}
@@ -740,37 +656,14 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'client_config'}
       <div class="tab-panel">
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <Laptop size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>SSH Client Host Aliases (<code>~/.ssh/config</code>)</h4>
-              <p>
-                Configure server shortcuts with custom ports, usernames, and specific identity keys. Connect with a single <code>ssh &lt;alias&gt;</code> command.
-              </p>
-            </div>
-          </div>
-          <button class="btn btn-primary" onclick={() => showAddClientModal = true}>
-            <Plus size={14} /> Add Host Profile
-          </button>
-        </div>
-
         <div class="card table-card">
           <div class="table-toolbar">
-            <div class="search-input-wrap">
-              <Search size={14} class="search-icon" />
-              <input 
-                type="text" 
-                placeholder="Search host alias, target hostname, or user..." 
-                bind:value={clientSearch} 
-              />
-              {#if clientSearch}
-                <button class="clear-search-btn" onclick={() => clientSearch = ''}><X size={13} /></button>
-              {/if}
-            </div>
-            <span class="table-count-label">Showing {filteredClientHosts.length} of {clientHosts.length} profiles</span>
+            <SearchBar
+              bind:value={clientSearch}
+              placeholder="Search host alias, target hostname, or user..."
+              count={filteredClientHosts.length}
+              total={clientHosts.length}
+            />
           </div>
 
           <div class="table-wrap">
@@ -789,19 +682,15 @@
               <tbody>
                 {#if filteredClientHosts.length === 0}
                   <tr>
-                    <td colspan="7" class="empty-cell">
-                      <div class="empty-state-box">
-                        <Laptop size={32} class="empty-icon" />
-                        <div class="empty-title">No Host Profiles Configured</div>
-                        <div class="empty-desc">
-                          {clientSearch ? 'No client hosts matched your search filter.' : 'Add your servers to ~/.ssh/config for 1-click terminal connections.'}
-                        </div>
-                        {#if !clientSearch}
-                          <button class="btn btn-primary btn-sm mt-2" onclick={() => showAddClientModal = true}>
-                            <Plus size={13} /> Add Host Profile
-                          </button>
-                        {/if}
-                      </div>
+                    <td colspan="7" class="empty-cell" style="padding: 24px 0 !important;">
+                      <EmptyState
+                        icon={Laptop}
+                        title="No Host Profiles Configured"
+                        description={clientSearch ? 'No client hosts matched your search filter.' : 'Add your servers to ~/.ssh/config for 1-click terminal connections.'}
+                        actionLabel={!clientSearch ? 'Add Host Profile' : ''}
+                        actionIcon={Plus}
+                        onAction={() => showAddClientModal = true}
+                      />
                     </td>
                   </tr>
                 {:else}
@@ -819,22 +708,25 @@
                         {/if}
                       </td>
                       <td>
-                        <button 
-                          class="btn-text font-mono" 
+                        <Button 
+                          variant="ghost" 
+                          size="sm"
+                          class="font-mono"
                           onclick={() => copyToClipboard(`ssh ${host.host}`, 'SSH command')}
                           title="Copy terminal connection command"
                         >
                           <Terminal size={12} /> ssh {host.host}
-                        </button>
+                        </Button>
                       </td>
                       <td style="text-align: right;">
-                        <button 
-                          class="btn btn-danger btn-sm" 
+                        <Button 
+                          variant="danger" 
+                          size="sm"
                           onclick={() => handleDeleteClientHost(host.host)}
                           title="Remove host profile from config"
                         >
                           <Trash2 size={13} /> Delete
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   {/each}
@@ -851,39 +743,14 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'known_hosts'}
       <div class="tab-panel">
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <Globe size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>Remote Server Fingerprints (<code>~/.ssh/known_hosts</code>)</h4>
-              <p>
-                Stored cryptographic fingerprints of servers you have connected to. Removing an entry resolves <em>"Host key verification failed"</em> warnings after a remote OS reinstallation.
-              </p>
-            </div>
-          </div>
-          {#if knownHosts.length > 0}
-            <button class="btn btn-danger btn-sm" onclick={handleClearKnownHosts}>
-              <Trash2 size={13} /> Flush Known Hosts
-            </button>
-          {/if}
-        </div>
-
         <div class="card table-card">
           <div class="table-toolbar">
-            <div class="search-input-wrap">
-              <Search size={14} class="search-icon" />
-              <input 
-                type="text" 
-                placeholder="Search server domain, IP, or fingerprint..." 
-                bind:value={knownSearch} 
-              />
-              {#if knownSearch}
-                <button class="clear-search-btn" onclick={() => knownSearch = ''}><X size={13} /></button>
-              {/if}
-            </div>
-            <span class="table-count-label">Showing {filteredKnownHosts.length} of {knownHosts.length} entries</span>
+            <SearchBar
+              bind:value={knownSearch}
+              placeholder="Search server domain, IP, or fingerprint..."
+              count={filteredKnownHosts.length}
+              total={knownHosts.length}
+            />
           </div>
 
           <div class="table-wrap">
@@ -900,12 +767,12 @@
               <tbody>
                 {#if filteredKnownHosts.length === 0}
                   <tr>
-                    <td colspan="5" class="empty-cell">
-                      <div class="empty-state-box">
-                        <Globe size={32} class="empty-icon" />
-                        <div class="empty-title">No Known Hosts Recorded</div>
-                        <div class="empty-desc">Your ~/.ssh/known_hosts file is currently clean and empty.</div>
-                      </div>
+                    <td colspan="5" class="empty-cell" style="padding: 24px 0 !important;">
+                      <EmptyState
+                        icon={Globe}
+                        title="No Known Hosts Recorded"
+                        description="Your ~/.ssh/known_hosts file is currently clean and empty."
+                      />
                     </td>
                   </tr>
                 {:else}
@@ -920,13 +787,14 @@
                         {kh.fingerprint !== 'Available' ? kh.fingerprint : kh.raw.slice(0, 45) + '...'}
                       </td>
                       <td style="text-align: right;">
-                        <button 
-                          class="btn btn-danger btn-sm" 
+                        <Button 
+                          variant="danger" 
+                          size="sm"
                           onclick={() => handleRemoveKnownHost(kh.line_number, kh.host)}
                           title="Remove this host key to fix verification errors"
                         >
                           <Trash2 size={13} /> Remove
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   {/each}
@@ -943,27 +811,12 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'authorized'}
       <div class="tab-panel">
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <ShieldCheck size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>Authorized Remote Keys &amp; Daemon Hardening Posture</h4>
-              <p>
-                The <code>~/.ssh/authorized_keys</code> file controls which remote machines can log in. Keep your OpenSSH daemon hardened against brute-force attacks.
-              </p>
-            </div>
-          </div>
-          <button class="btn btn-primary" onclick={() => showAddAuthModal = true}>
-            <Plus size={14} /> Add Authorized Key
-          </button>
-        </div>
-
         <!-- Authorized Keys Table Card -->
         <div class="card table-card">
-          <div class="card-header-bar">
-            <h3 class="card-section-title">Authorized Public Keys ({authorizedKeys.length})</h3>
+          <div class="table-toolbar" style="display: flex; align-items: center; justify-content: space-between;">
+            <div style="font-size: 12px; font-weight: 600; color: var(--color-text-secondary);">
+              Authorized Public Keys ({authorizedKeys.length})
+            </div>
           </div>
 
           <div class="table-wrap">
@@ -980,15 +833,15 @@
               <tbody>
                 {#if authorizedKeys.length === 0}
                   <tr>
-                    <td colspan="5" class="empty-cell">
-                      <div class="empty-state-box">
-                        <ShieldCheck size={32} class="empty-icon" />
-                        <div class="empty-title">No Authorized Keys Configured</div>
-                        <div class="empty-desc">Add public keys to ~/.ssh/authorized_keys to allow incoming logins.</div>
-                        <button class="btn btn-primary btn-sm mt-2" onclick={() => showAddAuthModal = true}>
-                          <Plus size={13} /> Add Key
-                        </button>
-                      </div>
+                    <td colspan="5" class="empty-cell" style="padding: 24px 0 !important;">
+                      <EmptyState
+                        icon={ShieldCheck}
+                        title="No Authorized Keys Configured"
+                        description="Add public keys to ~/.ssh/authorized_keys to allow incoming logins."
+                        actionLabel="Add Key"
+                        actionIcon={Plus}
+                        onAction={() => showAddAuthModal = true}
+                      />
                     </td>
                   </tr>
                 {:else}
@@ -1005,13 +858,14 @@
                         {/if}
                       </td>
                       <td style="text-align: right;">
-                        <button 
-                          class="btn btn-danger btn-sm" 
+                        <Button 
+                          variant="danger" 
+                          size="sm"
                           onclick={() => handleRemoveAuthorizedKey(ak.line_number)}
                           title="Revoke login access for this key"
                         >
                           <Trash2 size={13} /> Revoke
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   {/each}
@@ -1023,20 +877,21 @@
 
         <!-- SSHD Hardening Cards Section -->
         {#if sshdStatus}
-          <div class="card grid-card mt-4">
+          <div class="card grid-card">
             <div class="card-header-bar">
               <div>
                 <h3 class="card-section-title">SSH Daemon Security Posture</h3>
                 <span class="card-section-sub">Active daemon settings resolved via <code>/etc/ssh/sshd_config</code></span>
               </div>
-              <button 
-                class="btn btn-secondary btn-sm" 
+              <Button 
+                variant="outline" 
+                size="sm"
                 onclick={() => loadSshdHardening(true)} 
                 disabled={evaluatingSshd}
               >
                 <RefreshCw size={12} class={evaluatingSshd ? 'animate-spin-slow' : ''} /> 
                 <span>{evaluatingSshd ? 'Evaluating...' : 'Re-evaluate'}</span>
-              </button>
+              </Button>
             </div>
 
             {#if sshdStatus.error}
@@ -1045,12 +900,13 @@
                   <AlertTriangle size={16} class="text-warning flex-shrink-0" />
                   <span>{sshdStatus.error}. Enable Root Mode for live daemon configuration analysis.</span>
                 </div>
-                <button 
-                  class="btn btn-primary btn-sm"
+                <Button 
+                  variant="primary" 
+                  size="sm"
                   onclick={() => window.dispatchEvent(new CustomEvent('request-root-auth'))}
                 >
                   <ShieldCheck size={13} /> Enable Root Mode
-                </button>
+                </Button>
               </div>
             {/if}
 
@@ -1128,59 +984,38 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'certs'}
       <div class="tab-panel">
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <FileKey size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>SSL / TLS Web &amp; Server Certificates</h4>
-              <p>
-                Discovered certificates across Let's Encrypt (<code>/etc/letsencrypt/live</code>), Nginx, and local trust stores. Includes real-time expiration monitoring.
-              </p>
-            </div>
-          </div>
-          <button class="btn btn-primary" onclick={() => showTestSslModal = true}>
-            <Globe size={14} /> Test Live TLS Port
-          </button>
-        </div>
-
         <div class="card table-card">
           <div class="table-toolbar">
-            <div class="search-input-wrap">
-              <Search size={14} class="search-icon" />
-              <input 
-                type="text" 
-                placeholder="Search domain, issuer, or SANs..." 
-                bind:value={certSearch} 
+            <div style="display: flex; align-items: center; gap: 10px; flex: 1;">
+              <SearchBar
+                bind:value={certSearch}
+                placeholder="Search domain, issuer, or SANs..."
+                count={filteredSslCerts.length}
+                total={sslCerts.length}
               />
-              {#if certSearch}
-                <button class="clear-search-btn" onclick={() => certSearch = ''}><X size={13} /></button>
-              {/if}
-            </div>
-
-            <div class="filter-chip-group">
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'all'} 
-                onclick={() => certFilter = 'all'}
-              >
-                All ({sslCerts.length})
-              </button>
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'valid'} 
-                onclick={() => certFilter = 'valid'}
-              >
-                Valid ({sslCerts.filter(c => !c.is_expired).length})
-              </button>
-              <button 
-                class="filter-chip" 
-                class:active={certFilter === 'expiring'} 
-                onclick={() => certFilter = 'expiring'}
-              >
-                ⚠️ Expiring / Expired ({expiringCertsCount})
-              </button>
+              <div class="filter-chip-group">
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'all'} 
+                  onclick={() => certFilter = 'all'}
+                >
+                  All ({sslCerts.length})
+                </button>
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'valid'} 
+                  onclick={() => certFilter = 'valid'}
+                >
+                  Valid ({sslCerts.filter(c => !c.is_expired).length})
+                </button>
+                <button 
+                  class="filter-chip" 
+                  class:active={certFilter === 'expiring'} 
+                  onclick={() => certFilter = 'expiring'}
+                >
+                  Expiring ({expiringCertsCount})
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1199,17 +1034,15 @@
               <tbody>
                 {#if filteredSslCerts.length === 0}
                   <tr>
-                    <td colspan="6" class="empty-cell">
-                      <div class="empty-state-box">
-                        <FileKey size={32} class="empty-icon" />
-                        <div class="empty-title">No SSL Certificates Found</div>
-                        <div class="empty-desc">
-                          {certSearch ? 'No certificates matched your search filter.' : 'No active server certificates found in /etc/letsencrypt, /etc/nginx/ssl, or ~/.local/share/mkcert.'}
-                        </div>
-                        <button class="btn btn-secondary btn-sm mt-2" onclick={() => showTestSslModal = true}>
-                          <Globe size={13} /> Test Remote TLS Endpoint
-                        </button>
-                      </div>
+                    <td colspan="6" class="empty-cell" style="padding: 24px 0 !important;">
+                      <EmptyState
+                        icon={FileKey}
+                        title="No SSL Certificates Found"
+                        description={certSearch ? 'No certificates matched your search filter.' : 'No active server certificates found in /etc/letsencrypt, /etc/nginx/ssl, or ~/.local/share/mkcert.'}
+                        actionLabel={!certSearch ? 'Test Remote TLS Endpoint' : ''}
+                        actionIcon={Globe}
+                        onAction={() => showTestSslModal = true}
+                      />
                     </td>
                   </tr>
                 {:else}
@@ -1255,13 +1088,14 @@
                         {cert.path}
                       </td>
                       <td style="text-align: right;">
-                        <button 
-                          class="btn btn-secondary btn-sm" 
+                        <Button 
+                          variant="outline" 
+                          size="sm"
                           onclick={() => copyToClipboard(cert.path, 'Certificate Path')}
                           title="Copy file path to clipboard"
                         >
                           <Copy size={12} /> Path
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   {/each}
@@ -1278,41 +1112,6 @@
          ══════════════════════════════════════════════════════════════════════════ -->
     {#if activeTab === 'threats'}
       <div class="tab-panel">
-        <div class="guide-banner">
-          <div class="guide-left">
-            <div class="guide-icon-badge">
-              <ShieldAlert size={18} />
-            </div>
-            <div class="guide-copy">
-              <h4>Fail2ban Intrusion Prevention &amp; IP Jail Defense</h4>
-              <p>
-                Automatically scans authentication logs for abusive login attempts and updates firewall rules to drop malicious traffic.
-              </p>
-            </div>
-          </div>
-          <div class="header-actions">
-            {#if fail2banStatus?.is_installed}
-              <button 
-                class="btn btn-secondary btn-sm" 
-                onclick={() => handleControlFail2ban('restart')}
-                title="Restart fail2ban service daemon"
-              >
-                <RotateCw size={13} /> Restart Service
-              </button>
-              <button class="btn btn-primary btn-sm" onclick={() => {
-                if (fail2banStatus?.jails && fail2banStatus.jails.length > 0) {
-                  banJailName = fail2banStatus.jails[0].jail_name;
-                } else {
-                  banJailName = 'sshd';
-                }
-                showBanModal = true;
-              }}>
-                <Ban size={13} /> Manually Ban IP
-              </button>
-            {/if}
-          </div>
-        </div>
-
         {#if !fail2banStatus?.is_installed}
           <div class="card p-5 text-center">
             <ShieldAlert size={36} class="text-muted mx-auto mb-2" />
@@ -1326,7 +1125,7 @@
           </div>
         {:else}
           <!-- Service Status Card -->
-          <div class="card status-overview-card mb-4">
+          <div class="card status-overview-card">
             <div class="status-overview-left">
               <div class="status-indicator-dot {fail2banStatus.is_active ? 'online' : 'offline'}"></div>
               <div>
@@ -1339,9 +1138,9 @@
               </div>
             </div>
             {#if !fail2banStatus.is_active}
-              <button class="btn btn-primary btn-sm" onclick={() => handleControlFail2ban('start')}>
+              <Button variant="primary" size="sm" onclick={() => handleControlFail2ban('start')}>
                 <Play size={13} /> Start Fail2ban
-              </button>
+              </Button>
             {/if}
           </div>
 
@@ -1453,10 +1252,10 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => showGenModal = false}>Cancel</button>
-        <button class="btn btn-primary" onclick={handleGenerateKey}>
+        <Button variant="secondary" onclick={() => showGenModal = false}>Cancel</Button>
+        <Button variant="primary" onclick={handleGenerateKey}>
           <Key size={14} /> Generate Key Pair
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1485,13 +1284,13 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => generatedKeyResult = null}>Close</button>
-        <button class="btn btn-primary" onclick={() => {
+        <Button variant="secondary" onclick={() => generatedKeyResult = null}>Close</Button>
+        <Button variant="primary" onclick={() => {
           if (generatedKeyResult) copyToClipboard(generatedKeyResult.publicKey, 'Public Key');
           generatedKeyResult = null;
         }}>
           <Copy size={14} /> Copy Public Key &amp; Close
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1545,10 +1344,10 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => showAddClientModal = false}>Cancel</button>
-        <button class="btn btn-primary" onclick={handleAddClientHost}>
+        <Button variant="secondary" onclick={() => showAddClientModal = false}>Cancel</Button>
+        <Button variant="primary" onclick={handleAddClientHost}>
           <Check size={14} /> Save to ~/.ssh/config
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1581,10 +1380,10 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => showAddAuthModal = false}>Cancel</button>
-        <button class="btn btn-primary" onclick={handleAddAuthorizedKey}>
+        <Button variant="secondary" onclick={() => showAddAuthModal = false}>Cancel</Button>
+        <Button variant="primary" onclick={handleAddAuthorizedKey}>
           <Plus size={14} /> Add Authorized Key
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1614,14 +1413,15 @@
           </div>
         </div>
 
-        <button 
-          class="btn btn-primary w-full justify-center" 
+        <Button 
+          variant="primary" 
+          class="w-full justify-center" 
           onclick={handleTestRemoteSsl} 
           disabled={testSslLoading}
         >
           <RefreshCw size={13} class={testSslLoading ? 'animate-spin-slow' : ''} />
           <span>{testSslLoading ? 'Querying TLS Handshake...' : 'Inspect Live Certificate'}</span>
-        </button>
+        </Button>
 
         {#if testSslError}
           <div class="alert-banner-danger mt-3">
@@ -1659,7 +1459,7 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => showTestSslModal = false}>Close</button>
+        <Button variant="secondary" onclick={() => showTestSslModal = false}>Close</Button>
       </div>
     </div>
   </div>
@@ -1684,9 +1484,9 @@
               <AlertTriangle size={15} class="text-warning flex-shrink-0" />
               <span>Fail2ban service is currently inactive. Start the service to enforce active IP bans.</span>
             </div>
-            <button class="btn btn-primary btn-sm" onclick={() => handleControlFail2ban('start')}>
+            <Button variant="primary" size="sm" onclick={() => handleControlFail2ban('start')}>
               <Play size={12} /> Start Service
-            </button>
+            </Button>
           </div>
         {/if}
 
@@ -1715,10 +1515,10 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={() => showBanModal = false}>Cancel</button>
-        <button class="btn btn-danger" onclick={handleManualBan} disabled={!banIpAddress.trim()}>
+        <Button variant="secondary" onclick={() => showBanModal = false}>Cancel</Button>
+        <Button variant="danger" onclick={handleManualBan} disabled={!banIpAddress.trim()}>
           <Ban size={14} /> Ban IP Address
-        </button>
+        </Button>
       </div>
     </div>
   </div>
@@ -1726,13 +1526,13 @@
 
 <style>
   /* ── Layout Root ─────────────────────────────────────────────────────────── */
-  .module-root {
+  .module-page.ssh-vault-page {
     display: flex;
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
-    gap: 18px;
+    gap: 10px;
     padding: 24px;
     box-sizing: border-box;
     background: transparent;
@@ -1741,14 +1541,14 @@
   .tab-main-body {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding-bottom: 24px;
+    gap: 8px;
+    padding-bottom: 12px;
   }
 
   .tab-panel {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 8px;
   }
 
   .header-actions {
@@ -1757,227 +1557,43 @@
     gap: 8px;
   }
 
-  /* ── KPI Stat Cards ──────────────────────────────────────────────────────── */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 12px;
-  }
-
-  @media (max-width: 1080px) {
-    .kpi-grid {
-      grid-template-columns: repeat(3, 1fr);
-    }
-  }
-
-  @media (max-width: 720px) {
-    .kpi-grid {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .kpi-card {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    padding: 14px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  :global(html.light-mode) .kpi-card {
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  }
-
-  .kpi-card:hover {
-    border-color: var(--color-accent);
-    transform: translateY(-1px);
-  }
-
-  .kpi-icon-wrap {
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .kpi-icon-wrap.accent { background: rgba(0, 218, 243, 0.12); color: var(--color-accent); }
-  .kpi-icon-wrap.primary { background: rgba(59, 130, 246, 0.12); color: #3B82F6; }
-  .kpi-icon-wrap.info { background: rgba(14, 165, 233, 0.12); color: #0EA5E9; }
-  .kpi-icon-wrap.success { background: rgba(16, 185, 129, 0.12); color: var(--color-success); }
-  .kpi-icon-wrap.warning { background: rgba(245, 158, 11, 0.12); color: var(--color-warning); }
-  .kpi-icon-wrap.muted { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }
-
-  .kpi-body {
-    min-width: 0;
-  }
-
-  .kpi-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .kpi-value {
-    font-size: 19px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-    line-height: 1.2;
-  }
-
-  .kpi-desc {
-    font-size: 10.5px;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* ── Tab Bar Navigation ─────────────────────────────────────────────────── */
-  .tab-bar-nav {
-    display: flex;
-    gap: 6px;
-    border-bottom: 1px solid var(--color-border);
-    padding-bottom: 2px;
-  }
-
-  :global(html.light-mode) .tab-bar-nav {
-    border-bottom-color: #E2E8F0;
-  }
-
-  .tab-nav-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 14px;
-    border-radius: 8px 8px 0 0;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    background: transparent;
-    border: 1px solid transparent;
-    border-bottom: none;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .tab-nav-btn:hover {
-    color: var(--color-text-primary);
-    background: rgba(255, 255, 255, 0.04);
-  }
-
-  :global(html.light-mode) .tab-nav-btn:hover {
-    background: #F1F5F9;
-  }
-
-  .tab-nav-btn.active {
-    color: var(--color-accent);
-    background: var(--color-bg-card);
-    border-color: var(--color-border);
-    border-bottom: 1px solid var(--color-bg-card);
-    margin-bottom: -1px;
-  }
-
-  :global(html.light-mode) .tab-nav-btn.active {
-    color: #2563EB;
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-    border-bottom-color: #FFFFFF;
-  }
-
-  .tab-pill {
-    font-size: 10.5px;
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-text-muted);
-  }
-
-  .tab-nav-btn.active .tab-pill {
-    background: rgba(0, 218, 243, 0.15);
-    color: var(--color-accent);
-  }
-
-  :global(html.light-mode) .tab-nav-btn.active .tab-pill {
-    background: #EFF6FF;
-    color: #2563EB;
-  }
-
-  .tab-pill.pill-warn {
-    background: rgba(245, 158, 11, 0.2);
-    color: var(--color-warning);
-  }
-
-  .tab-pill.pill-danger {
-    background: rgba(239, 68, 68, 0.2);
-    color: var(--color-error);
-  }
-
-  /* ── Guide Banners ──────────────────────────────────────────────────────── */
-  .guide-banner {
-    background: rgba(0, 218, 243, 0.04);
-    border: 1px solid rgba(0, 218, 243, 0.15);
-    border-radius: 12px;
-    padding: 14px 18px;
+  /* ── Subnav Bar ─────────────────────────────────────────────────────────── */
+  .vault-subnav-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 14px;
-  }
-
-  :global(html.light-mode) .guide-banner {
-    background: #EFF6FF;
-    border-color: #BFDBFE;
-  }
-
-  .guide-left {
-    display: flex;
-    align-items: center;
     gap: 12px;
+    padding: 0 0 2px 0;
+    flex-wrap: wrap;
   }
 
-  .guide-icon-badge {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    background: rgba(0, 218, 243, 0.12);
+  .subnav-actions {
     display: flex;
     align-items: center;
-    justify-content: center;
-    color: var(--color-accent);
-    flex-shrink: 0;
+    gap: 8px;
   }
 
-  :global(html.light-mode) .guide-icon-badge {
-    background: #DBEAFE;
-    color: #2563EB;
-  }
-
-  .guide-copy h4 {
-    margin: 0;
-    font-size: 13.5px;
+  .vault-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 9999px;
+    font-size: 11px;
     font-weight: 600;
-    color: var(--color-text-primary);
+    border: 1px solid transparent;
   }
 
-  .guide-copy p {
-    margin: 2px 0 0 0;
-    font-size: 11.5px;
-    color: var(--color-text-secondary);
-    line-height: 1.4;
+  .vault-status-pill.warning {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: var(--color-warning);
+  }
+
+  .vault-status-pill.active {
+    background: rgba(16, 185, 129, 0.12);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: var(--color-success);
   }
 
   /* ── Table Card & Toolbar ───────────────────────────────────────────────── */
@@ -2009,59 +1625,14 @@
     border-bottom-color: #E2E8F0;
   }
 
-  .search-input-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--color-bg-base);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 6px 10px;
-    width: 320px;
-    max-width: 100%;
-  }
-
-  :global(html.light-mode) .search-input-wrap {
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-  }
-
-  .search-icon {
-    color: var(--color-text-muted);
-  }
-
-  .search-input-wrap input {
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--color-text-primary);
-    font-size: 12px;
-    width: 100%;
-  }
-
-  .clear-search-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    padding: 0;
-  }
-
-  .table-count-label {
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }
-
   .filter-chip-group {
     display: flex;
     gap: 6px;
   }
 
   .filter-chip {
-    padding: 4px 10px;
-    border-radius: 6px;
+    padding: 5px 12px;
+    border-radius: 8px;
     font-size: 11.5px;
     font-weight: 500;
     color: var(--color-text-muted);
@@ -2076,16 +1647,16 @@
   }
 
   .filter-chip.active {
-    background: rgba(0, 218, 243, 0.12);
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     border-color: var(--color-accent);
     color: var(--color-accent);
     font-weight: 600;
   }
 
   :global(html.light-mode) .filter-chip.active {
-    background: #EFF6FF;
-    border-color: #2563EB;
-    color: #2563EB;
+    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }
 
   .table-wrap {
@@ -2185,8 +1756,8 @@
     font-weight: 600;
   }
 
-  .badge-accent { background: rgba(0, 218, 243, 0.12); color: var(--color-accent); }
-  :global(html.light-mode) .badge-accent { background: #EFF6FF; color: #2563EB; }
+  .badge-accent { background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)); color: var(--color-accent); }
+  :global(html.light-mode) .badge-accent { background: var(--color-accent-muted, rgba(37, 99, 235, 0.1)); color: var(--color-accent); }
   .badge-neutral { background: rgba(255, 255, 255, 0.08); color: var(--color-text-secondary); }
   :global(html.light-mode) .badge-neutral { background: #F1F5F9; color: #475569; }
   .badge-success { background: rgba(16, 185, 129, 0.15); color: var(--color-success); }
@@ -2226,35 +1797,9 @@
     white-space: nowrap;
   }
 
-  /* ── Empty State ────────────────────────────────────────────────────────── */
+  /* ── Empty Cell ─────────────────────────────────────────────────────────── */
   .empty-cell {
     text-align: center;
-    padding: 40px 16px !important;
-  }
-
-  .empty-state-box {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .empty-icon {
-    color: var(--color-text-muted);
-    opacity: 0.5;
-    margin-bottom: 4px;
-  }
-
-  .empty-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-
-  .empty-desc {
-    font-size: 12px;
-    color: var(--color-text-muted);
-    max-width: 400px;
   }
 
   /* ── SSHD Hardening Cards ───────────────────────────────────────────────── */
@@ -2388,7 +1933,7 @@
   .jails-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 14px;
+    gap: 8px;
   }
 
   .jail-card {
@@ -2610,14 +2155,14 @@
 
   .radio-pill-btn.active {
     border-color: var(--color-accent);
-    background: rgba(0, 218, 243, 0.08);
+    background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
     color: var(--color-text-primary);
   }
 
   :global(html.light-mode) .radio-pill-btn.active {
-    background: #EFF6FF;
-    border-color: #2563EB;
-    color: #0F172A;
+    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
+    border-color: var(--color-accent);
+    color: var(--color-text-primary);
   }
 
   .field-hint {
@@ -2669,88 +2214,9 @@
   }
 
   /* ── General UI Helpers ─────────────────────────────────────────────────── */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-    transition: all 0.15s ease;
-  }
-
-  .btn-primary {
-    background: var(--color-accent);
-    color: #00363d;
-  }
-
-  :global(html.light-mode) .btn-primary {
-    background: #2563EB;
-    color: #FFFFFF;
-  }
-
-  .btn-primary:hover {
-    filter: brightness(1.1);
-  }
-
-  .btn-secondary {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-  }
-
-  :global(html.light-mode) .btn-secondary {
-    background: #F8FAFC;
-    border-color: #E2E8F0;
-    color: #0F172A;
-  }
-
-  .btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.1);
-  }
-
-  .btn-danger {
-    background: rgba(239, 68, 68, 0.12);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    color: var(--color-error);
-  }
-
-  .btn-danger:hover {
-    background: rgba(239, 68, 68, 0.2);
-  }
-
-  .btn-sm {
-    padding: 5px 10px;
-    font-size: 11.5px;
-  }
-
-  .btn-text {
-    background: transparent;
-    border: none;
-    color: var(--color-accent);
-    cursor: pointer;
-    font-size: 12px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 0;
-  }
-
-  :global(html.light-mode) .btn-text {
-    color: #2563EB;
-  }
-
-  .btn-text:hover {
-    text-decoration: underline;
-  }
-
   .font-mono { font-family: var(--font-mono, monospace); }
   .strong { font-weight: 600; color: var(--color-text-primary); }
   .text-accent { color: var(--color-accent); }
-  :global(html.light-mode) .text-accent { color: #2563EB; }
   .text-success { color: var(--color-success); }
   .text-warning { color: var(--color-warning); }
   .text-error { color: var(--color-error); }

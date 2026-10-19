@@ -758,6 +758,15 @@ pub struct OsInfo {
     pub name: String,
     pub os_version: String,
     pub kernel_version: String,
+    pub distro_family: String,
+    pub pkg_manager: String,
+    pub mac_type: String,
+    pub firewall: String,
+}
+
+#[tauri::command]
+pub async fn get_distro_info() -> Result<crate::utils::distro::DistroInfo, String> {
+    Ok(crate::utils::distro::detect_distro())
 }
 
 #[tauri::command]
@@ -772,23 +781,26 @@ pub async fn get_os_info() -> Result<OsInfo, String> {
         .trim()
         .to_string();
 
-    let os_release = fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let mut name = "Linux".to_string();
-    let mut os_version = "".to_string();
-
-    for line in os_release.lines() {
-        if line.starts_with("NAME=") {
-            name = line.trim_start_matches("NAME=").trim_matches('"').to_string();
-        } else if line.starts_with("VERSION=") {
-            os_version = line.trim_start_matches("VERSION=").trim_matches('"').to_string();
-        }
-    }
+    let distro = crate::utils::distro::detect_distro();
+    let name = if !distro.pretty_name.is_empty() {
+        distro.pretty_name
+    } else if !distro.name.is_empty() {
+        distro.name
+    } else {
+        "Linux".to_string()
+    };
+    let os_version = distro.version_id;
+    let distro_family = format!("{:?}", distro.family).to_lowercase();
 
     Ok(OsInfo {
         hostname,
         name,
         os_version,
         kernel_version,
+        distro_family,
+        pkg_manager: distro.pkg_manager,
+        mac_type: distro.mac_type,
+        firewall: distro.firewall,
     })
 }
 

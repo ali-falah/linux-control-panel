@@ -71,45 +71,79 @@ pub async fn list_flatpaks() -> Result<Vec<FlatpakApp>, String> {
     Ok(apps)
 }
 
-/// List all installed RPM packages
+/// List all installed native packages (RPM on Fedora/RHEL, DEB on Debian/Ubuntu)
 #[tauri::command]
 pub async fn list_rpms() -> Result<Vec<RpmPackage>, String> {
-    if !binary_exists("rpm").await {
-        return Err("rpm is not available on this system".to_string());
+    if binary_exists("rpm").await {
+        let output = Command::new("rpm")
+            .args([
+                "-qa",
+                "--queryformat",
+                "%{NAME}\t%{VERSION}\t%{ARCH}\t%{SUMMARY}\n",
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run rpm: {e}"))?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("rpm -qa failed: {err}"));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let packages = stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                RpmPackage {
+                    name: parts.first().unwrap_or(&"").trim().to_string(),
+                    version: parts.get(1).unwrap_or(&"").trim().to_string(),
+                    arch: parts.get(2).unwrap_or(&"").trim().to_string(),
+                    summary: parts.get(3).unwrap_or(&"").trim().to_string(),
+                }
+            })
+            .filter(|p| !p.name.is_empty())
+            .collect();
+
+        return Ok(packages);
     }
 
-    let output = Command::new("rpm")
-        .args([
-            "-qa",
-            "--queryformat",
-            "%{NAME}\t%{VERSION}\t%{ARCH}\t%{SUMMARY}\n",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run rpm: {e}"))?;
+    if binary_exists("dpkg-query").await {
+        let output = Command::new("dpkg-query")
+            .args([
+                "-W",
+                "-f=${Package}\t${Version}\t${Architecture}\t${binary:Summary}\n",
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run dpkg-query: {e}"))?;
 
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(format!("rpm -qa failed: {err}"));
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("dpkg-query failed: {err}"));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let packages = stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                RpmPackage {
+                    name: parts.first().unwrap_or(&"").trim().to_string(),
+                    version: parts.get(1).unwrap_or(&"").trim().to_string(),
+                    arch: parts.get(2).unwrap_or(&"").trim().to_string(),
+                    summary: parts.get(3).unwrap_or(&"").trim().to_string(),
+                }
+            })
+            .filter(|p| !p.name.is_empty())
+            .collect();
+
+        return Ok(packages);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let packages = stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            let parts: Vec<&str> = line.splitn(4, '\t').collect();
-            RpmPackage {
-                name: parts.first().unwrap_or(&"").trim().to_string(),
-                version: parts.get(1).unwrap_or(&"").trim().to_string(),
-                arch: parts.get(2).unwrap_or(&"").trim().to_string(),
-                summary: parts.get(3).unwrap_or(&"").trim().to_string(),
-            }
-        })
-        .filter(|p| !p.name.is_empty())
-        .collect();
-
-    Ok(packages)
+    Err("Neither rpm nor dpkg-query is available on this system".to_string())
 }
 
 /// Detect packages available as both Flatpak and RPM
@@ -170,17 +204,15 @@ fn normalize_name(name: &str) -> String {
 }
 
 fn determine_recommendation(flatpak: &FlatpakApp, _rpm: &RpmPackage) -> String {
-    // Sandbox preference: Flatpak is sandboxed, better for untrusted apps
-    // RPM integrates better with system; prefer for system tools
     let system_tool_keywords = [
-        "systemd", "dnf", "rpm", "gtk", "qt", "lib", "python", "perl", "kernel",
+        "systemd", "dnf", "rpm", "apt", "dpkg", "gtk", "qt", "lib", "python", "perl", "kernel",
     ];
 
     let name_lower = flatpak.name.to_lowercase();
     let is_system_tool = system_tool_keywords.iter().any(|k| name_lower.contains(k));
 
     if is_system_tool {
-        "Keep RPM — better system integration for system tools".to_string()
+        "Keep Native Package — better system integration for system tools".to_string()
     } else {
         "Keep Flatpak — sandboxed with automatic updates".to_string()
     }
@@ -224,42 +256,62 @@ pub async fn remove_flatpak(app_id: String, system_wide: bool) -> Result<String,
 const PROTECTED_PACKAGES: &[&str] = &[
     "glibc", "systemd", "dnf", "dnf5", "kernel", "kernel-core", "kernel-modules",
     "bash", "coreutils", "rpm", "sudo", "shadow-utils", "polkit", "dbus",
-    "util-linux", "pam", "filesystem", "libselinux", "glibc-common"
+    "util-linux", "pam", "filesystem", "libselinux", "glibc-common",
+    "apt", "dpkg", "libc6", "ubuntu-minimal", "ubuntu-standard", "debian-archive-keyring"
 ];
 
 pub fn is_protected_package(name: &str) -> bool {
     let lower = name.trim().to_lowercase();
-    if lower.starts_with("kernel") || lower.starts_with("systemd") || lower.starts_with("glibc") || lower.starts_with("dnf") {
+    if lower.starts_with("kernel") || lower.starts_with("linux-image") || lower.starts_with("systemd") || lower.starts_with("glibc") || lower.starts_with("libc6") || lower.starts_with("dnf") || lower.starts_with("apt") {
         return true;
     }
     PROTECTED_PACKAGES.contains(&lower.as_str())
 }
 
-/// Remove an RPM package
+/// Remove a native package (RPM on Fedora/RHEL, DEB on Debian/Ubuntu)
 #[tauri::command]
 pub async fn remove_rpm(name: String) -> Result<String, String> {
     if is_protected_package(&name) {
         return Err(format!("Action blocked: '{}' is a vital system package and cannot be removed.", name));
     }
 
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
+    if binary_exists("dnf").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/dnf", "remove", &name, "-y"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("remove_rpm {name} failed: {stderr}"));
+            return Err(format!("Failed to remove package: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Removed RPM: {name}"));
+        return Ok(stdout);
     }
 
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "remove", &name, "-y"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    if binary_exists("apt-get").await {
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/apt-get", "remove", "-y", &name])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("remove_rpm {name} failed: {stderr}"));
-        return Err(format!("Failed to remove RPM: {stderr}"));
+        if !output.status.success() {
+            log_to_file("ERROR", &format!("remove_deb {name} failed: {stderr}"));
+            return Err(format!("Failed to remove package: {stderr}"));
+        }
+
+        log_to_file("INFO", &format!("Removed DEB: {name}"));
+        return Ok(stdout);
     }
 
-    log_to_file("INFO", &format!("Removed RPM: {name}"));
-    Ok(stdout)
+    Err("Neither dnf nor apt-get is available on this system".to_string())
 }

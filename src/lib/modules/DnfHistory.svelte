@@ -399,7 +399,7 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="DNF Manager" subtitle="Manage packages, view history, and perform maintenance" icon={Package}>
+  <PageHeader title="Packages & Updates" subtitle="Manage packages, view history, and perform system upgrades" icon={Package}>
     {#if activeTab === 'history'}
       <Button variant="outline" size="sm" onclick={loadHistory} disabled={loadingHistory}>
         <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
@@ -432,7 +432,7 @@
   <!-- Tab bar + actions row -->
   <div class="controls-row">
     <div class="tab-bar">
-      {#each [['updates','Updates'],['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs','DNF System Logs']] as [id, label]}
+      {#each [['updates','Updates'],['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs','System Package Logs']] as [id, label]}
         <button class="tab-btn {activeTab === id ? 'active' : ''}" onclick={() => activeTab = id as Tab}>
           {label}
         </button>

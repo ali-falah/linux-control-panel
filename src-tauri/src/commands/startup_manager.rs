@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
@@ -292,3 +292,239 @@ pub async fn toggle_autostart(file_path: String, enabled: bool) -> Result<(), St
     );
     Ok(())
 }
+
+fn get_autostart_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not determine user home directory".to_string())?;
+    let autostart_dir = home.join(".config/autostart");
+    if !autostart_dir.exists() {
+        fs::create_dir_all(&autostart_dir)
+            .map_err(|e| format!("Failed to create autostart directory: {e}"))?;
+    }
+    autostart_dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize autostart directory: {e}"))
+}
+
+fn validate_autostart_file_path(file_path: &str, autostart_dir: &Path) -> Result<PathBuf, String> {
+    let path = PathBuf::from(file_path);
+    if !path.exists() {
+        return Err("File does not exist".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {e}"))?;
+    if !canonical.starts_with(autostart_dir) {
+        return Err("Security violation: path is outside ~/.config/autostart".to_string());
+    }
+    if canonical.extension().and_then(|e| e.to_str()) != Some("desktop") {
+        return Err("Invalid file: must be a .desktop file".to_string());
+    }
+    Ok(canonical)
+}
+
+/// Create or update an XDG autostart entry
+#[tauri::command]
+pub async fn save_autostart_entry(
+    original_file_path: Option<String>,
+    name: String,
+    exec: String,
+    comment: String,
+    enabled: bool,
+) -> Result<AutostartEntry, String> {
+    if name.contains('\n')
+        || name.contains('\r')
+        || exec.contains('\n')
+        || exec.contains('\r')
+        || comment.contains('\n')
+        || comment.contains('\r')
+    {
+        return Err("Fields must not contain newline characters".to_string());
+    }
+
+    let trimmed_name = name.trim();
+    let trimmed_exec = exec.trim();
+    let trimmed_comment = comment.trim();
+
+    if trimmed_name.is_empty() {
+        return Err("Application name is required".to_string());
+    }
+    if trimmed_exec.is_empty() {
+        return Err("Command / executable is required".to_string());
+    }
+
+    let autostart_dir = get_autostart_dir()?;
+
+    if let Some(orig_path) = original_file_path.filter(|p| !p.trim().is_empty()) {
+        let canonical_path = validate_autostart_file_path(&orig_path, &autostart_dir)?;
+        let content = fs::read_to_string(&canonical_path)
+            .map_err(|e| format!("Failed to read desktop file: {e}"))?;
+
+        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let mut found_name = false;
+        let mut found_exec = false;
+        let mut found_comment = false;
+        let mut found_enabled = false;
+        let mut found_hidden = false;
+        let mut icon: Option<String> = None;
+
+        for line in &mut lines {
+            let trimmed = line.trim().to_string();
+            if trimmed.starts_with("Name=") {
+                *line = format!("Name={trimmed_name}");
+                found_name = true;
+            } else if trimmed.starts_with("Exec=") {
+                *line = format!("Exec={trimmed_exec}");
+                found_exec = true;
+            } else if trimmed.starts_with("Comment=") {
+                *line = format!("Comment={trimmed_comment}");
+                found_comment = true;
+            } else if trimmed.starts_with("X-GNOME-Autostart-enabled=") {
+                *line = format!(
+                    "X-GNOME-Autostart-enabled={}",
+                    if enabled { "true" } else { "false" }
+                );
+                found_enabled = true;
+            } else if trimmed.starts_with("Hidden=") {
+                *line = format!("Hidden={}", if enabled { "false" } else { "true" });
+                found_hidden = true;
+            } else if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == "Icon" {
+                    icon = Some(v.trim().to_string());
+                }
+            }
+        }
+
+        let mut insert_pos = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() == "[Desktop Entry]" {
+                insert_pos = i + 1;
+                break;
+            }
+        }
+        if insert_pos == 0 && lines.is_empty() {
+            lines.push("[Desktop Entry]".to_string());
+            lines.push("Type=Application".to_string());
+            insert_pos = lines.len();
+        }
+
+        if !found_name {
+            lines.insert(insert_pos, format!("Name={trimmed_name}"));
+            insert_pos += 1;
+        }
+        if !found_exec {
+            lines.insert(insert_pos, format!("Exec={trimmed_exec}"));
+            insert_pos += 1;
+        }
+        if !found_comment && !trimmed_comment.is_empty() {
+            lines.insert(insert_pos, format!("Comment={trimmed_comment}"));
+            insert_pos += 1;
+        }
+        if !found_enabled {
+            lines.insert(
+                insert_pos,
+                format!(
+                    "X-GNOME-Autostart-enabled={}",
+                    if enabled { "true" } else { "false" }
+                ),
+            );
+            insert_pos += 1;
+        }
+        if !found_hidden {
+            lines.insert(
+                insert_pos,
+                format!("Hidden={}", if enabled { "false" } else { "true" }),
+            );
+        }
+
+        let new_content = lines.join("\n");
+        fs::write(&canonical_path, new_content)
+            .map_err(|e| format!("Failed to update desktop file: {e}"))?;
+
+        log_to_file(
+            "INFO",
+            &format!("Updated autostart entry: {}", canonical_path.display()),
+        );
+
+        Ok(AutostartEntry {
+            name: trimmed_name.to_string(),
+            exec: trimmed_exec.to_string(),
+            comment: trimmed_comment.to_string(),
+            enabled,
+            file_path: canonical_path.to_string_lossy().to_string(),
+            icon,
+        })
+    } else {
+        let mut safe_stem: String = trimmed_name
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        while safe_stem.contains("__") {
+            safe_stem = safe_stem.replace("__", "_");
+        }
+        safe_stem = safe_stem.trim_matches('_').to_string();
+        if safe_stem.is_empty() {
+            safe_stem = "autostart-app".to_string();
+        }
+
+        let mut target_path = autostart_dir.join(format!("{safe_stem}.desktop"));
+        if target_path.exists() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            target_path = autostart_dir.join(format!("{safe_stem}-{timestamp}.desktop"));
+        }
+
+        let content = format!(
+            "[Desktop Entry]\n\
+            Type=Application\n\
+            Name={trimmed_name}\n\
+            Exec={trimmed_exec}\n\
+            Comment={trimmed_comment}\n\
+            Hidden={}\n\
+            NoDisplay=false\n\
+            X-GNOME-Autostart-enabled={}\n",
+            if enabled { "false" } else { "true" },
+            if enabled { "true" } else { "false" }
+        );
+
+        fs::write(&target_path, content)
+            .map_err(|e| format!("Failed to create desktop file: {e}"))?;
+
+        log_to_file(
+            "INFO",
+            &format!("Created autostart entry: {}", target_path.display()),
+        );
+
+        Ok(AutostartEntry {
+            name: trimmed_name.to_string(),
+            exec: trimmed_exec.to_string(),
+            comment: trimmed_comment.to_string(),
+            enabled,
+            file_path: target_path.to_string_lossy().to_string(),
+            icon: None,
+        })
+    }
+}
+
+/// Delete an XDG autostart entry file
+#[tauri::command]
+pub async fn delete_autostart_entry(file_path: String) -> Result<(), String> {
+    let autostart_dir = get_autostart_dir()?;
+    let canonical_path = validate_autostart_file_path(&file_path, &autostart_dir)?;
+    fs::remove_file(&canonical_path)
+        .map_err(|e| format!("Failed to delete desktop file: {e}"))?;
+    log_to_file(
+        "INFO",
+        &format!("Deleted autostart entry: {}", canonical_path.display()),
+    );
+    Ok(())
+}
+

@@ -90,7 +90,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
 
             if let (Some(n), Some(e)) = (name, exec) {
                 let path_str = path.to_string_lossy().to_string();
-                let source;
+                let mut source = String::new();
                 let mut package_id = None;
                 if path_str.contains("flatpak") {
                     source = "Flatpak".to_string();
@@ -103,6 +103,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                         package_id = Some(stem.to_string_lossy().to_string());
                     }
                 } else {
+                    let mut is_native = false;
                     if let Ok(output) = Command::new("rpm")
                         .arg("-qf")
                         .arg(&path)
@@ -112,12 +113,28 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                             let pkg = String::from_utf8_lossy(&output.stdout).trim().to_string();
                             if !pkg.contains("is not owned") && !pkg.is_empty() {
                                 package_id = Some(pkg);
+                                source = "RPM".to_string();
+                                is_native = true;
                             }
                         }
                     }
-                    if package_id.is_some() {
-                        source = "RPM".to_string();
-                    } else {
+                    if !is_native {
+                        if let Ok(output) = Command::new("dpkg")
+                            .arg("-S")
+                            .arg(&path)
+                            .output().await
+                        {
+                            if output.status.success() {
+                                let out = String::from_utf8_lossy(&output.stdout);
+                                if let Some((pkg, _)) = out.split_once(':') {
+                                    package_id = Some(pkg.trim().to_string());
+                                    source = "RPM".to_string();
+                                    is_native = true;
+                                }
+                            }
+                        }
+                    }
+                    if !is_native {
                         source = "Local".to_string();
                         if let Some(stem) = path.file_stem() {
                             package_id = Some(stem.to_string_lossy().to_string());
@@ -189,7 +206,21 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
                 if parts.len() == 2 {
                     let size_bytes = parts[0].parse::<u64>().unwrap_or(0);
                     let install_date = parts[1].parse::<u64>().unwrap_or(0);
-                    return Ok(AppMeta { size_bytes, install_date });
+                    if size_bytes > 0 {
+                        return Ok(AppMeta { size_bytes, install_date });
+                    }
+                }
+            }
+        }
+        // Fallback for dpkg on Debian / Ubuntu
+        if let Ok(output) = Command::new("dpkg-query")
+            .args(["-W", "-f=${Installed-Size}", &package_id])
+            .output().await
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Ok(kb) = s.parse::<u64>() {
+                    return Ok(AppMeta { size_bytes: kb * 1024, install_date: 0 });
                 }
             }
         }
@@ -211,9 +242,6 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
                 for line in info.lines() {
                     if line.trim().starts_with("Version:") {
                         version = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
-                    } else if line.trim().starts_with("Description:") {
-                        // flatpak info description might be empty or missing. 
-                        // But usually Name/Description are at the top.
                     }
                 }
             }
@@ -238,7 +266,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             files: Vec::new(),
         })
     } else {
-        // RPM
+        // RPM or DEB
         let mut version = "Unknown".to_string();
         let mut description = String::new();
         let mut files = Vec::new();
@@ -261,6 +289,32 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
                 }
             }
         }
+
+        if version == "Unknown" {
+            if let Ok(output) = Command::new("dpkg-query").args(["-s", &package_id]).output().await {
+                if output.status.success() {
+                    let info = String::from_utf8_lossy(&output.stdout).to_string();
+                    let mut in_desc = false;
+                    for line in info.lines() {
+                        if in_desc {
+                            if line.starts_with(' ') {
+                                description.push_str(line.trim());
+                                description.push('\n');
+                            } else {
+                                in_desc = false;
+                            }
+                        }
+                        if line.starts_with("Version:") {
+                            version = line.trim_start_matches("Version:").trim().to_string();
+                        } else if line.starts_with("Description:") {
+                            description.push_str(line.trim_start_matches("Description:").trim());
+                            description.push('\n');
+                            in_desc = true;
+                        }
+                    }
+                }
+            }
+        }
         
         if let Ok(output) = Command::new("rpm").arg("-ql").arg(&package_id).output().await {
             if output.status.success() {
@@ -270,7 +324,16 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
                 }
             }
         }
-        
+        if files.is_empty() {
+            if let Ok(output) = Command::new("dpkg-query").args(["-L", &package_id]).output().await {
+                if output.status.success() {
+                    let list = String::from_utf8_lossy(&output.stdout).to_string();
+                    for line in list.lines() {
+                        files.push(line.to_string());
+                    }
+                }
+            }
+        }
         
         Ok(AppDetails {
             version,
@@ -305,9 +368,13 @@ pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: St
         let pkg = package_id.trim_start_matches("waydroid.");
         c.args(&["app", "remove", pkg]);
         c
-    } else {
+    } else if crate::binary_exists("dnf").await {
         let mut c = Command::new("pkexec");
         c.args(&["dnf", "remove", "-y", &package_id]);
+        c
+    } else {
+        let mut c = Command::new("pkexec");
+        c.args(&["apt-get", "remove", "-y", &package_id]);
         c
     };
 
@@ -340,16 +407,19 @@ pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: St
         return Err(format!("Uninstallation failed with status: {}", status));
     }
 
-    let _ = app_handle.emit("uninstall-log", "
-Uninstallation completed. Running cleanup...");
+    let _ = app_handle.emit("uninstall-log", "\nUninstallation completed. Running cleanup...");
 
     let mut cleanup_cmd = if source == "Flatpak" {
         let mut c = Command::new("pkexec");
         c.args(&["flatpak", "uninstall", "--unused", "-y"]);
         c
-    } else {
+    } else if crate::binary_exists("dnf").await {
         let mut c = Command::new("pkexec");
         c.args(&["dnf", "autoremove", "-y"]);
+        c
+    } else {
+        let mut c = Command::new("pkexec");
+        c.args(&["apt-get", "autoremove", "-y"]);
         c
     };
 
@@ -605,6 +675,25 @@ pub async fn get_app_dependencies(package_id: String, source: String) -> Result<
                     let line = line.trim();
                     if !line.starts_with("rpmlib(") && !line.is_empty() {
                         deps.push(line.to_string());
+                    }
+                }
+            }
+        }
+        if deps.is_empty() {
+            if let Ok(output) = Command::new("dpkg-query")
+                .arg("-W")
+                .arg("-f=${Depends}")
+                .arg(&package_id)
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for dep in stdout.split(',') {
+                        let d = dep.trim();
+                        if !d.is_empty() {
+                            deps.push(d.to_string());
+                        }
                     }
                 }
             }

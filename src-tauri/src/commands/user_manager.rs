@@ -188,14 +188,27 @@ pub async fn change_password(username: String, password: String) -> Result<Strin
     Ok("Password changed successfully".to_string())
 }
 
+fn get_admin_group() -> &'static str {
+    if let Ok(group_content) = std::fs::read_to_string("/etc/group") {
+        for line in group_content.lines() {
+            if line.starts_with("sudo:") {
+                return "sudo";
+            }
+            if line.starts_with("wheel:") {
+                return "wheel";
+            }
+        }
+    }
+    "wheel"
+}
+
 #[tauri::command]
 pub async fn toggle_sudo(username: String, grant: bool) -> Result<String, String> {
-    // Fedora uses 'wheel' group for sudo privileges
-    // Actually, `gpasswd -d user wheel` is better for removal.
+    let admin_group = get_admin_group();
     let (cmd, args) = if grant {
-        ("/usr/sbin/usermod", vec!["-aG", "wheel", &username])
+        ("/usr/sbin/usermod", vec!["-aG", admin_group, &username])
     } else {
-        ("/usr/bin/gpasswd", vec!["-d", &username, "wheel"])
+        ("/usr/bin/gpasswd", vec!["-d", &username, admin_group])
     };
 
     let output = Command::new("pkexec")

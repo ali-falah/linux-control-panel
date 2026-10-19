@@ -371,8 +371,8 @@
     <div style="display:flex; align-items:center; gap:10px; flex-wrap: wrap;">
       <TabGroup
         tabs={[
-          { id: 'repos', label: 'RPM Repos' },
-          { id: 'copr', label: 'COPR Packages' }
+          { id: 'repos', label: 'System Repos' },
+          { id: 'copr', label: 'Community (COPR / PPA)' }
         ]}
         bind:activeTab={activeTab}
         onchange={(id) => activeTab = id as any}
@@ -399,7 +399,7 @@
             <Activity size={14} /> Test All Mirror Speeds
           </button>
           <button class="menu-item" onclick={makecache} disabled={loading}>
-            <RefreshCw size={14} /> Run dnf makecache
+            <RefreshCw size={14} /> Update Metadata Cache
           </button>
           <button class="menu-item" onclick={loadRepos} disabled={loading}>
             <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh Repo List
