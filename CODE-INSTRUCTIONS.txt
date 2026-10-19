@@ -50,3 +50,6 @@ For multi-step tasks, state a brief plan:
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
 also : UI UX match system design use always already built in compoennts ( inputs , buttons ... etc ) 
+
+5. Build Policy:
+Do NOT run full production builds (`npm run build`) after every change — it takes too long. Rely on targeted syntax/type checks, tests, and the active dev server HMR unless explicitly requested by the user. 
