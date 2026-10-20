@@ -7,11 +7,13 @@
     AlertTriangle, ShieldAlert, Thermometer, ExternalLink, ChevronRight,
     Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
     Zap, Layers, Package, Sliders, Play, Square, RotateCcw, ShieldCheck, Database,
-    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X, GripVertical,
-    Copy, Globe, Folder, FolderOpen, Flame
+    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X,
+    Copy, Globe, Folder, FolderOpen, Flame, MoreHorizontal
   } from '@lucide/svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
+  import Card from '../components/ui/Card.svelte';
+  import Badge from '../components/ui/Badge.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { portal } from '../actions/portal.ts';
@@ -42,23 +44,21 @@
   let systemStats = $state<any>(null);
   let diskUsage = $state<any[]>([]);
   let networkInterfaces = $state<any[]>([]);
+  let appFootprint = $state<Record<'Flatpak' | 'RPM', { count: number; sizeBytes: number; sizesLoaded: number }> | null>(null);
+  let appFootprintError = $state(false);
 
   // Initial Top Processes (Guarantees immediate rich rendering without empty layout flash)
-  let topProcesses = $state<ProcessItem[]>([
-    { pid: 1420, name: 'gnome-shell', cpu_percent: 3.8, mem_percent: 6.2, user: 'ali' },
-    { pid: 3120, name: 'firefox', cpu_percent: 2.5, mem_percent: 8.4, user: 'ali' },
-    { pid: 842, name: 'systemd-journald', cpu_percent: 1.2, mem_percent: 1.1, user: 'root' },
-    { pid: 5621, name: 'code', cpu_percent: 0.8, mem_percent: 4.5, user: 'ali' },
-    { pid: 980, name: 'NetworkManager', cpu_percent: 0.4, mem_percent: 0.8, user: 'root' }
-  ]);
+  let topProcesses = $state<ProcessItem[]>([]);
+  let processesLoaded = $state(false);
+  let processesError = $state(false);
 
   const DEFAULT_WATCHDOG_SERVICES: ServiceDaemon[] = [
-    { name: 'systemd-journald.service', label: 'Journal Logging', status: 'active', subState: 'running' },
-    { name: 'firewalld.service', label: 'Firewall Daemon', status: 'active', subState: 'running' },
-    { name: 'sshd.service', label: 'OpenSSH Server', status: 'active', subState: 'running' },
-    { name: 'NetworkManager.service', label: 'Network Manager', status: 'active', subState: 'running' },
-    { name: 'crond.service', label: 'Cron Scheduler', status: 'active', subState: 'running' },
-    { name: 'nginx.service', label: 'NGINX Web Server', status: 'inactive', subState: 'dead' }
+    { name: 'systemd-journald.service', label: 'Journal Logging', status: 'unknown', subState: 'checking' },
+    { name: 'firewalld.service', label: 'Firewall Daemon', status: 'unknown', subState: 'checking' },
+    { name: 'sshd.service', label: 'OpenSSH Server', status: 'unknown', subState: 'checking' },
+    { name: 'NetworkManager.service', label: 'Network Manager', status: 'unknown', subState: 'checking' },
+    { name: 'crond.service', label: 'Cron Scheduler', status: 'unknown', subState: 'checking' },
+    { name: 'nginx.service', label: 'NGINX Web Server', status: 'unknown', subState: 'checking' }
   ];
 
   function getInitialWatchdogServices(): ServiceDaemon[] {
@@ -66,7 +66,7 @@
       const stored = localStorage.getItem('dashboard_watchdog_services');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed.map(svc => ({ ...svc, status: 'unknown', subState: 'checking' }));
       }
     } catch {}
     return DEFAULT_WATCHDOG_SERVICES;
@@ -74,7 +74,10 @@
 
   // Watchdog Services
   let watchdogServices = $state<ServiceDaemon[]>(getInitialWatchdogServices());
+  let servicesLoaded = $state(false);
+  let servicesError = $state(false);
   let showWatchdogModal = $state(false);
+  let showAttentionModal = $state(false);
   let availableUnits = $state<Array<{ name: string; description: string; active_state: string }>>([]);
   let loadingUnits = $state(false);
   let watchdogSearchQuery = $state('');
@@ -122,6 +125,15 @@
     dragOverIndex = null;
   }
 
+  function moveWatchdogService(index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= watchdogServices.length) return;
+    const updated = [...watchdogServices];
+    const [moved] = updated.splice(index, 1);
+    updated.splice(targetIndex, 0, moved);
+    saveWatchdogServices(updated);
+  }
+
   function saveWatchdogServices(newList: ServiceDaemon[]) {
     watchdogServices = newList;
     try {
@@ -145,7 +157,7 @@
         status: (active_state === 'active' ? 'active' : active_state === 'failed' ? 'failed' : 'unknown') as any,
         subState: active_state || 'checking'
       };
-      saveWatchdogServices([...watchdogServices, newService]);
+      saveWatchdogServices([newService, ...watchdogServices]);
       uiStore.addToast(`Pinned ${formattedLabel} to Watchdog`, 'success');
     }
   }
@@ -208,9 +220,20 @@
   let networkDetails = $state<any>(null);
   let gatewayPing = $state<string>('');
   let systemEvents = $state<any>(null);
+  let systemEventsLoaded = $state(false);
+  let systemEventsError = $state(false);
   let lastSystemUpdate = $state<string>('');
   let failedServicesCount = $state<number>(0);
+  let failedServicesCountLoaded = $state(false);
   let recentLogStream = $state<Array<{ time: string; service: string; level: string; message: string }>>([]);
+  let logsLoaded = $state(false);
+  let logsError = $state(false);
+  let systemStatsError = $state(false);
+  let systemStatsLoaded = $state(false);
+  let lastDashboardCheck = $state<Date | null>(null);
+  let lastLogsCheck = $state<Date | null>(null);
+  let lastServicesCheck = $state<Date | null>(null);
+  let lastSecurityCheck = $state<Date | null>(null);
 
   // Service Action Execution State
   let serviceActionRunning = $state<string | null>(null);
@@ -519,16 +542,26 @@
     footprintContextMenu.show = false;
   }
 
+  function activateOnKeyboard(e: KeyboardEvent, action: () => void) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      action();
+    }
+  }
+
   // Sparkline history tracking
-  let cpuHistory = $state<number[]>([15, 18, 14, 22, 28, 20, 35, 25, 30, 22, 19, 24]);
-  let ramHistory = $state<number[]>([36, 36, 37, 37, 38, 38, 37, 37, 38, 37, 37, 37]);
+  let cpuHistory = $state<number[]>([]);
+  let ramHistory = $state<number[]>([]);
 
   let cpuTemp = $state<string>('');
+  let cpuTempAvailable = $state(false);
   let currentRxRate = $state<string>('0.0 KB/s');
   let currentTxRate = $state<string>('0.0 KB/s');
-  let prevTrafficTime = 0;
-  let prevTotalRx = 0;
-  let prevTotalTx = 0;
+  let prevTrafficTime = $state(0);
+  let prevTotalRx = $state(0);
+  let prevTotalTx = $state(0);
+  let trafficAvailable = $state(false);
+  let trafficPolls = $state(0);
 
   function formatNetRate(bytesPerSec: number): string {
     if (!bytesPerSec || bytesPerSec <= 0) return '0.0 KB/s';
@@ -559,20 +592,18 @@
         if (!isNaN(val)) return val;
       }
     }
-    if (systemStats?.cpu_percent) {
-      return 35 + (systemStats.cpu_percent * 0.2);
-    }
-    return 42;
+    return null;
   });
 
   let cpuTempClass = $derived.by(() => {
-    if (cpuTempNumeric > 85) return 'temp-crit';
-    if (cpuTempNumeric > 70) return 'temp-warn';
+    if (cpuTempNumeric !== null && cpuTempNumeric > 85) return 'temp-crit';
+    if (cpuTempNumeric !== null && cpuTempNumeric > 70) return 'temp-warn';
     return 'temp-normal';
   });
 
   let securityReport = $state<any>(null);
   let loadingSecurity = $state(false);
+  let securityError = $state(false);
   let mutedIds = $state<string[]>([]);
 
   $effect(() => {
@@ -583,7 +614,7 @@
   });
 
   let effectiveDashboardScore = $derived.by(() => {
-    if (!securityReport) return 60;
+    if (!securityReport) return null;
     if (!mutedIds || mutedIds.length === 0) return securityReport.score;
     const activeFindings = securityReport.findings.filter((f: any) => !mutedIds.includes(f.id));
     if (activeFindings.length === 0) return 100;
@@ -603,8 +634,8 @@
     return hasUnmutedCritical ? Math.min(rawScore, 60) : rawScore;
   });
 
-  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 1);
-  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved && !mutedIds.includes(f.id)).length : 15);
+  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
+  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
 
   function getScoreColor(score: number) {
     if (score >= 80) return '#22C55E';
@@ -624,10 +655,13 @@
 
   async function fetchSecurityReport(forceRefresh: boolean | MouseEvent = false) {
     loadingSecurity = true;
+    securityError = false;
     const shouldForce = typeof forceRefresh === 'boolean' ? forceRefresh : false;
     try {
       securityReport = await invoke('security_run_audit', { forceRefresh: shouldForce });
+      lastSecurityCheck = new Date();
     } catch (e) {
+      securityError = true;
       console.error("Error fetching security report:", e);
     } finally {
       loadingSecurity = false;
@@ -637,8 +671,13 @@
   async function fetchSystemEvents() {
     try {
       systemEvents = await invoke('get_system_events');
+      systemEventsLoaded = true;
+      systemEventsError = false;
     } catch (e) {
+      systemEventsError = true;
       console.error("Error fetching system events:", e);
+    } finally {
+      systemEventsLoaded = true;
     }
   }
 
@@ -664,28 +703,31 @@
   }
 
   async function fetchRecentLogs() {
+    logsError = false;
     try {
-      const rawLogs: string[] = await invoke('get_journal_logs', { limit: 15 });
+      const rawLogs: string[] = await invoke('get_journal_logs', { priority: 4 });
       if (Array.isArray(rawLogs) && rawLogs.length > 0) {
-        recentLogStream = rawLogs.slice(0, 10).map(line => {
+        recentLogStream = rawLogs.slice(0, 20).map(line => {
           try {
             const obj = JSON.parse(line);
-            const ts = obj.__REALTIME_TIMESTAMP ? new Date(parseInt(obj.__REALTIME_TIMESTAMP) / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '15:52';
+            const ts = obj.__REALTIME_TIMESTAMP ? new Date(parseInt(obj.__REALTIME_TIMESTAMP) / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
             const svc = obj.SYSLOG_IDENTIFIER || obj._COMM || 'systemd';
-            const prio = parseInt(obj.PRIORITY || '6');
-            const level = prio <= 3 ? 'Err' : prio === 4 ? 'Warn' : 'Info';
+            const prio = Number.parseInt(obj.PRIORITY ?? '', 10);
+            const level = Number.isNaN(prio) ? 'Info' : prio <= 3 ? 'Err' : prio === 4 ? 'Warn' : 'Info';
             return { time: ts, service: svc, level, message: obj.MESSAGE || '' };
           } catch {
-            return { time: '15:52', service: 'system', level: 'Info', message: line };
+            return { time: '—', service: 'system', level: 'Info', message: line };
           }
         });
+      } else {
+        recentLogStream = [];
       }
     } catch {
-      recentLogStream = [
-        { time: '15:52:01', service: 'sshd', level: 'Warn', message: 'Failed password attempt from 192.168.1.104' },
-        { time: '15:52:04', service: 'kernel', level: 'Err', message: 'NVMe thermal throttle alert triggered' },
-        { time: '15:52:10', service: 'systemd', level: 'Info', message: 'Daily logrotate timer completed' }
-      ];
+      recentLogStream = [];
+      logsError = true;
+    } finally {
+      logsLoaded = true;
+      lastLogsCheck = new Date();
     }
   }
 
@@ -732,6 +774,12 @@
     return `${gb.toFixed(1)} GB`;
   }
 
+  function formatAppSize(bytes: number) {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
   async function fetchServicesWatchdog() {
     try {
       const names = watchdogServices.map(s => s.name);
@@ -745,14 +793,21 @@
           if (match) {
             return {
               ...svc,
-              status: match.active_state === 'active' ? 'active' : match.active_state === 'failed' ? 'failed' : 'inactive',
+              status: match.active_state === 'active' ? 'active' : match.active_state === 'failed' ? 'failed' : match.active_state === 'inactive' ? 'inactive' : 'unknown',
               subState: match.sub_state || match.active_state
             };
           }
           return svc;
         });
       }
+      servicesLoaded = true;
+      servicesError = false;
+      lastServicesCheck = new Date();
     } catch (e) {
+      servicesError = true;
+      watchdogServices = watchdogServices.map(svc => ({ ...svc, status: 'unknown', subState: 'unavailable' }));
+      servicesLoaded = true;
+      lastServicesCheck = new Date();
       console.warn("Could not fetch units watchdog:", e);
     }
   }
@@ -760,17 +815,15 @@
   async function fetchTopProcesses() {
     try {
       const procList = await invoke<ProcessItem[]>('get_process_list');
-      if (Array.isArray(procList) && procList.length > 0) {
-        topProcesses = procList
-          .filter(p => p.name && p.name !== 'systemd' && p.pid !== 1)
-          .sort((a, b) => {
-            const memA = a.mem_percent ?? a.memory_percent ?? 0;
-            const memB = b.mem_percent ?? b.memory_percent ?? 0;
-            return ((b.cpu_percent || 0) + memB) - ((a.cpu_percent || 0) + memA);
-          })
-          .slice(0, 5);
-      }
+      topProcesses = Array.isArray(procList) ? procList
+        .filter(p => p.name && p.name !== 'systemd' && p.pid !== 1)
+        .sort((a, b) => (b.cpu_percent || 0) - (a.cpu_percent || 0))
+        .slice(0, 5) : [];
+      processesLoaded = true;
+      processesError = false;
     } catch (e) {
+      processesError = true;
+      topProcesses = [];
       console.warn("Could not fetch top processes:", e);
     }
   }
@@ -786,13 +839,22 @@
         invoke('get_disk_usage'),
         invoke('get_network_interfaces'),
         invoke<string>('get_last_system_update').catch(() => ''),
-        invoke<number>('get_failed_services_count').catch(() => 0),
+        invoke<number>('get_failed_services_count').then(count => {
+          failedServicesCountLoaded = true;
+          return count;
+        }).catch(() => {
+          failedServicesCountLoaded = false;
+          return 0;
+        }),
         invoke<number | null>('get_cpu_temperature').catch(() => null),
         invoke<Array<{ interface: string; rx_bytes: number; tx_bytes: number }>>('get_network_traffic').catch(() => [])
       ]);
 
       osInfo = os;
       systemStats = stats;
+      systemStatsError = false;
+      systemStatsLoaded = true;
+      lastDashboardCheck = new Date();
       diskUsage = disks as any[];
       networkInterfaces = ifaces as any[];
       lastSystemUpdate = lastUpdate;
@@ -800,12 +862,16 @@
 
       if (temp !== null && temp !== undefined && !isNaN(temp)) {
         cpuTemp = `${Math.round(temp)}°C`;
-      } else if (systemStats?.cpu_percent) {
-        cpuTemp = `${Math.round(35 + (systemStats.cpu_percent * 0.2))}°C`;
+        cpuTempAvailable = true;
+      } else {
+        cpuTemp = '';
+        cpuTempAvailable = false;
       }
 
       // Calculate real live network throughput
+      trafficAvailable = Array.isArray(traffic) && traffic.length > 0;
       if (Array.isArray(traffic) && traffic.length > 0) {
+        trafficPolls += 1;
         const now = Date.now();
         let totalRx = 0;
         let totalTx = 0;
@@ -838,7 +904,35 @@
       fetchNetworkDetails();
       fetchSystemEvents();
     } catch (e) {
+      systemStatsError = true;
+      systemStatsLoaded = true;
+      trafficAvailable = false;
       console.error("Dashboard fetch error:", e);
+    }
+  }
+
+  async function fetchAppFootprint() {
+    try {
+      const apps = await invoke<Array<{ source: string; package_id: string | null }>>('list_desktop_apps');
+      const packageIds = {
+        Flatpak: [...new Set(apps.filter(app => app.source === 'Flatpak' && app.package_id).map(app => app.package_id!))],
+        RPM: [...new Set(apps.filter(app => app.source === 'RPM' && app.package_id).map(app => app.package_id!))]
+      };
+      const summaries = await Promise.all((['Flatpak', 'RPM'] as const).map(async source => {
+        const results = await Promise.allSettled(packageIds[source].map(packageId =>
+          invoke<{ size_bytes: number }>('get_app_meta', { packageId, source })
+        ));
+        return [source, {
+          count: packageIds[source].length,
+          sizeBytes: results.reduce((total, result) => total + (result.status === 'fulfilled' ? result.value.size_bytes : 0), 0),
+          sizesLoaded: results.filter(result => result.status === 'fulfilled').length
+        }] as const;
+      }));
+      appFootprint = Object.fromEntries(summaries) as typeof appFootprint;
+      appFootprintError = false;
+    } catch (error) {
+      appFootprintError = true;
+      console.warn('Could not fetch application footprint:', error);
     }
   }
 
@@ -894,6 +988,7 @@
 
   onMount(() => {
     fetchData();
+    fetchAppFootprint();
     // Stagger heavy security audit after initial telemetry renders
     setTimeout(() => {
       fetchSecurityReport();
@@ -901,748 +996,738 @@
     startPolling();
   });
 
-  onDestroy(() => {
-    stopPolling();
+    // ── REDESIGNED DASHBOARD DERIVED STATES ──
+  let detailsCollapsed = $state(true);
+
+  // Header subtitle uses values from the live system response.
+  let headerSubtitle = $derived.by(() => {
+    let distro = osInfo ? 'System' : 'System details';
+    if (osInfo) {
+      const cleanName = (osInfo.name || 'Fedora').replace(/Linux/i, '').replace(/\([^)]*\)/g, '').trim();
+      const ver = (osInfo.os_version || '').trim();
+      if (ver && !cleanName.includes(ver)) {
+        distro = `${cleanName} ${ver}`.trim();
+      } else {
+        distro = cleanName || 'Fedora';
+      }
+    }
+
+    let kernel = '';
+    if (osInfo?.kernel_version) {
+      const kMatch = osInfo.kernel_version.match(/^(\d+\.\d+(\.\d+)?)/);
+      kernel = `Kernel ${kMatch ? kMatch[1] : osInfo.kernel_version.split('-')[0]}`;
+    }
+
+    let uptime = '';
+    if (systemStats?.uptime_seconds !== undefined && systemStats?.uptime_seconds !== null) {
+      const sec = systemStats.uptime_seconds;
+      if (sec >= 3600) {
+        uptime = `up ${(sec / 3600).toFixed(1)} h`;
+      } else {
+        uptime = `up ${Math.floor(sec / 60)} m`;
+      }
+    }
+
+    let sync = '';
+    if (lastSystemUpdate) {
+      try {
+        const d = new Date(lastSystemUpdate);
+        if (!isNaN(d.getTime())) {
+          sync = `last sync ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`;
+        } else {
+          sync = `last sync ${lastSystemUpdate.slice(0, 10)}`;
+        }
+      } catch {
+        sync = `last sync ${lastSystemUpdate.slice(0, 10)}`;
+      }
+    }
+
+    if (!osInfo && !systemStats) return systemStatsError ? 'System details unavailable' : 'System details loading…';
+    return [distro, kernel, uptime, sync].filter(Boolean).join(' · ');
   });
+
+  // Root disk partition (matches DiskMount: { mount, device, fs_type, total_gb, used_gb, free_gb, percent })
+  let rootDisk = $derived.by(() => {
+    if (!diskUsage || diskUsage.length === 0) return null;
+    return diskUsage.find((d: any) => d.mount === '/') || null;
+  });
+
+  // 2. Computed Needs Attention List:
+  // - security score < 80 (< 50 critical, 50-79 warning)
+  // - critical log errors > 0 (critical)
+  // - CPU temp > 80°C (> 85 critical, 81-85 warning)
+  // - failed services (critical)
+  // - disk > 85% (> 92% critical, 86-92% warning)
+  interface NeedsAttentionItem {
+    id: string;
+    severity: 'critical' | 'warning';
+    label: string;
+    value: string;
+    checkedAt: string;
+    action: () => void;
+  }
+
+  function formatCheckedAt(date: Date | null): string {
+    return date ? `Checked ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : 'Check time unavailable';
+  }
+
+  let needsAttentionList = $derived.by<NeedsAttentionItem[]>(() => {
+    const items: NeedsAttentionItem[] = [];
+
+    // Security score
+    if (securityReport && effectiveDashboardScore < 80) {
+      const isCrit = effectiveDashboardScore < 50;
+      items.push({
+        id: 'security-score',
+        severity: isCrit ? 'critical' : 'warning',
+        label: 'Security Posture Audit',
+        value: `${effectiveDashboardScore}/100 score (${isCrit ? 'Critical Risk' : 'Warnings Detected'})`,
+        checkedAt: formatCheckedAt(lastSecurityCheck),
+        action: () => uiStore.navigateTo('security-center', 'advisory')
+      });
+    }
+
+    // Critical log errors
+    const critLogs = recentLogStream.filter(l => l.level === 'Err');
+    const systemErrorCount = systemEventsLoaded && !systemEventsError
+      ? systemEvents?.error_count
+      : logsLoaded && !logsError ? critLogs.length : null;
+    const logErrCount = systemErrorCount ?? 0;
+    if (logErrCount > 0) {
+      items.push({
+        id: 'critical-logs',
+        severity: 'critical',
+        label: systemEventsLoaded && !systemEventsError ? 'Journal Errors Since Boot' : 'Recent Journal Errors',
+        value: `${logErrCount} critical error${logErrCount > 1 ? 's' : ''} found`,
+        checkedAt: formatCheckedAt(lastDashboardCheck),
+        action: () => uiStore.navigateTo('journal-logs')
+      });
+    }
+
+    // CPU temp
+    if (cpuTempAvailable && cpuTempNumeric !== null && cpuTempNumeric > 80) {
+      const isCrit = cpuTempNumeric > 85;
+      items.push({
+        id: 'cpu-temp',
+        severity: isCrit ? 'critical' : 'warning',
+        label: 'CPU Thermal Alert',
+        value: `${Math.round(cpuTempNumeric)}°C (Thermal threshold exceeded)`,
+        checkedAt: formatCheckedAt(lastDashboardCheck),
+        action: () => uiStore.navigateTo('system-monitor', 'overview')
+      });
+    }
+
+    // Failed services
+    const failedWatchdog = watchdogServices.filter(s => s.status === 'failed');
+    const totalFailed = Math.max(
+      servicesLoaded && !servicesError ? failedWatchdog.length : 0,
+      failedServicesCountLoaded ? failedServicesCount : 0
+    );
+    if (totalFailed > 0) {
+      items.push({
+        id: 'failed-services',
+        severity: 'critical',
+        label: 'System Services Failed',
+        value: `${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`,
+        checkedAt: formatCheckedAt(lastServicesCheck),
+        action: () => uiStore.navigateTo('service-manager')
+      });
+    }
+
+    // Disk usage > 85%
+    if (rootDisk && !systemStatsError) {
+      const diskPct = rootDisk.percent ?? 0;
+      if (diskPct > 85) {
+        const isCrit = diskPct > 92;
+        items.push({
+          id: 'disk-full',
+          severity: isCrit ? 'critical' : 'warning',
+          label: `Root Partition Storage (${rootDisk.mount || '/'})`,
+          value: `${diskPct.toFixed(0)}% utilized (${(rootDisk.free_gb ?? 0).toFixed(1)} GB free)`,
+          checkedAt: formatCheckedAt(lastDashboardCheck),
+          action: () => uiStore.navigateTo('device-manager')
+        });
+      }
+    }
+
+    // Sort by severity (critical first, then warning)
+    return items.sort((a, b) => {
+      if (a.severity === 'critical' && b.severity !== 'critical') return -1;
+      if (a.severity !== 'critical' && b.severity === 'critical') return 1;
+      return 0;
+    });
+  });
+
+  let worstSeverity = $derived.by<'critical' | 'warning'>(() => {
+    return needsAttentionList.some(i => i.severity === 'critical') ? 'critical' : 'warning';
+  });
+
+  // Show all pinned services, with failed services first.
+  let displayServices = $derived.by<ServiceDaemon[]>(() => {
+    const list = [...watchdogServices];
+    list.sort((a, b) => {
+      if (a.status === 'failed' && b.status !== 'failed') return -1;
+      if (a.status !== 'failed' && b.status === 'failed') return 1;
+      return 0;
+    });
+    return list;
+  });
+
+  // 4. Display Events: warnings and errors ONLY, max 5 rows. No Info entries.
+  let displayEvents = $derived.by(() => {
+    return recentLogStream
+      .filter(l => l.level === 'Err' || l.level === 'Warn')
+      .slice(0, 5);
+  });
+
+  // 5. Display Top Processes: top 3 by CPU
+  let displayTopProcesses = $derived.by<ProcessItem[]>(() => {
+    return [...topProcesses]
+      .sort((a, b) => (b.cpu_percent || 0) - (a.cpu_percent || 0))
+      .slice(0, 3);
+  });
+
+  let checksPending = $derived((!securityReport && !securityError) || (!logsLoaded && !systemEventsLoaded) || !servicesLoaded || !systemStatsLoaded);
+  let checksUnavailable = $derived(securityError || (logsError && systemEventsError) || servicesError || systemStatsError || (systemStatsLoaded && (!cpuTempAvailable || !rootDisk)));
+
 </script>
 
 <div class="dashboard-page">
-  <!-- ── Top Header Toolbar (Fixed) ── -->
+  <!-- 1. Page Header (Fixed) -->
   <div class="dashboard-header-fixed">
-    <PageHeader title="Dashboard" subtitle="System Telemetry & Overview" />
-  </div>
-
-  <!-- ── Scrollable Dashboard Content ── -->
-  <div class="dashboard-scrollable-content">
-    <!-- ── HERO TELEMETRY RIBBON (Top KPI Row) ── -->
-    <div class="hero-kpi-ribbon">
-    <!-- KPI 1: CPU Load & Temperature -->
-    <button
-      type="button"
-      class="kpi-card"
-      onclick={() => {
-        uiStore.processSearchQuery = '';
-        uiStore.navigateTo('system-monitor', 'overview');
-      }}
-      title="Click to inspect real-time CPU & Resource Monitor"
-    >
-      <div class="kpi-top-row">
-        <div class="kpi-label-group">
-          <div class="kpi-icon-box cpu-bg">
-            <Cpu size={16} />
-          </div>
-          <span class="kpi-title">CPU Utilization</span>
-        </div>
-        <span class="kpi-badge {cpuTempClass}">
-          {cpuTemp || (systemStats ? `${Math.round(cpuTempNumeric)}°C` : '42°C')}
-        </span>
+    <div class="dashboard-header-row">
+      <div class="dashboard-header-left">
+        <h1 class="dashboard-title">Dashboard</h1>
+        <p class="dashboard-subtitle">{headerSubtitle}{lastDashboardCheck ? ` · Updated ${lastDashboardCheck.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}{systemStatsError ? ' · Update failed; values may be stale' : ''}</p>
       </div>
-      <div class="kpi-value-row">
-        <span class="kpi-big-num">{systemStats ? `${systemStats.cpu_percent.toFixed(1)}%` : '0.0%'}</span>
-        <svg viewBox="0 0 80 20" class="kpi-sparkline">
-          <path d={generateSparklinePath(cpuHistory, 80, 20)} fill="none" stroke="#00daf3" stroke-width="2" stroke-linecap="round" />
-        </svg>
-      </div>
-      <div class="kpi-footer-sub">
-        <span>Load: {systemStats ? `${systemStats.load_1.toFixed(2)}, ${systemStats.load_5.toFixed(2)}` : '0.00, 0.00'}</span>
-        <ArrowUpRight size={13} class="jump-arrow" />
-      </div>
-    </button>
-
-    <!-- KPI 2: Memory & Swap -->
-    <button
-      type="button"
-      class="kpi-card"
-      onclick={() => {
-        uiStore.processSearchQuery = '';
-        uiStore.navigateTo('system-monitor', 'overview');
-      }}
-      title="Click to view memory usage breakdown"
-    >
-      <div class="kpi-top-row">
-        <div class="kpi-label-group">
-          <div class="kpi-icon-box ram-bg">
-            <Activity size={16} />
-          </div>
-          <span class="kpi-title">RAM &amp; Swap</span>
-        </div>
-        <span class="kpi-badge info">{systemStats ? `${Math.round(systemStats.ram_percent)}%` : '0%'}</span>
-      </div>
-      <div class="kpi-value-row">
-        <span class="kpi-big-num">{systemStats ? `${(systemStats.ram_used_mb / 1024).toFixed(1)} GB` : '0.0 GB'}</span>
-        <span class="kpi-total-sub">/ {systemStats ? `${(systemStats.ram_total_mb / 1024).toFixed(0)} GB` : '0 GB'}</span>
-      </div>
-      <div class="kpi-bar-track">
-        <div class="kpi-bar-fill ram-fill" style="width: {systemStats ? Math.min(100, systemStats.ram_percent) : 0}%;"></div>
-      </div>
-    </button>
-
-    <!-- KPI 3: Network Throughput & Latency -->
-    <button
-      type="button"
-      class="kpi-card"
-      onclick={() => uiStore.navigateTo('network-manager', 'interfaces')}
-      title="Click to view network adapters & connections"
-    >
-      <div class="kpi-top-row">
-        <div class="kpi-label-group">
-          <div class="kpi-icon-box net-bg">
-            <Wifi size={16} />
-          </div>
-          <span class="kpi-title">Network I/O</span>
-        </div>
-        <span class="kpi-badge success">{gatewayPing ? `${gatewayPing}` : 'Connected'}</span>
-      </div>
-      <div class="kpi-value-row">
-        <div class="net-flow-rates">
-          <span class="flow-item"><ArrowDown size={12} style="color: #22c55e;" /> {currentRxRate}</span>
-          <span class="flow-item"><ArrowUp size={12} style="color: #38bdf8;" /> {currentTxRate}</span>
-        </div>
-      </div>
-      <div class="kpi-footer-sub">
-        <span>Adapter: {primaryAdapterLabel}</span>
-        <ArrowUpRight size={13} class="jump-arrow" />
-      </div>
-    </button>
-
-    <!-- KPI 4: Security & System Health Pulse -->
-    <button
-      type="button"
-      class="kpi-card"
-      onclick={() => uiStore.navigateTo('security-auditor')}
-      title="Click to view CIS Security Audit & Hardening Score"
-    >
-      <div class="kpi-top-row">
-        <div class="kpi-label-group">
-          <div class="kpi-icon-box sec-bg">
-            <Shield size={16} />
-          </div>
-          <span class="kpi-title">Security Pulse</span>
-        </div>
-        <span class="kpi-badge" style="color: {getScoreColor(effectiveDashboardScore)}; background: rgba(34, 197, 94, 0.1);">
-          {getScoreLabel(effectiveDashboardScore)}
-        </span>
-      </div>
-      <div class="kpi-value-row">
-        <span class="kpi-big-num" style="color: {getScoreColor(effectiveDashboardScore)};">{effectiveDashboardScore} <span style="font-size:14px; opacity:0.7;">/ 100</span></span>
-        <span class="kpi-findings-count">{securityCriticalCount} Crit · {securityWarningCount} Warn</span>
-      </div>
-      <div class="kpi-footer-sub">
-        <span>{failedServicesCount === 0 ? 'All daemons operational' : `${failedServicesCount} failed services`}</span>
-        <ArrowUpRight size={13} class="jump-arrow" />
-      </div>
-    </button>
-  </div>
-
-  <!-- ── MAIN DASHBOARD GRID (High-Value Modular Containers) ── -->
-  <div class="dashboard-grid-container">
-
-    <!-- ══ CARD 1: System Environment & Hardware Specs ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <Server size={17} style="color: var(--color-accent, #00daf3);" />
-          <span class="card-header-title">System Environment</span>
-        </div>
-        <button
-          type="button"
-          class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('shell-env', 'variables')}
-          title="Open Environment & Shell"
-        >
-          <ArrowUpRight size={15} />
-        </button>
-      </div>
-
-      <div class="overview-stack">
-        <!-- Hostname -->
-        <div class="overview-row">
-          <span class="row-label"><Laptop size={14} style="color: #64748b;" /> Hostname:</span>
-          <span class="row-val">{osInfo ? osInfo.hostname : 'Fedora-Workstation'}</span>
-        </div>
-
-        <!-- OS Distribution -->
-        <div class="overview-row">
-          <span class="row-label"><Disc size={14} style="color: #3b82f6;" /> Distribution:</span>
-          <div class="os-pill-group">
-            <span class="os-badge">{osInfo && osInfo.name ? (osInfo.name.toLowerCase().includes('fedora') ? 'Fedora Linux' : osInfo.name) : 'Fedora Linux'}</span>
-            <span class="os-version-tag">{osInfo && osInfo.os_version ? (osInfo.os_version.match(/\d+/)?.[0] || '44') : '44'}</span>
-          </div>
-        </div>
-
-        <!-- Kernel Version -->
-        <div class="overview-row">
-          <span class="row-label"><Cpu size={14} style="color: #a855f7;" /> Kernel Target:</span>
-          <span class="kernel-pill">{osInfo ? osInfo.kernel_version : '7.1.7-200.fc44.x86_64'}</span>
-        </div>
-
-        <!-- System Uptime -->
-        <div class="overview-row uptime-row">
-          <span class="row-label green-label"><Clock size={14} style="color: #22c55e;" /> System Uptime:</span>
-          <span class="uptime-val">{systemStats ? (systemStats.uptime_seconds / 3600).toFixed(1) + ' hours' : '2.4 hours'}</span>
-        </div>
-
-        <!-- Last DNF Sync -->
-        <div class="overview-row">
-          <span class="row-label"><Calendar size={14} style="color: #f59e0b;" /> Last DNF Sync:</span>
-          <span class="timestamp-val">{formatShortDate(lastSystemUpdate || '17 May 2026, 15:21')}</span>
-        </div>
-      </div>
-
-      <!-- Quick Jump Actions -->
-      <div class="quick-chips-row">
-        <button type="button" class="quick-chip" onclick={() => uiStore.navigateTo('shell-env', 'path')}>
-          <Terminal size={12} /> $PATH
-        </button>
-        <button type="button" class="quick-chip" onclick={() => uiStore.navigateTo('dnf-history')}>
-          <Package size={12} /> DNF History
-        </button>
-        <button type="button" class="quick-chip" onclick={() => uiStore.navigateTo('grub-manager')}>
-          <Cpu size={12} /> GRUB Boot
-        </button>
+      <div class="header-actions-group">
+        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('shell-env', 'path')} title="Inspect system $PATH entries">
+          <Terminal size={13} />
+          <span>$PATH</span>
+        </Button>
+        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('dnf-history')} title="View DNF transaction history">
+          <Package size={13} />
+          <span>DNF History</span>
+        </Button>
+        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('grub-manager')} title="Configure GRUB bootloader">
+          <Cpu size={13} />
+          <span>GRUB Boot</span>
+        </Button>
+        <Button variant="ghost" size="sm" onclick={() => fetchData()} title="Refresh telemetry">
+          <RefreshCw size={13} />
+        </Button>
       </div>
     </div>
+  </div>
 
-    <!-- ══ CARD 2: Top Active Resource Processes ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <Activity size={17} style="color: #38bdf8;" />
-          <span class="card-header-title">Top Active Processes</span>
+  <!-- ── Dashboard Main Content ── -->
+  <div class="dashboard-content">
+    <!-- 2. Health Banner (Slim bar, amber/red, hidden when 0) -->
+    {#if needsAttentionList.length > 0}
+      <div class="health-banner {worstSeverity}" role="alert">
+        <div class="health-banner-left">
+          <span class="health-dot {worstSeverity}"></span>
+          <span class="health-banner-text">
+            <strong>{needsAttentionList.length}</strong> {needsAttentionList.length === 1 ? 'thing needs' : 'things need'} attention
+          </span>
         </div>
         <button
           type="button"
-          class="card-jump-btn"
-          onclick={() => {
-            uiStore.processSearchQuery = '';
-            uiStore.navigateTo('system-monitor', 'processes');
-          }}
-          title="Open Full Process Tree"
+          class="health-banner-link"
+          onclick={() => showAttentionModal = true}
+          title="View all attention items"
         >
-          <ArrowUpRight size={15} />
-        </button>
-      </div>
-
-      <div class="top-processes-list">
-        {#each topProcesses as proc (proc.pid)}
-          <button
-            type="button"
-            class="process-row-item clickable-row"
-            onclick={() => {
-              uiStore.processSearchQuery = proc.name;
-              uiStore.navigateTo('system-monitor', 'processes');
-            }}
-            oncontextmenu={(e) => handleProcessContextMenu(e, proc)}
-            title="Right-click for options or click to inspect PID {proc.pid} ({proc.name})"
-          >
-            <div class="proc-left-info">
-              <span class="proc-name">{proc.name}</span>
-              <span class="proc-pid">PID {proc.pid} · {proc.user}</span>
-            </div>
-            <div class="proc-metrics-right">
-              <span class="proc-cpu-badge" class:high={(proc.cpu_percent || 0) > 10}>
-                {(proc.cpu_percent || 0).toFixed(1)}% CPU
-              </span>
-              <span class="proc-mem-badge">
-                {(proc.mem_percent ?? proc.memory_percent ?? 0).toFixed(1)}% RAM
-              </span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </button>
-        {/each}
-      </div>
-
-      <div class="card-footer-action">
-        <button
-          type="button"
-          class="footer-jump-link"
-          onclick={() => {
-            uiStore.processSearchQuery = '';
-            uiStore.navigateTo('system-monitor', 'processes');
-          }}
-        >
-          <span>View All Running Processes ({topProcesses.length > 0 ? '140+' : '0'})</span>
+          <span>View all</span>
           <ChevronRight size={13} />
         </button>
       </div>
+    {/if}
+
+    <!-- 3. Metric Strip (ONE row of 4 compact tiles) -->
+    <div class="metric-strip-grid">
+      <!-- Tile 1: CPU -->
+      <button
+        type="button"
+        class="metric-tile"
+        onclick={() => {
+          uiStore.processSearchQuery = '';
+          uiStore.navigateTo('system-monitor', 'overview');
+        }}
+        title="Open System Monitor (CPU)"
+      >
+        <div class="metric-tile-header">
+          <span class="metric-tile-label">CPU</span>
+          <span class="metric-tile-sub">{cpuTempAvailable ? cpuTemp : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+        <div class="metric-tile-body">
+          <span class="metric-tile-num mono">{systemStats ? `${systemStats.cpu_percent.toFixed(1)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <svg viewBox="0 0 60 16" class="metric-tile-sparkline">
+            {#if cpuHistory.length > 1}<path d={generateSparklinePath(cpuHistory, 60, 16)} fill="none" stroke="var(--color-accent, #00daf3)" stroke-width="1.75" stroke-linecap="round" />{/if}
+          </svg>
+        </div>
+      </button>
+
+      <!-- Tile 2: Memory -->
+      <button
+        type="button"
+        class="metric-tile"
+        onclick={() => {
+          uiStore.processSearchQuery = '';
+          uiStore.navigateTo('system-monitor', 'overview');
+        }}
+        title="Open System Monitor (Memory)"
+      >
+        <div class="metric-tile-header">
+          <span class="metric-tile-label">Memory</span>
+          <span class="metric-tile-sub">{systemStats ? `${(systemStats.ram_used_mb / 1024).toFixed(1)} / ${(systemStats.ram_total_mb / 1024).toFixed(0)} GB` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+        <div class="metric-tile-body">
+          <span class="metric-tile-num mono">{systemStats ? `${systemStats.ram_percent.toFixed(1)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+      </button>
+
+      <!-- Tile 3: Disk -->
+      <button
+        type="button"
+        class="metric-tile"
+        onclick={() => uiStore.navigateTo('device-manager')}
+        title="Open Device Manager (Disks)"
+      >
+        <div class="metric-tile-header">
+          <span class="metric-tile-label">Disk</span>
+          <span class="metric-tile-sub">{rootDisk ? `${rootDisk.used_gb.toFixed(0)} / ${rootDisk.total_gb.toFixed(0)} GB` : systemStats || systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+        <div class="metric-tile-body">
+          <span class="metric-tile-num mono">{rootDisk ? `${rootDisk.percent.toFixed(0)}%` : systemStats || systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+      </button>
+
+      <!-- Tile 4: Network -->
+      <button
+        type="button"
+        class="metric-tile"
+        onclick={() => uiStore.navigateTo('network-manager', 'interfaces')}
+        title="Open Network Manager"
+      >
+        <div class="metric-tile-header">
+          <span class="metric-tile-label">Network</span>
+          <span class="metric-tile-sub">{gatewayPing || (systemStats ? (networkInterfaces.length ? 'Checking' : 'No interface') : systemStatsError ? 'Unavailable' : 'Loading…')}</span>
+        </div>
+        <div class="metric-tile-body">
+          <span class="metric-tile-num mono">{trafficAvailable ? (trafficPolls > 1 ? `↓${currentRxRate} ↑${currentTxRate}` : 'Sampling…') : systemStats ? 'Unavailable' : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+        </div>
+      </button>
     </div>
 
-    <!-- ══ CARD 3: Storage Disks & Partition Health ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <HardDrive size={17} style="color: #3b82f6;" />
-          <span class="card-header-title">Storage &amp; Disks</span>
-        </div>
-        <button
-          type="button"
-          class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('device-manager', 'list')}
-          title="Open Device Manager"
-        >
-          <ArrowUpRight size={15} />
-        </button>
-      </div>
+    <!-- 4. Two-Column Row (1:1): Needs Attention & Services -->
+    <div class="two-col-grid col-1-1">
+      <!-- "Needs attention" card -->
+      <div id="needs-attention-card" class="card-wrap">
+        <Card title="Needs Attention">
+          {#snippet headerActions()}
+            {#if needsAttentionList.length > 0}
+              <Badge variant={worstSeverity === 'critical' ? 'error' : 'warning'}>
+                {needsAttentionList.length}
+              </Badge>
+            {/if}
+          {/snippet}
 
-      <div class="storage-card-stack">
-        <!-- Physical Drive Header -->
-        <div class="drive-subcard">
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div 
-            class="drive-subcard-header clickable-storage-row"
-            oncontextmenu={(e) => handleStorageContextMenu(e, { title: 'Physical Drive (/dev/sda)', device: '/dev/sda', used_gb: 94.4, total_gb: 235.9, is_drive: true })}
-            onclick={() => openStoragePathModal('/', '/dev/sda', 94.4, 235.9, 'NVMe/SSD')}
-            title="Right-click for drive actions or click to inspect"
-            style="cursor: pointer;"
-          >
-            <div style="display: flex; align-items: center; gap: 7px;">
-              <HardDrive size={15} style="color: #3b82f6;" />
-              <span class="drive-node">/dev/sda</span>
-              <span class="drive-model">NVMe / SSD 256GB</span>
+          {#if needsAttentionList.length === 0}
+            <div class="all-clear-state">
+              {#if checksPending}
+                <RefreshCw size={18} class="all-clear-icon" />
+              {:else if checksUnavailable}
+                <AlertCircle size={18} class="all-clear-icon" />
+              {:else}
+                <CheckCircle2 size={22} class="all-clear-icon" />
+              {/if}
+              <div class="all-clear-text">
+                <span class="all-clear-title">
+                  {#if checksPending}Checking system health…
+                  {:else if checksUnavailable}Some checks are unavailable
+                  {:else}All systems normal{/if}
+                </span>
+                <span class="all-clear-sub">
+                  {#if checksUnavailable}Unavailable checks are not counted as alerts.
+                  {:else if needsAttentionList.length === 0}No warnings or critical conditions detected{/if}
+                </span>
+              </div>
             </div>
-            <span class="passed-badge">● PASSED</span>
-          </div>
-
-          <!-- Partitions Usage Bars -->
-          <div class="partition-bars-stack">
-            <!-- /boot partition -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div 
-              class="partition-bar-item clickable-storage-row"
-              oncontextmenu={(e) => handleStorageContextMenu(e, { title: '/boot Partition', mount: '/boot', device: '/dev/sda2', fs_type: 'ext4', used_gb: 0.528, total_gb: 1.9 })}
-              onclick={() => openStoragePathModal('/boot', '/dev/sda2', 0.528, 1.9, 'ext4')}
-              title="Right-click for options or click to inspect /boot"
-              style="cursor: pointer;"
-            >
-              <div class="part-header-line">
-                <span class="part-mount">/boot</span>
-                <span class="part-dev">/dev/sda2 (ext4)</span>
-              </div>
-              <div class="progress-track">
-                <div class="progress-bar-fill" style="width: 29.0%; background: #3b82f6;"></div>
-              </div>
-              <div class="part-stat-line">29.0% (528 MB / 1.9 GB)</div>
-            </div>
-
-            <!-- BTRFS POOL /dev/sda3 -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div 
-              class="btrfs-pool-subcard clickable-storage-row"
-              oncontextmenu={(e) => handleStorageContextMenu(e, { title: 'BTRFS Storage Pool (/dev/sda3)', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 94.4, total_gb: 235.9, is_pool: true })}
-              onclick={() => openStoragePathModal('/', '/dev/sda3', 94.4, 235.9, 'btrfs')}
-              title="Right-click for options or click to inspect pool"
-              style="cursor: pointer;"
-            >
-              <div class="btrfs-header-row">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                  <span class="btrfs-tag">BTRFS POOL</span>
-                  <span class="btrfs-dev">/dev/sda3</span>
-                </div>
-                <span class="btrfs-capacity">235.9 GB Shared</span>
-              </div>
-
-              <div class="progress-track" style="margin-bottom: 6px;">
-                <div class="progress-bar-fill" style="width: 40.0%; background: #00daf3;"></div>
-              </div>
-              <div class="btrfs-pct-label">94.4 GB used of 235.9 GB (40.0%)</div>
-
-              <!-- Tree breakdown -->
-              <div class="tree-subvols">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div 
-                  class="tree-subvol-row clickable-storage-row"
-                  oncontextmenu={(e) => { e.stopPropagation(); handleStorageContextMenu(e, { title: 'Root Subvolume (/)', mount: '/', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 92.3, total_gb: 235.9 }); }}
-                  onclick={(e) => { e.stopPropagation(); openStoragePathModal('/', '/dev/sda3', 92.3, 235.9, 'btrfs'); }}
-                  title="Right-click for options or click to inspect /"
-                  style="cursor: pointer;"
+          {:else}
+            <div class="card-row-list">
+              {#each needsAttentionList as item (item.id)}
+                <button
+                  type="button"
+                  class="data-row clickable-row"
+                  onclick={item.action}
+                  title="Click to resolve: {item.label}"
                 >
-                  <span><strong style="color:#00daf3;">├─</strong> <strong>/</strong> (root)</span>
-                  <span class="subvol-size">92.3 GB</span>
-                </div>
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div 
-                  class="tree-subvol-row clickable-storage-row"
-                  oncontextmenu={(e) => { e.stopPropagation(); handleStorageContextMenu(e, { title: 'User Files Subvolume (/home)', mount: '/home', device: '/dev/sda3', fs_type: 'btrfs', used_gb: 92.3, total_gb: 235.9 }); }}
-                  onclick={(e) => { e.stopPropagation(); openStoragePathModal('/home', '/dev/sda3', 92.3, 235.9, 'btrfs'); }}
-                  title="Right-click for options or click to inspect /home"
-                  style="cursor: pointer;"
-                >
-                  <span><strong style="color:#00daf3;">└─</strong> <strong>/home</strong></span>
-                  <span class="subvol-size">92.3 GB</span>
-                </div>
-              </div>
+                  <div class="data-row-left">
+                    <span class="status-dot {item.severity}"></span>
+                    <span class="data-row-label">{item.label}</span>
+                  </div>
+                  <span class="data-row-value mono">{item.value}<span class="attention-checked-at">{item.checkedAt}</span></span>
+                </button>
+              {/each}
             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ══ CARD 4: Critical Daemons & Services Watchdog ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <ShieldCheck size={17} style="color: #22c55e;" />
-          <span class="card-header-title">Services &amp; Daemons Watchdog</span>
-          <span class="badge-watchdog-count">{watchdogServices.length}</span>
-        </div>
-        <div style="display: flex; align-items: center; gap: 4px;">
-          <button
-            type="button"
-            class="card-jump-btn"
-            onclick={() => {
-              showWatchdogModal = true;
-              loadAvailableUnitsForModal();
-            }}
-            title="Customize Watchdog Services"
-          >
-            <SlidersHorizontal size={14} />
-          </button>
-          <button
-            type="button"
-            class="card-jump-btn"
-            onclick={() => {
-              uiStore.serviceSearchQuery = '';
-              uiStore.serviceFilter = 'all';
-              uiStore.navigateTo('service-manager');
-            }}
-            title="Open Full Service Manager"
-          >
-            <ArrowUpRight size={15} />
-          </button>
-        </div>
+          {/if}
+        </Card>
       </div>
 
-      <div class="services-watchdog-grid">
-        {#each watchdogServices as svc (svc.name)}
-          <button
-            type="button"
-            class="watchdog-item clickable-row"
-            class:is-active={svc.status === 'active'}
-            class:is-failed={svc.status === 'failed'}
-            onclick={() => {
-              uiStore.serviceFilter = svc.status === 'failed' ? 'failed' : 'all';
-              uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, '');
-              uiStore.navigateTo('service-manager');
-            }}
-            oncontextmenu={(e) => handleServiceContextMenu(e, svc)}
-            title="Inspect {svc.name} (Right-click to Start/Stop/Restart/Configure)"
-          >
-            <div class="watchdog-left">
-              <span class="status-indicator-dot" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}></span>
-              <div class="watchdog-text">
-                <span class="watchdog-name">{svc.label}</span>
-                <span class="watchdog-unit">{svc.name}</span>
-              </div>
-            </div>
-            <div style="display: flex; align-items: center; gap: 6px;">
-              <span class="watchdog-state-pill" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}>
-                {svc.subState}
-              </span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </button>
-        {/each}
-      </div>
-
-      <div class="card-footer-action">
-        <button
-          type="button"
-          class="footer-jump-link"
-          onclick={() => {
-            uiStore.serviceSearchQuery = '';
-            uiStore.serviceFilter = 'all';
-            uiStore.navigateTo('service-manager');
-          }}
-        >
-          <span>Open Full Systemd Unit Manager</span>
-          <ChevronRight size={13} />
-        </button>
-      </div>
-    </div>
-
-    <!-- ══ CARD 5: System Events & Real-time Log Ticker ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <FileText size={17} style="color: #f59e0b;" />
-          <span class="card-header-title">System Events &amp; Log Ticker</span>
-        </div>
-        <button
-          type="button"
-          class="card-jump-btn"
-          onclick={() => {
-            uiStore.preAppliedJournalPriority = 'all';
-            uiStore.preAppliedJournalSearch = '';
-            uiStore.navigateTo('journal-logs', 'journal');
-          }}
-          title="Open Journal Viewer"
-        >
-          <ArrowUpRight size={15} />
-        </button>
-      </div>
-
-      <div class="events-card-container">
-        <!-- Health Proportion Bar -->
-        <div class="proportion-bar">
-          <div class="prop-segment green-seg" style="width: 98%;">98% Normal</div>
-          <div class="prop-segment orange-seg" style="width: 1.5%;"></div>
-          <div class="prop-segment red-seg" style="width: 0.5%;"></div>
-        </div>
-
-        <!-- Metric Counters (Clickable filter shortcuts) -->
-        <div class="event-metrics-grid">
-          <button
-            type="button"
-            class="metric-btn"
-            onclick={() => {
-              uiStore.preAppliedJournalPriority = '3';
-              uiStore.preAppliedJournalSearch = '';
-              uiStore.navigateTo('journal-logs', 'journal');
-            }}
-            oncontextmenu={(e) => handleMetricContextMenu(e, 'errors', systemEvents ? systemEvents.error_count || 12 : 12)}
-            title="Click to view Critical Errors in Journal Logs (Right-click for options)"
-          >
-            <div class="metric-num text-danger">{systemEvents ? systemEvents.error_count || 12 : 12}</div>
-            <div class="metric-desc">Critical Errors</div>
-          </button>
-
-          <button
-            type="button"
-            class="metric-btn"
-            onclick={() => {
-              uiStore.preAppliedJournalPriority = '4';
-              uiStore.preAppliedJournalSearch = '';
-              uiStore.navigateTo('journal-logs', 'journal');
-            }}
-            oncontextmenu={(e) => handleMetricContextMenu(e, 'warnings', systemEvents ? systemEvents.warning_count || 210 : 210)}
-            title="Click to view Warnings in Journal Logs (Right-click for options)"
-          >
-            <div class="metric-num text-warn">{systemEvents ? systemEvents.warning_count || 210 : 210}</div>
-            <div class="metric-desc">Warnings</div>
-          </button>
-
-          <button
-            type="button"
-            class="metric-btn"
-            onclick={() => {
-              uiStore.preAppliedJournalPriority = 'all';
-              uiStore.preAppliedJournalSearch = '';
-              uiStore.navigateTo('journal-logs', 'journal');
-            }}
-            oncontextmenu={(e) => handleMetricContextMenu(e, 'health')}
-            title="Click to view all System Logs (Right-click for health options)"
-          >
-            <div class="metric-num text-success">98.5%</div>
-            <div class="metric-desc">Health Rate</div>
-          </button>
-        </div>
-
-        <!-- Live Log Stream Feed with Real Messages & Direct Links -->
-        <div class="log-stream-box">
-          <div class="log-stream-header">
-            <span>Live Journal Ticker</span>
+      <!-- "Services" card -->
+      <div class="card-wrap service-card-wrap">
+        <Card title="Services">
+          {#snippet headerActions()}
+            {#if failedServicesCount > 0}
+              <Badge variant="error">{failedServicesCount} failed</Badge>
+            {/if}
             <button
               type="button"
-              class="view-all-link"
+              class="icon-ghost-btn"
               onclick={() => {
-                uiStore.preAppliedJournalPriority = 'all';
+                showWatchdogModal = true;
+                loadAvailableUnitsForModal();
+              }}
+              title="Configure Watchdog Services"
+            >
+              <SlidersHorizontal size={13} />
+            </button>
+            <button
+              type="button"
+              class="card-header-link"
+              onclick={() => {
+                uiStore.serviceSearchQuery = '';
+                uiStore.serviceFilter = 'all';
+                uiStore.navigateTo('service-manager');
+              }}
+            >
+              Show all
+            </button>
+          {/snippet}
+
+          <div class="card-row-list services-card-list">
+            {#if servicesError}
+              <div class="all-clear-state compact"><span class="all-clear-title">Service status unavailable</span></div>
+            {:else if !servicesLoaded}
+              <div class="all-clear-state compact"><span class="all-clear-title">Loading services…</span></div>
+            {:else if displayServices.length === 0}
+              <div class="all-clear-state compact"><span class="all-clear-title">No services pinned</span></div>
+            {:else}
+            {#each displayServices as svc (svc.name)}
+              <div
+                class="data-row hoverable-row"
+                role="button"
+                tabindex="0"
+                onclick={() => {
+                  uiStore.serviceFilter = svc.status === 'failed' ? 'failed' : 'all';
+                  uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, '');
+                  uiStore.navigateTo('service-manager');
+                }}
+                onkeydown={(e) => { if (e.target === e.currentTarget) activateOnKeyboard(e, () => { uiStore.serviceFilter = svc.status === 'failed' ? 'failed' : 'all'; uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, ''); uiStore.navigateTo('service-manager'); }); }}
+                oncontextmenu={(e) => handleServiceContextMenu(e, svc)}
+                title="Open service in Service Manager"
+              >
+                <div class="data-row-left">
+                  <span class="status-dot {svc.status === 'active' ? 'active' : svc.status === 'failed' ? 'critical' : 'inactive'}"></span>
+                  <span class="data-row-label">{svc.label || svc.name}</span>
+                  {#if svc.status === 'inactive' || svc.subState === 'dead' || svc.subState === 'stopped'}
+                    <span class="status-muted-text">stopped</span>
+                  {:else if svc.status === 'unknown'}
+                    <span class="status-muted-text">{svc.subState}</span>
+                  {/if}
+                </div>
+                <div class="data-row-right">
+                  <button
+                    type="button"
+                    class="row-kebab-trigger"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      handleServiceContextMenu(e, svc);
+                    }}
+                    title="Service actions"
+                    aria-label="Service actions"
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                </div>
+              </div>
+            {/each}
+            {/if}
+          </div>
+        </Card>
+      </div>
+    </div>
+
+    <!-- 5. Two-Column Row (3:2): Recent Events & Top Processes -->
+    <div class="two-col-grid col-3-2">
+      <!-- "Recent events" card (3) -->
+      <div class="card-wrap flex-3">
+        <Card title="Recent Events">
+          {#snippet headerActions()}
+            <button
+              type="button"
+              class="card-header-link"
+              onclick={() => {
+                uiStore.preAppliedJournalPriority = '4';
                 uiStore.preAppliedJournalSearch = '';
                 uiStore.navigateTo('journal-logs', 'journal');
               }}
             >
-              Full Logs &rarr;
+              Full logs
             </button>
-          </div>
-          <div class="log-stream-list">
-            {#each recentLogStream as log}
-              <button
-                type="button"
-                class="log-item-line clickable clickable-row"
+          {/snippet}
+
+          {#if !logsLoaded && !systemEventsLoaded}
+            <div class="all-clear-state compact"><span class="all-clear-title">Loading recent events…</span></div>
+          {:else if logsError && systemEventsError}
+            <div class="all-clear-state compact"><span class="all-clear-title">Recent events unavailable</span></div>
+          {:else if displayEvents.length === 0}
+            <div class="all-clear-state compact">
+              <CheckCircle2 size={18} class="all-clear-icon" />
+              <span class="all-clear-title">No recent warnings or errors</span>
+            </div>
+          {:else}
+            <div class="card-row-list">
+              {#each displayEvents as log}
+                <div
+                  class="data-row hoverable-row event-row"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => {
+                    uiStore.preAppliedJournalPriority = log.level === 'Err' ? '3' : '4';
+                    uiStore.preAppliedJournalSearch = log.service || '';
+                    uiStore.navigateTo('journal-logs', 'journal');
+                  }}
+                  onkeydown={(e) => { if (e.target === e.currentTarget) activateOnKeyboard(e, () => { uiStore.preAppliedJournalPriority = log.level === 'Err' ? '3' : '4'; uiStore.preAppliedJournalSearch = log.service || ''; uiStore.navigateTo('journal-logs', 'journal'); }); }}
+                  oncontextmenu={(e) => handleLogContextMenu(e, log)}
+                  title="Open event in Journal"
+                >
+                  <div class="event-row-main">
+                    <Badge variant={log.level === 'Err' ? 'error' : 'warning'} class="event-badge">
+                      {log.level}
+                    </Badge>
+                    <span class="event-time mono">{log.time}</span>
+                    <span class="event-msg mono" title={log.message}>{log.message}</span>
+                  </div>
+                  <div class="data-row-right">
+                    <button
+                      type="button"
+                      class="row-kebab-trigger"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleLogContextMenu(e, log);
+                      }}
+                      title="Log actions"
+                      aria-label="Log actions"
+                    >
+                      <MoreHorizontal size={14} />
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </Card>
+      </div>
+
+      <!-- "Top processes" card (2) -->
+      <div class="card-wrap flex-2">
+        <Card title="Top Processes">
+          {#snippet headerActions()}
+            <button
+              type="button"
+              class="card-header-link"
+              onclick={() => {
+                uiStore.processSearchQuery = '';
+                uiStore.navigateTo('system-monitor');
+              }}
+            >
+              All processes
+            </button>
+          {/snippet}
+
+          <div class="card-row-list">
+            {#if processesError}
+              <div class="all-clear-state compact"><span class="all-clear-title">Process data unavailable</span></div>
+            {:else if !processesLoaded}
+              <div class="all-clear-state compact"><span class="all-clear-title">Loading processes…</span></div>
+            {:else if displayTopProcesses.length === 0}
+              <div class="all-clear-state compact"><span class="all-clear-title">No processes to show</span></div>
+            {:else}
+            {#each displayTopProcesses as proc (proc.pid)}
+              <div
+                class="data-row hoverable-row"
+                role="button"
+                tabindex="0"
                 onclick={() => {
-                  uiStore.preAppliedJournalPriority = 'all';
-                  uiStore.preAppliedJournalSearch = log.service || '';
-                  uiStore.navigateTo('journal-logs', 'journal');
+                  uiStore.processSearchQuery = proc.name;
+                  uiStore.navigateTo('system-monitor');
                 }}
-                oncontextmenu={(e) => handleLogContextMenu(e, log)}
-                title="Click to inspect '{log.service}' logs (Right-click for log options)"
+                onkeydown={(e) => { if (e.target === e.currentTarget) activateOnKeyboard(e, () => { uiStore.processSearchQuery = proc.name; uiStore.navigateTo('system-monitor'); }); }}
+                oncontextmenu={(e) => handleProcessContextMenu(e, proc)}
+                title="Open {proc.name} in System Monitor"
               >
-                <span class="log-ts">[{log.time}]</span>
-                <span class="log-svc">[{log.service}]</span>
-                <span class="log-lvl {log.level.toLowerCase()}">[{log.level}]</span>
-                <span class="log-msg" title={log.message}>{log.message || 'System operation executed successfully'}</span>
-                <ArrowUpRight size={12} class="row-action-icon log-icon" />
-              </button>
+                <div class="data-row-left">
+                  <span class="proc-pid mono">{proc.pid}</span>
+                  <span class="data-row-label">{proc.name}</span>
+                </div>
+                <div class="data-row-right">
+                  <span class="proc-stat mono" title="CPU usage">CPU {proc.cpu_percent.toFixed(1)}%</span>
+                  <span class="proc-stat mono text-muted" title="Memory usage">RAM {proc.mem_percent !== undefined || proc.memory_percent !== undefined ? `${(proc.mem_percent ?? proc.memory_percent).toFixed(1)}%` : '—'}</span>
+                  <button
+                    type="button"
+                    class="row-kebab-trigger"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      handleProcessContextMenu(e, proc);
+                    }}
+                    title="Process actions"
+                    aria-label="Process actions"
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                </div>
+              </div>
             {/each}
+            {/if}
           </div>
-        </div>
+        </Card>
       </div>
     </div>
 
-    <!-- ══ CARD 6: Application & Storage Footprint ══ -->
-    <div class="dash-card-wrapper">
-      <div class="card-glass-header">
-        <div class="header-left">
-          <Layers size={17} style="color: #a855f7;" />
-          <span class="card-header-title">App &amp; Disk Footprint</span>
+    <!-- 6. Collapsed "Details" section (collapsed by default) -->
+    <div
+      class="details-card-container"
+    >
+      <Card collapsible={true} bind:collapsed={detailsCollapsed} title="Storage Breakdown & Footprint" class="details-card">
+      <div class="details-grid">
+        <!-- Sub-panel 1: Storage Breakdown -->
+        <div class="details-subpanel">
+          <div class="subpanel-title">Storage Breakdown</div>
+          <div class="card-row-list">
+            {#if diskUsage && diskUsage.length > 0}
+              {#each diskUsage as disk (disk.mount)}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="data-row hoverable-row"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => openStoragePathModal(disk.mount, disk.device, disk.used_gb, disk.total_gb, disk.fs_type)}
+                  onkeydown={(e) => { if (e.target === e.currentTarget) activateOnKeyboard(e, () => openStoragePathModal(disk.mount, disk.device, disk.used_gb, disk.total_gb, disk.fs_type)); }}
+                  oncontextmenu={(e) => handleStorageContextMenu(e, { title: `${disk.mount} Storage`, mount: disk.mount, device: disk.device, fs_type: disk.fs_type, used_gb: disk.used_gb, total_gb: disk.total_gb })}
+                  title="Inspect {disk.mount} storage"
+                >
+                  <div class="data-row-left">
+                    <HardDrive size={14} class="row-icon text-muted" />
+                    <span class="data-row-label mono">{disk.mount}</span>
+                    <span class="text-muted" style="font-size:11px;">({disk.device})</span>
+                  </div>
+                  <div class="data-row-right">
+                    <span class="data-row-value mono">{(disk.used_gb ?? 0).toFixed(1)} / {(disk.total_gb ?? 0).toFixed(0)} GB</span>
+                    <span class="pct-badge mono">{(disk.percent ?? 0).toFixed(0)}%</span>
+                  </div>
+                </div>
+              {/each}
+            {:else}
+              <div class="all-clear-state compact"><span class="all-clear-title">{systemStats || systemStatsError ? 'Storage data unavailable' : 'Loading storage…'}</span></div>
+            {/if}
+          </div>
         </div>
-        <button
-          type="button"
-          class="card-jump-btn"
-          onclick={() => uiStore.navigateTo('app-manager')}
-          title="Open App Manager"
-        >
-          <ArrowUpRight size={15} />
-        </button>
+
+        <!-- Sub-panel 2: Application & Disk Footprint -->
+        <div class="details-subpanel">
+          <div class="subpanel-title">Application &amp; System Footprint</div>
+          <div class="footprint-summary-list">
+            {#each ['Flatpak', 'RPM'] as source}
+              {@const stats = appFootprint?.[source as 'Flatpak' | 'RPM']}
+              <Button
+                variant="ghost"
+                size="sm"
+                class="footprint-summary-row clickable-row"
+                onclick={() => uiStore.navigateTo('app-manager', source)}
+                oncontextmenu={(e) => handleFootprintContextMenu(e, { title: `${source} applications`, size: stats ? `${stats.count} apps · ${formatAppSize(stats.sizeBytes)}` : 'Application size summary', type: source === 'Flatpak' ? 'flatpak' : 'rpm' })}
+              >
+                <span class="footprint-summary-main">
+                  <span class="footprint-summary-name">{source} applications</span>
+                  <span class="footprint-summary-meta">
+                    {#if stats}
+                      {stats.count} {stats.count === 1 ? 'app' : 'apps'}
+                      {#if stats.sizesLoaded < stats.count} · size partly unavailable{/if}
+                    {:else if appFootprintError}
+                      Details unavailable
+                    {:else}
+                      Loading details…
+                    {/if}
+                  </span>
+                </span>
+                <span class="footprint-summary-size">{stats ? formatAppSize(stats.sizeBytes) : '—'}</span>
+                <ChevronRight size={14} />
+              </Button>
+            {/each}
+            <span class="status-muted-text footprint-hint">Installed size total for detected desktop apps.</span>
+          </div>
+        </div>
       </div>
-
-      <div class="footprint-stack">
-        <!-- Item 1: Home directory -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => openStoragePathModal('/home', '/dev/sda3', 17.3, 235.9, 'btrfs')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/home User Files', path: '/home', size: '17.3 GB', type: 'path', used_gb: 17.3, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
-          title="Right-click for options or click to inspect /home"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">/home User Files</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">17.3 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 48%; background: #22c55e;"></div>
-          </div>
-        </button>
-
-        <!-- Item 2: Flatpaks -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => uiStore.navigateTo('app-manager', 'Flatpak')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: 'Flatpak Desktop Apps', size: '3.5 GB', type: 'flatpak' })}
-          title="Right-click for options or click to open Flatpak Apps"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">Flatpak Desktop Apps</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">3.5 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 25%; background: #38bdf8;"></div>
-          </div>
-        </button>
-
-        <!-- Item 3: RPM Packages -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => uiStore.navigateTo('app-manager', 'RPM')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: 'Native RPM Packages', size: '1.8 GB', type: 'rpm' })}
-          title="Right-click for options or click to open RPM Packages"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">Native RPM Packages</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">1.8 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 18%; background: #f59e0b;"></div>
-          </div>
-        </button>
-
-        <!-- Item 4: System Binaries & Libs -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => openStoragePathModal('/usr', '/dev/sda3', 4.2, 235.9, 'btrfs')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/usr System Binaries', path: '/usr', size: '4.2 GB', type: 'path', used_gb: 4.2, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
-          title="Right-click for options or click to inspect /usr"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">/usr System Binaries</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">4.2 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 30%; background: #a855f7;"></div>
-          </div>
-        </button>
-
-        <!-- Item 5: System Logs -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => openStoragePathModal('/var/log', '/dev/sda3', 1.4, 235.9, 'btrfs')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/var/log System Logs', path: '/var/log', size: '1.4 GB', type: 'logs', used_gb: 1.4, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
-          title="Right-click for options or click to inspect /var/log"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">/var/log System Logs</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">1.4 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 14%; background: #ec4899;"></div>
-          </div>
-        </button>
-
-        <!-- Item 6: Package & App Caches -->
-        <button
-          type="button"
-          class="footprint-row-item clickable-row"
-          onclick={() => openStoragePathModal('/var/cache', '/dev/sda3', 2.1, 235.9, 'btrfs')}
-          oncontextmenu={(e) => handleFootprintContextMenu(e, { title: '/var/cache DNF Caches', path: '/var/cache', size: '2.1 GB', type: 'cache', used_gb: 2.1, total_gb: 235.9, fs_type: 'btrfs', device: '/dev/sda3' })}
-          title="Right-click for options or click to inspect /var/cache"
-        >
-          <div class="footprint-label-row">
-            <div class="row-name-group">
-              <span class="footprint-name">/var/cache DNF Caches</span>
-            </div>
-            <div class="row-val-group">
-              <span class="footprint-val">2.1 GB</span>
-              <ArrowUpRight size={13} class="row-action-icon" />
-            </div>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar-fill" style="width: 20%; background: #14b8a6;"></div>
-          </div>
-        </button>
-      </div>
-
-      <div class="card-footer-action">
-        <button
-          type="button"
-          class="footer-jump-link"
-          onclick={() => uiStore.navigateTo('app-manager', 'Duplicates')}
-        >
-          <span>Scan for Redundant Duplicate Apps</span>
-          <ChevronRight size={13} />
-        </button>
-      </div>
+    </Card>
     </div>
   </div>
 </div>
-</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: NEEDS ATTENTION DETAILS -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+{#if showAttentionModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div use:portal class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) showAttentionModal = false; }} role="presentation">
+    <div class="modal-glass-card modal-attention-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+      <div class="modal-header-row">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <AlertTriangle size={20} style="color: {worstSeverity === 'critical' ? 'var(--color-error)' : 'var(--color-warning)'};" />
+          <div>
+            <h3 style="margin:0; font-size:16px; font-weight:700; color:var(--color-text-primary);">
+              Needs Attention ({needsAttentionList.length})
+            </h3>
+            <span style="font-size:11.5px; color:var(--color-text-muted);">
+              System conditions that exceed normal thresholds and require administrative review
+            </span>
+          </div>
+        </div>
+        <button type="button" class="close-modal-btn" onclick={() => showAttentionModal = false}>&times;</button>
+      </div>
+
+      <div class="attention-modal-list">
+        {#each needsAttentionList as item (item.id)}
+          <div class="attention-modal-item {item.severity}">
+            <div class="attention-item-left">
+              <span class="status-dot {item.severity}"></span>
+              <div class="attention-item-info">
+                <span class="attention-item-label">{item.label}</span>
+                <span class="attention-item-val mono">{item.value}</span>
+                <span class="attention-item-val">{item.checkedAt}</span>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => {
+                showAttentionModal = false;
+                item.action();
+              }}
+            >
+              <span>Take Action &rarr;</span>
+            </Button>
+          </div>
+        {/each}
+      </div>
+
+      <div style="margin-top:16px; display:flex; justify-content:flex-end;">
+        <Button variant="default" size="sm" onclick={() => showAttentionModal = false}>Close</Button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- Storage Details Modal -->
 {#if selectedStorageDetail}
@@ -1679,7 +1764,7 @@
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showWatchdogModal}
   <div use:portal class="modal-backdrop" onclick={() => showWatchdogModal = false} role="presentation">
-    <div class="modal-glass-card modal-watchdog-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="modal-glass-card modal-watchdog-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') showWatchdogModal = false; }} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header-row">
         <div style="display:flex; align-items:center; gap:10px;">
           <ShieldCheck size={20} style="color:#22c55e;" />
@@ -1789,6 +1874,8 @@
                     class="pinned-service-row"
                     class:is-dragging={draggedIndex === i}
                     class:is-dragover={dragOverIndex === i}
+                    role="listitem"
+                    title="Drag to reorder. Use the up and down buttons with a keyboard."
                     draggable="true"
                     ondragstart={(e) => handleDragStart(e, i)}
                     ondragover={(e) => handleDragOver(e, i)}
@@ -1796,8 +1883,9 @@
                     ondrop={(e) => handleDrop(e, i)}
                     ondragend={handleDragEnd}
                   >
-                    <div class="drag-handle" title="Drag to reorder on dashboard">
-                      <GripVertical size={13} />
+                    <div class="service-reorder-buttons" aria-label="Reorder service">
+                      <Button variant="ghost" size="sm" class="drag-handle" aria-label="Move {svc.label} up" title="Move up" disabled={i === 0} onclick={() => moveWatchdogService(i, -1)}><ArrowUp size={11} /></Button>
+                      <Button variant="ghost" size="sm" class="drag-handle" aria-label="Move {svc.label} down" title="Move down" disabled={i === watchdogServices.length - 1} onclick={() => moveWatchdogService(i, 1)}><ArrowDown size={11} /></Button>
                     </div>
                     <div class="pinned-row-left">
                       <span class="chip-status-dot" class:active={svc.status === 'active'} class:failed={svc.status === 'failed'}></span>
@@ -2747,662 +2835,795 @@
 {/if}
 
 <style>
+
   .dashboard-page {
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
     overflow: hidden;
     box-sizing: border-box;
+    background: var(--color-bg-base);
   }
 
   .dashboard-header-fixed {
     flex-shrink: 0;
-    padding: 10px 20px 0 20px;
+    padding: 14px 24px 12px 24px;
     background: var(--color-bg-base);
+    border-bottom: 1px solid var(--color-border);
     z-index: 20;
-  }
-
-  :global(.dashboard-page .header-wrapper) {
-    margin: 0;
-  }
-
-  :global(.dashboard-page .page-header) {
-    padding: 8px 0;
-  }
-
-  .dashboard-scrollable-content {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 6px 20px 32px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
+    width: 100%;
+    max-width: 100%;
     box-sizing: border-box;
   }
 
-  /* ── Header Actions Dock ── */
-  .header-actions-dock {
+  .dashboard-header-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
   }
 
-
-
-  /* ── Hero KPI Ribbon (Top Row) ── */
-  .hero-kpi-ribbon {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 14px;
-  }
-
-  @media (max-width: 1100px) {
-    .hero-kpi-ribbon {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  @media (max-width: 600px) {
-    .hero-kpi-ribbon {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
-
-  .kpi-card {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 14px;
-    padding: 14px 16px;
+  .dashboard-header-left {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    text-align: left;
-    cursor: pointer;
-    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-  }
-  .kpi-card:hover {
-    transform: translateY(-2px);
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.4);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    gap: 3px;
   }
 
-  .kpi-top-row {
+  .dashboard-title {
+    font-size: 19px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    margin: 0;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+  }
+
+  .dashboard-subtitle {
+    font-size: 12.5px;
+    color: var(--color-text-muted);
+    margin: 0;
+    line-height: 1.3;
+  }
+
+  .header-actions-group {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
-  .kpi-label-group {
+  .dashboard-content {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px 24px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-sizing: border-box;
+  }
+
+  /* ── 2. Health Banner ── */
+  .health-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    border: 1px solid transparent;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .health-banner.warning {
+    background: var(--color-warning-muted);
+    border-color: rgba(245, 158, 11, 0.25);
+    color: var(--color-warning);
+  }
+
+  .health-banner.critical {
+    background: var(--color-error-muted);
+    border-color: rgba(239, 68, 68, 0.25);
+    color: var(--color-error);
+  }
+
+  .health-banner-left {
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
-  .kpi-icon-box {
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .health-banner-text {
+    font-size: 13px;
+    color: var(--color-text-primary);
   }
-  .cpu-bg { background: rgba(0, 218, 243, 0.12); color: #00daf3; }
-  .ram-bg { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-  .net-bg { background: rgba(34, 197, 94, 0.12); color: #22c55e; }
-  .sec-bg { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
 
-  .kpi-title {
+  .health-banner-text strong {
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .health-banner-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
     font-size: 12px;
     font-weight: 600;
-    color: var(--color-text-secondary);
+    color: inherit;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: opacity 0.15s ease;
   }
 
-  .kpi-badge {
-    font-size: 10.5px;
+  .health-banner-link:hover {
+    text-decoration: underline;
+    opacity: 0.85;
+  }
+
+  /* ── 3. Metric Strip (ONE row of 4 compact tiles) ── */
+  .metric-strip-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 24px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .metric-tile {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    min-height: 74px;
+    min-width: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .metric-tile:hover {
+    background: var(--color-bg-hover);
+    border-color: var(--color-border-hover);
+  }
+
+  .metric-tile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+    min-width: 0;
+  }
+
+  .metric-tile-label {
+    font-size: 11px;
     font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.06);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
     color: var(--color-text-muted);
-    transition: all 0.2s ease;
-  }
-  .kpi-badge.info { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
-  .kpi-badge.success { background: rgba(34, 197, 94, 0.1); color: #22c55e; }
-
-  /* ── Dynamic CPU Temperature Badges ── */
-  .kpi-badge.temp-warn {
-    color: #f59e0b !important;
-    background: rgba(245, 158, 11, 0.16) !important;
-    border: 1px solid rgba(245, 158, 11, 0.35) !important;
-    box-shadow: 0 0 8px rgba(245, 158, 11, 0.2);
-    font-weight: 800;
-  }
-  .kpi-badge.temp-crit {
-    color: #ef4444 !important;
-    background: rgba(239, 68, 68, 0.2) !important;
-    border: 1px solid rgba(239, 68, 68, 0.45) !important;
-    box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
-    font-weight: 800;
-    animation: tempCritPulse 1.5s infinite ease-in-out;
+    white-space: nowrap;
   }
 
-  @keyframes tempCritPulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.85; transform: scale(1.04); }
+  .metric-tile-sub {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  :global(html.light-mode) .kpi-badge.temp-warn,
-  :global([data-theme="light"]) .kpi-badge.temp-warn {
-    color: #b45309 !important;
-    background: #fef3c7 !important;
-    border-color: #fcd34d !important;
-  }
-
-  :global(html.light-mode) .kpi-badge.temp-crit,
-  :global([data-theme="light"]) .kpi-badge.temp-crit {
-    color: #b91c1c !important;
-    background: #fee2e2 !important;
-    border-color: #fca5a5 !important;
-  }
-
-  .kpi-value-row {
+  .metric-tile-body {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 8px;
+    min-width: 0;
   }
 
-  .kpi-big-num {
-    font-size: 22px;
-    font-weight: 800;
+  .metric-tile-num {
     font-family: var(--font-mono);
+    font-size: 19px;
+    font-weight: 700;
     color: var(--color-text-primary);
-    line-height: 1;
+    line-height: 1.2;
+    white-space: nowrap;
   }
 
-  .kpi-total-sub {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
+  .net-tx {
+    font-size: 13.5px;
+    font-weight: normal;
+    color: var(--color-text-secondary);
+    margin-left: 4px;
   }
 
-  .kpi-findings-count {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
+  .metric-tile-sparkline {
+    width: 60px;
+    height: 16px;
+    flex-shrink: 0;
   }
 
-  .net-flow-rates {
-    display: flex;
-    gap: 10px;
-    font-size: 11.5px;
-    font-family: var(--font-mono);
-    font-weight: 600;
-  }
-  .flow-item {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .kpi-sparkline {
-    width: 80px;
-    height: 20px;
-    overflow: visible;
-  }
-
-  .kpi-bar-track {
-    width: 100%;
-    height: 4px;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .kpi-bar-fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width 0.4s ease;
-  }
-  .ram-fill {
-    background: linear-gradient(90deg, #3b82f6, #00daf3);
-  }
-
-  .kpi-footer-sub {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }
-
-  .jump-arrow {
-    opacity: 0.5;
-    transition: transform 0.15s ease, opacity 0.15s ease;
-  }
-  .kpi-card:hover .jump-arrow {
-    opacity: 1;
-    transform: translate(2px, -2px);
-    color: var(--color-accent);
-  }
-
-  /* ── Main 6-Card Grid Layout ── */
-  .dashboard-grid-container {
+  /* ── Two-Column Grids (24px gutter, with strict minmax for responsiveness) ── */
+  .two-col-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 16px;
+    gap: 24px;
     align-items: stretch;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
   }
 
-  @media (max-width: 1100px) {
-    .dashboard-grid-container {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  @media (max-width: 768px) {
-    .dashboard-grid-container {
-      grid-template-columns: minmax(0, 1fr);
-    }
+  .two-col-grid.col-1-1 {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .dash-card-wrapper {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 14px;
-    padding: 16px;
+  .two-col-grid.col-3-2 {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+
+  .card-wrap {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
   }
 
-  .card-glass-header {
+  .card-wrap :global(.card) {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--color-border);
+    flex-direction: column;
+    height: 100%;
+    min-width: 0;
+    max-width: 100%;
+    padding: 12px 16px 8px 16px;
+    box-sizing: border-box;
+    overflow: hidden;
   }
 
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .service-card-wrap {
+    align-self: start;
+    width: 100%;
   }
 
-  .card-header-title {
+  .service-card-wrap :global(.card) {
+    height: auto;
+  }
+
+  .card-wrap :global(.card .card-header-row) {
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    min-width: 0;
+  }
+
+  .card-wrap :global(.card-title-header) {
     font-size: 13.5px;
     font-weight: 700;
     color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .card-jump-btn {
+  .icon-ghost-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     border: none;
     color: var(--color-text-muted);
     cursor: pointer;
+    padding: 3px;
+    border-radius: 4px;
+    transition: color 0.15s ease, background 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .icon-ghost-btn:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+  }
+
+  .card-header-link {
+    background: none;
+    border: none;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    cursor: pointer;
     padding: 2px 4px;
     border-radius: 4px;
-    display: flex;
-    align-items: center;
-    transition: all 0.12s ease;
-  }
-  .card-jump-btn:hover {
-    color: var(--color-accent);
-    background: rgba(255, 255, 255, 0.06);
-    transform: translate(1px, -1px);
+    transition: color 0.15s ease;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
-  /* ── 1. System Overview Stack ── */
-  .overview-stack {
+  .card-header-link:hover {
+    color: var(--color-text-primary);
+    text-decoration: underline;
+  }
+
+  /* ── Card Row List & Dividers ── */
+  .card-row-list {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    overflow: hidden;
   }
 
-  .overview-row {
+  .services-card-list {
+    flex: 0 0 182px;
+    height: 182px;
+    min-height: 0;
+    max-height: 182px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    overscroll-behavior: contain;
+  }
+
+  .services-card-list .data-row {
+    flex: 0 0 auto;
+    min-height: 26px;
+    padding: 4px 8px;
+  }
+
+  .data-row {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .overview-row.uptime-row {
-    background: rgba(34, 197, 94, 0.08);
-    border-color: rgba(34, 197, 94, 0.2);
+    justify-content: space-between;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: transparent;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+    text-align: left;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    font-size: 12.5px;
+    color: var(--color-text-primary);
+    border-radius: 4px;
+    transition: background 0.12s ease;
+    overflow: hidden;
   }
 
-  .row-label {
+  .data-row:last-child {
+    border-bottom: none;
+  }
+
+  .data-row.hoverable-row,
+  .data-row.clickable-row {
+    cursor: pointer;
+  }
+
+  .data-row.hoverable-row:hover,
+  .data-row.clickable-row:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .data-row-left {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--color-text-secondary);
-    font-weight: 500;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .data-row-label {
     white-space: nowrap;
-  }
-  .row-label.green-label {
-    color: #22c55e;
-  }
-
-  .row-val {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-  .uptime-val {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    color: #22c55e;
-  }
-  .kernel-pill {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    font-size: 11px;
-    color: var(--color-text-primary);
-  }
-  .timestamp-val {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 500;
   }
 
-  .os-pill-group {
+  .data-row-right {
     display: flex;
     align-items: center;
-    gap: 6px;
-  }
-  .os-badge {
-    background: rgba(59, 130, 246, 0.12);
-    color: #38bdf8;
-    font-size: 10px;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 4px;
-  }
-  .os-version-tag {
-    font-size: 11.5px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-    font-family: var(--font-mono);
+    gap: 8px;
+    flex-shrink: 0;
   }
 
-  .quick-chips-row {
-    display: flex;
-    gap: 6px;
-    margin-top: 2px;
+  .data-row-value {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
-  .quick-chip {
-    flex: 1;
+
+  /* Status Dots (Semantic green/amber/red only) */
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-dot.active {
+    background: #22c55e;
+  }
+
+  .status-dot.critical {
+    background: var(--color-error);
+  }
+
+  .status-dot.warning {
+    background: var(--color-warning);
+  }
+
+  .status-dot.inactive {
+    background: #6b7280;
+  }
+
+  .health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .health-dot.critical {
+    background: var(--color-error);
+  }
+
+  .health-dot.warning {
+    background: var(--color-warning);
+  }
+
+  .status-muted-text {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .row-kebab-trigger {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
-    padding: 5px 8px;
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }
-  .quick-chip:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-text-primary);
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.3);
-  }
-
-  /* ── 2. Top Processes Container ── */
-  .top-processes-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .clickable-row {
-    cursor: pointer;
-    border-left: 3px solid transparent !important;
-    transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-  }
-  .clickable-row:hover {
-    transform: translateX(4px);
-    border-left-color: var(--color-accent, #00daf3) !important;
-    background: rgba(255, 255, 255, 0.07) !important;
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.35) !important;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
-  }
-
-  :global(html.light-mode) .clickable-row,
-  :global([data-theme="light"]) .clickable-row {
-    background: #ffffff;
-    border-color: #e2e8f0;
-  }
-  :global(html.light-mode) .clickable-row:hover,
-  :global([data-theme="light"]) .clickable-row:hover {
-    background: #f1f5f9 !important;
-    border-color: #cbd5e1 !important;
-    border-left-color: var(--color-accent, #0284c7) !important;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06) !important;
-  }
-
-  .row-action-icon {
-    opacity: 0.35;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    background: transparent;
+    border: none;
     color: var(--color-text-muted);
-    transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
     flex-shrink: 0;
   }
-  .clickable-row:hover .row-action-icon {
+
+  .data-row:hover .row-kebab-trigger,
+  .row-kebab-trigger:focus {
     opacity: 1;
-    color: var(--color-accent, #00daf3);
-    transform: translate(2px, -2px);
-  }
-  :global(html.light-mode) .clickable-row:hover .row-action-icon,
-  :global([data-theme="light"]) .clickable-row:hover .row-action-icon {
-    color: var(--color-accent, #0284c7);
   }
 
-  .process-row-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 7px 10px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    text-align: left;
-    width: 100%;
+  @media (hover: none) {
+    .row-kebab-trigger { opacity: 1; }
   }
 
-  .proc-left-info {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .proc-name {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-    font-family: var(--font-mono);
-  }
-  .proc-pid {
-    font-size: 10px;
-    color: var(--color-text-muted);
-  }
-
-  .proc-metrics-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .proc-cpu-badge {
-    font-size: 10.5px;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(0, 218, 243, 0.1);
-    color: var(--color-accent);
-  }
-  .proc-cpu-badge.high {
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
-  }
-  .proc-mem-badge {
-    font-size: 10.5px;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--color-text-secondary);
-  }
-
-  /* ── 3. Storage & Disks ── */
-  .storage-card-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .drive-subcard-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-  .drive-node {
-    font-weight: 700;
-    font-size: 13px;
-    font-family: var(--font-mono);
+  .row-kebab-trigger:hover {
+    background: rgba(255, 255, 255, 0.08);
     color: var(--color-text-primary);
   }
-  .drive-model {
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }
-  .passed-badge {
-    color: #22c55e;
-    background: rgba(34, 197, 94, 0.12);
-    font-size: 10px;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 4px;
+
+  /* All Clear Empty State */
+  .all-clear-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px 16px;
+    flex: 1;
   }
 
-  .partition-bars-stack {
-    display: flex;
-    flex-direction: column;
+  .all-clear-state.compact {
+    padding: 16px;
     gap: 8px;
   }
 
-  .partition-bar-item {
+  .all-clear-icon {
+    color: #22c55e;
+    flex-shrink: 0;
+  }
+
+  .all-clear-text {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-  }
-  .part-header-line {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11.5px;
-  }
-  .part-mount { font-weight: 600; color: var(--color-text-primary); }
-  .part-dev { color: var(--color-text-muted); font-size: 10.5px; font-family: var(--font-mono); }
-  .part-stat-line {
-    text-align: right;
-    font-size: 10.5px;
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
   }
 
-  .progress-track {
-    height: 5px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .progress-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
-
-  .btrfs-pool-subcard {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 8px 10px;
-  }
-  .btrfs-header-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-  }
-  .btrfs-tag {
-    font-size: 9px;
-    font-weight: 800;
-    background: rgba(59, 130, 246, 0.12);
-    color: #38bdf8;
-    padding: 1px 5px;
-    border-radius: 3px;
-  }
-  .btrfs-dev {
-    font-family: var(--font-mono);
-    font-size: 11px;
+  .all-clear-title {
+    font-size: 13px;
     font-weight: 600;
     color: var(--color-text-primary);
   }
-  .btrfs-capacity {
-    font-size: 10.5px;
+
+  .all-clear-sub {
+    font-size: 11.5px;
     color: var(--color-text-muted);
   }
-  .btrfs-pct-label {
-    text-align: right;
-    font-size: 10.5px;
-    font-weight: 600;
+
+  /* Recent Events Row (Guaranteed Responsiveness & Truncation) */
+  .event-row {
+    padding: 6px 8px;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .event-row-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 0%;
+    overflow: hidden;
+  }
+
+  .event-badge {
+    flex-shrink: 0;
+  }
+
+  .event-time {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .event-msg {
+    font-size: 12px;
     color: var(--color-text-secondary);
-    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1 1 0%;
+  }
+
+  /* Top Processes Specific */
+  .proc-pid {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    width: 44px;
+    flex-shrink: 0;
+  }
+
+  .proc-stat {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    min-width: 44px;
+    text-align: right;
+  }
+
+  /* ── 6. Details Section (Whole Row Clickable) ── */
+  .details-card-container {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .details-card-container :global(.card-header-row) {
+    cursor: pointer;
+    user-select: none;
+    border-radius: 6px;
+    padding: 4px 6px;
+    margin: -4px -6px 8px -6px;
+    transition: background 0.12s ease;
+  }
+
+  .details-card-container :global(.card-header-row:hover) {
+    background: var(--color-bg-hover);
+  }
+
+  :global(.details-card) {
+    background: var(--color-bg-card) !important;
+  }
+
+  .details-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    padding: 8px 0 4px 0;
+  }
+
+  .attention-checked-at {
+    display: block;
+    margin-top: 2px;
+    color: var(--color-text-muted);
+    font-size: 10px;
+    font-family: var(--font-sans);
+  }
+
+  @media (max-width: 1050px) {
+    .dashboard-content { padding: 14px 16px 20px; }
+    .metric-strip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .two-col-grid.col-1-1,
+    .two-col-grid.col-3-2 { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .details-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  }
+
+  @media (max-width: 620px) {
+    .dashboard-header-fixed { padding: 12px 14px; }
+    .dashboard-header-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+    .header-actions-group { width: 100%; flex-wrap: wrap; gap: 6px; }
+    .dashboard-content { padding: 12px; gap: 12px; }
+    .metric-strip-grid { gap: 8px; }
+    .metric-tile { padding: 10px; }
+    .metric-tile-num { font-size: 16px; }
+    .dashboard-subtitle { overflow-wrap: anywhere; }
+    .health-banner { align-items: flex-start; gap: 8px; padding: 8px 10px; }
+    .health-banner-link { flex-shrink: 0; }
+  }
+
+  .details-subpanel {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .subpanel-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--color-text-muted);
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .footprint-summary-list {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+  }
+
+  .footprint-summary-row {
+    display: flex;
+    justify-content: flex-start;
+    gap: 10px;
+    min-height: 54px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    text-align: left;
+  }
+
+  .footprint-summary-main {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .footprint-summary-name {
+    color: var(--color-text-primary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .footprint-summary-meta {
+    color: var(--color-text-muted);
+    font-size: 10.5px;
+  }
+
+  .footprint-summary-size {
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .footprint-hint {
+    padding: 8px 10px 4px;
+  }
+
+  .pct-badge {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .row-icon {
+    flex-shrink: 0;
+  }
+
+  .mono {
     font-family: var(--font-mono);
   }
 
-  .tree-subvols {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-left: 8px;
-    border-left: 2px solid var(--color-border);
-  }
-  .tree-subvol-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-  }
-  .subvol-size {
-    font-family: var(--font-mono);
+  .text-muted {
     color: var(--color-text-muted);
   }
 
-  /* ── 4. Services Watchdog ── */
-  .services-watchdog-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    height: 310px;
-    max-height: 310px;
-    overflow-y: auto;
-    padding-right: 4px;
-    scrollbar-width: thin;
+  /* ── Needs Attention Modal Styles ── */
+  .modal-glass-card.modal-attention-card {
+    width: 600px !important;
+    max-width: calc(100vw - 40px) !important;
+    max-height: 80vh !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+    padding: 22px !important;
   }
 
-  .badge-watchdog-count {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 10px;
-    background: rgba(34, 197, 94, 0.12);
-    color: #22c55e;
+  .attention-modal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 14px;
+    overflow-y: auto;
+    max-height: 52vh;
+    padding-right: 4px;
+  }
+
+  .attention-modal-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border-subtle);
+    gap: 12px;
+  }
+
+  .attention-modal-item.critical {
+    border-left: 3.5px solid var(--color-error);
+  }
+
+  .attention-modal-item.warning {
+    border-left: 3.5px solid var(--color-warning);
+  }
+
+  .attention-item-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .attention-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .attention-item-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .attention-item-val {
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
   }
 
   .modal-header-row {
@@ -3549,13 +3770,20 @@
 
   .drag-handle {
     color: var(--color-text-muted);
-    cursor: grab;
     display: flex;
     align-items: center;
-    opacity: 0.5;
+    justify-content: center;
+    padding: 2px;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 1;
     transition: opacity 0.15s ease, color 0.15s ease;
     flex-shrink: 0;
   }
+  .service-reorder-buttons { display: flex; flex-direction: column; gap: 1px; }
+  .drag-handle:disabled { opacity: 0.35; cursor: not-allowed; }
   .pinned-service-row:hover .drag-handle {
     opacity: 1;
     color: var(--color-accent);

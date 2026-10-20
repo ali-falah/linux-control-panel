@@ -1,4 +1,5 @@
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
+export type AccentColor = 'cyan' | 'emerald' | 'sapphire' | 'mint' | 'purple' | 'amber' | 'rose' | 'indigo' | 'slate';
 
 export interface Toast {
   id: string;
@@ -52,6 +53,7 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
+  accentColor = $state<AccentColor>('sapphire');
   tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
@@ -245,7 +247,26 @@ class UIStore {
       } else {
         this.theme = 'dark';
       }
+      const savedAccent = localStorage.getItem('app_accent_color') as AccentColor | null;
+      if (savedAccent && ['cyan', 'emerald', 'sapphire', 'mint', 'purple', 'amber', 'rose', 'indigo', 'slate'].includes(savedAccent)) {
+        this.accentColor = savedAccent;
+      }
       this.applyTheme();
+      this.applyAccentColor();
+    }
+  }
+
+  setAccentColor(color: AccentColor) {
+    this.accentColor = color;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_accent_color', color);
+      this.applyAccentColor();
+    }
+  }
+
+  private applyAccentColor() {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-accent', this.accentColor);
     }
   }
 
