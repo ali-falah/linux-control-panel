@@ -1239,6 +1239,36 @@ pub async fn get_failed_services_count() -> Result<u32, String> {
     }
 }
 
+/// Names of the systemd units that are currently in a failed state.
+/// Used to jump straight to the journal entries of the unit that broke.
+#[tauri::command]
+pub async fn get_failed_services() -> Result<Vec<String>, String> {
+    let output = Command::new("systemctl")
+        .args(["list-units", "--state=failed", "--no-legend", "--no-pager", "--plain"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run systemctl: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let units: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            let unit = line.split_whitespace().next()?;
+            if unit.is_empty() || unit == "UNIT" {
+                None
+            } else {
+                Some(unit.to_string())
+            }
+        })
+        .collect();
+
+    Ok(units)
+}
+
 #[derive(serde::Serialize)]
 pub struct StorageDistribution {
     pub rpm_gb: f64,

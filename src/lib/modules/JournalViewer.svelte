@@ -20,14 +20,24 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
 
-  let logs = $state<any[]>([]);
+  // raw state: a large journal page is replaced wholesale, never mutated in
+  // place — deep reactivity would proxy every one of the 20k entries
+  let logs = $state.raw<any[]>([]);
   let isLoading = $state(false);
+  /** True when the selected range holds more entries than we fetched */
+  let journalTruncated = $state(false);
+  /** Wall-clock time of the last fetch (ms) */
+  let journalFetchMs = $state(0);
+  /** Total number of entries the current range holds (0 = not known yet) */
+  let journalTotalInRange = $state(0);
+  /** Timestamp of the oldest entry we have — used to page further back */
+  let journalOldestTs = $state<string | null>(null);
+  let isLoadingOlder = $state(false);
+  /** How many entries a single fetch may return */
+  let maxEntries = $state(20000);
 
   // Backend filters (re-fetch journalctl)
-  let currentUnitFilter = $state(uiStore.preAppliedJournalUnit || '');
-  if (uiStore.preAppliedJournalUnit) {
-    uiStore.preAppliedJournalUnit = '';
-  }
+  let currentUnitFilter = $state('');
   let filterPriority = $state('all');
   let timeRange = $state('1'); // Default to last 24 hours (1 day)
   let customStartDate = $state('');
@@ -104,8 +114,9 @@
     return `${customEndDate} ${customEndTime || '23:59'}:59`;
   }
 
-  async function fetchLogs() {
-    isLoading = true;
+  async function fetchLogs(opts: { appendOlder?: boolean } = {}) {
+    const appendOlder = opts.appendOlder === true;
+    if (appendOlder) isLoadingOlder = true; else isLoading = true;
     statusStore.setBusy('Fetching journal logs...');
     try {
       const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
@@ -118,29 +129,53 @@
         sinceF = `${timeRange} days ago`;
       }
 
+      // Paging further back: stop at the oldest entry we already have
+      if (appendOlder && journalOldestTs) {
+        const iso = new Date(Number(journalOldestTs) / 1000).toISOString();
+        untilF = iso;
+      }
+
       const unitF = currentUnitFilter.trim() || null;
-      const lines = await invoke<string[]>('get_journal_logs', {
+      const page = await invoke<any>('get_journal_logs', {
         unitFilter: unitF,
         priority: prioF,
         sinceFilter: sinceF,
         untilFilter: untilF,
+        maxEntries: maxEntries
       });
 
-      logs = lines.map(line => {
-        try { return JSON.parse(line); } catch { return null; }
-      }).filter(Boolean).reverse();
+      // The backend already returns newest-first
+      logs = appendOlder ? [...logs, ...(page.entries || [])] : (page.entries || []);
+      journalTruncated = !!page.truncated;
+      journalFetchMs = page.elapsed_ms || 0;
+      if (!appendOlder) {
+        journalOldestTs = page.oldest_ts || null;
+        setTimeout(() => {
+          const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
+          if (tableWrap) {
+            tableWrap.scrollTop = 0;
+            logScrollTop = 0;
+            logContainerHeight = tableWrap.clientHeight || 700;
+          }
+        }, 50);
 
-      setTimeout(() => {
-        const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
-        if (tableWrap) {
-          tableWrap.scrollTop = 0;
-          logScrollTop = 0;
-          logContainerHeight = tableWrap.clientHeight || 700;
+        // Count the whole range in the background — the table is already
+        // usable, the exact total fills in when it arrives.
+        countRange(unitF, prioF, sinceF, untilF);
+
+        if (page.truncated) {
+          uiStore.addToast(
+            `This range holds more entries — showing the most recent ${(page.entries || []).length.toLocaleString()}.`,
+            'warning',
+            5000,
+            'Load older',
+            () => loadOlderLogs()
+          );
         }
-      }, 50);
+      }
 
       statusStore.setLastCommand(
-        `journalctl -n 2000 -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''} ${untilF ? '--until="' + untilF + '"' : ''}`,
+        `journalctl -n ${maxEntries} -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''} ${untilF ? '--until="' + untilF + '"' : ''}`,
         0, true
       );
     } catch (e) {
@@ -148,7 +183,38 @@
       statusStore.setLastCommand('journalctl', 1, false);
     } finally {
       isLoading = false;
+      isLoadingOlder = false;
       statusStore.clearBusy();
+    }
+  }
+
+  /** Fetch the next page of older entries and append them. */
+  async function loadOlderLogs() {
+    if (isLoadingOlder) return;
+    await fetchLogs({ appendOlder: true });
+  }
+
+  /**
+   * Ask the backend how many entries the whole range holds. Runs in the
+   * background so the table is usable immediately; the total simply fills in
+   * when it arrives.
+   */
+  async function countRange(
+    unitFilter: string | null,
+    priority: number | null,
+    sinceFilter: string | null,
+    untilFilter: string | null
+  ) {
+    try {
+      const total = await invoke<number>('count_journal_entries', {
+        unitFilter,
+        priority,
+        sinceFilter,
+        untilFilter
+      });
+      journalTotalInRange = total || 0;
+    } catch {
+      journalTotalInRange = 0;
     }
   }
 
@@ -234,10 +300,12 @@
 
   function handleTabChange(tabId: string) {
     activeTab = tabId;
-    if (tabId === 'journal') fetchLogs();
-    else if (tabId === 'auth') fetchAuthEvents();
-    else if (tabId === 'audit') fetchAuditLogs();
-    else if (tabId === 'threats') fetchThreats();
+    // Load a tab the first time it is opened — switching back is instant.
+    // A range/level change calls refreshActiveTab() explicitly.
+    if (tabId === 'journal' && logs.length === 0) fetchLogs();
+    else if (tabId === 'auth' && authEvents.length === 0) fetchAuthEvents();
+    else if (tabId === 'audit' && auditLogs.length === 0) fetchAuditLogs();
+    else if (tabId === 'threats' && runtimeThreats.length === 0) fetchThreats();
   }
 
   function handleRangeChange() {
@@ -298,24 +366,45 @@
     searchQuery = '';
   }
 
+  /**
+   * Apply deep-link filters coming from another module (Dashboard, Service
+   * Manager …) exactly once — they are consumed here so that later state
+   * changes never overwrite what the user typed.
+   */
+  let hasLoadedOnce = false;
   $effect(() => {
-    if (uiStore.preAppliedJournalPriority && uiStore.preAppliedJournalPriority !== 'all') {
-      filterPriority = uiStore.preAppliedJournalPriority;
+    const prio = uiStore.preAppliedJournalPriority;
+    const search = uiStore.preAppliedJournalSearch;
+    const unit = uiStore.preAppliedJournalUnit;
+    let applied = false;
+
+    if (prio && prio !== 'all') {
+      filterPriority = prio;
+      uiStore.preAppliedJournalPriority = 'all';
+      applied = true;
     }
-    if (uiStore.preAppliedJournalSearch !== undefined && uiStore.preAppliedJournalSearch !== null) {
-      searchQuery = uiStore.preAppliedJournalSearch;
+    if (search) {
+      searchQuery = search;
+      uiStore.preAppliedJournalSearch = '';
+      applied = true;
     }
-    if (uiStore.preAppliedJournalUnit !== undefined && uiStore.preAppliedJournalUnit !== null) {
-      currentUnitFilter = uiStore.preAppliedJournalUnit;
+    if (unit) {
+      currentUnitFilter = unit;
+      uiStore.preAppliedJournalUnit = '';
+      applied = true;
+    }
+    // The first run loads the page: either with the deep-linked filters or
+    // the default tab. Later runs only refetch when a filter was applied.
+    if (applied) {
+      fetchLogs();
+      hasLoadedOnce = true;
+    } else if (!hasLoadedOnce) {
+      refreshActiveTab();
+      hasLoadedOnce = true;
     }
   });
 
   onMount(() => {
-    fetchLogs();
-    fetchAuthEvents();
-    fetchAuditLogs();
-    fetchThreats();
-
     const handleTabSelect = (e: Event) => {
       const customEvent = e as CustomEvent;
       if (customEvent.detail) {
@@ -361,15 +450,13 @@
     if (isLiveFollowing) {
       try {
         const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
-        await invoke('start_journal_live_stream', { unitFilter: null, priority: prioF });
-        unlistenLive = await listen<string>('journal-live-log', (event) => {
-          try {
-            const parsed = JSON.parse(event.payload);
-            if (parsed) {
-              logs = [parsed, ...logs.slice(0, 2500)];
-            }
-          } catch(err) {
-            console.error(err);
+        // honour the active unit filter — the stream used to ignore it
+        const unitF = currentUnitFilter.trim() || null;
+        await invoke('start_journal_live_stream', { unitFilter: unitF, priority: prioF });
+        unlistenLive = await listen<any>('journal-live-log', (event) => {
+          const parsed = event.payload;
+          if (parsed) {
+            logs = [parsed, ...logs.slice(0, 2500)];
           }
         });
         uiStore.addToast('Live Journal streaming active', 'success');
@@ -475,22 +562,10 @@
     }
 
     try {
-      // 1. Write file via backend command directly to ~/Downloads
+      // The backend writes the file straight into ~/Downloads — a browser
+      // download on top of that would leave the user with two copies.
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
       lastExportedFile = { name: filename, path: savedPath };
-
-      // 2. Fallback browser download blob
-      try {
-        const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      } catch (err) {
-        console.warn('Browser download fallback failed:', err);
-      }
 
       if (openFolder) {
         await invoke('reveal_in_file_manager', { path: savedPath });
@@ -549,7 +624,16 @@
     MESSAGE: string;
     count?: number;
     _unique_id?: string;
+    /** lower-cased searchable text, built once per fetch instead of per keystroke */
+    _hay?: string;
     [key: string]: any;
+  }
+
+  /** Lower-cased haystack for one entry — built once, not on every keystroke. */
+  function buildHaystack(log: any): string {
+    const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || log._COMM || 'kernel';
+    const msg = typeof log.MESSAGE === 'string' ? log.MESSAGE : JSON.stringify(log.MESSAGE || '');
+    return `${msg} ${unit} ${log.SYSLOG_IDENTIFIER || ''} ${log._COMM || ''} ${log._PID || ''} ${log._EXE || ''}`.toLowerCase();
   }
 
   // Collapse consecutive duplicates
@@ -567,7 +651,7 @@
       } else {
         idx++;
         const uniqueId = `${log.__REALTIME_TIMESTAMP || ''}_${unit}_${idx}`;
-        list.push({ ...log, _unique_id: uniqueId, count: 1 });
+        list.push({ ...log, _unique_id: uniqueId, count: 1, _hay: buildHaystack(log) });
       }
     }
     return list;
@@ -579,11 +663,8 @@
     if (!q) return collapsedLogs;
     return collapsedLogs.filter(log => {
       if (!log) return false;
-      const msg = typeof log.MESSAGE === 'string' ? log.MESSAGE.toLowerCase() : JSON.stringify(log.MESSAGE || '').toLowerCase();
-      const unit = String(log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || log._COMM || 'kernel').toLowerCase();
-      const sysIdent = String(log.SYSLOG_IDENTIFIER || '').toLowerCase();
-      const raw = JSON.stringify(log).toLowerCase();
-      return msg.includes(q) || unit.includes(q) || sysIdent.includes(q) || raw.includes(q);
+      // prebuilt haystack — no JSON.stringify on every keystroke
+      return (log._hay ?? buildHaystack(log)).includes(q);
     });
   });
 
@@ -960,18 +1041,22 @@
           {#if isLoading}
             <div class="empty-state">Fetching logs…</div>
           {:else if hasActiveSearch && collapsedLogs.length > 0}
-            <EmptyState 
+            <EmptyState
               icon={FileText}
               title="No Matching Logs"
-              description={`No log messages matched "${searchQuery}".`}
+              description={currentUnitFilter
+                ? `No log messages matched "${searchQuery}" for unit ${currentUnitFilter}. Widen the range or clear the filters.`
+                : `No log messages matched "${searchQuery}". Widen the range or clear the filters.`}
               actionLabel="Clear Search"
               onAction={() => { searchQuery = ''; }}
             />
           {:else}
-            <EmptyState 
+            <EmptyState
               icon={FileText}
               title="No Logs in Selected Range"
-              description="No systemd journal messages found for the current time and level filters."
+              description={currentUnitFilter
+                ? `No systemd journal messages found for ${currentUnitFilter} with the current time and level filters. Try a wider range.`
+                : 'No systemd journal messages found for the current time and level filters.'}
               actionLabel="Refresh Logs"
               onAction={fetchLogs}
             />
@@ -1036,6 +1121,32 @@
               {/if}
             </tbody>
           </Table>
+          <!-- Table footer: entry count, fetch time, and paging for older entries -->
+          {#if !isLoading && logs.length > 0}
+            <div class="journal-table-footer">
+              <div class="journal-footer-stats">
+                <span class="journal-footer-count">
+                  <Layers size={12} />
+                  {journalTotalInRange
+                    ? `${logs.length.toLocaleString()} of ${journalTotalInRange.toLocaleString()} entries`
+                    : `${logs.length.toLocaleString()} entries`}
+                </span>
+                <span class="journal-footer-time">fetched in {journalFetchMs} ms</span>
+              </div>
+              {#if journalTruncated}
+                <button
+                  type="button"
+                  class="journal-footer-action"
+                  onclick={loadOlderLogs}
+                  disabled={isLoadingOlder}
+                  title="Load the next batch of older entries"
+                >
+                  {#if isLoadingOlder}<RefreshCw size={12} class="animate-spin-slow" />{:else}<ChevronDown size={12} />{/if}
+                  Load older entries
+                </button>
+              {/if}
+            </div>
+          {/if}
         {/if}
 
       <!-- Tab 2: Auth Events -->
@@ -1739,6 +1850,65 @@
     background: var(--color-bg-card);
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
+  }
+  /* ── Table footer (entry count + fetch time + paging) ───────── */
+  .journal-table-footer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 7px 12px;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-raised);
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-sans);
+    flex-shrink: 0;
+  }
+
+  .journal-footer-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .journal-footer-count {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .journal-footer-time {
+    color: var(--color-text-muted);
+  }
+
+  .journal-footer-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid var(--color-accent-glow);
+    border-radius: 6px;
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+    font-size: 11.5px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+
+  .journal-footer-action:hover:not(:disabled) {
+    border-color: var(--color-accent);
+  }
+
+  .journal-footer-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }:global(.log-container .table-wrap) {
     flex: 1;
     min-height: 0;

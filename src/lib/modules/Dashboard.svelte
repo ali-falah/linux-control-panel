@@ -712,19 +712,20 @@
   async function fetchRecentLogs() {
     logsError = false;
     try {
-      const rawLogs: string[] = await invoke('get_journal_logs', { priority: 4 });
-      if (Array.isArray(rawLogs) && rawLogs.length > 0) {
-        recentLogStream = rawLogs.slice(0, 20).map(line => {
-          try {
-            const obj = JSON.parse(line);
-            const ts = obj.__REALTIME_TIMESTAMP ? new Date(parseInt(obj.__REALTIME_TIMESTAMP) / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
-            const svc = obj.SYSLOG_IDENTIFIER || obj._COMM || 'systemd';
-            const prio = Number.parseInt(obj.PRIORITY ?? '', 10);
-            const level = Number.isNaN(prio) ? 'Info' : prio <= 3 ? 'Err' : prio === 4 ? 'Warn' : 'Info';
-            return { time: ts, service: svc, level, message: obj.MESSAGE || '' };
-          } catch {
-            return { time: '—', service: 'system', level: 'Info', message: line };
-          }
+      // The backend returns a page object with compact, pre-parsed entries
+      // (newest first). The card only shows the 5 newest warnings/errors,
+      // so there is no point pulling a larger set.
+      const page = await invoke<any>('get_journal_logs', { priority: 4, maxEntries: 20 });
+      const entries: any[] = Array.isArray(page) ? page : (page?.entries ?? []);
+      if (entries.length > 0) {
+        recentLogStream = entries.slice(0, 20).map(obj => {
+          const ts = obj.__REALTIME_TIMESTAMP
+            ? new Date(parseInt(obj.__REALTIME_TIMESTAMP) / 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            : '—';
+          const svc = obj.SYSLOG_IDENTIFIER || obj._COMM || obj._SYSTEMD_UNIT || 'systemd';
+          const prio = Number(obj.PRIORITY ?? 6);
+          const level = Number.isNaN(prio) ? 'Info' : prio <= 3 ? 'Err' : prio === 4 ? 'Warn' : 'Info';
+          return { time: ts, service: svc, level, message: obj.MESSAGE || '' };
         });
       } else {
         recentLogStream = [];
@@ -931,6 +932,12 @@
         diskUsageError = true;
       }
 
+      // Names of the failed units — lets the attention card link straight to
+      // the journal entries of the unit that broke.
+      invoke<string[]>('get_failed_services')
+        .then(units => { failedServiceUnits = units || []; })
+        .catch(() => { failedServiceUnits = []; });
+
       if (temp !== null && temp !== undefined && !isNaN(temp)) {
         cpuTemp = `${Math.round(temp)}°C`;
         cpuTempAvailable = true;
@@ -1136,7 +1143,21 @@
     label: string;
     value: string;
     checkedAt: string;
+    /** Where the problem is actually fixed (remediation) */
     action: () => void;
+    /** The journal entries that prove this problem (diagnosis) */
+    logFilter?: { search?: string; unit?: string; priority?: string };
+  }
+
+  /**
+   * Open the Journal Logs pre-filtered for a specific problem.
+   * The Journal Viewer consumes these as one-shot deep links.
+   */
+  function openLogsFor(filter: { search?: string; unit?: string; priority?: string }) {
+    uiStore.preAppliedJournalSearch = filter.search ?? '';
+    uiStore.preAppliedJournalUnit = filter.unit ?? '';
+    uiStore.preAppliedJournalPriority = filter.priority ?? 'all';
+    uiStore.navigateTo('journal-logs', 'journal');
   }
 
   function formatCheckedAt(date: Date | null): string {
@@ -1152,8 +1173,10 @@
     return '';
   }
 
-  let needsAttentionList = $derived.by<NeedsAttentionItem[]>(() => {
-    const items: NeedsAttentionItem[] = [];
+  /** Names of the systemd units currently in a failed state (for exact log filters) */
+  let failedServiceUnits = $state<string[]>([]);
+
+  let needsAttentionList = $derived.by<NeedsAttentionItem[]>(() => {    const items: NeedsAttentionItem[] = [];
 
     // Security score
     if (securityReport && effectiveDashboardScore < 80) {
@@ -1164,7 +1187,8 @@
         label: 'Security Posture Audit',
         value: `${effectiveDashboardScore}/100 score (${isCrit ? 'Critical Risk' : 'Warnings Detected'})`,
         checkedAt: formatCheckedAt(lastSecurityCheck),
-        action: () => uiStore.navigateTo('security-center', 'advisory')
+        logFilter: { priority: '3' },
+        action: () => uiStore.navigateTo('security-auditor', 'advisory')
       });
     }
 
@@ -1181,7 +1205,8 @@
         label: systemEventsLoaded && !systemEventsError ? 'Journal Errors Since Boot' : 'Recent Journal Errors',
         value: `${logErrCount} critical error${logErrCount > 1 ? 's' : ''} found`,
         checkedAt: formatCheckedAt(lastSlowCheck),
-        action: () => uiStore.navigateTo('journal-logs')
+        logFilter: { priority: '3' },
+        action: () => uiStore.navigateTo('journal-logs', 'journal')
       });
     }
 
@@ -1194,6 +1219,8 @@
         label: 'CPU Thermal Alert',
         value: `${Math.round(cpuTempNumeric)}°C (Thermal threshold exceeded)`,
         checkedAt: formatCheckedAt(lastSlowCheck),
+        // the kernel reports throttling as "Thermal throttled"
+        logFilter: { search: 'thermal' },
         action: () => uiStore.navigateTo('system-monitor', 'overview')
       });
     }
@@ -1205,12 +1232,23 @@
       failedServicesCountLoaded ? failedServicesCount : 0
     );
     if (totalFailed > 0) {
+      // when exactly one unit failed we can filter the journal exactly
+      const failedUnit =
+        failedServiceUnits.length === 1
+          ? failedServiceUnits[0]
+          : failedWatchdog.length === 1
+            ? failedWatchdog[0].name
+            : '';
+      const unitHint = failedUnit ? ` (${failedUnit})` : '';
       items.push({
         id: 'failed-services',
         severity: 'critical',
         label: 'System Services Failed',
-        value: `${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`,
+        value: failedUnit
+          ? `${failedUnit} — ${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`
+          : `${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`,
         checkedAt: formatCheckedAt(lastServicesCheck),
+        logFilter: { unit: failedUnit, priority: '3' },
         action: () => uiStore.navigateTo('service-manager')
       });
     }
@@ -1226,6 +1264,8 @@
           label: `Root Partition Storage (${rootDisk.mount || '/'})`,
           value: `${diskPct.toFixed(0)}% utilized (${(rootDisk.free_gb ?? 0).toFixed(1)} GB free)`,
           checkedAt: formatCheckedAt(lastSlowCheck),
+          // the kernel reports this as "No space left on device"
+          logFilter: { search: 'no space' },
           action: () => uiStore.navigateTo('device-manager')
         });
       }
@@ -1489,8 +1529,8 @@
                 <button
                   type="button"
                   class="data-row clickable-row"
-                  onclick={item.action}
-                  title="Click to resolve: {item.label}"
+                  onclick={() => item.logFilter ? openLogsFor(item.logFilter) : item.action()}
+                  title={item.logFilter ? `View the log evidence for: ${item.label}` : `Click to resolve: ${item.label}`}
                 >
                   <div class="data-row-left">
                     <span class="status-dot {item.severity}"></span>
@@ -1866,16 +1906,31 @@
                 <span class="attention-item-val">{item.checkedAt}</span>
               </div>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onclick={() => {
-                showAttentionModal = false;
-                item.action();
-              }}
-            >
-              <span>Take Action &rarr;</span>
-            </Button>
+            <div class="attention-item-buttons">
+              {#if item.logFilter}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Open the journal filtered to this problem"
+                  onclick={() => {
+                    showAttentionModal = false;
+                    openLogsFor(item.logFilter!);
+                  }}
+                >
+                  <FileText size={13} /> View logs
+                </Button>
+              {/if}
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={() => {
+                  showAttentionModal = false;
+                  item.action();
+                }}
+              >
+                <span>Take Action &rarr;</span>
+              </Button>
+            </div>
           </div>
         {/each}
       </div>
@@ -4024,6 +4079,13 @@
     overflow-y: auto;
     max-height: 52vh;
     padding-right: 4px;
+  }
+
+  .attention-item-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .attention-modal-item {

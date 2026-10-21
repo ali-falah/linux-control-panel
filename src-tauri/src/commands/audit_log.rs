@@ -47,13 +47,20 @@ pub async fn get_auth_events(
     custom_start: Option<String>,
     custom_end: Option<String>
 ) -> Result<Vec<AuthEvent>, String> {
-    // Try reading /var/log/secure or /var/log/auth.log via pkexec (needs root)
-    // If root is not available, fall back to journalctl which works without root
+    // journalctl first: it honours the selected time range, which the flat
+    // log files cannot do (they would always return the newest N lines).
+    match get_auth_events_journalctl(since_days, custom_start.clone(), custom_end.clone()).await {
+        Ok(events) if !events.is_empty() => return Ok(events),
+        Ok(_) => {}
+        Err(_) => {}
+    }
+
+    // Fall back to the traditional auth log files (needs root)
     let script = r#"
     if [ -r /var/log/secure ]; then
-        tail -n 2000 /var/log/secure
+        tail -n 20000 /var/log/secure
     elif [ -r /var/log/auth.log ]; then
-        tail -n 2000 /var/log/auth.log
+        tail -n 20000 /var/log/auth.log
     else
         echo "__FALLBACK__"
     fi
@@ -65,22 +72,17 @@ pub async fn get_auth_events(
         .output()
         .await;
 
-    let raw_events = match output {
+    match output {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).to_string();
             if s.trim() == "__FALLBACK__" || s.trim().is_empty() {
-                // Fall back to journalctl (no root needed)
-                return get_auth_events_journalctl(since_days, custom_start, custom_end).await;
+                Ok(Vec::new())
             } else {
-                parse_auth_log_text(&s)?
+                parse_auth_log_text(&s)
             }
         }
-        _ => {
-            // Root not available or command failed — use journalctl fallback
-            return get_auth_events_journalctl(since_days, custom_start, custom_end).await;
-        }
-    };
-    Ok(raw_events)
+        _ => Ok(Vec::new()),
+    }
 }
 
 async fn get_auth_events_journalctl(
@@ -91,7 +93,7 @@ async fn get_auth_events_journalctl(
     // Use JSON format — MESSAGE field is always complete (no line-wrapping),
     // and _UID gives us the kernel-verified real UID for accurate user resolution.
     let mut cmd = ::tokio::process::Command::new("journalctl");
-    cmd.args(["-n", "2000", "--no-pager", "-o", "json",
+    cmd.args(["-n", "20000", "--no-pager", "-o", "json",
               "_COMM=sshd", "_COMM=sudo", "_COMM=su", "_COMM=su-l"]);
 
     if let Some(days) = since_days {
@@ -105,8 +107,10 @@ async fn get_auth_events_journalctl(
         }
     }
 
+    // A long range needs real time to scan — the old 1.5 s cap failed the
+    // whole tab for anything beyond a day.
     let output = tokio::time::timeout(
-        tokio::time::Duration::from_millis(1500),
+        tokio::time::Duration::from_secs(30),
         cmd.output()
     ).await.map_err(|_| "journalctl timeout".to_string())?.map_err(|e| e.to_string())?;
 
@@ -474,35 +478,49 @@ pub async fn get_command_audit_logs(
     custom_start: Option<String>,
     custom_end: Option<String>
 ) -> Result<Vec<AuditLogEvent>, String> {
-    let script = "cat /var/log/audit/audit.log 2>/dev/null | tail -n 1500";
-    let output = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    let stdout_str = match output {
-        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-            String::from_utf8_lossy(&o.stdout).to_string()
+    // journalctl first — it applies the selected range natively. The flat
+    // audit.log only ever holds the newest N lines, so a long range would
+    // come back empty or short.
+    let mut jcmd = ::tokio::process::Command::new("journalctl");
+    jcmd.args(["-n", "20000", "--no-pager", "_TRANSPORT=audit"]);
+    if let Some(days) = since_days {
+        jcmd.arg("--since").arg(format!("{} days ago", days));
+    } else {
+        if let Some(ref start) = custom_start {
+            jcmd.arg("--since").arg(start);
         }
-        _ => {
-            // Fall back to journalctl audit transport
-            let mut jcmd = ::tokio::process::Command::new("journalctl");
-            jcmd.args(["-n", "1500", "--no-pager", "_TRANSPORT=audit"]);
-            if let Some(days) = since_days {
-                jcmd.arg("--since").arg(format!("{} days ago", days));
-            } else {
-                if let Some(ref start) = custom_start {
-                    jcmd.arg("--since").arg(start);
-                }
-                if let Some(ref end) = custom_end {
-                    jcmd.arg("--until").arg(end);
-                }
+        if let Some(ref end) = custom_end {
+            jcmd.arg("--until").arg(end);
+        }
+    }
+    // A long range needs real time to scan — the old 1.5 s cap failed the
+    // whole tab for anything beyond a day.
+    let journal_out = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        jcmd.output(),
+    )
+    .await
+    {
+        Ok(Ok(jo)) if jo.status.success() => String::from_utf8_lossy(&jo.stdout).to_string(),
+        _ => String::new(),
+    };
+
+    let stdout_str = if !journal_out.trim().is_empty() {
+        journal_out
+    } else {
+        // Fall back to the flat audit log file (needs root)
+        let script = "cat /var/log/audit/audit.log 2>/dev/null | tail -n 20000";
+        let output = Command::new("pkexec")
+            .args(["bash", "-c", script])
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
+        match output {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                String::from_utf8_lossy(&o.stdout).to_string()
             }
-            match tokio::time::timeout(tokio::time::Duration::from_millis(1500), jcmd.output()).await {
-                Ok(Ok(jo)) if jo.status.success() => String::from_utf8_lossy(&jo.stdout).to_string(),
-                _ => String::new(),
-            }
+            _ => String::new(),
         }
     };
 
