@@ -6,7 +6,7 @@
     Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Sparkles, 
     AlertTriangle, ShieldAlert, Thermometer, ExternalLink, ChevronRight,
     Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
-    Zap, Layers, Package, Sliders, Play, Square, RotateCcw, ShieldCheck, Database,
+    Zap, Layers, Package, Boxes, Sliders, Play, Pause, Square, RotateCcw, ShieldCheck, Database,
     FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X,
     Copy, Globe, Folder, FolderOpen, Flame, MoreHorizontal
   } from '@lucide/svelte';
@@ -231,6 +231,11 @@
   let systemStatsError = $state(false);
   let systemStatsLoaded = $state(false);
   let lastDashboardCheck = $state<Date | null>(null);
+  /** Timestamp of the last SLOW tier fetch — the freshness of the data behind
+   *  the attention items (logs, disk, temperature) */
+  let lastSlowCheck = $state<Date | null>(null);
+  /** True when the storage read failed — distinguishes "no data" from "error" */
+  let diskUsageError = $state(false);
   let lastLogsCheck = $state<Date | null>(null);
   let lastServicesCheck = $state<Date | null>(null);
   let lastSecurityCheck = $state<Date | null>(null);
@@ -552,6 +557,8 @@
   // Sparkline history tracking
   let cpuHistory = $state<number[]>([]);
   let ramHistory = $state<number[]>([]);
+  /** How many samples the metric sparklines keep */
+  const SPARK_POINTS = 30;
 
   let cpuTemp = $state<string>('');
   let cpuTempAvailable = $state(false);
@@ -828,49 +835,25 @@
     }
   }
 
-  async function fetchData() {
-    fetchRecentLogs();
-    fetchServicesWatchdog();
-    fetchTopProcesses();
+  /**
+   * Fast tier — cheap, high-frequency telemetry that drives the metric tiles.
+   * Runs every 4 s: two cheap reads only.
+   */
+  async function fetchFastData() {
     try {
-      const [os, stats, disks, ifaces, lastUpdate, failedSvc, temp, traffic] = await Promise.all([
-        invoke('get_os_info'),
+      const [stats, traffic] = await Promise.all([
         invoke('get_system_stats'),
-        invoke('get_disk_usage'),
-        invoke('get_network_interfaces'),
-        invoke<string>('get_last_system_update').catch(() => ''),
-        invoke<number>('get_failed_services_count').then(count => {
-          failedServicesCountLoaded = true;
-          return count;
-        }).catch(() => {
-          failedServicesCountLoaded = false;
-          return 0;
-        }),
-        invoke<number | null>('get_cpu_temperature').catch(() => null),
         invoke<Array<{ interface: string; rx_bytes: number; tx_bytes: number }>>('get_network_traffic').catch(() => [])
       ]);
 
-      osInfo = os;
       systemStats = stats;
       systemStatsError = false;
       systemStatsLoaded = true;
       lastDashboardCheck = new Date();
-      diskUsage = disks as any[];
-      networkInterfaces = ifaces as any[];
-      lastSystemUpdate = lastUpdate;
-      failedServicesCount = failedSvc;
-
-      if (temp !== null && temp !== undefined && !isNaN(temp)) {
-        cpuTemp = `${Math.round(temp)}°C`;
-        cpuTempAvailable = true;
-      } else {
-        cpuTemp = '';
-        cpuTempAvailable = false;
-      }
 
       // Calculate real live network throughput
       trafficAvailable = Array.isArray(traffic) && traffic.length > 0;
-      if (Array.isArray(traffic) && traffic.length > 0) {
+      if (trafficAvailable) {
         trafficPolls += 1;
         const now = Date.now();
         let totalRx = 0;
@@ -895,19 +878,84 @@
         prevTotalTx = totalTx;
       }
 
-      // Update sparkline histories
+      // Update sparkline histories (rolling window — slice(-(N-1)) keeps the
+      // last N points; slice(1) would pin the array at a single element and
+      // the sparkline would never draw)
       if (systemStats) {
-        cpuHistory = [...cpuHistory.slice(1), Math.round(systemStats.cpu_percent || 0)];
-        ramHistory = [...ramHistory.slice(1), Math.round(systemStats.ram_percent || 0)];
+        cpuHistory = [...cpuHistory.slice(-(SPARK_POINTS - 1)), Math.round(systemStats.cpu_percent || 0)];
+        ramHistory = [...ramHistory.slice(-(SPARK_POINTS - 1)), Math.round(systemStats.ram_percent || 0)];
       }
-
-      fetchNetworkDetails();
-      fetchSystemEvents();
     } catch (e) {
       systemStatsError = true;
       systemStatsLoaded = true;
       trafficAvailable = false;
       console.error("Dashboard fetch error:", e);
+    }
+  }
+
+  /**
+   * Slow tier — expensive data (journal, services, processes, disks).
+   * Runs every 30 s so we are not re-running journalctl every 4 seconds.
+   */
+  async function fetchSlowData() {
+    fetchRecentLogs();
+    fetchServicesWatchdog();
+    fetchTopProcesses();
+    try {
+      // Each read is isolated: one failing command (e.g. df) must not discard
+      // the rest of the slow tier.
+      const [os, disks, ifaces, lastUpdate, failedSvc, temp] = await Promise.all([
+        invoke('get_os_info').catch(() => null),
+        invoke('get_disk_usage').catch(() => null),
+        invoke('get_network_interfaces').catch(() => null),
+        invoke<string>('get_last_system_update').catch(() => ''),
+        invoke<number>('get_failed_services_count').then(count => {
+          failedServicesCountLoaded = true;
+          return count;
+        }).catch(() => {
+          failedServicesCountLoaded = false;
+          return 0;
+        }),
+        invoke<number | null>('get_cpu_temperature').catch(() => null)
+      ]);
+
+      if (os) osInfo = os;
+      if (ifaces) networkInterfaces = ifaces;
+      if (lastUpdate) lastSystemUpdate = lastUpdate;
+      failedServicesCount = failedSvc;
+
+      if (disks) {
+        diskUsage = disks as any[];
+        diskUsageError = false;
+      } else {
+        diskUsageError = true;
+      }
+
+      if (temp !== null && temp !== undefined && !isNaN(temp)) {
+        cpuTemp = `${Math.round(temp)}°C`;
+        cpuTempAvailable = true;
+      } else {
+        cpuTemp = '';
+        cpuTempAvailable = false;
+      }
+
+      lastSlowCheck = new Date();
+
+      fetchNetworkDetails();
+      fetchSystemEvents();
+    } catch (e) {
+      console.error("Dashboard slow fetch error:", e);
+    }
+  }
+
+  /** Manual refresh — both tiers. */
+  async function fetchData() {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      await Promise.all([fetchFastData(), fetchSlowData()]);
+    } finally {
+      refreshing = false;
     }
   }
 
@@ -963,28 +1011,52 @@
     return cleaned || '17 May 2026, 15:21';
   }
 
+  // ── Refresh tiers ─────────────────────────────────────────────────────────
+  // Fast tier: cheap telemetry (CPU / RAM / network) — every 4 s
+  // Slow tier: expensive reads (journal, services, processes, disks) — every 30 s
   let pollInterval: any = null;
+  let slowInterval: any = null;
+  /** When false the dashboard freezes on the last known values */
+  let liveUpdates = $state(true);
+  /** True while a manual refresh is in flight */
+  let refreshing = $state(false);
 
   function stopPolling() {
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
     }
+    if (slowInterval) {
+      clearInterval(slowInterval);
+      slowInterval = null;
+    }
   }
 
   function startPolling() {
-    if (!pollInterval && !uiStore.isThrottled) {
-      pollInterval = setInterval(fetchData, 4000);
+    if (pollInterval || slowInterval || uiStore.isThrottled || !liveUpdates) return;
+    pollInterval = setInterval(fetchFastData, 4000);
+    slowInterval = setInterval(fetchSlowData, 30000);
+  }
+
+  function toggleLiveUpdates() {
+    liveUpdates = !liveUpdates;
+    if (liveUpdates) {
+      // catch up immediately instead of waiting for the next tick
+      fetchFastData();
+      fetchSlowData();
     }
   }
 
   $effect(() => {
-    if (uiStore.isThrottled) {
+    if (uiStore.isThrottled || !liveUpdates) {
       stopPolling();
     } else {
       startPolling();
     }
   });
+
+  // The poll must not outlive the page
+  onDestroy(() => stopPolling());
 
   onMount(() => {
     fetchData();
@@ -1001,6 +1073,12 @@
 
   // Header subtitle uses values from the live system response.
   let headerSubtitle = $derived.by(() => {
+    // Which machine am I on? — the single most useful fact at a glance
+    let host = '';
+    if (osInfo?.hostname) {
+      host = osInfo.hostname.trim();
+    }
+
     let distro = osInfo ? 'System' : 'System details';
     if (osInfo) {
       const cleanName = (osInfo.name || 'Fedora').replace(/Linux/i, '').replace(/\([^)]*\)/g, '').trim();
@@ -1028,22 +1106,16 @@
       }
     }
 
-    let sync = '';
-    if (lastSystemUpdate) {
-      try {
-        const d = new Date(lastSystemUpdate);
-        if (!isNaN(d.getTime())) {
-          sync = `last sync ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`;
-        } else {
-          sync = `last sync ${lastSystemUpdate.slice(0, 10)}`;
-        }
-      } catch {
-        sync = `last sync ${lastSystemUpdate.slice(0, 10)}`;
-      }
-    }
-
     if (!osInfo && !systemStats) return systemStatsError ? 'System details unavailable' : 'System details loading…';
-    return [distro, kernel, uptime, sync].filter(Boolean).join(' · ');
+    return [host, distro, kernel, uptime].filter(Boolean).join(' · ');
+  });
+
+  /** Full system facts live in the tooltip so the header stays on one line. */
+  let headerSubtitleTooltip = $derived.by(() => {
+    const parts = [headerSubtitle];
+    if (lastSystemUpdate) parts.push(`Last package sync: ${formatShortDate(lastSystemUpdate)}`);
+    if (osInfo?.kernel_version) parts.push(osInfo.kernel_version);
+    return parts.join('\n');
   });
 
   // Root disk partition (matches DiskMount: { mount, device, fs_type, total_gb, used_gb, free_gb, percent })
@@ -1068,7 +1140,16 @@
   }
 
   function formatCheckedAt(date: Date | null): string {
-    return date ? `Checked ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : 'Check time unavailable';
+    // Minute precision — the dashboard refreshes every few seconds, so
+    // second-level timestamps would churn on every tick.
+    return date ? `Checked ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Check time unavailable';
+  }
+
+  /** Capacity colour ramp — matches the attention thresholds (85% / 92%). */
+  function diskSeverityClass(percent: number): string {
+    if (percent > 92) return 'is-critical';
+    if (percent > 85) return 'is-warning';
+    return '';
   }
 
   let needsAttentionList = $derived.by<NeedsAttentionItem[]>(() => {
@@ -1099,7 +1180,7 @@
         severity: 'critical',
         label: systemEventsLoaded && !systemEventsError ? 'Journal Errors Since Boot' : 'Recent Journal Errors',
         value: `${logErrCount} critical error${logErrCount > 1 ? 's' : ''} found`,
-        checkedAt: formatCheckedAt(lastDashboardCheck),
+        checkedAt: formatCheckedAt(lastSlowCheck),
         action: () => uiStore.navigateTo('journal-logs')
       });
     }
@@ -1112,7 +1193,7 @@
         severity: isCrit ? 'critical' : 'warning',
         label: 'CPU Thermal Alert',
         value: `${Math.round(cpuTempNumeric)}°C (Thermal threshold exceeded)`,
-        checkedAt: formatCheckedAt(lastDashboardCheck),
+        checkedAt: formatCheckedAt(lastSlowCheck),
         action: () => uiStore.navigateTo('system-monitor', 'overview')
       });
     }
@@ -1144,7 +1225,7 @@
           severity: isCrit ? 'critical' : 'warning',
           label: `Root Partition Storage (${rootDisk.mount || '/'})`,
           value: `${diskPct.toFixed(0)}% utilized (${(rootDisk.free_gb ?? 0).toFixed(1)} GB free)`,
-          checkedAt: formatCheckedAt(lastDashboardCheck),
+          checkedAt: formatCheckedAt(lastSlowCheck),
           action: () => uiStore.navigateTo('device-manager')
         });
       }
@@ -1158,8 +1239,19 @@
     });
   });
 
-  let worstSeverity = $derived.by<'critical' | 'warning'>(() => {
-    return needsAttentionList.some(i => i.severity === 'critical') ? 'critical' : 'warning';
+  /**
+   * Single source of truth for the attention surfaces. The banner, the card and
+   * the modal all read this one snapshot, so the headline item, the count and
+   * the severity can never disagree with each other.
+   */
+  let attentionSummary = $derived.by(() => {
+    const list = needsAttentionList;
+    return {
+      list,
+      top: list[0] ?? null,
+      count: list.length,
+      severity: (list.some(i => i.severity === 'critical') ? 'critical' : 'warning') as 'critical' | 'warning'
+    };
   });
 
   // Show all pinned services, with failed services first.
@@ -1198,19 +1290,49 @@
     <div class="dashboard-header-row">
       <div class="dashboard-header-left">
         <h1 class="dashboard-title">System Overview</h1>
-        <p class="dashboard-subtitle">{headerSubtitle}{lastDashboardCheck ? ` · Updated ${lastDashboardCheck.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}{systemStatsError ? ' · Update failed; values may be stale' : ''}</p>
+        <p class="dashboard-subtitle" title={headerSubtitleTooltip}>
+          {headerSubtitle}{lastDashboardCheck ? ` · updated ${lastDashboardCheck.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}{systemStatsError ? ' · update failed' : ''}
+        </p>
       </div>
       <div class="header-actions-group">
         <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('app-manager')} title="Manage installed applications">
           <LayoutDashboard size={13} />
           <span>Applications</span>
         </Button>
-        <Button variant="primary" size="sm" onclick={() => uiStore.navigateTo('dnf-history')} title="Check for system updates">
+        <Button
+          variant="primary"
+          size="sm"
+          onclick={() => uiStore.navigateTo('dnf-history')}
+          title={lastSystemUpdate ? `Open the update manager — last package sync ${formatShortDate(lastSystemUpdate)}` : 'Open the update manager'}
+        >
           <Package size={13} />
-          <span>{uiStore.availableUpdatesCount > 0 ? `${uiStore.availableUpdatesCount} updates` : 'Check updates'}</span>
+          <span>{uiStore.availableUpdatesCount > 0 ? `${uiStore.availableUpdatesCount} updates` : 'Updates'}</span>
         </Button>
-        <Button variant="ghost" size="sm" onclick={() => fetchData()} title="Refresh telemetry">
-          <RefreshCw size={13} />
+        <Button
+          variant="ghost"
+          size="sm"
+          onclick={toggleLiveUpdates}
+          disabled={refreshing}
+          title={liveUpdates ? 'Pause live updates' : 'Resume live updates'}
+          aria-label={liveUpdates ? 'Pause live updates' : 'Resume live updates'}
+        >
+          {#if refreshing}
+            <RefreshCw size={13} class="animate-spin-slow" />
+          {:else if liveUpdates}
+            <Pause size={13} />
+          {:else}
+            <Play size={13} />
+          {/if}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onclick={() => fetchData()}
+          disabled={refreshing}
+          title="Refresh telemetry"
+          aria-label="Refresh telemetry"
+        >
+          <RefreshCw size={13} class={refreshing ? 'animate-spin-slow' : ''} />
         </Button>
       </div>
     </div>
@@ -1219,13 +1341,19 @@
   <!-- ── Dashboard Main Content ── -->
   <div class="dashboard-content">
     <!-- 2. Health Banner (Slim bar, amber/red, hidden when 0) -->
-    {#if needsAttentionList.length > 0}
-      <div class="health-banner {worstSeverity}" role="alert">
+    {#if attentionSummary.count > 0}
+      {@const topItem = attentionSummary.top}
+      <div class="health-banner {attentionSummary.severity}" role="alert">
         <div class="health-banner-left">
-          <span class="health-dot {worstSeverity}"></span>
+          <span class="health-dot {attentionSummary.severity}"></span>
           <span class="health-banner-text">
-            <strong>{needsAttentionList.length}</strong> {needsAttentionList.length === 1 ? 'thing needs' : 'things need'} attention
+            <strong>{topItem.label}</strong>
+            <span class="health-banner-value">{topItem.value}</span>
+            <span class="health-banner-checked">{topItem.checkedAt}</span>
           </span>
+          {#if attentionSummary.count > 1}
+            <span class="health-banner-more">+{attentionSummary.count - 1} more</span>
+          {/if}
         </div>
         <button
           type="button"
@@ -1252,11 +1380,11 @@
         title="Open System Monitor (CPU)"
       >
         <div class="metric-tile-header">
-          <span class="metric-tile-label">CPU</span>
+          <span class="metric-tile-label">CPU<ArrowUpRight size={12} class="metric-tile-arrow" /></span>
           <span class="metric-tile-sub">{cpuTempAvailable ? cpuTemp : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
         </div>
         <div class="metric-tile-body">
-          <span class="metric-tile-num mono">{systemStats ? `${systemStats.cpu_percent.toFixed(1)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <span class="metric-tile-num mono">{systemStats ? `${Math.round(systemStats.cpu_percent)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
           <svg viewBox="0 0 60 16" class="metric-tile-sparkline">
             {#if cpuHistory.length > 1}<path d={generateSparklinePath(cpuHistory, 60, 16)} fill="none" stroke="var(--color-accent, #00daf3)" stroke-width="1.75" stroke-linecap="round" />{/if}
           </svg>
@@ -1274,11 +1402,14 @@
         title="Open System Monitor (Memory)"
       >
         <div class="metric-tile-header">
-          <span class="metric-tile-label">Memory</span>
+          <span class="metric-tile-label">Memory<ArrowUpRight size={12} class="metric-tile-arrow" /></span>
           <span class="metric-tile-sub">{systemStats ? `${(systemStats.ram_used_mb / 1024).toFixed(1)} / ${(systemStats.ram_total_mb / 1024).toFixed(0)} GB` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
         </div>
         <div class="metric-tile-body">
-          <span class="metric-tile-num mono">{systemStats ? `${systemStats.ram_percent.toFixed(1)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <span class="metric-tile-num mono">{systemStats ? `${Math.round(systemStats.ram_percent)}%` : systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <svg viewBox="0 0 60 16" class="metric-tile-sparkline">
+            {#if ramHistory.length > 1}<path d={generateSparklinePath(ramHistory, 60, 16)} fill="none" stroke="var(--color-accent, #00daf3)" stroke-width="1.75" stroke-linecap="round" />{/if}
+          </svg>
         </div>
       </button>
 
@@ -1290,11 +1421,14 @@
         title="Open Device Manager (Disks)"
       >
         <div class="metric-tile-header">
-          <span class="metric-tile-label">Disk</span>
+          <span class="metric-tile-label">Disk<ArrowUpRight size={12} class="metric-tile-arrow" /></span>
           <span class="metric-tile-sub">{rootDisk ? `${rootDisk.used_gb.toFixed(0)} / ${rootDisk.total_gb.toFixed(0)} GB` : systemStats || systemStatsError ? 'Unavailable' : 'Loading…'}</span>
         </div>
         <div class="metric-tile-body">
-          <span class="metric-tile-num mono">{rootDisk ? `${rootDisk.percent.toFixed(0)}%` : systemStats || systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <span class="metric-tile-num mono">{rootDisk ? `${Math.round(rootDisk.percent)}%` : systemStats || systemStatsError ? 'Unavailable' : 'Loading…'}</span>
+          <div class="metric-tile-bar">
+            <span style="width: {rootDisk ? Math.min(100, Math.round(rootDisk.percent)) : 0}%"></span>
+          </div>
         </div>
       </button>
 
@@ -1306,7 +1440,7 @@
         title="Open Network Manager"
       >
         <div class="metric-tile-header">
-          <span class="metric-tile-label">Network</span>
+          <span class="metric-tile-label">Network<ArrowUpRight size={12} class="metric-tile-arrow" /></span>
           <span class="metric-tile-sub">{gatewayPing || (systemStats ? (networkInterfaces.length ? 'Checking' : 'No interface') : systemStatsError ? 'Unavailable' : 'Loading…')}</span>
         </div>
         <div class="metric-tile-body">
@@ -1321,14 +1455,14 @@
       <div id="needs-attention-card" class="card-wrap">
         <Card title="Needs Attention">
           {#snippet headerActions()}
-            {#if needsAttentionList.length > 0}
-              <Badge variant={worstSeverity === 'critical' ? 'error' : 'warning'}>
-                {needsAttentionList.length}
+            {#if attentionSummary.count > 0}
+              <Badge variant={attentionSummary.severity === 'critical' ? 'error' : 'warning'}>
+                {attentionSummary.count}
               </Badge>
             {/if}
           {/snippet}
 
-          {#if needsAttentionList.length === 0}
+          {#if attentionSummary.count === 0}
             <div class="all-clear-state">
               {#if checksPending}
                 <RefreshCw size={18} class="all-clear-icon" />
@@ -1345,13 +1479,13 @@
                 </span>
                 <span class="all-clear-sub">
                   {#if checksUnavailable}Unavailable checks are not counted as alerts.
-                  {:else if needsAttentionList.length === 0}No warnings or critical conditions detected{/if}
+                  {:else if attentionSummary.count === 0}No warnings or critical conditions detected{/if}
                 </span>
               </div>
             </div>
           {:else}
             <div class="card-row-list">
-              {#each needsAttentionList as item (item.id)}
+              {#each attentionSummary.list as item (item.id)}
                 <button
                   type="button"
                   class="data-row clickable-row"
@@ -1592,21 +1726,25 @@
     </div>
 
     <!-- 6. Collapsed "Details" section (collapsed by default) -->
-    <div
-      class="details-card-container"
-    >
+    <div class="details-card-container">
       <Card collapsible={true} bind:collapsed={detailsCollapsed} title="Storage Breakdown & Footprint" class="details-card">
       <div class="details-grid">
         <!-- Sub-panel 1: Storage Breakdown -->
-        <div class="details-subpanel">
-          <div class="subpanel-title">Storage Breakdown</div>
-          <div class="card-row-list">
+        <div class="subpanel">
+          <div class="subpanel-head">
+            <span class="subpanel-chip"><HardDrive size={13} /></span>
+            <span class="subpanel-title">Storage Breakdown</span>
+            <span class="subpanel-meta">
+              {diskUsage?.length ? `${diskUsage.length} mount${diskUsage.length === 1 ? '' : 's'}` : ''}
+            </span>
+          </div>
+          <div class="card-row-list storage-list">
             {#if diskUsage && diskUsage.length > 0}
               {#each diskUsage as disk (disk.mount)}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
-                  class="data-row hoverable-row"
+                  class="data-row hoverable-row storage-row"
                   role="button"
                   tabindex="0"
                   onclick={() => openStoragePathModal(disk.mount, disk.device, disk.used_gb, disk.total_gb, disk.fs_type)}
@@ -1615,35 +1753,59 @@
                   title="Inspect {disk.mount} storage"
                 >
                   <div class="data-row-left">
-                    <HardDrive size={14} class="row-icon text-muted" />
+                    <span class="row-icon-wrap"><HardDrive size={13} /></span>
                     <span class="data-row-label mono">{disk.mount}</span>
-                    <span class="text-muted" style="font-size:11px;">({disk.device})</span>
+                    <span class="storage-device">({disk.device})</span>
                   </div>
-                  <div class="data-row-right">
+                  <div class="data-row-right storage-row-right">
+                    <span class="capacity-bar" title="{disk.percent ?? 0}% used">
+                      <span class="capacity-fill {diskSeverityClass(disk.percent ?? 0)}" style="width: {Math.min(100, disk.percent ?? 0)}%"></span>
+                    </span>
                     <span class="data-row-value mono">{(disk.used_gb ?? 0).toFixed(1)} / {(disk.total_gb ?? 0).toFixed(0)} GB</span>
-                    <span class="pct-badge mono">{(disk.percent ?? 0).toFixed(0)}%</span>
+                    <span class="pct-badge mono {diskSeverityClass(disk.percent ?? 0)}">{(disk.percent ?? 0).toFixed(0)}%</span>
                   </div>
                 </div>
               {/each}
             {:else}
-              <div class="all-clear-state compact"><span class="all-clear-title">{systemStats || systemStatsError ? 'Storage data unavailable' : 'Loading storage…'}</span></div>
+              <div class="panel-empty">
+                <span class="panel-empty-icon">
+                  {#if diskUsageError}
+                    <AlertCircle size={18} />
+                  {:else}
+                    <RefreshCw size={18} class="animate-spin-slow" />
+                  {/if}
+                </span>
+                <span class="panel-empty-title">
+                  {diskUsageError ? 'Storage data unavailable' : 'Loading storage…'}
+                </span>
+                <span class="panel-empty-sub">
+                  {diskUsageError
+                    ? 'The mounted filesystems could not be read. Use Reload in the header to try again.'
+                    : 'Reading mounted filesystems and their capacity…'}
+                </span>
+              </div>
             {/if}
           </div>
         </div>
 
         <!-- Sub-panel 2: Application & Disk Footprint -->
-        <div class="details-subpanel">
-          <div class="subpanel-title">Application &amp; System Footprint</div>
+        <div class="subpanel">
+          <div class="subpanel-head">
+            <span class="subpanel-chip"><Layers size={13} /></span>
+            <span class="subpanel-title">Application &amp; System Footprint</span>
+          </div>
           <div class="footprint-summary-list">
             {#each ['Flatpak', 'RPM'] as source}
               {@const stats = appFootprint?.[source as 'Flatpak' | 'RPM']}
               <Button
                 variant="ghost"
-                size="sm"
-                class="footprint-summary-row clickable-row"
+                class="footprint-summary-row"
                 onclick={() => uiStore.navigateTo('app-manager', source)}
                 oncontextmenu={(e) => handleFootprintContextMenu(e, { title: `${source} applications`, size: stats ? `${stats.count} apps · ${formatAppSize(stats.sizeBytes)}` : 'Application size summary', type: source === 'Flatpak' ? 'flatpak' : 'rpm' })}
               >
+                <span class="footprint-chip">
+                  {#if source === 'Flatpak'}<Boxes size={13} />{:else}<Package size={13} />{/if}
+                </span>
                 <span class="footprint-summary-main">
                   <span class="footprint-summary-name">{source} applications</span>
                   <span class="footprint-summary-meta">
@@ -1658,7 +1820,7 @@
                   </span>
                 </span>
                 <span class="footprint-summary-size">{stats ? formatAppSize(stats.sizeBytes) : '—'}</span>
-                <ChevronRight size={14} />
+                <ChevronRight size={14} class="footprint-chevron" />
               </Button>
             {/each}
             <span class="status-muted-text footprint-hint">Installed size total for detected desktop apps.</span>
@@ -1680,10 +1842,10 @@
     <div class="modal-glass-card modal-attention-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header-row">
         <div style="display:flex; align-items:center; gap:10px;">
-          <AlertTriangle size={20} style="color: {worstSeverity === 'critical' ? 'var(--color-error)' : 'var(--color-warning)'};" />
+          <AlertTriangle size={20} style="color: {attentionSummary.severity === 'critical' ? 'var(--color-error)' : 'var(--color-warning)'};" />
           <div>
             <h3 style="margin:0; font-size:16px; font-weight:700; color:var(--color-text-primary);">
-              Needs Attention ({needsAttentionList.length})
+              Needs Attention ({attentionSummary.count})
             </h3>
             <span style="font-size:11.5px; color:var(--color-text-muted);">
               System conditions that exceed normal thresholds and require administrative review
@@ -1694,7 +1856,7 @@
       </div>
 
       <div class="attention-modal-list">
-        {#each needsAttentionList as item (item.id)}
+        {#each attentionSummary.list as item (item.id)}
           <div class="attention-modal-item {item.severity}">
             <div class="attention-item-left">
               <span class="status-dot {item.severity}"></span>
@@ -2868,6 +3030,9 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
+    /* let the subtitle truncate instead of pushing the action buttons off-screen */
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .dashboard-title {
@@ -2884,6 +3049,10 @@
     color: var(--color-text-muted);
     margin: 0;
     line-height: 1.3;
+    /* keep the header on one line — the full facts live in the tooltip */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .header-actions-group {
@@ -2941,11 +3110,38 @@
   .health-banner-text {
     font-size: 13px;
     color: var(--color-text-primary);
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
   }
 
   .health-banner-text strong {
     font-family: var(--font-mono);
     font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .health-banner-value {
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .health-banner-more {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .health-banner-checked {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .health-banner-link {
@@ -2992,6 +3188,20 @@
     min-width: 0;
     box-sizing: border-box;
     overflow: hidden;
+    position: relative;
+  }
+
+  /* "clickable" affordance — the tiles navigate somewhere */
+  .metric-tile-arrow {
+    color: var(--color-text-muted);
+    opacity: 0;
+    vertical-align: middle;
+    transition: opacity 0.15s ease, color 0.15s ease;
+  }
+
+  .metric-tile:hover .metric-tile-arrow {
+    opacity: 1;
+    color: var(--color-accent);
   }
 
   .metric-tile:hover {
@@ -3015,6 +3225,10 @@
     letter-spacing: 0.5px;
     color: var(--color-text-muted);
     white-space: nowrap;
+    /* keep the hover arrow on the same line as the label */
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
 
   .metric-tile-sub {
@@ -3032,6 +3246,25 @@
     justify-content: space-between;
     gap: 8px;
     min-width: 0;
+  }
+
+  /* Capacity bar for metrics that have no history to plot */
+  .metric-tile-bar {
+    width: 60px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--color-bg-raised);
+    overflow: hidden;
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  .metric-tile-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--color-accent);
+    transition: width 0.3s ease;
   }
 
   .metric-tile-num {
@@ -3424,11 +3657,24 @@
     border-radius: 6px;
     padding: 4px 6px;
     margin: -4px -6px 8px -6px;
-    transition: background 0.12s ease;
+    transition: background 0.15s ease;
   }
 
+  /* Clear "click to expand" affordance — accent tint instead of a flat wash */
   .details-card-container :global(.card-header-row:hover) {
-    background: var(--color-bg-hover);
+    background: var(--color-accent-muted);
+  }
+
+  .details-card-container :global(.card-header-row:hover .card-title-header) {
+    color: var(--color-accent);
+  }
+
+  .details-card-container :global(.card-collapse-btn) {
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  }
+
+  .details-card-container :global(.card-collapse-btn:hover) {
+    transform: scale(1.06);
   }
 
   :global(.details-card) {
@@ -3479,31 +3725,136 @@
     overflow: hidden;
   }
 
+  /* Sub-panel header — a raised band so it reads as a header, not as content */
+  .subpanel {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--color-bg-card);
+  }
+
+  .subpanel-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 14px;
+    background: var(--color-bg-raised);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .subpanel-chip {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--color-module-icon-bg);
+    border: 1px solid var(--color-module-icon-border);
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
   .subpanel-title {
     font-size: 11.5px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.6px;
+    color: var(--color-text-primary);
+  }
+
+  .subpanel-meta {
+    margin-left: auto;
+    font-size: 11px;
     color: var(--color-text-muted);
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--color-border-subtle);
-    background: rgba(255, 255, 255, 0.02);
+    white-space: nowrap;
+  }
+
+  /* ── Sub-panel empty state ───────────────────────────────────── */
+  .panel-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 30px 20px;
+    text-align: center;
+  }
+
+  .panel-empty-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    margin-bottom: 2px;
+  }
+
+  .panel-empty-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .panel-empty-sub {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    max-width: 330px;
+    line-height: 1.5;
   }
 
   .footprint-summary-list {
     display: flex;
     flex-direction: column;
-    padding: 6px 10px;
+    gap: 4px;
+    padding: 8px;
   }
 
-  .footprint-summary-row {
+  /* Ghost button + row styling. :global() is required because the <Button>
+     element carries the Button component's scope hash, not this component's.
+     The default button size is used on purpose — the global .btn-sm rules
+     force a 28px height with !important, which a row cannot live with. */
+  .footprint-summary-list :global(.footprint-summary-row) {
     display: flex;
+    align-items: center;
     justify-content: flex-start;
     gap: 10px;
-    min-height: 54px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--color-border-subtle);
+    width: 100%;
+    min-height: 52px;
+    padding: 9px 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
     text-align: left;
+    font-size: 12px;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .footprint-summary-list :global(.footprint-summary-row:hover) {
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent-glow);
+  }
+
+  .footprint-chip {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .footprint-summary-list :global(.footprint-summary-row:hover .footprint-chip) {
+    color: var(--color-accent);
+    border-color: var(--color-accent-glow);
   }
 
   .footprint-summary-main {
@@ -3533,16 +3884,113 @@
     white-space: nowrap;
   }
 
+  .footprint-chevron {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    transition: transform 0.15s ease, color 0.15s ease;
+  }
+
+  .footprint-summary-list :global(.footprint-summary-row:hover .footprint-chevron) {
+    color: var(--color-accent);
+    transform: translateX(2px);
+  }
+
   .footprint-hint {
-    padding: 8px 10px 4px;
+    padding: 10px 10px 4px;
+  }
+
+  /* ── Storage rows ─────────────────────────────────────────────────── */
+  .storage-list {
+    padding: 4px 6px;
+  }
+
+  .storage-row {
+    gap: 10px;
+    border-radius: 8px;
+    border-bottom: none;
+    padding: 9px 8px;
+  }
+
+  .storage-row:hover {
+    background: var(--color-accent-muted);
+    box-shadow: inset 2px 0 0 var(--color-accent);
+  }
+
+  .row-icon-wrap {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--color-bg-raised);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    transition: color 0.15s ease;
+  }
+
+  .storage-row:hover .row-icon-wrap {
+    color: var(--color-accent);
+  }
+
+  .storage-device {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .storage-row-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .capacity-bar {
+    display: block;
+    width: 90px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--color-bg-raised);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .capacity-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--color-accent);
+    transition: width 0.3s ease, background 0.2s ease;
+  }
+
+  .capacity-fill.is-warning {
+    background: var(--color-warning);
+  }
+
+  .capacity-fill.is-critical {
+    background: var(--color-error);
   }
 
   .pct-badge {
     font-size: 11px;
-    color: var(--color-text-muted);
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
+    color: var(--color-text-secondary);
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .pct-badge.is-warning {
+    color: var(--color-warning);
+    background: var(--color-warning-muted);
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+
+  .pct-badge.is-critical {
+    color: var(--color-error);
+    background: var(--color-error-muted);
+    border-color: rgba(239, 68, 68, 0.3);
   }
 
   .row-icon {
