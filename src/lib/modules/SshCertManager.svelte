@@ -244,14 +244,14 @@
 
   async function loadSshdHardening(isManual = false) {
     if (isManual) evaluatingSshd = true;
-    const res = await invokeSafe<SshdHardeningStatus>('vault_get_sshd_hardening', {}, { quiet: true });
+    const res = await invokeSafe<SshdHardeningStatus>('vault_get_sshd_hardening', { elevated: isManual }, { quiet: true });
     if (res) {
       sshdStatus = res;
       if (isManual) {
         if (res.is_evaluated) {
           uiStore.showToast('SSH daemon configuration evaluated successfully', 'success');
         } else {
-          uiStore.showToast('Evaluation requires Root mode enabled in status bar', 'warning');
+          uiStore.showToast('Could not evaluate the SSH daemon configuration. Check authorization or file permissions.', 'warning');
         }
       }
     }
@@ -898,15 +898,8 @@
               <div class="alert-banner-warn">
                 <div class="alert-banner-left">
                   <AlertTriangle size={16} class="text-warning flex-shrink-0" />
-                  <span>{sshdStatus.error}. Enable Root Mode for live daemon configuration analysis.</span>
+                  <span>{sshdStatus.error}. Select Re-evaluate to request system authorization for the full configuration.</span>
                 </div>
-                <Button 
-                  variant="primary" 
-                  size="sm"
-                  onclick={() => window.dispatchEvent(new CustomEvent('request-root-auth'))}
-                >
-                  <ShieldCheck size={13} /> Enable Root Mode
-                </Button>
               </div>
             {/if}
 

@@ -538,7 +538,7 @@ pub fn vault_remove_authorized_key(line_number: usize) -> Result<String, String>
 // ─── 5. SSHD Hardening Audit ───────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
+pub async fn vault_get_sshd_hardening(elevated: bool) -> Result<SshdHardeningStatus, String> {
     let config_path = "/etc/ssh/sshd_config";
     let mut status = SshdHardeningStatus {
         permit_root_login: "prohibit-password".to_string(),
@@ -560,10 +560,11 @@ pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
     };
 
     // 1. Try evaluating active sshd daemon config directly (sshd -T)
-    let sshd_t = PrivCommand::new("pkexec")
-        .args([sshd_bin, "-T"])
-        .output()
-        .await;
+    let sshd_t = if elevated {
+        PrivCommand::new("pkexec").args([sshd_bin, "-T"]).output().await
+    } else {
+        PrivCommand::new(sshd_bin).args(["-T"]).output().await
+    };
 
     if let Ok(out) = sshd_t {
         if out.status.success() {
@@ -589,10 +590,11 @@ pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
     }
 
     // 2. Fallback: Cat config file with root privileges if sshd -T had an issue
-    let cat_res = PrivCommand::new("pkexec")
-        .args(["cat", config_path])
-        .output()
-        .await;
+    let cat_res = if elevated {
+        PrivCommand::new("pkexec").args(["/usr/bin/cat", config_path]).output().await
+    } else {
+        PrivCommand::new("cat").arg(config_path).output().await
+    };
 
     if let Ok(out) = cat_res {
         if out.status.success() {

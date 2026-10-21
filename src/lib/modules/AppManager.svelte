@@ -118,13 +118,25 @@
     if (selectedAppNames.size === 0) return;
     const list = apps.filter(a => selectedAppNames.has(a.name));
     const count = list.length;
+    const removalPreviews = new Map<string, string>();
+    try {
+      for (const app of list) {
+        if (app.source === 'RPM' && app.package_id) {
+          const preview = await invoke<string>('preview_rpm_removal', { name: app.package_id });
+          removalPreviews.set(app.package_id, preview);
+        }
+      }
+    } catch (e) {
+      uiStore.addToast(`Could not prepare package removal previews: ${e}`, 'error');
+      return;
+    }
     uiStore.confirm(
       'Batch Uninstall Applications',
-      `Are you sure you want to uninstall ${count} selected applications?\n\n${list.map(a => `• ${a.name} (${a.source})`).join('\n')}`,
+      `Review these selected applications and package transactions before continuing:\n\n${list.map(a => `• ${a.name} (${a.source})${a.source === 'RPM' && a.package_id ? `\n${removalPreviews.get(a.package_id) || ''}` : ''}`).join('\n\n')}`,
       async () => {
         uiStore.addToast(`Starting batch uninstall of ${count} applications…`, 'info');
         for (const app of list) {
-          await executeUninstall(app);
+          await performUninstall(app, app.package_id ? removalPreviews.get(app.package_id) : undefined);
         }
         selectedAppNames = new Set();
       },
@@ -439,7 +451,7 @@
     }
   }
 
-    async function performUninstall(app: DesktopApp) {
+    async function performUninstall(app: DesktopApp, expectedPreview?: string) {
     if (!app.package_id) {
       uiStore.addToast('Cannot uninstall: Unknown package ID', 'error');
       return;
@@ -455,8 +467,13 @@
         ? `flatpak uninstall -y ${app.package_id}`
         : `dnf remove -y ${app.package_id}`;
       
-      await invoke('uninstall_app', { packageId: app.package_id, source: app.source });
-      appendLog(`\nSuccessfully uninstalled ${app.name} and cleaned dependencies.`);
+      await invoke('uninstall_app', {
+        packageId: app.package_id,
+        source: app.source,
+        expectedPreview,
+        systemWide: app.source === 'Flatpak' && app.file_path.includes('/var/lib/flatpak/'),
+      });
+      appendLog(`\nSuccessfully uninstalled ${app.name}. Automatic dependency cleanup was skipped.`);
       statusStore.setLastCommand(cmdString, 0, true);
       uiStore.addToast(`Removed ${app.name}`, 'success');
       loadApps();
@@ -471,16 +488,25 @@
     }
   }
 
-  function confirmUninstall(app: DesktopApp) {
+  async function confirmUninstall(app: DesktopApp) {
     if (!app.package_id) {
       uiStore.addToast('Cannot uninstall: Unknown package ID', 'error');
       return;
     }
     
+    let expectedPreview: string | undefined;
+    if (app.source === 'RPM') {
+      try {
+        expectedPreview = await invoke<string>('preview_rpm_removal', { name: app.package_id });
+      } catch (e) {
+        uiStore.addToast(`Could not prepare a safe removal preview: ${e}`, 'error');
+        return;
+      }
+    }
     uiStore.confirm(
       'Uninstall Application',
-      `Are you sure you want to uninstall ${app.name}?\nSource: ${app.source}\nPackage: ${app.package_id}`,
-      () => performUninstall(app),
+      `Review before uninstalling ${app.name}.\nSource: ${app.source}\nPackage: ${app.package_id}${expectedPreview ? `\n\nPackage transaction:\n${expectedPreview}` : ''}`,
+      () => performUninstall(app, expectedPreview),
       true
     );
   }
@@ -510,14 +536,21 @@
     );
   }
 
-  function confirmRemoveRpm(pkg: RpmPackage) {
+  async function confirmRemoveRpm(pkg: RpmPackage) {
+    let expectedPreview: string;
+    try {
+      expectedPreview = await invoke<string>('preview_rpm_removal', { name: pkg.name });
+    } catch (e) {
+      uiStore.addToast(`Could not prepare a safe removal preview: ${e}`, 'error');
+      return;
+    }
     uiStore.confirm(
       'Remove RPM Package',
-      `Remove "${pkg.name}" (${pkg.version})?\n\nThis may affect other packages that depend on it.`,
+      `Review the package manager transaction before removing "${pkg.name}" (${pkg.version}):\n\n${expectedPreview}\n\nOnly the displayed transaction will be applied.`,
       async () => {
         statusStore.setBusy(`Removing RPM: ${pkg.name}...`);
         try {
-          await invoke('remove_rpm', { name: pkg.name });
+          await invoke('remove_rpm', { name: pkg.name, expectedPreview });
           uiStore.addToast(`Removed RPM: ${pkg.name}`, 'success');
           statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 0, true);
           await loadApps();

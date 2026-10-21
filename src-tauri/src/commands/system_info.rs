@@ -691,10 +691,6 @@ pub async fn get_network_traffic() -> Result<Vec<NetworkTraffic>, String> {
 
 #[tauri::command]
 pub async fn get_smart_health() -> Result<Vec<SmartHealth>, String> {
-    if !crate::utils::privilege::check_sudo_status() {
-        return Ok(Vec::new());
-    }
-
     let lsblk = crate::utils::privilege::tokio::Command::new("lsblk")
         .args(["-d", "-n", "-o", "NAME,TYPE"])
         .output()
@@ -865,16 +861,8 @@ pub struct ActiveConnection {
 
 #[tauri::command]
 pub async fn get_active_connections() -> Result<Vec<ActiveConnection>, String> {
-    // If root privileges are active, run with pkexec to get process names for all users
-    let mut cmd = if crate::utils::privilege::check_sudo_status() {
-        let mut c = crate::utils::privilege::tokio::Command::new("pkexec");
-        c.args(["ss", "-tunp"]);
-        c
-    } else {
-        let mut c = crate::utils::privilege::tokio::Command::new("ss");
-        c.args(["-tunp"]);
-        c
-    };
+    let mut cmd = crate::utils::privilege::tokio::Command::new("ss");
+    cmd.args(["-tunp"]);
     cmd.stdout(std::process::Stdio::piped());
     
     let output = cmd.output().await.map_err(|e| e.to_string())?;

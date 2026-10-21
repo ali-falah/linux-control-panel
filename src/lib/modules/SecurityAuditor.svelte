@@ -240,8 +240,18 @@
     } catch {}
   }
 
+  function applyReport(res: SecurityReport) {
+    const sanitized = sanitizeReport(res);
+    report = sanitized;
+    if (sanitized) {
+      saveCache(sanitized);
+      saveHistory(effectiveScore);
+    }
+    statusStore.setLastCommand('security_audit_executed', 0, true);
+  }
+
   // ── Audit ──────────────────────────────────────────────────────────────────
-  async function runAudit(forceRefresh: boolean | MouseEvent = true, isBackground = false) {
+  async function runAudit(forceRefresh: boolean | MouseEvent = true, isBackground = false): Promise<SecurityReport | null> {
     if (!isBackground) {
       loading = true;
     }
@@ -249,11 +259,8 @@
     try {
       const res = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
       if (res && res.findings) {
-        const sanitized = sanitizeReport(res);
-        report = sanitized;
-        if (sanitized) saveCache(sanitized);
-        saveHistory(effectiveScore);
-        statusStore.setLastCommand('security_audit_executed', 0, true);
+        applyReport(res);
+        return res;
       }
     } catch (e) {
       uiStore.addToast(`Audit scan error: ${e}`, 'error');
@@ -261,6 +268,7 @@
     } finally {
       loading = false;
     }
+    return null;
   }
 
   onMount(() => {
@@ -271,7 +279,11 @@
     const hasCache = !!report;
     runAudit(false, hasCache);
 
-    const handleReaudit = () => runAudit(true, false);
+    const handleReaudit = (event: Event) => {
+      const freshReport = (event as CustomEvent<SecurityReport>).detail;
+      if (freshReport?.findings) applyReport(freshReport);
+      else runAudit(true, false);
+    };
     window.addEventListener('security-audit-run', handleReaudit);
     return () => window.removeEventListener('security-audit-run', handleReaudit);
   });
@@ -568,7 +580,38 @@
       }
 
       default:
-        uiStore.addToast('No auto-fix available for this check. Please remediate manually.', 'info');
+        {
+          const fix = getHardcodedFix(finding.id);
+          if (!fix) {
+            uiStore.addToast('No auto-fix available for this check. Please remediate manually.', 'info');
+            break;
+          }
+          uiStore.confirm(
+            `Apply Hardening: ${fix.label}`,
+            `This will apply the following change:\n\n${fix.current_label}  →  ${fix.proposed_label}\n\nTarget: ${fix.target}`,
+            async () => {
+              fixingId = finding.id;
+              try {
+                const message = await invoke<string>(fix.tauri_command, fix.tauri_args);
+                invoke('security_log_fix', {
+                  findingId: finding.id,
+                  findingTitle: finding.title,
+                  action: 'apply',
+                  outcome: message,
+                }).catch(() => {});
+                const freshReport = await runAudit(true);
+                const verified = freshReport?.findings.find(item => item.id === finding.id)?.is_resolved;
+                if (verified) uiStore.addToast(`Fix verified: ${fix.label}`, 'success');
+                else uiStore.addToast('The command completed, but the rescan still reports this finding. It may need a reboot or manual review.', 'warning');
+              } catch (e) {
+                uiStore.addToast(`Failed: ${e}`, 'error');
+              } finally {
+                fixingId = null;
+              }
+            },
+            false
+          );
+        }
     }
   }
 

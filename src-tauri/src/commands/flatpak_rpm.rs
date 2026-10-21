@@ -221,22 +221,25 @@ fn determine_recommendation(flatpak: &FlatpakApp, _rpm: &RpmPackage) -> String {
 /// Remove a Flatpak app
 #[tauri::command]
 pub async fn remove_flatpak(app_id: String, system_wide: bool) -> Result<String, String> {
+    if !is_safe_package_id(&app_id) {
+        return Err("Invalid Flatpak application ID".to_string());
+    }
     if !binary_exists("flatpak").await {
         return Err("flatpak is not available".to_string());
     }
 
-    let mut args = vec!["/usr/bin/flatpak", "uninstall", "-y", &app_id];
-    if system_wide {
-        args.push("--system");
+    let output = if system_wide {
+        Command::new("pkexec")
+            .args(["/usr/bin/flatpak", "uninstall", "--system", "-y", &app_id])
+            .output()
+            .await
     } else {
-        args.push("--user");
+        Command::new("flatpak")
+            .args(["uninstall", "--user", "-y", &app_id])
+            .output()
+            .await
     }
-
-    let output = Command::new("pkexec")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    .map_err(|e| format!("Failed to run Flatpak uninstall: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -257,22 +260,130 @@ const PROTECTED_PACKAGES: &[&str] = &[
     "glibc", "systemd", "dnf", "dnf5", "kernel", "kernel-core", "kernel-modules",
     "bash", "coreutils", "rpm", "sudo", "shadow-utils", "polkit", "dbus",
     "util-linux", "pam", "filesystem", "libselinux", "glibc-common",
-    "apt", "dpkg", "libc6", "ubuntu-minimal", "ubuntu-standard", "debian-archive-keyring"
+    "apt", "dpkg", "libc6", "ubuntu-minimal", "ubuntu-standard", "debian-archive-keyring",
+    "grub2", "grub2-common", "grub2-tools", "shim", "dracut", "NetworkManager",
+    "firewalld", "nftables", "openssl-libs", "cryptsetup", "lvm2", "selinux-policy"
 ];
 
 pub fn is_protected_package(name: &str) -> bool {
     let lower = name.trim().to_lowercase();
-    if lower.starts_with("kernel") || lower.starts_with("linux-image") || lower.starts_with("systemd") || lower.starts_with("glibc") || lower.starts_with("libc6") || lower.starts_with("dnf") || lower.starts_with("apt") {
+    if [
+        "kernel", "linux-image", "systemd", "libsystemd", "glibc", "libc6", "dnf", "apt",
+        "grub", "shim", "dracut", "networkmanager", "selinux-policy", "libselinux",
+        "cryptsetup", "lvm2", "rpm", "coreutils", "libpam", "libssl", "openssl",
+        "dbus", "polkit", "sudo", "shadow", "passwd", "util-linux", "openssh",
+        "firewalld", "nftables", "iptables", "libnss", "systemd-boot",
+    ].iter().any(|prefix| lower.starts_with(prefix)) {
         return true;
     }
-    PROTECTED_PACKAGES.contains(&lower.as_str())
+    PROTECTED_PACKAGES.iter().any(|package| package.to_lowercase() == lower)
+}
+
+pub fn is_safe_package_id(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | ':' | '@' | '-'))
+}
+
+pub async fn rpm_remove_preview(name: &str) -> Result<String, String> {
+    if !is_safe_package_id(name) {
+        return Err("Invalid package name".to_string());
+    }
+    if is_protected_package(name) {
+        return Err(format!("Action blocked: '{}' is an essential system package and cannot be removed.", name));
+    }
+    let is_dnf = binary_exists("dnf").await;
+    let mut command = if is_dnf {
+        let mut cmd = tokio::process::Command::new("dnf");
+        cmd.args(["--color=never", "remove", "--assumeno", name]).env("LC_ALL", "C").env("LANG", "C");
+        cmd
+    } else if binary_exists("apt-get").await {
+        let mut cmd = tokio::process::Command::new("apt-get");
+        cmd.args(["-s", "remove", name]).env("LC_ALL", "C").env("LANG", "C");
+        cmd
+    } else {
+        return Err("No supported package manager is available".to_string());
+    };
+    let output = command.output().await.map_err(|e| format!("Failed to preview package removal: {e}"))?;
+    let preview = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if preview.trim().is_empty() {
+        return Err("The package manager returned no removal preview".to_string());
+    }
+
+    let lower_preview = preview.to_lowercase();
+    if ["error:", "problem:", "failed to", "unable to", "no match for argument", "could not"].iter().any(|marker| lower_preview.contains(marker)) {
+        return Err("The package manager could not produce a safe removal preview. No changes were made.".to_string());
+    }
+
+    if is_dnf {
+        let has_summary = lower_preview.contains("transaction summary");
+        let expected_abort = lower_preview.contains("operation aborted");
+        if !has_summary || (!output.status.success() && !expected_abort) {
+            return Err("DNF did not return a complete removal preview. No changes were made.".to_string());
+        }
+        let mut in_remove_section = false;
+        let mut saw_removal_row = false;
+        for line in preview.lines() {
+            let trimmed = line.trim();
+            let lower = trimmed.to_lowercase();
+            if lower.starts_with("removing:") || lower.starts_with("removing ") {
+                in_remove_section = true;
+                continue;
+            }
+            if lower.starts_with("transaction summary") {
+                break;
+            }
+            if !in_remove_section || trimmed.is_empty() || trimmed.starts_with('=') || lower.starts_with("package ") {
+                continue;
+            }
+            let Some(candidate) = trimmed.split_whitespace().next() else { continue };
+            if !candidate.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+                continue;
+            }
+            saw_removal_row = true;
+            let package = candidate.rsplit_once('.').map(|(name, arch)| {
+                if ["x86_64", "aarch64", "noarch", "i686", "i386", "ppc64le", "s390x"].contains(&arch) { name } else { candidate }
+            }).unwrap_or(candidate);
+            if is_protected_package(package) {
+                return Err(format!("Removal blocked because the transaction includes protected package '{package}'."));
+            }
+        }
+        if !saw_removal_row {
+            return Err("DNF did not list the packages in its removal preview. No changes were made.".to_string());
+        }
+    } else {
+        if !output.status.success() || !preview.lines().any(|line| line.starts_with("Remv ")) {
+            return Err("APT did not return a complete removal preview. No changes were made.".to_string());
+        }
+        for line in preview.lines().filter(|line| line.starts_with("Remv ")) {
+            if let Some(package) = line.split_whitespace().nth(1) {
+                if is_protected_package(package) {
+                    return Err(format!("Removal blocked because the transaction includes protected package '{package}'."));
+                }
+            }
+        }
+    }
+
+    Ok(preview)
+}
+
+#[tauri::command]
+pub async fn preview_rpm_removal(name: String) -> Result<String, String> {
+    rpm_remove_preview(&name).await
 }
 
 /// Remove a native package (RPM on Fedora/RHEL, DEB on Debian/Ubuntu)
 #[tauri::command]
-pub async fn remove_rpm(name: String) -> Result<String, String> {
+pub async fn remove_rpm(name: String, expected_preview: String) -> Result<String, String> {
+    if !is_safe_package_id(&name) {
+        return Err("Invalid package name".to_string());
+    }
     if is_protected_package(&name) {
         return Err(format!("Action blocked: '{}' is a vital system package and cannot be removed.", name));
+    }
+    let current_preview = rpm_remove_preview(&name).await?;
+    if current_preview != expected_preview {
+        return Err("The removal transaction changed. Review the updated preview and confirm again.".to_string());
     }
 
     if binary_exists("dnf").await {

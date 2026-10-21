@@ -422,6 +422,10 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
             .await
             .map_err(|e| e.to_string())?;
 
+        if !output.status.success() {
+            return Err(format!("DNF could not list available upgrades: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut entries = Vec::new();
         let mut current_entry = DnfUpdateEntry::default();
@@ -472,6 +476,10 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
             .output()
             .await
             .map_err(|e| e.to_string())?;
+
+        if !output.status.success() {
+            return Err(format!("APT could not list available upgrades: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut entries = Vec::new();
@@ -644,49 +652,35 @@ fn check_disk_space() -> Result<u64, String> {
 
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024; // 500 MiB
 
-/// Stop PackageKit to prevent it from holding the DNF lock during upgrade.
-/// Returns Ok(true) if PackageKit was running and was stopped, Ok(false) if not running.
-async fn pause_packagekit() -> bool {
-    // Check if running first
-    let is_running = std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "packagekit"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if is_running {
-        let _ = std::process::Command::new("systemctl")
-            .args(["stop", "packagekit"])
-            .status();
-        log_to_file("INFO", "Paused PackageKit before upgrade");
-        true
-    } else {
-        false
+fn validate_update_package_names(packages: &[String]) -> Result<(), String> {
+    if packages.iter().any(|package| {
+        package.is_empty()
+            || !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | ':' | '@' | '-'))
+            || !package.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    }) {
+        return Err("Invalid package selection. Select packages from the update list and try again.".to_string());
     }
+    Ok(())
 }
 
 // ─── Main Upgrade Command (with all safety guards) ───────────────────────────
 
 #[tauri::command]
-pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<(), String> {
+pub async fn dnf_run_upgrade(
+    app: AppHandle,
+    packages: Vec<String>,
+    expected_packages: Vec<DnfPackageDiff>,
+) -> Result<(), String> {
     use std::process::Stdio;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
-    // ── Guard 1: Root required ───────────────────────────────────────────────
-    let (is_none, pw_opt) = {
-        let guard = crate::utils::privilege::SUDO_PASSWORD.lock().unwrap();
-        (guard.is_none(), guard.clone())
-    };
-    if is_none {
-        return Err("Root privileges are required. Please enable Root in the status bar before upgrading.".to_string());
-    }
-    let pw = pw_opt.unwrap();
+    validate_update_package_names(&packages)?;
 
     // ── Guard 2: Package manager lock check ───────────────────────────────────
     let lock_info = dnf_check_lock_status().await?;
     if lock_info.locked {
         return Err(format!(
-            "Package manager is locked by '{}' (PID {}). Another package operation is in progress.\n\nWait for it to finish, or use Maintenance → Kill Lock if the process is stuck.",
+            "Package manager is locked by '{}' (PID {}). Another package operation is in progress.\n\nWait for it to finish, or inspect the lock in Advanced → Updates if the process is stuck.",
             lock_info.process_name.unwrap_or("unknown".to_string()),
             lock_info.pid.unwrap_or(0)
         ));
@@ -704,12 +698,6 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
         _ => {}
     }
 
-    // ── Guard 4: Pause PackageKit ────────────────────────────────────────────
-    let packagekit_paused = pause_packagekit().await;
-    if packagekit_paused {
-        let _ = app.emit("dnf-upgrade-output", "ℹ PackageKit paused to prevent lock conflicts.\n");
-    }
-
     let is_dnf = crate::binary_exists("dnf").await;
     let is_apt = crate::binary_exists("apt-get").await;
 
@@ -717,17 +705,59 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
         return Err("No supported package manager (dnf or apt-get) found.".to_string());
     }
 
-    // ── Launch upgrade process ───────────────────────────────────────────────
-    let mut cmd = tokio::process::Command::new("sudo");
-    cmd.arg("-S")
-       .arg("--prompt=")
-       .arg("stdbuf")
+    if is_dnf {
+        let preview = dnf_dry_run_upgrade(packages.clone()).await?;
+        if preview.packages.is_empty() {
+            return Err("No updates are available in the current transaction. No changes were made.".to_string());
+        }
+        if !same_package_transaction(&preview.packages, &expected_packages) {
+            return Err("The DNF transaction changed after the preview. Review the new transaction and confirm again.".to_string());
+        }
+        let protected_removals: Vec<&str> = preview.packages.iter()
+            .filter(|package| package.action == "Remove" && crate::commands::flatpak_rpm::is_protected_package(&package.name))
+            .map(|package| package.name.as_str())
+            .collect();
+        if !protected_removals.is_empty() {
+            return Err(format!(
+                "Update blocked because the transaction would remove protected system package(s): {}.",
+                protected_removals.join(", ")
+            ));
+        }
+    } else {
+        let mut preview_cmd = tokio::process::Command::new("apt-get");
+        preview_cmd.arg("-s");
+        preview_cmd.env("LC_ALL", "C").env("LANG", "C");
+        if packages.is_empty() {
+            preview_cmd.arg("dist-upgrade");
+        } else {
+            preview_cmd.args(["install", "--only-upgrade"]);
+            preview_cmd.args(&packages);
+        }
+        let preview = preview_cmd.output().await.map_err(|e| format!("Could not preview the package transaction: {e}"))?;
+        let preview_stdout = String::from_utf8_lossy(&preview.stdout);
+        let removals: Vec<&str> = preview_stdout
+            .lines()
+            .filter(|line| line.starts_with("Remv "))
+            .collect();
+        if !preview.status.success() || !removals.is_empty() {
+            return Err(if removals.is_empty() {
+                "Could not safely preview this package transaction. No changes were made.".to_string()
+            } else {
+                format!("This upgrade would remove installed packages:\n{}. Resolve the conflict before applying it.", removals.join("\n"))
+            });
+        }
+    }
+
+    // ── Launch upgrade process through the system authorization agent ────────
+    let mut cmd = tokio::process::Command::new("pkexec");
+    cmd.arg("/usr/bin/stdbuf")
        .arg("-oL")
        .arg("-eL");
 
     if is_dnf {
-        cmd.arg("dnf")
+        cmd.arg("/usr/bin/dnf")
            .arg("upgrade")
+           .arg("--best")
            .arg("-y");
 
         // Put package names BEFORE flags so `dnf history list` displays
@@ -736,13 +766,11 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
             cmd.args(&packages);
         }
 
-        cmd.arg("--allowerasing")
-           .arg("--nogpgcheck")
-           .arg("--setopt=timeout=120");
+        cmd.arg("--setopt=timeout=120");
 
         cmd.env("PYTHONUNBUFFERED", "1");
     } else {
-        cmd.arg("apt-get");
+        cmd.arg("/usr/bin/apt-get");
         if !packages.is_empty() {
             cmd.arg("install").arg("--only-upgrade").arg("-y");
             cmd.args(&packages);
@@ -752,8 +780,7 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
         cmd.env("DEBIAN_FRONTEND", "noninteractive");
     }
 
-    cmd.stdin(Stdio::piped())
-       .stdout(Stdio::piped())
+    cmd.stdout(Stdio::piped())
        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -762,15 +789,6 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     if let Some(pid) = child.id() {
         let mut guard = UPGRADE_PID.lock().unwrap();
         *guard = Some(pid);
-    }
-
-    // Write password to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        let mut p = pw;
-        p.push('\n');
-        tokio::spawn(async move {
-            let _ = stdin.write_all(p.as_bytes()).await;
-        });
     }
 
     let mut stdout = child.stdout.take().unwrap();
@@ -826,7 +844,7 @@ pub async fn dnf_run_upgrade(app: AppHandle, packages: Vec<String>) -> Result<()
     log_to_file("INFO", "DNF upgrade completed successfully");
     Ok(())
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DnfPackageDiff {
     pub name: String,
     pub arch: String,
@@ -835,6 +853,22 @@ pub struct DnfPackageDiff {
     pub repo: String,
     pub size: String,
     pub action: String, // "Upgrade" | "Install" | "Remove" | "Downgrade" | "Obsolete"
+}
+
+fn same_package_transaction(current: &[DnfPackageDiff], expected: &[DnfPackageDiff]) -> bool {
+    let mut current = current.to_vec();
+    let mut expected = expected.to_vec();
+    let sort_packages = |packages: &mut Vec<DnfPackageDiff>| {
+        packages.sort_by(|a, b| (&a.action, &a.name, &a.arch, &a.new_version).cmp(&(&b.action, &b.name, &b.arch, &b.new_version)));
+    };
+    sort_packages(&mut current);
+    sort_packages(&mut expected);
+    current == expected
+}
+
+fn dnf_preview_detail(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().rev().take(18).collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n").chars().take(2400).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,44 +1070,25 @@ fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult 
 #[tauri::command]
 pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResult, String> {
     use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
-
-    let pw_opt = {
-        let guard = crate::utils::privilege::SUDO_PASSWORD.lock().unwrap();
-        guard.clone()
-    };
-
-    let mut cmd = if let Some(ref _pw) = pw_opt {
-        let mut c = tokio::process::Command::new("sudo");
-        c.arg("-S").arg("--prompt=").arg("dnf");
-        c
-    } else {
-        tokio::process::Command::new("dnf")
-    };
+    validate_update_package_names(&packages)?;
+    let mut cmd = tokio::process::Command::new("dnf");
 
     cmd.arg("--color=never")
        .arg("upgrade")
+       .arg("--best")
        .arg("--assumeno");
+    cmd.env("LC_ALL", "C").env("LANG", "C");
 
     if !packages.is_empty() {
         cmd.args(&packages);
     }
 
-    cmd.arg("--allowerasing")
-       .arg("--nogpgcheck")
-       .arg("--setopt=timeout=60");
+    cmd.arg("--setopt=timeout=60");
 
-    cmd.stdin(Stdio::piped())
-       .stdout(Stdio::piped())
+    cmd.stdout(Stdio::piped())
        .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn DNF dry-run: {e}"))?;
-
-    if let (Some(pw), Some(mut stdin)) = (pw_opt, child.stdin.take()) {
-        let mut p = pw;
-        p.push('\n');
-        let _ = stdin.write_all(p.as_bytes()).await;
-    }
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn DNF dry-run: {e}"))?;
 
     let output = child.wait_with_output().await.map_err(|e| format!("Error waiting for DNF dry-run: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1081,6 +1096,33 @@ pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResul
     let full_text = format!("{}\n{}", stdout, stderr);
 
     let parsed = parse_dnf_dry_run(&stdout, &full_text);
+    let lower_text = full_text.to_lowercase();
+    let has_error = ["error:", "problem:", "errors during downloading", "failed to download", "cannot download"]
+        .iter()
+        .any(|marker| lower_text.contains(marker));
+    if has_error {
+        return Err(format!(
+            "DNF could not safely preview this update transaction. No changes were made.\n\n{}",
+            dnf_preview_detail(&full_text)
+        ));
+    }
+
+    let known_noop = lower_text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("nothing to do") || line.starts_with("no packages marked for upgrade")
+    });
+    let has_summary = lower_text.contains("transaction summary");
+    let expected_assumeno_exit = lower_text.contains("operation aborted");
+    let has_remove_section = lower_text.lines().any(|line| line.trim().starts_with("removing:"));
+    if (known_noop && !output.status.success())
+        || (!known_noop && (parsed.packages.is_empty() || !has_summary || (!output.status.success() && !expected_assumeno_exit)))
+        || (has_remove_section && parsed.to_remove_count == 0)
+    {
+        return Err(format!(
+            "DNF did not return a complete update preview. No changes were made.\n\n{}",
+            dnf_preview_detail(&full_text)
+        ));
+    }
 
     // If no packages were parsed, check if DNF failed with a conflict or problem
     if parsed.packages.is_empty() {

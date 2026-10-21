@@ -130,7 +130,7 @@ class DnfStore {
     return res;
   }
 
-  async startUpgrade(packages: string[]) {
+  async startUpgrade(packages: string[], expectedPackages: DnfPackageDiff[]) {
     if (this.isUpgrading) return;
     this.packagesBeingUpgraded = [...packages];
     this.isUpgrading = true;
@@ -150,7 +150,7 @@ class DnfStore {
     }, 5_000);
 
     try {
-      await invoke('dnf_run_upgrade', { packages });
+      await invoke('dnf_run_upgrade', { packages, expectedPackages });
     } catch (e: any) {
       const msg = typeof e === 'string' ? e : e?.message || String(e);
       uiStore.addToast(msg, 'error');
@@ -223,8 +223,9 @@ class DnfStore {
   confirmAndExecuteUpgrade() {
     this.showDryRunModal = false;
     const pkgs = [...this.pendingUpgradePackages];
+    const expectedPackages = [...(this.dryRunResult?.packages ?? [])];
     this.openDrawer();
-    this.startUpgrade(pkgs);
+    this.startUpgrade(pkgs, expectedPackages);
   }
 
   closeDryRunModal() {

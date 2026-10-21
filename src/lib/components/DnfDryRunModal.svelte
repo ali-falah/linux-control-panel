@@ -7,6 +7,8 @@
   } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
 
+  let { onConfirm }: { onConfirm?: () => void } = $props();
+
   let searchQuery = $state('');
   let actionFilter = $state<'all' | 'Upgrade' | 'Install' | 'Remove' | 'Downgrade'>('all');
   let showRawOutput = $state(false);
@@ -313,7 +315,7 @@
             type="button" 
             class="btn btn-primary btn-sm" 
             disabled={dnfStore.isDryRunning || !!dnfStore.dryRunError || (dnfStore.dryRunResult?.packages.length ?? 0) === 0}
-            onclick={() => dnfStore.confirmAndExecuteUpgrade()}
+            onclick={() => { onConfirm?.(); dnfStore.confirmAndExecuteUpgrade(); }}
           >
             <Play size={13} />
             <span>Apply Upgrade ({dnfStore.dryRunResult?.packages.length || 0} Packages)</span>

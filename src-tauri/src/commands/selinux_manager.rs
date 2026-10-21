@@ -118,44 +118,48 @@ pub async fn get_selinux_status() -> Result<SelinuxStatus, String> {
 #[tauri::command]
 pub async fn set_selinux_state(mode: String) -> Result<String, String> {
     let mode_lower = mode.trim().to_lowercase();
-    if mode_lower != "enforcing" && mode_lower != "permissive" && mode_lower != "disabled" {
-        return Err(format!("Invalid SELinux mode '{}'. Only 'enforcing', 'permissive', or 'disabled' are permitted.", mode));
+    if mode_lower == "disabled" {
+        return Err("Disabling SELinux is blocked to protect system security. Resolve the policy denial or use a temporary permissive mode only for troubleshooting.".to_string());
+    }
+    if mode_lower != "enforcing" && mode_lower != "permissive" {
+        return Err(format!("Invalid SELinux mode '{}'. Only 'enforcing' or 'permissive' are permitted.", mode));
     }
 
-    // 1. Safety Backup of existing /etc/selinux/config
-    if let Ok(existing_cfg) = std::fs::read_to_string("/etc/selinux/config") {
-        if !existing_cfg.trim().is_empty() {
-            let _ = crate::utils::privilege::write_file_as_root("/etc/selinux/config.bak", &existing_cfg).await;
-        }
-    }
-
-    // 2. Set runtime state if possible
-    if mode_lower == "enforcing" || mode_lower == "permissive" {
-        let setenforce_val = if mode_lower == "enforcing" { "1" } else { "0" };
-        let output = Command::new("pkexec")
-            .args(["/usr/sbin/setenforce", setenforce_val])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec setenforce failed: {}", e))?;
-        
-        if !output.status.success() {
-            return Err(format!("Failed to set runtime mode: {}", String::from_utf8_lossy(&output.stderr)));
-        }
-    }
-
-    // 3. Set permanent state in /etc/selinux/config
+    let setenforce_value = if mode_lower == "enforcing" { "1" } else { "0" };
     let script = format!(
-        "sed -i 's/^SELINUX=.*/SELINUX={}/' /etc/selinux/config",
-        mode_lower
+        r#"set -eu
+config=/etc/selinux/config
+backup=/etc/selinux/config.bak
+test -f "$config" && test ! -L "$config" || {{ echo 'SELinux configuration is missing or unsafe to edit.' >&2; exit 1; }}
+test ! -L "$backup" || {{ echo 'SELinux backup path is a symbolic link; refusing to continue.' >&2; exit 1; }}
+tmp=$(mktemp /etc/selinux/config.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+cp -p "$config" "$tmp"
+sed -i 's/^SELINUX=.*/SELINUX={mode_lower}/' "$tmp"
+count=$(grep -c '^SELINUX=' "$tmp" || true)
+test "$count" -eq 1 && grep -q '^SELINUX={mode_lower}$' "$tmp" || {{ echo 'SELINUX setting could not be safely updated.' >&2; exit 1; }}
+cp -p "$config" "$backup"
+mv -f "$tmp" "$config"
+if ! /usr/sbin/setenforce {setenforce_value}; then
+    cp -p "$backup" "$config"
+    echo 'Runtime mode change failed; persistent configuration was restored.' >&2
+    exit 1
+fi
+trap - EXIT"#
     );
     let output = Command::new("pkexec")
-        .args(["bash", "-c", &script])
+        .args(["/bin/bash", "-c", &script])
         .output()
         .await
-        .map_err(|e| format!("pkexec failed: {}", e))?;
+        .map_err(|e| format!("Could not request authorization to change SELinux mode: {e}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(if stderr.trim().is_empty() {
+            "SELinux change was not applied. The system authorization was canceled or the operation failed.".to_string()
+        } else {
+            format!("SELinux change was not applied: {stderr}")
+        });
     }
 
     Ok(format!("Successfully set SELinux to {}", mode_lower))

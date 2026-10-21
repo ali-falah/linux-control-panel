@@ -1045,7 +1045,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to read authentication logs.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open authentication logs.</div>
             </div>
           </div>
         {/if}
@@ -1054,7 +1054,7 @@
             {#if loadingAuth}
               Fetching authentication logs…
             {:else if authError && authError.includes('Root privileges')}
-              Enable Root mode in the status bar to view authentication logs.
+              System authorization is requested when you open authentication logs.
             {:else if hasActiveSearch}
               No auth events match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1119,7 +1119,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to read audit logs and configure auditd rules.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open audit logs or change audit rules.</div>
             </div>
           </div>
         {:else if setupError}
@@ -1158,7 +1158,7 @@
             {#if loadingAudit}
               Fetching command logs…
             {:else if auditError && auditError.includes('Root privileges')}
-              Enable Root mode in the status bar to view command audit logs.
+              System authorization is requested when you open command audit logs.
             {:else if hasActiveSearch}
               No commands match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1217,7 +1217,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to run threat correlation analysis.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you run threat correlation analysis.</div>
             </div>
           </div>
         {/if}

@@ -7,6 +7,7 @@
   import CodeEditor from '../components/CodeEditor.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import DnfDryRunModal from '../components/DnfDryRunModal.svelte';
 
   import { tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -212,8 +213,7 @@
   async function startUpgrade() {
     if (selectedUpdates.size === 0) return;
     const pkgs = Array.from(selectedUpdates).map(p => p.trim()).filter(Boolean);
-    await dnfStore.startUpgrade(pkgs);
-    selectedUpdates.clear();
+    await dnfStore.requestUpgrade(pkgs);
   }
 
   // ─── History ─────────────────────────────────────────────────────────────────
@@ -810,6 +810,7 @@
     </div>
   {/if}
 </div>
+<DnfDryRunModal onConfirm={() => selectedUpdates.clear()} />
 
 <style>
   /* ── Pagination Bar ─────────────────────────────────────────────────── */

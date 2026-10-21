@@ -22,8 +22,8 @@ use commands::{
         firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
         firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
-    flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
-    grub_manager::{read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
+    flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, preview_rpm_removal, remove_flatpak, remove_rpm},
+    grub_manager::{grub_is_available, read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
     hosts_manager::{read_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
     selinux_manager::{
@@ -118,7 +118,6 @@ use commands::{
         pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
     },
 };
-use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
 /// Returns the app config directory, creating it if needed.
 pub fn config_dir() -> PathBuf {
@@ -222,6 +221,7 @@ pub fn run() {
             list_flatpaks,
             list_rpms,
             detect_duplicates,
+            preview_rpm_removal,
             remove_flatpak,
             remove_rpm,
             // Startup Manager
@@ -272,6 +272,7 @@ pub fn run() {
             firewall_change_interface_zone,
             firewall_check_port_listener,
             // GRUB Configurator
+            grub_is_available,
             read_grub_config,
             write_grub_config,
             rebuild_grub,
@@ -402,10 +403,6 @@ pub fn run() {
             get_failed_services_count,
             open_folder,
             get_app_version,
-            // Privilege Manager
-            set_sudo_password,
-            clear_sudo_password,
-            check_sudo_status,
             // Journal Viewer
             get_journal_logs,
             start_journal_live_stream,

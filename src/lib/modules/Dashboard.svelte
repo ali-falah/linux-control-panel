@@ -1197,21 +1197,17 @@
   <div class="dashboard-header-fixed">
     <div class="dashboard-header-row">
       <div class="dashboard-header-left">
-        <h1 class="dashboard-title">Dashboard</h1>
+        <h1 class="dashboard-title">System Overview</h1>
         <p class="dashboard-subtitle">{headerSubtitle}{lastDashboardCheck ? ` · Updated ${lastDashboardCheck.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}{systemStatsError ? ' · Update failed; values may be stale' : ''}</p>
       </div>
       <div class="header-actions-group">
-        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('shell-env', 'path')} title="Inspect system $PATH entries">
-          <Terminal size={13} />
-          <span>$PATH</span>
+        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('app-manager')} title="Manage installed applications">
+          <LayoutDashboard size={13} />
+          <span>Applications</span>
         </Button>
-        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('dnf-history')} title="View DNF transaction history">
+        <Button variant="primary" size="sm" onclick={() => uiStore.navigateTo('dnf-history')} title="Check for system updates">
           <Package size={13} />
-          <span>DNF History</span>
-        </Button>
-        <Button variant="ghost" size="sm" onclick={() => uiStore.navigateTo('grub-manager')} title="Configure GRUB bootloader">
-          <Cpu size={13} />
-          <span>GRUB Boot</span>
+          <span>{uiStore.availableUpdatesCount > 0 ? `${uiStore.availableUpdatesCount} updates` : 'Check updates'}</span>
         </Button>
         <Button variant="ghost" size="sm" onclick={() => fetchData()} title="Refresh telemetry">
           <RefreshCw size={13} />

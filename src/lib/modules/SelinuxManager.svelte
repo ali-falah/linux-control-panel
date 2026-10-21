@@ -32,6 +32,8 @@
 
   let status = $state<SelinuxStatus | null>(null);
   let denials = $state<Denial[]>([]);
+  let denialsLoaded = $state(false);
+  let loadingDenials = $state(false);
   let loading = $state(true);
 
   // Tab control
@@ -98,16 +100,27 @@
     try {
       status = await invoke<SelinuxStatus>('get_selinux_status');
       if (status.status !== 'disabled') {
-        denials = await invoke<Denial[]>('get_selinux_denials');
         await loadBooleans();
       }
-      statusStore.setLastCommand('sestatus / ausearch', 0, true);
+      statusStore.setLastCommand('SELinux status', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load SELinux data: ${e}`, 'error');
       statusStore.setLastCommand('sestatus', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
+    }
+  }
+
+  async function loadDenials() {
+    loadingDenials = true;
+    try {
+      denials = await invoke<Denial[]>('get_selinux_denials');
+      denialsLoaded = true;
+    } catch (e) {
+      uiStore.addToast(`Could not load access denials: ${e}`, 'error');
+    } finally {
+      loadingDenials = false;
     }
   }
 
@@ -306,11 +319,23 @@
       <div class="card" style="padding:0; overflow:hidden; display:flex; flex-direction:column;">
         <div style="padding:10px 16px; border-bottom:1px solid var(--color-border); display:flex; justify-content:space-between; align-items:center; background:var(--color-bg-base);">
           <h3 style="margin:0; font-size:13px; font-weight:700; color:var(--color-text-primary);">Recent Access Denials (AVC)</h3>
-          <span class="badge {denials.length > 0 ? 'badge-error' : 'badge-success'}">{denials.length} events</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            {#if denialsLoaded}<span class="badge {denials.length > 0 ? 'badge-error' : 'badge-success'}">{denials.length} events</span>{/if}
+            <Button variant="outline" size="sm" onclick={loadDenials} disabled={loadingDenials}>
+              <RefreshCw size={12} class={loadingDenials ? 'animate-spin-slow' : ''} />
+              {denialsLoaded ? 'Refresh denials' : 'Load denials'}
+            </Button>
+          </div>
         </div>
         
         <div style="padding:14px; display:flex; flex-direction:column; gap:10px;">
-          {#if denials.length === 0}
+          {#if !denialsLoaded}
+            <EmptyState
+              icon={Shield}
+              title="Denials not loaded"
+              description="Load recent access denials when you need to troubleshoot a blocked action. System authorization may be required."
+            />
+          {:else if denials.length === 0}
             <EmptyState
               icon={Shield}
               title="No Recent Denials"

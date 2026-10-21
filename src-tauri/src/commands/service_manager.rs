@@ -16,7 +16,8 @@ pub struct ServiceUnit {
 }
 
 pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>) {
-    let clean_name = unit_name.trim_end_matches(".service").to_lowercase();
+    let clean_name = unit_name.to_lowercase();
+    let base_name = clean_name.strip_suffix(".service").unwrap_or(&clean_name);
 
     // 1. Critical Core System Services (Immortal: Cannot Stop, Disable, or Mask)
     let critical_services = [
@@ -32,12 +33,32 @@ pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>)
         "systemd-tmpfiles-setup-dev",
         "systemd-user-sessions",
         "systemd-modules-load",
+        "default.target",
+        "basic.target",
+        "sysinit.target",
+        "multi-user.target",
+        "graphical.target",
+        "local-fs.target",
+        "local-fs-pre.target",
+        "network.target",
+        "remote-fs.target",
+        "swap.target",
+        "cryptsetup.target",
+        "rescue.target",
+        "emergency.target",
+        "init.target",
+        "systemd.target",
+        "sockets.target",
+        "timers.target",
+        "shutdown.target",
+        "reboot.target",
+        "poweroff.target",
         "emergency",
         "rescue",
         "init",
     ];
 
-    if critical_services.iter().any(|&s| clean_name == s || clean_name.starts_with("systemd-journald") || clean_name.starts_with("systemd-udevd") || clean_name.starts_with("dbus")) {
+    if critical_services.iter().any(|&s| clean_name == s || base_name == s || base_name.starts_with("systemd-journald") || base_name.starts_with("systemd-udev") || base_name.starts_with("dbus")) {
         return (
             true,
             "critical".to_string(),
@@ -64,7 +85,7 @@ pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>)
         "systemd-homed",
     ];
 
-    if essential_services.iter().any(|&s| clean_name == s || clean_name.starts_with("networkmanager") || clean_name.starts_with("firewalld")) {
+    if essential_services.iter().any(|&s| clean_name == s || base_name == s || base_name.starts_with("networkmanager") || base_name.starts_with("firewalld")) {
         return (
             true,
             "essential".to_string(),
@@ -73,6 +94,37 @@ pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>)
     }
 
     (false, String::new(), None)
+}
+
+fn is_valid_unit_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 255 || name.starts_with('-') || name.contains('/') {
+        return false;
+    }
+    let valid_suffix = [
+        ".service", ".socket", ".target", ".timer", ".mount", ".automount",
+        ".path", ".slice", ".scope", ".device", ".swap",
+    ].iter().any(|suffix| name.ends_with(suffix));
+    if !valid_suffix {
+        return false;
+    }
+
+    let bytes = name.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || b"-_.@:".contains(&byte) {
+            index += 1;
+        } else if byte == b'\\'
+            && bytes.get(index + 1) == Some(&b'x')
+            && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(index + 3).is_some_and(u8::is_ascii_hexdigit)
+        {
+            index += 4;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -472,6 +524,9 @@ pub async fn list_all_units(filter: Option<String>, user_mode: Option<bool>) -> 
 pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<bool>) -> Result<String, String> {
     if !binary_exists("systemctl").await {
         return Err("systemctl is not available".to_string());
+    }
+    if !is_valid_unit_name(&name) {
+        return Err("Invalid systemd unit name".to_string());
     }
 
     let action_str = action.to_string();

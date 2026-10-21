@@ -11,6 +11,8 @@
 
   let appVersion = $state('...');
   let currentUsername = $state('user');
+  let grubAvailable = $state(false);
+  let macAvailable = $state(false);
   let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
   
   onMount(() => {
@@ -18,6 +20,12 @@
     invoke<string>('get_current_user')
       .then(u => { if (u) currentUsername = u; })
       .catch(() => {});
+    invoke<boolean>('grub_is_available')
+      .then(available => grubAvailable = available)
+      .catch(() => grubAvailable = false);
+    invoke<{ status: string; config_mode: string }>('get_selinux_status')
+      .then(status => macAvailable = status.status !== 'disabled' || status.config_mode !== 'none')
+      .catch(() => macAvailable = false);
   });
 
   let searchQuery = $state('');
@@ -56,7 +64,7 @@
     const tab = uiStore.activeTab;
     if (tab && !uiStore.sidebarCollapsed) {
       untrack(() => {
-        for (const group of groups) {
+        for (const group of visibleGroups) {
           if (group.items.some(i => i.id === tab)) {
             if (expandedCategory !== group.label) {
               expandedCategory = group.label;
@@ -138,7 +146,7 @@
       items: [
         { id: 'network-manager',  label: 'Advanced Network', icon: Network, desc: 'Interfaces, IP & DNS routing' },
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
-        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, access & TLS certs' },
+        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault', icon: KeyRound, desc: 'SSH keys, access & TLS certs' },
       ],
     },
     {
@@ -165,8 +173,16 @@
     },
   ];
 
+  let visibleGroups = $derived(groups.map(group => ({
+    ...group,
+    items: group.items.filter(item =>
+      (item.id !== 'grub-manager' || grubAvailable) &&
+      (item.id !== 'selinux-manager' || macAvailable)
+    )
+  })).filter(group => group.items.length > 0));
+
   function getItemByTabId(id: TabId) {
-    for (const g of groups) {
+    for (const g of visibleGroups) {
       const match = g.items.find(i => i.id === id);
       if (match) return match;
     }
@@ -216,7 +232,7 @@
     {#if uiStore.sidebarCollapsed}
       <!-- Collapsed Mode: Category Icons with Nested Flyout Menu -->
       <div class="collapsed-categories-list">
-        {#each groups as group (group.label)}
+        {#each visibleGroups as group (group.label)}
           {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
           <div
             class="collapsed-cat-wrapper"
@@ -289,7 +305,7 @@
       </div>
     {:else}
       <!-- Expanded Mode -->
-      {#each groups as group}
+      {#each visibleGroups as group}
         {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
         {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
         {@const isExpanded = searchQuery.trim() !== '' || expandedCategory === group.label}
@@ -355,7 +371,7 @@
           </div>
           <div class="profile-text">
             <span class="profile-name">{currentUsername}</span>
-            <span class="profile-role">System Admin</span>
+            <span class="profile-role">Linux user</span>
           </div>
         </div>
         <button 

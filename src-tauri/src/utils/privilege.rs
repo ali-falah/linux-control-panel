@@ -1,50 +1,43 @@
 use std::ffi::OsStr;
 use std::process::{Child, Output, Stdio};
-use std::sync::Mutex;
-use std::io::Write;
 
-pub static SUDO_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
-
-#[tauri::command]
-pub async fn set_sudo_password(password: String) -> Result<(), String> {
-    let mut child = ::tokio::process::Command::new("sudo")
-        .arg("-k")
-        .arg("-S")
-        .arg("-v")
-        .arg("--prompt=")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use ::tokio::io::AsyncWriteExt;
-        let mut pw = password.clone();
-        pw.push('\n');
-        let _ = stdin.write_all(pw.as_bytes()).await;
+fn allowed_root_config_path(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir | Component::CurDir)) {
+        return false;
     }
 
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if output.status.success() {
-        let mut guard = SUDO_PASSWORD.lock().unwrap();
-        *guard = Some(password);
-        Ok(())
-    } else {
-        Err("Incorrect sudo password".to_string())
+    let value = path.to_string_lossy();
+    let fixed = [
+        "/etc/hosts", "/etc/environment", "/etc/default/grub", "/etc/default/grub.bak",
+        "/etc/selinux/config", "/etc/selinux/config.bak", "/etc/apt/sources.list",
+        "/etc/profile", "/etc/bash.bashrc", "/etc/nginx/nginx.conf",
+    ];
+    if fixed.contains(&value.as_ref()) {
+        return true;
     }
-}
 
-#[tauri::command]
-pub fn clear_sudo_password() {
-    let mut guard = SUDO_PASSWORD.lock().unwrap();
-    *guard = None;
-}
+    let allowed_file = |prefix: &str, extensions: &[&str]| {
+        value.starts_with(prefix)
+            && path.parent() == Some(std::path::Path::new(prefix.trim_end_matches('/')))
+            && path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                !name.is_empty() && !name.starts_with('.') && extensions.iter().any(|ext| name.ends_with(ext))
+            })
+    };
 
-#[tauri::command]
-pub fn check_sudo_status() -> bool {
-    let guard = SUDO_PASSWORD.lock().unwrap();
-    guard.is_some()
+    allowed_file("/etc/profile.d/", &[".sh"])
+        || allowed_file("/etc/yum.repos.d/", &[".repo"])
+        || allowed_file("/etc/apt/sources.list.d/", &[".list", ".sources"])
+        || (value.starts_with("/etc/nginx/conf.d/") && (value.ends_with(".conf") || value.ends_with(".conf.tmp_nginx_test")))
+        || (value.starts_with("/etc/nginx/sites-available/") && path.parent() == Some(std::path::Path::new("/etc/nginx/sites-available")))
+        || (value.starts_with("/etc/nginx/sites-enabled/") && path.parent() == Some(std::path::Path::new("/etc/nginx/sites-enabled")))
+        || (path.strip_prefix("/etc/systemd/system").ok().is_some_and(|relative| {
+            let mut parts = relative.components();
+            matches!(parts.next(), Some(Component::Normal(unit_dir)) if unit_dir.to_string_lossy().ends_with(".d"))
+                && matches!(parts.next(), Some(Component::Normal(file)) if file == "override.conf")
+                && parts.next().is_none()
+        }))
 }
 
 // A wrapper that mimics std::process::Command and tokio::process::Command
@@ -77,64 +70,16 @@ impl Command {
         self
     }
 
-    fn build_std(&self) -> std::io::Result<(std::process::Command, Option<String>)> {
-        let guard = SUDO_PASSWORD.lock().unwrap();
-        if self.program == "pkexec" && guard.is_some() {
-            let pw = guard.clone().unwrap();
-            let mut cmd = std::process::Command::new("sudo");
-            cmd.arg("-S").arg("--prompt=");
-            // pkexec arguments are actually the command and its arguments!
-            // e.g., pkexec systemctl restart nginx
-            for arg in &self.args {
-                cmd.arg(arg);
-            }
-            Ok((cmd, Some(pw)))
-        } else if self.program == "pkexec" && guard.is_none() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Root privileges are required. Please enable Root in the Control Panel.",
-            ))
-        } else {
-            let mut cmd = std::process::Command::new(&self.program);
-            cmd.args(&self.args);
-            Ok((cmd, None))
-        }
-    }
-    
-
-
     pub fn output(&mut self) -> std::io::Result<Output> {
-        let (mut cmd, pw_opt) = self.build_std()?;
-        if let Some(pw) = pw_opt {
-            cmd.stdin(Stdio::piped());
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-            let mut child = cmd.spawn()?;
-            if let Some(mut stdin) = child.stdin.take() {
-                let mut p = pw.clone();
-                p.push('\n');
-                let _ = stdin.write_all(p.as_bytes());
-            }
-            child.wait_with_output()
-        } else {
-            cmd.output()
-        }
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(&self.args);
+        cmd.output()
     }
 
     pub fn spawn(&mut self) -> std::io::Result<Child> {
-        let (mut cmd, pw_opt) = self.build_std()?;
-        if let Some(pw) = pw_opt {
-            cmd.stdin(Stdio::piped());
-            let mut child = cmd.spawn()?;
-            if let Some(mut stdin) = child.stdin.take() {
-                let mut p = pw.clone();
-                p.push('\n');
-                let _ = stdin.write_all(p.as_bytes());
-            }
-            Ok(child)
-        } else {
-            cmd.spawn()
-        }
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(&self.args);
+        cmd.spawn()
     }
 }
 
@@ -198,103 +143,25 @@ pub mod tokio {
         }
 
         pub async fn output(&mut self) -> std::io::Result<Output> {
-            let (is_pkexec, has_pw, pw_opt) = {
-                let guard = SUDO_PASSWORD.lock().unwrap();
-                (
-                    self.program == "pkexec",
-                    guard.is_some(),
-                    if self.program == "pkexec" && guard.is_some() { Some(guard.clone().unwrap()) } else { None }
-                )
-            };
-
-            if is_pkexec && !has_pw {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Root privileges are required. Please enable Root in the Control Panel.",
-                ));
+            let mut cmd = ::tokio::process::Command::new(&self.program);
+            if let Some(ref path) = self.current_dir {
+                cmd.current_dir(path);
             }
-
-            if let Some(pw) = pw_opt {
-                let mut cmd = ::tokio::process::Command::new("sudo");
-                if let Some(ref path) = self.current_dir {
-                    cmd.current_dir(path);
-                }
-                cmd.arg("-S").arg("--prompt=");
-                for arg in &self.args {
-                    cmd.arg(arg);
-                }
-                cmd.stdin(Stdio::piped());
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                let mut child = cmd.spawn()?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    use ::tokio::io::AsyncWriteExt;
-                    let mut p = pw.clone();
-                    p.push('\n');
-                    let _ = stdin.write_all(p.as_bytes()).await;
-                }
-                child.wait_with_output().await
-            } else {
-                let mut cmd = ::tokio::process::Command::new(&self.program);
-                if let Some(ref path) = self.current_dir {
-                    cmd.current_dir(path);
-                }
-                cmd.args(&self.args);
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                cmd.output().await
-            }
+            cmd.args(&self.args);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            cmd.output().await
         }
 
         pub fn spawn(&mut self) -> std::io::Result<TokioChild> {
-            let (is_pkexec, has_pw, pw_opt) = {
-                let guard = SUDO_PASSWORD.lock().unwrap();
-                (
-                    self.program == "pkexec",
-                    guard.is_some(),
-                    if self.program == "pkexec" && guard.is_some() { Some(guard.clone().unwrap()) } else { None }
-                )
-            };
-
-            if is_pkexec && !has_pw {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Root privileges are required. Please enable Root in the Control Panel.",
-                ));
+            let mut cmd = ::tokio::process::Command::new(&self.program);
+            if let Some(ref path) = self.current_dir {
+                cmd.current_dir(path);
             }
-
-            if let Some(pw) = pw_opt {
-                let mut cmd = ::tokio::process::Command::new("sudo");
-                if let Some(ref path) = self.current_dir {
-                    cmd.current_dir(path);
-                }
-                cmd.arg("-S").arg("--prompt=");
-                for arg in &self.args {
-                    cmd.arg(arg);
-                }
-                cmd.stdin(Stdio::piped());
-                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
-                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
-                let mut child = cmd.spawn()?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    use ::tokio::io::AsyncWriteExt;
-                    let mut p = pw.clone();
-                    p.push('\n');
-                    ::tokio::spawn(async move {
-                        let _ = stdin.write_all(p.as_bytes()).await;
-                    });
-                }
-                Ok(child)
-            } else {
-                let mut cmd = ::tokio::process::Command::new(&self.program);
-                if let Some(ref path) = self.current_dir {
-                    cmd.current_dir(path);
-                }
-                cmd.args(&self.args);
-                if self.capture_stdout { cmd.stdout(Stdio::piped()); }
-                if self.capture_stderr { cmd.stderr(Stdio::piped()); }
-                cmd.spawn()
-            }
+            cmd.args(&self.args);
+            if self.capture_stdout { cmd.stdout(Stdio::piped()); }
+            if self.capture_stderr { cmd.stderr(Stdio::piped()); }
+            cmd.spawn()
         }
     }
 }
@@ -302,18 +169,47 @@ pub mod tokio {
 /// Write file contents to a root-owned path safely via base64 decoding.
 /// Automatically creates a timestamped backup (.bak.<timestamp>) and (.bak) before overwriting.
 pub async fn write_file_as_root(path: &str, content: &str) -> Result<(), String> {
+    let target = std::path::Path::new(path);
+    if !allowed_root_config_path(target) {
+        return Err(format!("Blocked write to unsupported privileged path: {path}"));
+    }
+    if target.symlink_metadata().is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(format!("Blocked write through a symbolic link: {path}"));
+    }
+    let mut component_path = std::path::PathBuf::new();
+    for component in target.components() {
+        component_path.push(component.as_os_str());
+        if component_path.symlink_metadata().is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!("Blocked privileged path containing a symbolic link: {path}"));
+        }
+    }
+    if let Some(parent) = target.parent() {
+        let canonical_parent = parent.canonicalize().map_err(|e| format!("Cannot validate privileged path {path}: {e}"))?;
+        if !canonical_parent.starts_with("/etc") {
+            return Err(format!("Blocked privileged path outside /etc: {path}"));
+        }
+    }
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     let encoded = BASE64.encode(content.as_bytes());
     let escaped_path = path.replace('\'', "'\\''");
     
-    // Script performs safety backup then decodes and writes the file
+    // Back up first, then atomically replace the file so a failed write cannot truncate it.
     let script = format!(
-        r#"if [ -f '{escaped_path}' ]; then
+        r#"set -e
+if [ -f '{escaped_path}' ]; then
     TS=$(date +%Y%m%d_%H%M%S)
-    cp -p '{escaped_path}' '{escaped_path}.bak.'$TS 2>/dev/null || true
-    cp -p '{escaped_path}' '{escaped_path}.bak' 2>/dev/null || true
+    cp -p '{escaped_path}' '{escaped_path}.bak.'$TS
+    cp -p '{escaped_path}' '{escaped_path}.bak'
 fi
-echo -n '{encoded}' | base64 -d > '{escaped_path}'"#
+tmp=$(mktemp '{escaped_path}.tmp.XXXXXX')
+trap 'rm -f "$tmp"' EXIT
+echo -n '{encoded}' | base64 -d > "$tmp"
+if [ -e '{escaped_path}' ]; then
+    chown --reference='{escaped_path}' "$tmp"
+    chmod --reference='{escaped_path}' "$tmp"
+fi
+mv -f "$tmp" '{escaped_path}'
+trap - EXIT"#
     );
     
     let mut cmd = tokio::Command::new("pkexec");

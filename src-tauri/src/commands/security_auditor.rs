@@ -512,7 +512,8 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 if p[0] == "PASS_MIN_LEN" { pass_min_len = p[1].to_string(); }
             }
         }
-        if good_pass_policy {
+        let good_min_len = pass_min_len.parse::<u32>().is_ok_and(|len| len >= 12);
+        if good_pass_policy && good_min_len {
             user_cur += 5;
             findings.push(good("pass_policy", "Password Aging Policy",
                 &format!("PASS_MAX_DAYS={} (≤90 days). Regular password rotation is enforced.", cur_max),
@@ -1325,13 +1326,34 @@ pub async fn security_fix_ssh_param(param: String, value: String, revert_value: 
     let config_file = "/etc/ssh/sshd_config";
     // If the key exists (commented or not), replace it. Otherwise append.
     let script = format!(
-        r#"
-if grep -qiE '^#?{param}\s' {cfg}; then
-    sed -i "s|^#\\?{param}.*|{param} {val}|gI" {cfg}
+        r#"set -eu
+cfg={cfg}
+backup="${{cfg}}.control-panel.bak"
+test -f "$cfg"
+cp -p "$cfg" "$backup"
+if grep -qiE '^#?{param}[[:space:]]' "$cfg"; then
+    sed -i "s|^#\\?{param}.*|{param} {val}|gI" "$cfg"
 else
-    echo "{param} {val}" >> {cfg}
+    printf '%s %s\n' '{param}' '{val}' >> "$cfg"
 fi
-(systemctl is-active --quiet sshd && systemctl reload sshd) || (systemctl is-active --quiet ssh && systemctl reload ssh) || true
+if ! sshd -t -f "$cfg"; then
+    cp -p "$backup" "$cfg"
+    exit 1
+fi
+effective=$(sshd -T | grep -i -m1 '^{param}[[:space:]]' | sed -E 's/^[^[:space:]]+[[:space:]]+//' || true)
+if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "{val}s" ]; then effective="{val}"; fi
+if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "1m" ] && [ "{val}" = "60" ]; then effective=60; fi
+if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "2m" ] && [ "{val}" = "120" ]; then effective=120; fi
+if [ "$effective" != "{val}" ]; then
+    cp -p "$backup" "$cfg"
+    echo 'The requested SSH setting is overridden by another configuration file; no change was kept.' >&2
+    exit 1
+fi
+if systemctl is-active --quiet sshd; then
+    if ! systemctl reload sshd; then cp -p "$backup" "$cfg"; exit 1; fi
+elif systemctl is-active --quiet ssh; then
+    if ! systemctl reload ssh; then cp -p "$backup" "$cfg"; exit 1; fi
+fi
 "#,
         param = param,
         val = target_value,
@@ -1417,15 +1439,13 @@ pub async fn security_fix_kernel_param(key: String, value: String, revert_value:
 pub async fn security_fix_firewall() -> Result<String, String> {
     let has_firewalld = crate::binary_exists("firewall-cmd").await;
     if has_firewalld {
-        let _ = Command::new("pkexec").args(["systemctl", "enable", "--now", "firewalld"]).output().await;
-        let out = Command::new("pkexec").args(["firewall-cmd", "--set-default-zone=drop"])
+        let out = Command::new("pkexec").args(["bash", "-c", "set -e; systemctl enable --now firewalld; firewall-cmd --state; firewall-cmd --set-default-zone=drop; firewall-cmd --state"])
             .output().await.map_err(|e| e.to_string())?;
         if out.status.success() { return Ok("Firewalld enabled with default drop zone.".to_string()); }
     }
     let has_ufw = crate::binary_exists("ufw").await;
     if has_ufw {
-        let _ = Command::new("pkexec").args(["ufw", "--force", "enable"]).output().await;
-        let out = Command::new("pkexec").args(["ufw", "default", "deny", "incoming"])
+        let out = Command::new("pkexec").args(["bash", "-c", "set -e; ufw --force enable; ufw default deny incoming; ufw status | grep -q 'Status: active'"])
             .output().await.map_err(|e| e.to_string())?;
         if out.status.success() { return Ok("UFW enabled with default deny incoming.".to_string()); }
     }
@@ -1435,8 +1455,20 @@ pub async fn security_fix_firewall() -> Result<String, String> {
 /// Fix password aging policy.
 #[tauri::command]
 pub async fn security_fix_password_policy() -> Result<String, String> {
-    let script = "sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/g' /etc/login.defs && \
-                  sed -i 's/^PASS_MIN_LEN.*/PASS_MIN_LEN    12/g' /etc/login.defs";
+    let script = r#"set -eu
+cfg=/etc/login.defs
+test -f "$cfg"
+backup="${cfg}.control-panel.bak"
+cp -p "$cfg" "$backup"
+tmp=$(mktemp /etc/login.defs.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+awk '!/^[[:space:]]*#/ && $1 == "PASS_MAX_DAYS" {next} !/^[[:space:]]*#/ && $1 == "PASS_MIN_LEN" {next} {print} END {print "PASS_MAX_DAYS 90"; print "PASS_MIN_LEN 12"}' "$cfg" > "$tmp"
+chown --reference="$cfg" "$tmp"
+chmod --reference="$cfg" "$tmp"
+mv -f "$tmp" "$cfg"
+grep -Eq '^[[:space:]]*PASS_MAX_DAYS[[:space:]]+90([[:space:]]|$)' "$cfg"
+grep -Eq '^[[:space:]]*PASS_MIN_LEN[[:space:]]+12([[:space:]]|$)' "$cfg"
+trap - EXIT"#;
     let out = Command::new("pkexec").args(["bash", "-c", script])
         .output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
@@ -1656,28 +1688,34 @@ pub async fn security_fix_usbguard(enable: bool) -> Result<String, String> {
 /// Lock user account with empty password (passwd -l <user>).
 #[tauri::command]
 pub async fn security_fix_lock_account(user: Option<String>) -> Result<String, String> {
-    let username = match user {
-        Some(u) if !u.trim().is_empty() => u,
-        _ => {
-            let shadow = read_privileged_file("/etc/shadow").await;
-            shadow.lines()
-                .find_map(|line| {
-                    let parts: Vec<&str> = line.splitn(3, ':').collect();
-                    if parts.len() >= 2 && parts[1].is_empty() {
-                        Some(parts[0].to_string())
-                    } else { None }
-                })
-                .ok_or_else(|| "No accounts with empty passwords found.".to_string())?
-        }
-    };
+    let username = user.filter(|name| !name.trim().is_empty()).unwrap_or_default();
+    if !username.is_empty()
+        && (!username.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !username.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+    {
+        return Err("Invalid username".to_string());
+    }
+
+    let script = r#"set -e
+if [ -n "${1:-}" ]; then
+    users=("$1")
+else
+    mapfile -t users < <(awk -F: '$2 == "" { print $1 }' /etc/shadow)
+fi
+if [ "${#users[@]}" -eq 0 ]; then
+    echo 'No accounts with empty passwords found.' >&2
+    exit 1
+fi
+for username in "${users[@]}"; do passwd -l -- "$username"; done"#;
 
     let out = Command::new("pkexec")
-        .args(["passwd", "-l", &username])
+        .args(["bash", "-c", script, "--", &username])
         .output().await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
-        Ok(format!("Account '{username}' has been locked (passwd -l {username})."))
+        let detail = if username.is_empty() { "all accounts with empty passwords" } else { "the selected account" };
+        Ok(format!("Locked {detail}.") )
     } else {
         Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
