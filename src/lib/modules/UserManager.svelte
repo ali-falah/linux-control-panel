@@ -341,9 +341,9 @@
 <div class="module-page">
   <PageHeader title="Users & Groups" subtitle="Manage local accounts, passwords, privileges, and groups" icon={Users}>
     <div style="display:flex; background:var(--color-bg-raised); padding:4px; border-radius:8px; gap:4px; margin-right: 8px;">
-      <Button class="btn btn-sm {view === 'users' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'users'}>Users</Button>
-      <Button class="btn btn-sm {view === 'groups' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'groups'}>Groups</Button>
-      <Button class="btn btn-sm {view === 'sessions' ? 'btn-primary' : '-ghost'}" onclick={() => view = 'sessions'}>Sessions</Button>
+      <Button variant={view === 'users' ? 'primary' : 'ghost'} size="sm" onclick={() => view = 'users'}>Users</Button>
+      <Button variant={view === 'groups' ? 'primary' : 'ghost'} size="sm" onclick={() => view = 'groups'}>Groups</Button>
+      <Button variant={view === 'sessions' ? 'primary' : 'ghost'} size="sm" onclick={() => view = 'sessions'}>Sessions</Button>
     </div>
     <Button variant="ghost" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload

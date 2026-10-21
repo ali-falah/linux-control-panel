@@ -1123,7 +1123,8 @@
   >
     <div
       class="search-modal"
-      role="document"
+      role="dialog"
+      aria-modal="true"
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
       onkeydown={handleKeyDown}

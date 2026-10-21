@@ -1,15 +1,13 @@
 <script lang="ts">
-  import { tableFeatures } from '../actions/tableFeatures';
+  import { tick } from 'svelte';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
-  import Card from '../components/ui/Card.svelte';
   import Badge from '../components/ui/Badge.svelte';
-  import Table from '../components/ui/Table.svelte';
-  import Toggle from '../components/ui/Toggle.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { Globe, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
+  import { FileText, Variable, Plus, Trash2, RefreshCw, Save, FolderOpen } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -25,8 +23,10 @@
   let originalVars = $state<EnvVar[]>([]);
   let loading = $state(true);
   let saving = $state(false);
-  let hasChanges = $state(false);
   let showDiffModal = $state(false);
+
+  // Dirty state is derived from the file content instead of tracked by hand
+  const hasChanges = $derived(serializeEnvVars(vars) !== serializeEnvVars(originalVars));
 
   function serializeEnvVars(list: EnvVar[]): string {
     return list
@@ -51,8 +51,23 @@
     }
   }
 
-  function addVar() {
+  function requestReload() {
+    if (!hasChanges) {
+      loadVars();
+      return;
+    }
+    uiStore.confirm(
+      'Discard unsaved changes?',
+      'You have unsaved changes to /etc/environment. Reloading will discard them.',
+      () => loadVars(),
+      true
+    );
+  }
+
+  async function addVar() {
     vars = [...vars, { key: '', value: '', raw: '' }];
+    await tick();
+    document.getElementById(`env-name-${vars.length - 1}`)?.focus();
   }
 
   function removeVar(index: number) {
@@ -72,7 +87,6 @@
       await invoke('write_env_vars', { vars: validVars });
       statusStore.setLastCommand('echo "..." > /etc/environment', 0, true);
       uiStore.addToast('/etc/environment saved successfully', 'success');
-      hasChanges = false;
       originalVars = JSON.parse(JSON.stringify(vars));
       showDiffModal = false;
       await loadVars();
@@ -102,62 +116,113 @@
 </script>
 
 <div class="module-page">
-  <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={Globe}>
-    <Button variant="ghost" class="" onclick={loadVars} disabled={loading || saving}>
+  <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={FileText}>
+    <Button variant="ghost" onclick={requestReload} disabled={loading || saving} title="Reload /etc/environment from disk">
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button variant="primary" class="" onclick={confirmSave} disabled={loading || saving}>
+    <Button
+      variant="primary"
+      onclick={confirmSave}
+      disabled={loading || saving || !hasChanges}
+      title={hasChanges ? 'Save changes to /etc/environment' : 'No changes to save'}
+    >
       <Save size={14} /> Save Changes
     </Button>
   </PageHeader>
 
   {#if loading && vars.length === 0}
-    <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
-      <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
-        <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
-      </div>
-      <span style="font-weight:500">Loading Environment…</span>
+    <div class="env-loading">
+      <RefreshCw size={22} class="animate-spin-slow" />
+      <span>Reading /etc/environment…</span>
     </div>
   {:else}
-    <div class="card module-content-scroll" style="padding:0">
-      <div class="table-wrap" style="border:none; border-radius:0">
-        <table use:tableFeatures>
-          <thead>
-            <tr>
-              <th style="width:30%">Variable Name</th>
-              <th>Value</th>
-              <th style="width:80px; text-align:right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each vars as v, i}
+    <div class="card env-card">
+      <!-- Card header band: file context + count + primary action -->
+      <div class="env-card-header">
+        <span class="env-file-chip"><FileText size={14} /></span>
+        <code class="env-file-path">/etc/environment</code>
+        <Badge variant="muted">{vars.length} {vars.length === 1 ? 'variable' : 'variables'}</Badge>
+        <div class="env-card-actions">
+          <Button variant="outline" size="sm" onclick={addVar}>
+            <Plus size={13} /> Add Variable
+          </Button>
+        </div>
+      </div>
+
+      {#if vars.length === 0}
+        <div class="env-empty">
+          <EmptyState
+            icon={Variable}
+            title="No environment variables"
+            description="/etc/environment has no entries yet. Add a variable to make it available to every user on the next login."
+            actionLabel="Add Variable"
+            actionIcon={Plus}
+            onAction={addVar}
+          />
+        </div>
+      {:else}
+        <div class="env-table-wrap">
+          <table>
+            <thead>
               <tr>
-                <td>
-                  <input class="input" style="font-family:var(--font-mono); font-weight:600; font-size:12px" bind:value={v.key} placeholder="e.g. JAVA_HOME" />
-                </td>
-                <td>
-                  <div style="display:flex; gap:8px">
-                    <input class="input" style="font-family:var(--font-mono); font-size:12px" bind:value={v.value} placeholder="/usr/lib/jvm/java-11-openjdk" />
-                    <Button class="btn btn-sm -outline" style="padding: 0 8px" onclick={() => browseFile(i)} title="Browse for file or directory">
-                      <FolderOpen size={14} />
-                    </Button>
-                  </div>
-                </td>
-                <td style="text-align:right">
-                  <Button class="btn btn-sm -ghost" style="color:var(--color-danger)" onclick={() => removeVar(i)} title="Remove Variable">
-                    <Trash2 size={14} />
-                  </Button>
-                </td>
+                <th class="env-col-icon"></th>
+                <th style="width: 260px">Variable Name</th>
+                <th>Value</th>
+                <th style="width: 64px; text-align: right">Actions</th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-      <div style="padding:16px; border-top:1px solid var(--color-border); background:var(--color-bg-raised)">
-        <Button variant="outline" class="" onclick={addVar}>
-          <Plus size={14} /> Add Variable
-        </Button>
-      </div>
+            </thead>
+            <tbody>
+              {#each vars as v, i}
+                <tr>
+                  <td class="env-col-icon">
+                    <span class="env-row-chip"><Variable size={11} /></span>
+                  </td>
+                  <td class="env-name-cell">
+                    <Input
+                      id={`env-name-${i}`}
+                      class="env-name-input"
+                      bind:value={v.key}
+                      placeholder="e.g. JAVA_HOME"
+                      spellcheck="false"
+                      autocomplete="off"
+                    />
+                  </td>
+                  <td>
+                    <div class="env-value-group">
+                      <Input
+                        class="env-value-input"
+                        bind:value={v.value}
+                        placeholder="/usr/lib/jvm/java-11-openjdk"
+                        spellcheck="false"
+                        autocomplete="off"
+                      />
+                      <button
+                        type="button"
+                        class="env-browse-btn"
+                        onclick={() => browseFile(i)}
+                        title="Browse for a file or directory"
+                      >
+                        <FolderOpen size={14} />
+                      </button>
+                    </div>
+                  </td>
+                  <td class="env-actions">
+                    <button
+                      type="button"
+                      class="action-btn"
+                      onclick={() => removeVar(i)}
+                      title="Remove variable"
+                      aria-label="Remove {v.key || 'variable'}"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -174,3 +239,166 @@
     oncancel={() => showDiffModal = false}
   />
 </div>
+
+<style>
+  /* ── Card shell ─────────────────────────────────────────────── */
+  /* Hugs its content instead of stretching into an empty slab */
+  .env-card {
+    padding: 0;
+    overflow: hidden;
+    flex: 0 1 auto;
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Header band — raised surface so it reads as a header, not as content */
+  .env-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--color-bg-raised);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .env-file-chip {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: var(--color-module-icon-bg);
+    border: 1px solid var(--color-module-icon-border);
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .env-file-path {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .env-card-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* ── Table ──────────────────────────────────────────────────── */
+  .env-table-wrap {
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .env-table-wrap :global(tbody td) {
+    padding: 7px 12px;
+  }
+
+  .env-col-icon {
+    width: 34px;
+    padding-left: 16px;
+    padding-right: 0;
+  }
+
+  .env-row-chip {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    background: var(--color-bg-raised);
+    color: var(--color-text-muted);
+  }
+
+  /* ── Row fields ─────────────────────────────────────────────── */
+  .env-name-cell :global(.input) {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 12.5px;
+    height: 32px;
+    padding: 6px 10px;
+  }
+
+  .env-value-group {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .env-value-group :global(.input) {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    height: 32px;
+    padding: 6px 10px;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    min-width: 0;
+  }
+
+  /* Browse is an input affordance — styled as part of the field group */
+  .env-browse-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 32px;
+    flex-shrink: 0;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-left: none;
+    border-radius: 0 6px 6px 0;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .env-browse-btn:hover {
+    color: var(--color-accent);
+    background: var(--color-accent-muted);
+    border-color: var(--color-accent);
+  }
+
+  /* ── Row actions ────────────────────────────────────────────── */
+  .env-actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .env-actions :global(.action-btn) {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--color-text-muted);
+  }
+
+  /* Destructive action stays quiet until hovered */
+  .env-actions :global(.action-btn:hover) {
+    background: var(--color-error-muted);
+    color: var(--color-error);
+  }
+
+  /* ── Empty & loading ───────────────────────────────────────── */
+  .env-empty {
+    padding: 20px;
+  }
+
+  .env-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 60px 24px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+  }
+</style>

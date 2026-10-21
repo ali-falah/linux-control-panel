@@ -80,7 +80,7 @@
 <!-- Slide-over / Modal Live Terminal Drawer -->
 {#if dnfStore.showFloatingDrawer}
   <div class="drawer-backdrop" transition:fade={{ duration: 150 }}>
-    <div class="backdrop" onclick={() => dnfStore.closeDrawer()}></div>
+    <div class="backdrop" role="presentation" onclick={() => dnfStore.closeDrawer()}></div>
 
     <div class="drawer-modal" transition:fly={{ y: 20, duration: 250 }}>
       <!-- Header -->

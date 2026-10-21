@@ -2,6 +2,7 @@
   import { X, Columns2, PanelRightClose } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
+  import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { portal } from '../actions/portal.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -52,28 +53,32 @@
 
   const isDockedActive = $derived(isOpen && dockable && uiStore.isDrawerDocked && isWideScreen);
 
+  // Only the drawer instance that docked the shell may undock it — several
+  // pages host more than one SideDrawer and they share the same shell.
+  let ownsDock = false;
+
   $effect(() => {
-    if (typeof document !== 'undefined') {
-      const shell = document.querySelector('.app-shell') as HTMLElement | null;
-      if (shell) {
-        if (isDockedActive) {
-          const currentWidth = width || '500px';
-          shell.style.setProperty('--docked-drawer-width', currentWidth);
-          shell.classList.add('drawer-docked-active');
-        } else {
-          shell.classList.remove('drawer-docked-active');
-          shell.style.removeProperty('--docked-drawer-width');
-        }
-      }
-      return () => {
-        if (typeof document !== 'undefined') {
-          const s = document.querySelector('.app-shell') as HTMLElement | null;
-          if (s) {
-            s.classList.remove('drawer-docked-active');
-            s.style.removeProperty('--docked-drawer-width');
-          }
-        }
-      };
+    if (typeof document === 'undefined') return;
+    const shell = document.querySelector('.app-shell') as HTMLElement | null;
+    if (!shell) return;
+
+    if (isDockedActive) {
+      shell.style.setProperty('--docked-drawer-width', width || '500px');
+      shell.classList.add('drawer-docked-active');
+      ownsDock = true;
+    } else if (ownsDock) {
+      shell.classList.remove('drawer-docked-active');
+      shell.style.removeProperty('--docked-drawer-width');
+      ownsDock = false;
+    }
+  });
+
+  onDestroy(() => {
+    if (!ownsDock || typeof document === 'undefined') return;
+    const shell = document.querySelector('.app-shell') as HTMLElement | null;
+    if (shell) {
+      shell.classList.remove('drawer-docked-active');
+      shell.style.removeProperty('--docked-drawer-width');
     }
   });
 </script>

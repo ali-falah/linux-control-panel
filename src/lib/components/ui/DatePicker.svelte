@@ -132,7 +132,7 @@
 
   <!-- Inline calendar (expands the parent popover) -->
   {#if showCalendar}
-    <div class="dp-calendar" role="dialog">
+    <div class="dp-calendar" role="dialog" tabindex="-1">
       <!-- Header: month/year navigation -->
       <div class="dp-nav">
         <button type="button" class="dp-nav-btn" onclick={prevMonth}>

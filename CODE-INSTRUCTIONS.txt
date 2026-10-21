@@ -49,7 +49,30 @@ For multi-step tasks, state a brief plan:
 3. [Step] → verify: [check]
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-also : UI UX match system design use always already built in compoennts ( inputs , buttons ... etc ) 
+Also Super Important : UI/UX must match system design ,use always already built in components ( inputs , buttons ... etc ) , Use best practice code strategy and type do not do a redundant coding 
 
 5. Build Policy:
-Do NOT run full production builds (`npm run build`) after every change — it takes too long. Rely on targeted syntax/type checks, tests, and the active dev server HMR unless explicitly requested by the user. 
+Do NOT run full production builds (`npm run build`) after every change — it takes too long. Rely on targeted syntax/type checks, tests, and the active dev server HMR unless explicitly requested by the user.
+
+6. Report Observed Bugs — Let the User Decide
+While working you will inevitably stumble on bugs that are NOT part of the current request
+(broken CSS class names, missing store members, non-existent classes, dead code, inconsistent
+component usage, etc.).
+
+Do NOT silently fix them and do NOT expand the task to cover them.
+Collect them and report them to the user, each with:
+- Where it is (file:line)
+- The ROOT CAUSE, not just the symptom
+- The one-line proposed fix
+Then stop and let the user review and choose what to fix.
+
+Sweeping the whole codebase for the same bug class counts as a separate task — do it only when
+the user asks for it or explicitly says "fix all broken issues". Otherwise report first.
+
+Examples of the class of bug worth reporting (not fixing unasked):
+- `class="btn ... -outline"` — variant classes only exist via the `variant` prop, so a
+  hand-written `-outline` silently falls back to the unstyled base class
+- `class="badge badge-danger"` — the real variants are success/error/warning/info/muted/outline
+- `uiStore.someMethod()` where the store has no such member → runtime TypeError
+- Svelte compiler warnings (a11y_*, css_unused_selector, state_referenced_locally)
+ 

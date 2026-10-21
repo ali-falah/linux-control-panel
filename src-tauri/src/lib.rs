@@ -71,7 +71,7 @@ use commands::{
         network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
         network_test_ping, network_test_download, network_test_upload,
     },
-    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test},
+    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test, device_get_pci_driver, device_set_module_state},
     app_manager::{
         list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
@@ -367,6 +367,8 @@ pub fn run() {
             device_get_smart_data,
             device_get_topology,
             device_trigger_self_test,
+            device_get_pci_driver,
+            device_set_module_state,
             // App Manager
             list_desktop_apps,
             get_app_meta,

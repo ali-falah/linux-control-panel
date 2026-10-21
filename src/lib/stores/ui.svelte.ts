@@ -68,6 +68,10 @@ class UIStore {
   version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
   isWindowFocused = $state(true);
   isDocumentVisible = $state(true);
+  /** OLED pure-black mode — only applies while the dark theme is active */
+  isOled = $state(false);
+  /** Drawer docked as a side-by-side split view (only on wide screens) */
+  isDrawerDocked = $state(false);
 
   initVisibilityListener() {
     if (typeof window !== 'undefined') {
@@ -287,6 +291,46 @@ class UIStore {
         document.documentElement.classList.remove('light-mode');
         document.documentElement.setAttribute('data-theme', 'dark');
       }
+    }
+  }
+
+  initOled() {
+    if (typeof window !== 'undefined') {
+      this.isOled = localStorage.getItem('app_oled') === 'true';
+      this.applyOled();
+    }
+  }
+
+  /** Toggle OLED mode, or force it on/off when `force` is provided. */
+  toggleOled(force?: boolean) {
+    this.isOled = force ?? !this.isOled;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_oled', String(this.isOled));
+    }
+    this.applyOled();
+  }
+
+  private applyOled() {
+    if (typeof document !== 'undefined') {
+      if (this.isOled) {
+        document.documentElement.setAttribute('data-oled', 'true');
+      } else {
+        document.documentElement.removeAttribute('data-oled');
+      }
+    }
+  }
+
+  initDrawerDock() {
+    if (typeof window !== 'undefined') {
+      this.isDrawerDocked = localStorage.getItem('app_drawer_docked') === 'true';
+    }
+  }
+
+  /** Dock the side drawer as a split view, or undock it back to an overlay. */
+  toggleDrawerDocked() {
+    this.isDrawerDocked = !this.isDrawerDocked;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_drawer_docked', String(this.isDrawerDocked));
     }
   }
 

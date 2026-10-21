@@ -118,7 +118,10 @@
             <div 
               class="kpi-card" 
               class:active-filter={actionFilter === 'Upgrade'} 
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'; } }}
             >
               <div class="kpi-label">Packages Upgrading</div>
               <div class="kpi-val text-accent">{dnfStore.dryRunResult.to_upgrade_count}</div>
@@ -127,7 +130,10 @@
             <div 
               class="kpi-card" 
               class:active-filter={actionFilter === 'Install'} 
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Install' ? 'all' : 'Install'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Install' ? 'all' : 'Install'; } }}
             >
               <div class="kpi-label">New Dependencies</div>
               <div class="kpi-val text-info">{dnfStore.dryRunResult.to_install_count}</div>
@@ -137,7 +143,10 @@
               class="kpi-card" 
               class:danger-card={dnfStore.dryRunResult.to_remove_count > 0}
               class:active-filter={actionFilter === 'Remove'}
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Remove' ? 'all' : 'Remove'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Remove' ? 'all' : 'Remove'; } }}
             >
               <div class="kpi-label">Packages Removing</div>
               <div class="kpi-val" class:text-error={dnfStore.dryRunResult.to_remove_count > 0}>

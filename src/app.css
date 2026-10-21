@@ -1029,6 +1029,14 @@ input[type="password"]::placeholder {
   color: var(--color-text-muted);
 }
 
+/* ─── Text Utilities ─────────────────────────────────────────────────── */
+/* .text-muted is used across every module — it must resolve globally,
+   otherwise the class silently does nothing outside the few files that
+   define it in their scoped <style> block. */
+.text-muted {
+  color: var(--color-text-muted);
+}
+
 /* ─── Search Bar ─────────────────────────────────────────────────────── */
 .search-bar {
   display: flex;

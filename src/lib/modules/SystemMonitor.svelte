@@ -1352,6 +1352,7 @@
   <div 
     class="custom-context-menu" 
     style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000;"
+    role="presentation"
     onclick={(e) => e.stopPropagation()}
   >
     <button 
@@ -1384,6 +1385,7 @@
   <div 
     class="custom-context-menu" 
     style="position: fixed; left: {procContextMenu.x}px; top: {procContextMenu.y}px; z-index: 10000; min-width: 230px;"
+    role="presentation"
     onclick={(e) => e.stopPropagation()}
   >
     <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
@@ -1807,26 +1809,20 @@
   {/if}
 </SideDrawer>
 
-<style>
-  /* Base Layout */
-  .module-page {
+<style>/* Base Layout */ .module-page {
     display: flex;
     flex-direction: column;
     height: 100%;
     width: 100%;
     overflow: hidden;
-  }
-  .page-content {
+  }.page-content {
     flex: 1;
     overflow: hidden;
     padding: 8px 12px 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 10px;
-  }
-
-  /* Loading */
-  .loading-state {
+  }/* Loading */ .loading-state {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1834,10 +1830,7 @@
     height: 200px;
     color: var(--color-text-muted);
     font-size: 14px;
-  }
-
-  /* 2-column layout */
-  .monitor-layout {
+  }/* 2-column layout */ .monitor-layout {
     display: grid;
     grid-template-columns: 4fr 10fr;
     gap: 10px;
@@ -1846,13 +1839,9 @@
     min-height: 0;
     width: 100%;
     transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  .monitor-layout.resources-collapsed {
+  }.monitor-layout.resources-collapsed {
     grid-template-columns: 1fr;
-  }
-
-  .sidebar-collapse-toggle-btn {
+  }.sidebar-collapse-toggle-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -1867,105 +1856,64 @@
     cursor: pointer;
     transition: all 0.15s ease;
     user-select: none;
-  }
-
-  .sidebar-collapse-toggle-btn:hover {
+  }.sidebar-collapse-toggle-btn:hover {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
     border-color: var(--color-accent);
     color: var(--color-accent);
     transform: translateY(-0.5px);
-  }
-
-  .sidebar-collapse-toggle-btn.expand-active {
+  }.sidebar-collapse-toggle-btn.expand-active {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
     border-color: var(--color-accent);
     color: var(--color-accent);
     font-weight: 600;
     padding: 0 8px;
-  }
-
-  :global(html.light-mode) .sidebar-collapse-toggle-btn {
+  }:global(html.light-mode) .sidebar-collapse-toggle-btn {
     background: #F1F5F9;
     border-color: #CBD5E1;
     color: #475569;
-  }
-
-  :global(html.light-mode) .sidebar-collapse-toggle-btn:hover,
-  :global(html.light-mode) .sidebar-collapse-toggle-btn.expand-active {
+  }:global(html.light-mode) .sidebar-collapse-toggle-btn:hover, :global(html.light-mode) .sidebar-collapse-toggle-btn.expand-active {
     background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
     border-color: var(--color-accent);
     color: var(--color-accent);
-  }
-  .monitor-column-left {
+  }.monitor-column-left {
     display: flex;
     flex-direction: column;
     gap: 10px;
     height: 100%;
     min-height: 0;
     overflow-y: auto;
-  }
-  .monitor-column-left .monitor-panel {
+  }.monitor-column-left :global(.monitor-panel) {
     min-height: 0;
-  }
-  .monitor-column-left .monitor-panel:first-child {
+  }.monitor-column-left :global(.monitor-panel):first-child {
     flex: 1.5;
-  }
-  .monitor-column-left .monitor-panel:last-child {
+  }.monitor-column-left :global(.monitor-panel):last-child {
     flex: 0.8;
-  }
-
-  :global(.active-conn-table table thead th) {
+  }:global(.active-conn-table table thead th) {
     position: sticky;
     top: 0;
     z-index: 10;
     background: var(--color-bg-card);
-  }
-
-  .monitor-panel {
+  }:global(.monitor-panel) {
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
-  }
-  .panel-scroll {
+  }.panel-scroll {
     flex: 1;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 16px;
-  }
-
-  .sparkline-container {
-    height: 60px;
-    width: 100%;
-  }
-  .sparkline-svg {
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-  }
-  .spark-stroke { stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }
-  
-  .cpu-stroke { stroke: var(--color-info); }
-  .cpu-fill { fill: var(--color-info); opacity: 0.15; }
-  
-  
-  .progress-bg {
+  }.spark-stroke { stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }.cpu-stroke { stroke: var(--color-info); }.cpu-fill { fill: var(--color-info); opacity: 0.15; }.progress-bg {
     height: 6px;
     background: rgba(0,0,0,0.3);
     border-radius: 4px;
     overflow: hidden;
-  }
-  .progress-fill {
+  }.progress-fill {
     height: 100%;
     border-radius: 4px;
     transition: width 0.3s ease;
-  }
-  .ram-fill { background: linear-gradient(90deg, var(--color-accent), var(--color-accent-soft)); }
-  .swap-fill { background: linear-gradient(90deg, var(--color-text-secondary), var(--color-border)); }
-
-  /* PROCESSES TAB */
-  .table-container {
+  }.ram-fill { background: linear-gradient(90deg, var(--color-accent), var(--color-accent-soft)); }.swap-fill { background: linear-gradient(90deg, var(--color-text-secondary), var(--color-border)); }/* PROCESSES TAB */ .table-container {
     display: flex;
     flex-direction: column;
     flex: 1;
@@ -1974,16 +1922,14 @@
     border-radius: 12px;
     overflow: hidden;
     min-height: 0;
-  }
-  .table-toolbar {
+  }.table-toolbar {
     padding: 12px 16px;
     border-bottom: 1px solid var(--color-border);
     display: flex;
     justify-content: space-between;
     align-items: center;
     background: var(--color-surface-elevated, rgba(0,0,0,0.1));
-  }
-  .search-box input {
+  }.search-box input {
     background: var(--color-surface, rgba(255, 255, 255, 0.05));
     border: 1px solid var(--color-border);
     color: var(--color-text-primary);
@@ -1993,11 +1939,7 @@
     width: 300px;
     outline: none;
     transition: all 0.2s;
-  }
-  .search-box input:focus { border-color: var(--color-accent); }
-  .toolbar-stats { font-size: 12px; color: var(--color-text-muted); }
-
-  .toolbar-tree-btn {
+  }.search-box input:focus { border-color: var(--color-accent); }.toolbar-stats { font-size: 12px; color: var(--color-text-muted); }.toolbar-tree-btn {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--color-border);
     color: var(--color-text-secondary);
@@ -2007,198 +1949,134 @@
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-  .toolbar-tree-btn:hover {
+  }.toolbar-tree-btn:hover {
     background: rgba(59, 130, 246, 0.12);
     color: var(--color-accent);
     border-color: rgba(59, 130, 246, 0.4);
-  }
-  :global(html.light-mode) .toolbar-tree-btn {
+  }:global(html.light-mode) .toolbar-tree-btn {
     background: #FFFFFF;
     border-color: #CBD5E1;
     color: #475569;
-  }
-  :global(html.light-mode) .toolbar-tree-btn:hover {
+  }:global(html.light-mode) .toolbar-tree-btn:hover {
     background: #EFF6FF;
     border-color: #93C5FD;
     color: #2563EB;
-  }
-
-  /* ── Process Tree Hierarchy Styles ─────────────────────────────────── */
-  .tree-row {
+  }/* ── Process Tree Hierarchy Styles ─────────────────────────────────── */ .tree-row {
     transition: background 0.15s ease, border-color 0.15s ease;
     position: relative;
-  }
-
-  /* Expanded Parent Process Row */
-  .tree-row.is-expanded-parent {
+  }/* Expanded Parent Process Row */ .tree-row.is-expanded-parent {
     background: rgba(0, 218, 243, 0.05) !important;
     border-left: 3px solid var(--color-accent) !important;
-  }
-  :global(html.light-mode) .tree-row.is-expanded-parent {
+  }:global(html.light-mode) .tree-row.is-expanded-parent {
     background: rgba(37, 99, 235, 0.06) !important;
     border-left: 3px solid #2563EB !important;
-  }
-
-  .tree-row.is-expanded-parent .parent-proc-name.expanded-name {
+  }.tree-row.is-expanded-parent .parent-proc-name.expanded-name {
     color: var(--color-accent);
     font-weight: 700;
-  }
-  :global(html.light-mode) .tree-row.is-expanded-parent .parent-proc-name.expanded-name {
+  }:global(html.light-mode) .tree-row.is-expanded-parent .parent-proc-name.expanded-name {
     color: #2563EB;
-  }
-
-  .tree-child-badge.expanded-badge {
+  }.tree-child-badge.expanded-badge {
     background: rgba(0, 218, 243, 0.15);
     border-color: rgba(0, 218, 243, 0.4);
     color: var(--color-accent);
     font-weight: 700;
-  }
-  :global(html.light-mode) .tree-child-badge.expanded-badge {
+  }:global(html.light-mode) .tree-child-badge.expanded-badge {
     background: rgba(37, 99, 235, 0.12);
     border-color: rgba(37, 99, 235, 0.35);
     color: #1D4ED8;
-  }
-
-  /* Child Process Rows with Rich Gradient and Left Border Accent */
-  .tree-row.is-child {
+  }/* Child Process Rows with Rich Gradient and Left Border Accent */ .tree-row.is-child {
     position: relative;
     border-left: 2px dashed rgba(255, 255, 255, 0.12);
-  }
-  :global(html.light-mode) .tree-row.is-child {
+  }:global(html.light-mode) .tree-row.is-child {
     border-left: 2px dashed rgba(0, 0, 0, 0.15);
-  }
-
-  /* Depth 1 Gradient (Direct Sub-processes) */
-  .tree-row.is-child.depth-1 {
+  }/* Depth 1 Gradient (Direct Sub-processes) */ .tree-row.is-child.depth-1 {
     background: linear-gradient(90deg, rgba(0, 218, 243, 0.06) 0%, rgba(0, 218, 243, 0.015) 30%, transparent 80%) !important;
     border-left-color: rgba(0, 218, 243, 0.35);
-  }
-  :global(html.light-mode) .tree-row.is-child.depth-1 {
+  }:global(html.light-mode) .tree-row.is-child.depth-1 {
     background: linear-gradient(90deg, rgba(37, 99, 235, 0.06) 0%, rgba(37, 99, 235, 0.015) 35%, transparent 85%) !important;
     border-left-color: rgba(37, 99, 235, 0.4);
-  }
-
-  /* Depth 2 Gradient (Sub-sub-processes) */
-  .tree-row.is-child.depth-2 {
+  }/* Depth 2 Gradient (Sub-sub-processes) */ .tree-row.is-child.depth-2 {
     background: linear-gradient(90deg, rgba(168, 85, 247, 0.06) 0%, rgba(168, 85, 247, 0.015) 35%, transparent 80%) !important;
     border-left-color: rgba(168, 85, 247, 0.35);
-  }
-  :global(html.light-mode) .tree-row.is-child.depth-2 {
+  }:global(html.light-mode) .tree-row.is-child.depth-2 {
     background: linear-gradient(90deg, rgba(147, 51, 234, 0.06) 0%, rgba(147, 51, 234, 0.015) 40%, transparent 85%) !important;
     border-left-color: rgba(147, 51, 234, 0.4);
-  }
-
-  /* Depth 3+ Gradient */
-  .tree-row.is-child.depth-3 {
+  }/* Depth 3+ Gradient */ .tree-row.is-child.depth-3 {
     background: linear-gradient(90deg, rgba(236, 72, 153, 0.06) 0%, rgba(236, 72, 153, 0.015) 40%, transparent 80%) !important;
     border-left-color: rgba(236, 72, 153, 0.35);
-  }
-  :global(html.light-mode) .tree-row.is-child.depth-3 {
+  }:global(html.light-mode) .tree-row.is-child.depth-3 {
     background: linear-gradient(90deg, rgba(219, 39, 119, 0.06) 0%, rgba(219, 39, 119, 0.015) 45%, transparent 85%) !important;
     border-left-color: rgba(219, 39, 119, 0.4);
-  }
-
-  /* Hover states for tree rows */
-  .tree-row:hover {
+  }/* Hover states for tree rows */ .tree-row:hover {
     background: rgba(255, 255, 255, 0.04) !important;
-  }
-  :global(html.light-mode) .tree-row:hover {
+  }:global(html.light-mode) .tree-row:hover {
     background: #F1F5F9 !important;
-  }
-  .tree-row.is-child:hover {
+  }.tree-row.is-child:hover {
     background: linear-gradient(90deg, rgba(0, 218, 243, 0.1) 0%, rgba(255, 255, 255, 0.04) 40%, transparent 95%) !important;
-  }
-  :global(html.light-mode) .tree-row.is-child:hover {
+  }:global(html.light-mode) .tree-row.is-child:hover {
     background: linear-gradient(90deg, rgba(37, 99, 235, 0.1) 0%, rgba(241, 245, 249, 0.8) 45%, transparent 95%) !important;
-  }
-
-  /* Tree Branch Elbow Connector & Guide Tracks */
-  .tree-cell-wrapper {
+  }/* Tree Branch Elbow Connector & Guide Tracks */ .tree-cell-wrapper {
     display: flex;
     flex-direction: column;
     transition: margin-left 0.15s ease;
-  }
-
-  .tree-indent-tracks {
+  }.tree-indent-tracks {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     margin-right: 2px;
     flex-shrink: 0;
-  }
-
-  .tree-guide-vertical-bar {
+  }.tree-guide-vertical-bar {
     width: 2px;
     height: 16px;
     background: rgba(255, 255, 255, 0.18);
     border-radius: 1px;
     display: inline-block;
-  }
-  :global(html.light-mode) .tree-guide-vertical-bar {
+  }:global(html.light-mode) .tree-guide-vertical-bar {
     background: rgba(0, 0, 0, 0.2);
-  }
-
-  .tree-branch-guide {
+  }.tree-branch-guide {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     color: var(--color-accent);
     flex-shrink: 0;
-  }
-  .tree-branch-guide.active-elbow {
+  }.tree-branch-guide.active-elbow {
     background: rgba(0, 218, 243, 0.14);
     border-radius: 4px;
     padding: 2px 4px;
     border: 1px solid rgba(0, 218, 243, 0.3);
-  }
-  .depth-2 .tree-branch-guide.active-elbow {
+  }.depth-2 .tree-branch-guide.active-elbow {
     background: rgba(168, 85, 247, 0.14);
     border-color: rgba(168, 85, 247, 0.3);
     color: #C084FC;
-  }
-  .depth-3 .tree-branch-guide.active-elbow {
+  }.depth-3 .tree-branch-guide.active-elbow {
     background: rgba(236, 72, 153, 0.14);
     border-color: rgba(236, 72, 153, 0.3);
     color: #F472B6;
-  }
-  :global(html.light-mode) .tree-branch-guide.active-elbow {
+  }:global(html.light-mode) .tree-branch-guide.active-elbow {
     background: rgba(37, 99, 235, 0.1);
     border-color: rgba(37, 99, 235, 0.25);
     color: #2563EB;
-  }
-  :global(html.light-mode) .depth-2 .tree-branch-guide.active-elbow {
+  }:global(html.light-mode) .depth-2 .tree-branch-guide.active-elbow {
     background: rgba(147, 51, 234, 0.1);
     border-color: rgba(147, 51, 234, 0.25);
     color: #9333EA;
-  }
-  :global(html.light-mode) .depth-3 .tree-branch-guide.active-elbow {
+  }:global(html.light-mode) .depth-3 .tree-branch-guide.active-elbow {
     background: rgba(219, 39, 119, 0.1);
     border-color: rgba(219, 39, 119, 0.25);
     color: #DB2777;
-  }
-
-  .branch-elbow-icon {
+  }:global(.branch-elbow-icon) {
     transform: translateY(-1px);
-  }
-
-  .child-proc-name {
+  }.child-proc-name {
     font-weight: 500;
     color: var(--color-text-primary);
-  }
-
-  .pid-text.parent-pid {
+  }.pid-text.parent-pid {
     font-weight: 700;
     color: var(--color-accent);
-  }
-  :global(html.light-mode) .pid-text.parent-pid {
+  }:global(html.light-mode) .pid-text.parent-pid {
     color: #2563EB;
-  }
-  .pid-text.child-pid {
+  }.pid-text.child-pid {
     opacity: 0.75;
-  }
-
-  .tree-node-trigger {
+  }.tree-node-trigger {
     background: transparent;
     border: none;
     color: inherit;
@@ -2211,32 +2089,25 @@
     transition: all 0.15s ease;
     text-align: left;
     outline: none;
-  }
-  .tree-node-trigger:hover {
+  }.tree-node-trigger:hover {
     background: rgba(59, 130, 246, 0.12);
-  }
-  :global(html.light-mode) .tree-node-trigger:hover {
+  }:global(html.light-mode) .tree-node-trigger:hover {
     background: rgba(37, 99, 235, 0.08);
-  }
-  .tree-node-trigger:hover .parent-proc-name {
+  }.tree-node-trigger:hover .parent-proc-name {
     color: var(--color-accent);
     text-decoration: underline;
     text-underline-offset: 2px;
-  }
-  .tree-chevron-icon {
+  }.tree-chevron-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     color: var(--color-text-muted);
     transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
-  }
-  .tree-node-trigger:hover .tree-chevron-icon {
+  }.tree-node-trigger:hover .tree-chevron-icon {
     color: var(--color-accent);
-  }
-  .tree-chevron-icon.is-expanded {
+  }.tree-chevron-icon.is-expanded {
     transform: rotate(90deg);
-  }
-  .tree-child-badge {
+  }.tree-child-badge {
     font-size: 10px;
     font-weight: 700;
     padding: 1px 6px;
@@ -2245,110 +2116,72 @@
     border: 1px solid var(--color-border);
     color: var(--color-text-muted);
     font-family: var(--font-mono);
-  }
-  .tree-node-trigger:hover .tree-child-badge {
+  }.tree-node-trigger:hover .tree-child-badge {
     background: rgba(59, 130, 246, 0.2);
     border-color: rgba(59, 130, 246, 0.4);
     color: var(--color-accent);
-  }
-  :global(html.light-mode) .tree-child-badge {
+  }:global(html.light-mode) .tree-child-badge {
     background: #E2E8F0;
     color: #475569;
     border-color: #CBD5E1;
-  }
-  .tree-branch-icon {
-    color: var(--color-text-muted);
-    opacity: 0.4;
-    margin-right: 2px;
-    flex-shrink: 0;
-  }
-
-  .proc-row:hover {
+  }.proc-row:hover {
     background: rgba(255, 255, 255, 0.04) !important;
-  }
-  :global(html.light-mode) .proc-row:hover {
+  }:global(html.light-mode) .proc-row:hover {
     background: #F1F5F9 !important;
-  }
-
-  :global(html.light-mode) .table-toolbar {
+  }:global(html.light-mode) .table-toolbar {
     background: #F1F5F9;
     border-bottom: 1px solid #E2E8F0;
-  }
-  :global(html.light-mode) .search-box input {
+  }:global(html.light-mode) .search-box input {
     background: #FFFFFF;
     border: 1px solid #CBD5E1;
     color: #1E293B;
-  }
-  :global(html.light-mode) .search-box input::placeholder {
+  }:global(html.light-mode) .search-box input::placeholder {
     color: #94A3B8;
-  }
-
-  :global(.process-table-wrap) {
+  }:global(.process-table-wrap) {
     flex: 1;
     min-height: 0;
     overflow-y: auto !important;
-  }
-
-  :global(.process-table-wrap table thead) {
+  }:global(.process-table-wrap table thead) {
     position: sticky;
     top: 0;
     z-index: 20;
-  }
-
-  :global(.process-table-wrap table thead th) {
+  }:global(.process-table-wrap table thead th) {
     position: sticky !important;
     top: 0 !important;
     z-index: 20 !important;
     background: var(--color-bg-card, #0B1726) !important;
-  }
-
-  :global(html.light-mode .process-table-wrap table thead th) {
+  }:global(html.light-mode .process-table-wrap table thead th) {
     background: #EEF0F4 !important;
     color: #334155 !important;
     border-bottom: 1px solid #CBD5E1 !important;
-  }
-  .sortable-th {
+  }.sortable-th {
     cursor: pointer;
     user-select: none;
     transition: background 0.15s ease, color 0.15s ease;
-  }
-  .sortable-th:hover {
+  }.sortable-th:hover {
     color: var(--color-accent) !important;
-  }
-  :global(html.light-mode) .sortable-th:hover {
+  }:global(html.light-mode) .sortable-th:hover {
     color: #2563EB !important;
-  }
-  .th-content {
+  }.th-content {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-  }
-  .th-sort-icon {
+  }.th-sort-icon {
     font-size: 11px;
     opacity: 0.6;
     color: var(--color-accent);
-  }
-  :global(html.light-mode) .th-sort-icon {
+  }:global(html.light-mode) .th-sort-icon {
     color: #2563EB;
-  }
-
-  .is-root td { opacity: 0.8; }
-  .is-kernel td { opacity: 0.5; }
-
-  .col-pid {
+  }.is-root td { opacity: 0.8; }.is-kernel td { opacity: 0.5; }.col-pid {
     width: 95px;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
     user-select: text;
-  }
-
-  .pid-badge-container {
+  }.pid-badge-container {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-  }
-
-  .pid-copy-btn {
+  }.pid-copy-btn {
     background: transparent;
     border: none;
     padding: 2px 4px;
@@ -2360,50 +2193,27 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .proc-row:hover .pid-copy-btn,
-  .pid-copy-btn:focus-visible {
+  }.proc-row:hover .pid-copy-btn, .pid-copy-btn:focus-visible {
     opacity: 0.7;
-  }
-
-  .pid-copy-btn:hover {
+  }.pid-copy-btn:hover {
     opacity: 1 !important;
     background: rgba(0, 218, 243, 0.15);
     color: var(--color-accent);
-  }
-  :global(html.light-mode) .pid-copy-btn:hover {
+  }:global(html.light-mode) .pid-copy-btn:hover {
     background: #EFF6FF;
     color: #2563EB;
-  }
-
-  .pid-copied-icon {
+  }:global(.pid-copied-icon) {
     color: var(--color-success) !important;
     opacity: 1 !important;
-  }
-  .col-name { min-width: 280px; max-width: 480px; }
-  .col-user { width: 120px; }
-  .col-cpu, .col-mem, .col-rss { width: 90px; font-family: var(--font-mono); }
-  .col-actions { width: 60px; text-align: right; }
-
-  .proc-name { font-weight: 600; color: var(--color-text-primary); margin-bottom: 2px; }
-  .proc-cmd { 
+  }.col-name { min-width: 280px; max-width: 480px; }.col-user { width: 120px; }.col-cpu, .col-mem, .col-rss { width: 90px; font-family: var(--font-mono); }.col-actions { width: 60px; text-align: right; }.proc-name { font-weight: 600; color: var(--color-text-primary); margin-bottom: 2px; }.proc-cmd { 
     font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-
-  .user-badge {
+  }.user-badge {
     background: rgba(255, 255, 255, 0.05);
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 11px;
-  }
-
-  .text-warn { color: var(--color-warning) !important; font-weight: 600; }
-  .text-danger { color: var(--color-error) !important; font-weight: 700; }
-
-  /* Context Menu Styles */
-  .custom-context-menu {
+  }.text-warn { color: var(--color-warning) !important; font-weight: 600; }/* Context Menu Styles */ .custom-context-menu {
     background: var(--color-bg-popover, var(--color-bg-card));
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -2414,8 +2224,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-  .custom-context-menu button {
+  }.custom-context-menu button {
     display: flex;
     align-items: center;
     background: transparent;
@@ -2428,16 +2237,10 @@
     cursor: pointer;
     width: 100%;
     transition: all 0.15s;
-  }
-  .custom-context-menu button:hover:not(:disabled) {
+  }.custom-context-menu button:hover:not(:disabled) {
     background: var(--color-bg-hover);
     color: var(--color-accent);
-  }
-  .custom-context-menu button:disabled {
+  }.custom-context-menu button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-  .hover-text-error:hover {
-    color: var(--color-error) !important;
-  }
-</style>
+  }</style>

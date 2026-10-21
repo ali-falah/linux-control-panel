@@ -36,7 +36,10 @@ pub fn network_get_dns() -> Result<String, String> {
 #[tauri::command]
 pub fn network_list_connections() -> Result<String, String> {
     let mut cmd = Command::new("nmcli");
-    cmd.args(["-t", "-c", "no", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
+    // Keep nmcli's default escaping ('-c no' would turn a profile named
+    // "Corp: US-East" into two fields and shift every following column).
+    // The frontend splits on unescaped ':' and unescapes the values.
+    cmd.args(["-t", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     
     if !output.status.success() {
@@ -151,13 +154,39 @@ pub struct VpnProfile {
     pub uuid: String,
     pub name: String,
     pub vpn_type: String,
+    pub device: String,
     pub active: bool,
+}
+
+/// nmcli's terse output escapes the `:` separator and `\` inside field values.
+/// Parse it by hand so profile names containing `:` survive the round trip
+/// (splitting on a raw ':' silently truncates the name and shifts every
+/// following field, which makes VPN profiles disappear from the list).
+fn split_nmcli_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+
+    for c in line.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == ':' {
+            fields.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+    fields.push(current);
+    fields
 }
 
 #[tauri::command]
 pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
     let mut cmd = Command::new("nmcli");
-    cmd.args(["-t", "-c", "no", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
+    cmd.args(["-t", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     
     if !output.status.success() {
@@ -168,12 +197,13 @@ pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
     let mut profiles = Vec::new();
     
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split(':').collect();
+        let parts = split_nmcli_fields(line);
         if parts.len() >= 5 {
-            let uuid = parts[0].to_string();
-            let name = parts[1].to_string();
-            let conn_type = parts[2].to_string();
-            let state = parts[4].to_string();
+            let uuid = parts[0].clone();
+            let name = parts[1].clone();
+            let conn_type = parts[2].clone();
+            let device = parts[3].clone();
+            let state = parts[4].clone();
             
             if conn_type == "vpn" || conn_type == "wireguard" {
                 let active = !state.trim().is_empty() && state != "--";
@@ -181,6 +211,7 @@ pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
                     uuid,
                     name,
                     vpn_type: conn_type,
+                    device,
                     active,
                 });
             }
@@ -358,6 +389,10 @@ pub async fn network_create_vpn_profile(
     gateway: String,
     username: Option<String>,
     password: Option<String>,
+    peer_public_key: Option<String>,
+    ca_cert: Option<String>,
+    client_cert: Option<String>,
+    client_key: Option<String>,
 ) -> Result<String, String> {
     if vpn_type == "openvpn" {
         let con_name = if name.trim().is_empty() { "vpn-manual" } else { &name };
@@ -383,6 +418,7 @@ pub async fn network_create_vpn_profile(
             return Err(String::from_utf8_lossy(&mod_out.stderr).to_string());
         }
         
+        // Certificates — without them the openvpn plugin cannot authenticate
         if let Some(pass) = password {
             if !pass.is_empty() {
                 let secrets_setting = format!("password={}", pass);
@@ -392,10 +428,28 @@ pub async fn network_create_vpn_profile(
             }
         }
         
+        let mut cert_args: Vec<String> = vec!["nmcli".into(), "connection".into(), "modify".into(), con_name.to_string()];
+        for (key, value) in [("vpn.ca", &ca_cert), ("vpn.cert", &client_cert), ("vpn.key", &client_key)] {
+            if let Some(path) = value.as_ref().filter(|p| !p.trim().is_empty()) {
+                cert_args.push(key.to_string());
+                cert_args.push(path.trim().to_string());
+            }
+        }
+        if cert_args.len() > 4 {
+            let _ = Command::new("pkexec").args(&cert_args).output();
+        }
+        
         Ok(format!("OpenVPN connection '{}' created.", con_name))
     } else {
         let con_name = if name.trim().is_empty() { "wg-manual" } else { &name };
         let ifname = format!("wg-{}", con_name.to_lowercase().replace(' ', "-"));
+        
+        // A WireGuard peer is unusable without the server's public key
+        let peer_key = peer_public_key
+            .as_ref()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| "A peer public key is required for WireGuard profiles.".to_string())?;
         
         let add_out = Command::new("pkexec")
             .args(["nmcli", "connection", "add", "type", "wireguard", "con-name", con_name, "ifname", &ifname])
@@ -429,7 +483,7 @@ pub async fn network_create_vpn_profile(
             .output();
             
         if !gateway.is_empty() {
-            let peer_setting = format!("endpoint={}", gateway);
+            let peer_setting = format!("endpoint={}, public-key={}, allowed-ips=0.0.0.0/0", gateway, peer_key);
             let _ = Command::new("pkexec")
                 .args(["nmcli", "connection", "modify", con_name, "+wireguard.peers", &peer_setting])
                 .output();

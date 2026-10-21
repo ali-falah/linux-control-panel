@@ -141,7 +141,7 @@
 
 {#if show}
   <div use:portal class="modal-backdrop" onclick={oncancel} role="presentation">
-    <div class="diff-modal-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="diff-modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
       
       <!-- Modal Header -->
       <div class="diff-header">

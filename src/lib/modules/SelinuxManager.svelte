@@ -304,10 +304,10 @@
             </div>
 
             <div style="display:flex; gap:6px;">
-              <Button class="btn btn-sm {status.current_mode === 'enforcing' ? 'btn-primary' : '-outline'}" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
+              <Button variant={status.current_mode === 'enforcing' ? 'primary' : 'outline'} size="sm" disabled={status.current_mode === 'enforcing'} onclick={() => confirmChangeMode('enforcing')}>
                 Enforcing
               </Button>
-              <Button class="btn btn-sm {status.current_mode === 'permissive' ? 'btn-warning' : '-outline'}" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
+              <Button variant={status.current_mode === 'permissive' ? 'primary' : 'outline'} size="sm" disabled={status.current_mode === 'permissive'} onclick={() => confirmChangeMode('permissive')}>
                 Permissive
               </Button>
             </div>

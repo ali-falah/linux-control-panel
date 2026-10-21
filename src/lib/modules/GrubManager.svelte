@@ -253,7 +253,7 @@
     <Button variant="ghost" onclick={loadConfig} disabled={loading || saving || rebuilding}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    <Button class="btn -warning" onclick={confirmRebuild} disabled={loading || saving || rebuilding || !validation.isValid}>
+    <Button variant="outline" onclick={confirmRebuild} disabled={loading || saving || rebuilding || !validation.isValid}>
       <RefreshCw size={14} class={rebuilding ? 'animate-spin-slow' : ''} /> Rebuild GRUB
     </Button>
     <Button variant="primary" onclick={confirmSave} disabled={!hasChanges || saving || rebuilding || !validation.isValid}>

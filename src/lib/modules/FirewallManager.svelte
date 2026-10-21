@@ -340,7 +340,7 @@
     </Button>
     {#if state?.is_running}
       <Button 
-        class="btn {state.is_panic ? 'btn-success' : '-danger'}" 
+        variant={state.is_panic ? 'primary' : 'danger'}
         onclick={confirmTogglePanic}
       >
         <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}

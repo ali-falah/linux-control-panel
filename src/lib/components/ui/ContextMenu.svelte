@@ -44,8 +44,9 @@
   } = $props();
 
   let menuEl = $state<HTMLElement | null>(null);
-  let clampedX = $state(x);
-  let clampedY = $state(y);
+  // The effect below owns the final position — these are only starting values
+  let clampedX = $state(0);
+  let clampedY = $state(0);
 
   function close() {
     isOpen = false;

@@ -15,6 +15,8 @@
 
   onMount(() => {
     uiStore.initTheme();
+    uiStore.initOled();
+    uiStore.initDrawerDock();
     uiStore.initSearchHistory();
     uiStore.initVisibilityListener();
     dnfStore.initGlobalListeners();

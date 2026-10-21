@@ -908,7 +908,7 @@
               <div class="sshd-item">
                 <div class="sshd-item-top">
                   <span class="sshd-label">PermitRootLogin</span>
-                  <span class="badge {sshdStatus.permit_root_login === 'no' || sshdStatus.permit_root_login === 'prohibit-password' ? 'badge-success' : 'badge-danger'}">
+                  <span class="badge {sshdStatus.permit_root_login === 'no' || sshdStatus.permit_root_login === 'prohibit-password' ? 'badge-success' : 'badge-error'}">
                     {sshdStatus.permit_root_login}
                   </span>
                 </div>
@@ -934,7 +934,7 @@
               <div class="sshd-item">
                 <div class="sshd-item-top">
                   <span class="sshd-label">PubkeyAuthentication</span>
-                  <span class="badge {sshdStatus.pubkey_authentication === 'yes' ? 'badge-success' : 'badge-danger'}">
+                  <span class="badge {sshdStatus.pubkey_authentication === 'yes' ? 'badge-success' : 'badge-error'}">
                     {sshdStatus.pubkey_authentication}
                   </span>
                 </div>
@@ -1146,7 +1146,7 @@
                     <Shield size={16} class="text-accent" />
                     <span class="jail-name font-mono">{jail.jail_name}</span>
                   </div>
-                  <span class="badge {jail.currently_banned > 0 ? 'badge-danger' : 'badge-neutral'}">
+                  <span class="badge {jail.currently_banned > 0 ? 'badge-error' : 'badge-neutral'}">
                     {jail.currently_banned} banned
                   </span>
                 </div>
@@ -1195,7 +1195,7 @@
 <!-- 1. Generate SSH Key Modal -->
 {#if showGenModal}
   <div use:portal class="modal-backdrop" onclick={() => showGenModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <Key size={18} class="text-accent" />
@@ -1257,7 +1257,7 @@
 <!-- 2. Generated Key Result Modal -->
 {#if generatedKeyResult}
   <div use:portal class="modal-backdrop" onclick={() => generatedKeyResult = null} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <CheckCircle2 size={18} class="text-success" />
@@ -1292,7 +1292,7 @@
 <!-- 3. Add Client Host Modal -->
 {#if showAddClientModal}
   <div use:portal class="modal-backdrop" onclick={() => showAddClientModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <Laptop size={18} class="text-accent" />
@@ -1349,7 +1349,7 @@
 <!-- 4. Add Authorized Key Modal -->
 {#if showAddAuthModal}
   <div use:portal class="modal-backdrop" onclick={() => showAddAuthModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <ShieldCheck size={18} class="text-accent" />
@@ -1385,7 +1385,7 @@
 <!-- 5. Test Remote TLS Modal -->
 {#if showTestSslModal}
   <div use:portal class="modal-backdrop" onclick={() => showTestSslModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <Globe size={18} class="text-accent" />
@@ -1428,7 +1428,7 @@
             <div class="tls-result-header">
               <span class="font-semibold text-primary">{testSslResult.name}</span>
               {#if testSslResult.is_expired}
-                <span class="badge badge-danger">Expired</span>
+                <span class="badge badge-error">Expired</span>
               {:else}
                 <span class="badge badge-success">{testSslResult.days_valid} days remaining</span>
               {/if}
@@ -1461,7 +1461,7 @@
 <!-- 6. Manually Ban IP Modal -->
 {#if showBanModal}
   <div use:portal class="modal-backdrop" onclick={() => showBanModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="modal-header">
         <div class="modal-title-group">
           <Ban size={18} class="text-danger" />
@@ -1517,9 +1517,7 @@
   </div>
 {/if}
 
-<style>
-  /* ── Layout Root ─────────────────────────────────────────────────────────── */
-  .module-page.ssh-vault-page {
+<style>/* ── Layout Root ─────────────────────────────────────────────────────────── */ .module-page.ssh-vault-page {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -1529,44 +1527,31 @@
     padding: 24px;
     box-sizing: border-box;
     background: transparent;
-  }
-
-  .tab-main-body {
+  }.tab-main-body {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding-bottom: 12px;
-  }
-
-  .tab-panel {
+  }.tab-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
-  }
-
-  .header-actions {
+  }.header-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  /* ── Subnav Bar ─────────────────────────────────────────────────────────── */
-  .vault-subnav-bar {
+  }/* ── Subnav Bar ─────────────────────────────────────────────────────────── */ .vault-subnav-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     padding: 0 0 2px 0;
     flex-wrap: wrap;
-  }
-
-  .subnav-actions {
+  }.subnav-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .vault-status-pill {
+  }.vault-status-pill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -1575,35 +1560,24 @@
     font-size: 11px;
     font-weight: 600;
     border: 1px solid transparent;
-  }
-
-  .vault-status-pill.warning {
+  }.vault-status-pill.warning {
     background: rgba(245, 158, 11, 0.12);
     border-color: rgba(245, 158, 11, 0.3);
     color: var(--color-warning);
-  }
-
-  .vault-status-pill.active {
+  }.vault-status-pill.active {
     background: rgba(16, 185, 129, 0.12);
     border-color: rgba(16, 185, 129, 0.3);
     color: var(--color-success);
-  }
-
-  /* ── Table Card & Toolbar ───────────────────────────────────────────────── */
-  .card {
+  }/* ── Table Card & Toolbar ───────────────────────────────────────────────── */ .card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 12px;
     overflow: hidden;
-  }
-
-  :global(html.light-mode) .card {
+  }:global(html.light-mode) .card {
     background: #FFFFFF;
     border-color: #E2E8F0;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  }
-
-  .table-toolbar {
+  }.table-toolbar {
     padding: 12px 16px;
     display: flex;
     align-items: center;
@@ -1611,19 +1585,13 @@
     gap: 12px;
     border-bottom: 1px solid var(--color-border);
     background: rgba(0, 0, 0, 0.08);
-  }
-
-  :global(html.light-mode) .table-toolbar {
+  }:global(html.light-mode) .table-toolbar {
     background: #F8FAFC;
     border-bottom-color: #E2E8F0;
-  }
-
-  .filter-chip-group {
+  }.filter-chip-group {
     display: flex;
     gap: 6px;
-  }
-
-  .filter-chip {
+  }.filter-chip {
     padding: 5px 12px;
     border-radius: 8px;
     font-size: 11.5px;
@@ -1633,36 +1601,24 @@
     border: 1px solid var(--color-border);
     cursor: pointer;
     transition: all 0.15s;
-  }
-
-  :global(html.light-mode) .filter-chip {
+  }:global(html.light-mode) .filter-chip {
     border-color: #E2E8F0;
-  }
-
-  .filter-chip.active {
+  }.filter-chip.active {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     border-color: var(--color-accent);
     color: var(--color-accent);
     font-weight: 600;
-  }
-
-  :global(html.light-mode) .filter-chip.active {
+  }:global(html.light-mode) .filter-chip.active {
     background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
     border-color: var(--color-accent);
     color: var(--color-accent);
-  }
-
-  .table-wrap {
+  }.table-wrap {
     overflow-x: auto;
-  }
-
-  .data-table {
+  }.data-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 12.5px;
-  }
-
-  .data-table th {
+  }.data-table th {
     text-align: left;
     padding: 10px 16px;
     font-size: 11px;
@@ -1671,45 +1627,28 @@
     color: var(--color-text-muted);
     background: rgba(0, 0, 0, 0.12);
     border-bottom: 1px solid var(--color-border);
-  }
-
-  :global(html.light-mode) .data-table th {
+  }:global(html.light-mode) .data-table th {
     background: #F8FAFC;
     border-bottom-color: #E2E8F0;
-  }
-
-  .data-table td {
+  }.data-table td {
     padding: 12px 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     vertical-align: middle;
-  }
-
-  :global(html.light-mode) .data-table td {
+  }:global(html.light-mode) .data-table td {
     border-bottom-color: #F1F5F9;
-  }
-
-  .data-table tr:hover td {
+  }.data-table tr:hover td {
     background: rgba(255, 255, 255, 0.02);
-  }
-
-  :global(html.light-mode) .data-table tr:hover td {
+  }:global(html.light-mode) .data-table tr:hover td {
     background: #F8FAFC;
-  }
-
-  /* ── Table Cells & Chips ────────────────────────────────────────────────── */
-  .key-name-col {
+  }/* ── Table Cells & Chips ────────────────────────────────────────────────── */ .key-name-col {
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-
-  .fingerprint-cell {
+  }.fingerprint-cell {
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-
-  .copy-mini-btn {
+  }.copy-mini-btn {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid var(--color-border);
     border-radius: 4px;
@@ -1718,14 +1657,10 @@
     cursor: pointer;
     display: inline-flex;
     align-items: center;
-  }
-
-  .copy-mini-btn:hover {
+  }.copy-mini-btn:hover {
     color: var(--color-text-primary);
     border-color: var(--color-accent);
-  }
-
-  .status-chip {
+  }.status-chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -1733,37 +1668,18 @@
     border-radius: 6px;
     font-size: 11px;
     font-weight: 600;
-  }
-
-  .status-chip.success { background: rgba(16, 185, 129, 0.12); color: var(--color-success); }
-  .status-chip.warning { background: rgba(245, 158, 11, 0.12); color: var(--color-warning); }
-  .status-chip.danger { background: rgba(239, 68, 68, 0.12); color: var(--color-error); }
-  .status-chip.muted { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }
-
-  .badge {
+  }.status-chip.success { background: rgba(16, 185, 129, 0.12); color: var(--color-success); }.status-chip.warning { background: rgba(245, 158, 11, 0.12); color: var(--color-warning); }.status-chip.danger { background: rgba(239, 68, 68, 0.12); color: var(--color-error); }.status-chip.muted { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }.badge {
     display: inline-flex;
     align-items: center;
     padding: 2px 7px;
     border-radius: 6px;
     font-size: 11px;
     font-weight: 600;
-  }
-
-  .badge-accent { background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)); color: var(--color-accent); }
-  :global(html.light-mode) .badge-accent { background: var(--color-accent-muted, rgba(37, 99, 235, 0.1)); color: var(--color-accent); }
-  .badge-neutral { background: rgba(255, 255, 255, 0.08); color: var(--color-text-secondary); }
-  :global(html.light-mode) .badge-neutral { background: #F1F5F9; color: #475569; }
-  .badge-success { background: rgba(16, 185, 129, 0.15); color: var(--color-success); }
-  .badge-warning { background: rgba(245, 158, 11, 0.15); color: var(--color-warning); }
-  .badge-danger { background: rgba(239, 68, 68, 0.15); color: var(--color-error); }
-
-  .san-pill-wrap {
+  }.badge-accent { background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)); color: var(--color-accent); }:global(html.light-mode) .badge-accent { background: var(--color-accent-muted, rgba(37, 99, 235, 0.1)); color: var(--color-accent); }.badge-neutral { background: rgba(255, 255, 255, 0.08); color: var(--color-text-secondary); }:global(html.light-mode) .badge-neutral { background: #F1F5F9; color: #475569; }.badge-success { background: rgba(16, 185, 129, 0.15); color: var(--color-success); }.badge-warning { background: rgba(245, 158, 11, 0.15); color: var(--color-warning); }.san-pill-wrap {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-  }
-
-  .san-pill {
+  }.san-pill {
     font-size: 10px;
     font-family: var(--font-mono, monospace);
     background: rgba(255, 255, 255, 0.06);
@@ -1771,60 +1687,40 @@
     border-radius: 4px;
     padding: 1px 5px;
     color: var(--color-text-secondary);
-  }
-
-  .san-pill.muted {
+  }.san-pill.muted {
     color: var(--color-text-muted);
-  }
-
-  .domain-cell {
+  }.domain-cell {
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-
-  .truncate-cell {
+  }.truncate-cell {
     max-width: 240px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  /* ── Empty Cell ─────────────────────────────────────────────────────────── */
-  .empty-cell {
+  }/* ── Empty Cell ─────────────────────────────────────────────────────────── */ .empty-cell {
     text-align: center;
-  }
-
-  /* ── SSHD Hardening Cards ───────────────────────────────────────────────── */
-  .card-header-bar {
+  }/* ── SSHD Hardening Cards ───────────────────────────────────────────────── */ .card-header-bar {
     padding: 14px 18px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     border-bottom: 1px solid var(--color-border);
     background: rgba(0, 0, 0, 0.06);
-  }
-
-  :global(html.light-mode) .card-header-bar {
+  }:global(html.light-mode) .card-header-bar {
     background: #F8FAFC;
     border-bottom-color: #E2E8F0;
-  }
-
-  .card-section-title {
+  }.card-section-title {
     margin: 0;
     font-size: 14px;
     font-weight: 600;
     color: var(--color-text-primary);
-  }
-
-  .card-section-sub {
+  }.card-section-sub {
     font-size: 11.5px;
     color: var(--color-text-muted);
     margin-top: 1px;
     display: block;
-  }
-
-  .alert-banner-warn {
+  }.alert-banner-warn {
     margin: 14px 18px 0 18px;
     padding: 10px 14px;
     background: rgba(245, 158, 11, 0.1);
@@ -1836,15 +1732,11 @@
     flex-wrap: wrap;
     gap: 10px;
     font-size: 12px;
-  }
-
-  .alert-banner-left {
+  }.alert-banner-left {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .alert-banner-danger {
+  }.alert-banner-danger {
     padding: 10px 14px;
     background: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.25);
@@ -1852,16 +1744,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .sshd-grid {
+  }.sshd-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 12px;
     padding: 16px 18px;
-  }
-
-  .sshd-item {
+  }.sshd-item {
     background: rgba(0, 0, 0, 0.15);
     border: 1px solid var(--color-border);
     border-radius: 10px;
@@ -1870,102 +1758,66 @@
     flex-direction: column;
     gap: 8px;
     transition: all 0.15s ease;
-  }
-
-  :global(html.light-mode) .sshd-item {
+  }:global(html.light-mode) .sshd-item {
     background: #F8FAFC;
     border-color: #E2E8F0;
-  }
-
-  .sshd-item:hover {
+  }.sshd-item:hover {
     border-color: var(--color-accent);
-  }
-
-  .sshd-item-top {
+  }.sshd-item-top {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 10px;
-  }
-
-  .sshd-label {
+  }.sshd-label {
     font-size: 13px;
     color: var(--color-text-primary);
     font-weight: 600;
-  }
-
-  .sshd-desc {
+  }.sshd-desc {
     font-size: 11px;
     color: var(--color-text-muted);
     line-height: 1.4;
-  }
-
-  /* ── Threat Defense / Jails ─────────────────────────────────────────────── */
-  .status-overview-card {
+  }/* ── Threat Defense / Jails ─────────────────────────────────────────────── */ .status-overview-card {
     padding: 14px 18px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-  }
-
-  .status-overview-left {
+  }.status-overview-left {
     display: flex;
     align-items: center;
     gap: 12px;
-  }
-
-  .status-indicator-dot {
+  }.status-indicator-dot {
     width: 10px;
     height: 10px;
     border-radius: 50%;
-  }
-
-  .status-indicator-dot.online { background: var(--color-success); box-shadow: 0 0 8px var(--color-success); }
-  .status-indicator-dot.offline { background: var(--color-error); }
-
-  .jails-grid {
+  }.status-indicator-dot.online { background: var(--color-success); box-shadow: 0 0 8px var(--color-success); }.status-indicator-dot.offline { background: var(--color-error); }.jails-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 8px;
-  }
-
-  .jail-card {
+  }.jail-card {
     padding: 16px;
-  }
-
-  .jail-header {
+  }.jail-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: 12px;
-  }
-
-  .jail-title-group {
+  }.jail-title-group {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .jail-name {
+  }.jail-name {
     font-size: 14px;
     font-weight: 700;
     color: var(--color-text-primary);
-  }
-
-  .jail-stat-row {
+  }.jail-stat-row {
     display: flex;
     justify-content: space-between;
     margin-bottom: 10px;
-  }
-
-  .ip-pills-wrap {
+  }.ip-pills-wrap {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 6px;
-  }
-
-  .banned-ip-pill {
+  }.banned-ip-pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1976,9 +1828,7 @@
     color: var(--color-error);
     padding: 2px 8px;
     border-radius: 6px;
-  }
-
-  .unban-btn {
+  }.unban-btn {
     background: transparent;
     border: none;
     color: var(--color-error);
@@ -1986,10 +1836,7 @@
     display: flex;
     align-items: center;
     padding: 0;
-  }
-
-  /* ── Modals & Controls ──────────────────────────────────────────────────── */
-  .modal-backdrop {
+  }/* ── Modals & Controls ──────────────────────────────────────────────────── */ .modal-backdrop {
     position: fixed;
     inset: 0;
     z-index: 99990;
@@ -1998,9 +1845,7 @@
     align-items: center;
     justify-content: center;
     padding: 20px;
-  }
-
-  .modal-card {
+  }.modal-card {
     width: 540px;
     max-width: calc(100vw - 32px);
     max-height: calc(100vh - 40px);
@@ -2011,89 +1856,63 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-  }
-
-  :global(html.light-mode) .modal-card {
+  }:global(html.light-mode) .modal-card {
     background: #FFFFFF;
     border-color: #E2E8F0;
     box-shadow: 0 25px 60px rgba(0, 0, 0, 0.15);
-  }
-
-  .modal-header {
+  }.modal-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 16px 20px;
     border-bottom: 1px solid var(--color-border);
     background: rgba(0, 0, 0, 0.12);
-  }
-
-  :global(html.light-mode) .modal-header {
+  }:global(html.light-mode) .modal-header {
     background: #F8FAFC;
     border-bottom-color: #E2E8F0;
-  }
-
-  .modal-title-group {
+  }.modal-title-group {
     display: flex;
     align-items: center;
     gap: 10px;
-  }
-
-  .modal-title-group h3 {
+  }.modal-title-group h3 {
     margin: 0;
     font-size: 15px;
     font-weight: 700;
     color: var(--color-text-primary);
-  }
-
-  .modal-close-btn {
+  }.modal-close-btn {
     background: transparent;
     border: none;
     color: var(--color-text-muted);
     cursor: pointer;
     padding: 4px;
     border-radius: 6px;
-  }
-
-  .modal-close-btn:hover {
+  }.modal-close-btn:hover {
     color: var(--color-text-primary);
-  }
-
-  .modal-body {
+  }.modal-body {
     padding: 20px;
     display: flex;
     flex-direction: column;
     gap: 14px;
     overflow-y: auto;
-  }
-
-  .modal-footer {
+  }.modal-footer {
     padding: 14px 20px;
     border-top: 1px solid var(--color-border);
     background: rgba(0, 0, 0, 0.08);
     display: flex;
     justify-content: flex-end;
     gap: 10px;
-  }
-
-  :global(html.light-mode) .modal-footer {
+  }:global(html.light-mode) .modal-footer {
     background: #F8FAFC;
     border-top-color: #E2E8F0;
-  }
-
-  .form-group {
+  }.form-group {
     display: flex;
     flex-direction: column;
     gap: 5px;
-  }
-
-  .form-group label {
+  }.form-group label {
     font-size: 12px;
     font-weight: 600;
     color: var(--color-text-secondary);
-  }
-
-  .form-input, .form-select, .form-textarea {
+  }.form-input, .form-select, .form-textarea {
     width: 100%;
     padding: 8px 12px;
     background: var(--color-bg-base);
@@ -2103,31 +1922,19 @@
     font-size: 12.5px;
     outline: none;
     box-sizing: border-box;
-  }
-
-  :global(html.light-mode) .form-input,
-  :global(html.light-mode) .form-select,
-  :global(html.light-mode) .form-textarea {
+  }:global(html.light-mode) .form-input, :global(html.light-mode) .form-select, :global(html.light-mode) .form-textarea {
     background: #FFFFFF;
     border-color: #CBD5E1;
-  }
-
-  .form-input:focus, .form-select:focus, .form-textarea:focus {
+  }.form-input:focus, .form-select:focus, .form-textarea:focus {
     border-color: var(--color-accent);
-  }
-
-  .form-row-2 {
+  }.form-row-2 {
     display: flex;
     gap: 12px;
-  }
-
-  .radio-pill-group {
+  }.radio-pill-group {
     display: flex;
     flex-direction: column;
     gap: 8px;
-  }
-
-  .radio-pill-btn {
+  }.radio-pill-btn {
     padding: 10px 14px;
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -2137,31 +1944,21 @@
     text-align: left;
     cursor: pointer;
     transition: all 0.15s;
-  }
-
-  :global(html.light-mode) .radio-pill-btn {
+  }:global(html.light-mode) .radio-pill-btn {
     background: #F8FAFC;
     border-color: #E2E8F0;
-  }
-
-  .radio-pill-btn.active {
+  }.radio-pill-btn.active {
     border-color: var(--color-accent);
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
     color: var(--color-text-primary);
-  }
-
-  :global(html.light-mode) .radio-pill-btn.active {
+  }:global(html.light-mode) .radio-pill-btn.active {
     background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
     border-color: var(--color-accent);
     color: var(--color-text-primary);
-  }
-
-  .field-hint {
+  }.field-hint {
     font-size: 11px;
     color: var(--color-text-muted);
-  }
-
-  .pubkey-preview-box {
+  }.pubkey-preview-box {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -2169,69 +1966,29 @@
     word-break: break-all;
     user-select: all;
     color: var(--color-text-primary);
-  }
-
-  :global(html.light-mode) .pubkey-preview-box {
+  }:global(html.light-mode) .pubkey-preview-box {
     background: #F8FAFC;
     border-color: #CBD5E1;
-  }
-
-  .tls-result-card {
+  }.tls-result-card {
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 12px;
-  }
-
-  :global(html.light-mode) .tls-result-card {
+  }:global(html.light-mode) .tls-result-card {
     background: #F8FAFC;
     border-color: #E2E8F0;
-  }
-
-  .tls-result-header {
+  }.tls-result-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 8px;
     font-size: 13px;
-  }
-
-  .tls-result-detail {
+  }.tls-result-detail {
     font-size: 11.5px;
     color: var(--color-text-secondary);
     display: flex;
     flex-direction: column;
     gap: 4px;
-  }
-
-  /* ── General UI Helpers ─────────────────────────────────────────────────── */
-  .font-mono { font-family: var(--font-mono, monospace); }
-  .strong { font-weight: 600; color: var(--color-text-primary); }
-  .text-accent { color: var(--color-accent); }
-  .text-success { color: var(--color-success); }
-  .text-warning { color: var(--color-warning); }
-  .text-error { color: var(--color-error); }
-  .text-primary { color: var(--color-text-primary); }
-  .text-secondary { color: var(--color-text-secondary); }
-  .text-muted { color: var(--color-text-muted); }
-  .text-xs { font-size: 11px; }
-  .text-sm { font-size: 12px; }
-  .mt-2 { margin-top: 8px; }
-  .mt-3 { margin-top: 12px; }
-  .mt-4 { margin-top: 16px; }
-  .mb-1 { margin-bottom: 4px; }
-  .mb-2 { margin-bottom: 8px; }
-  .mb-4 { margin-bottom: 16px; }
-  .w-full { width: 100%; }
-  .justify-center { justify-content: center; }
-  .flex-shrink-0 { flex-shrink: 0; }
-
-  .animate-spin-slow {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-</style>
+  }/* ── General UI Helpers ─────────────────────────────────────────────────── */ .font-mono { font-family: var(--font-mono, monospace); }.strong { font-weight: 600; color: var(--color-text-primary); }.text-accent { color: var(--color-accent); }.text-success { color: var(--color-success); }.text-primary { color: var(--color-text-primary); }.text-secondary { color: var(--color-text-secondary); }.text-muted { color: var(--color-text-muted); }.text-xs { font-size: 11px; }.text-sm { font-size: 12px; }.mt-3 { margin-top: 12px; }.mb-1 { margin-bottom: 4px; }.mb-4 { margin-bottom: 16px; }
+@keyframes spin {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
+}</style>

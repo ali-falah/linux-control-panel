@@ -14,6 +14,9 @@
   import SideDrawer from '../components/SideDrawer.svelte';
   import Button from '../components/ui/Button.svelte';
   import Select from '../components/ui/Select.svelte';
+  import Badge from '../components/ui/Badge.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import { 
     validateIpv4WithCidr, 
     validateGateway, 
@@ -58,8 +61,53 @@
     type: 'openvpn', // 'openvpn' or 'wireguard'
     gateway: '',
     username: '',
-    password: ''
+    password: '',
+    peerPublicKey: '',
+    caCert: '',
+    clientCert: '',
+    clientKey: ''
   });
+  let vpnFilter = $state('');
+  /** uuid of the profile currently connecting/disconnecting (disables its buttons) */
+  let vpnBusyUuid = $state<string | null>(null);
+
+  const filteredVpnProfiles = $derived.by(() => {
+    const q = vpnFilter.trim().toLowerCase();
+    if (!q) return vpnProfiles;
+    return vpnProfiles.filter(
+      (v: any) =>
+        (v.name || '').toLowerCase().includes(q) ||
+        (v.vpn_type || '').toLowerCase().includes(q) ||
+        (v.device || '').toLowerCase().includes(q)
+    );
+  });
+
+  function vpnProtocolLabel(vpn: any) {
+    return vpn.vpn_type === 'wireguard' ? 'WireGuard' : 'OpenVPN';
+  }
+
+  /** WireGuard needs the server's public key; OpenVPN needs a name and gateway. */
+  const vpnFormValid = $derived.by(() => {
+    if (!vpnForm.name.trim()) return false;
+    if (!vpnForm.gateway.trim()) return false;
+    if (vpnForm.type === 'wireguard') return vpnForm.peerPublicKey.trim().length > 0;
+    return true;
+  });
+
+  async function pickVpnFile(field: 'caCert' | 'clientCert' | 'clientKey') {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Certificates and keys', extensions: ['crt', 'pem', 'key', 'ca', 'cert'] }]
+      });
+      if (selected && typeof selected === 'string') {
+        vpnForm[field] = selected;
+      }
+    } catch (e) {
+      uiStore.addToast(`Failed to open file dialog: ${e}`, 'error');
+    }
+  }
   
   // Speed Test States
   let isTestingSpeed = $state(false);
@@ -148,6 +196,34 @@
 
   // ─── Data Fetching ───────────────────────────────────────────────────────────
 
+  /**
+   * nmcli's terse output escapes the ':' separator and '\' inside field values.
+   * Splitting on a raw ':' truncates a profile named "Corp: US-East" and shifts
+   * every following column, which makes the profile look like a different type
+   * and can drop it from the list entirely.
+   */
+  function splitNmcliFields(line: string): string[] {
+    const fields: string[] = [];
+    let current = '';
+    let escaped = false;
+
+    for (const ch of line) {
+      if (escaped) {
+        current += ch;
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === ':') {
+        fields.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    fields.push(current);
+    return fields;
+  }
+
   async function loadVpnProfiles() {
     loadingVpn = true;
     try {
@@ -170,13 +246,13 @@
       
       const connsRaw: string = await invoke('network_list_connections');
       connections = connsRaw.split('\n').filter(l => l.trim()).map(line => {
-        const parts = line.split(':');
+        const parts = splitNmcliFields(line);
         return {
-          uuid: parts[0],
-          name: parts[1],
-          type: parts[2],
-          device: parts[3],
-          state: parts[4]
+          uuid: parts[0] ?? '',
+          name: parts[1] ?? '',
+          type: parts[2] ?? '',
+          device: parts[3] ?? '',
+          state: parts[4] ?? ''
         };
       });
 
@@ -285,8 +361,16 @@
     }
   }
   
-  async function deleteConnection(uuid: string) {
-    if (!confirm("Are you sure you want to delete this connection?")) return;
+  function deleteConnection(uuid: string) {
+    uiStore.confirm(
+      'Delete Connection Profile',
+      'Are you sure you want to delete this connection profile? This cannot be undone.',
+      () => doDeleteConnection(uuid),
+      true
+    );
+  }
+
+  async function doDeleteConnection(uuid: string) {
     statusStore.setBusy('Deleting connection…');
     try {
       await invoke('network_delete_connection', { uuid });
@@ -358,8 +442,17 @@
   }
 
   async function handleCreateVpn() {
-    if (!vpnForm.gateway) {
+    if (!vpnForm.gateway.trim()) {
       uiStore.addToast('Gateway/Endpoint is required', 'warning');
+      return;
+    }
+    if (!vpnFormValid) {
+      uiStore.addToast(
+        vpnForm.type === 'wireguard'
+          ? 'WireGuard profiles need a peer public key'
+          : 'Profile name and gateway are required',
+        'warning'
+      );
       return;
     }
     
@@ -368,13 +461,21 @@
       const res = await invoke<string>('network_create_vpn_profile', {
         name: vpnForm.name,
         vpnType: vpnForm.type,
-        gateway: vpnForm.gateway,
-        username: vpnForm.type === 'openvpn' ? vpnForm.username : null,
-        password: vpnForm.type === 'openvpn' ? vpnForm.password : null
+        gateway: vpnForm.gateway.trim(),
+        username: vpnForm.type === 'openvpn' ? (vpnForm.username || null) : null,
+        password: vpnForm.type === 'openvpn' ? (vpnForm.password || null) : null,
+        peerPublicKey: vpnForm.type === 'wireguard' ? vpnForm.peerPublicKey.trim() : null,
+        caCert: vpnForm.type === 'openvpn' ? (vpnForm.caCert || null) : null,
+        clientCert: vpnForm.type === 'openvpn' ? (vpnForm.clientCert || null) : null,
+        clientKey: vpnForm.type === 'openvpn' ? (vpnForm.clientKey || null) : null
       });
       
       uiStore.addToast(res, 'success');
       showVpnDrawer = false;
+      vpnForm.peerPublicKey = '';
+      vpnForm.caCert = '';
+      vpnForm.clientCert = '';
+      vpnForm.clientKey = '';
       await loadData();
     } catch (e) {
       console.error(e);
@@ -385,6 +486,7 @@
   }
 
   async function connectVpn(uuid: string) {
+    vpnBusyUuid = uuid;
     statusStore.setBusy('Connecting VPN…');
     try {
       await invoke('network_up_connection', { uuid });
@@ -393,6 +495,22 @@
     } catch(e) {
       uiStore.addToast(`VPN Connection failed: ${e}`, 'error');
     } finally {
+      vpnBusyUuid = null;
+      statusStore.clearBusy();
+    }
+  }
+
+  async function disconnectVpn(uuid: string) {
+    vpnBusyUuid = uuid;
+    statusStore.setBusy('Disconnecting VPN…');
+    try {
+      await invoke('network_down_connection', { uuid });
+      uiStore.addToast('VPN disconnected', 'info');
+      await loadData();
+    } catch(e) {
+      uiStore.addToast(`Error disconnecting VPN: ${e}`, 'error');
+    } finally {
+      vpnBusyUuid = null;
       statusStore.clearBusy();
     }
   }
@@ -906,50 +1024,118 @@
           {/each}
         </div>
       {:else if activeTab === 'vpn'}
-        <div style="display:flex; flex-direction:column; gap:16px;">
+        <div class="vpn-layout">
+          <!-- Header band: context + count + filter -->
+          <div class="vpn-header-band">
+            <span class="vpn-header-chip"><Key size={14} /></span>
+            <span class="vpn-header-title">VPN Profiles</span>
+            <Badge variant="muted">
+              {filteredVpnProfiles.length}
+              {filteredVpnProfiles.length === 1 ? 'profile' : 'profiles'}
+            </Badge>
+            <div class="vpn-header-actions">
+              <SearchBar
+                bind:value={vpnFilter}
+                placeholder="Filter profiles…"
+                style="width: 220px"
+              />
+            </div>
+          </div>
+
           {#if loadingVpn}
-            <div class="card" style="display:flex;align-items:center;justify-content:center;padding:40px;color:var(--color-text-muted)">
-              <RefreshCw size={24} class="animate-spin-slow" />
+            <div class="vpn-loading">
+              <RefreshCw size={22} class="animate-spin-slow" />
+              <span>Loading VPN profiles…</span>
             </div>
           {:else if vpnProfiles.length === 0}
-            <div class="card empty-state" style="padding: 64px 32px; text-align:center;">
-              <Key size={32} class="empty-state-icon" style="margin:0 0 16px; color:var(--color-text-muted);" />
-              <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No VPN Profiles</span>
-              <span style="color:var(--color-text-muted); margin-top:8px; display:block;">Import an OpenVPN (.ovpn) or WireGuard (.conf) file, or create one manually.</span>
-              <div style="display:flex; justify-content:center; gap:12px; margin-top:20px;">
-                <Button variant="outline" onclick={importVpnFile}>
-                  <FileUp size={14} style="margin-right:6px;" /> Import Profile
-                </Button>
-                <Button variant="primary" onclick={() => showVpnDrawer = true}>
-                  <Plus size={14} style="margin-right:6px;" /> Create VPN
-                </Button>
-              </div>
+            <div class="vpn-empty">
+              <EmptyState
+                icon={Key}
+                title="No VPN Profiles"
+                description="Import an OpenVPN (.ovpn) or WireGuard (.conf) file, or create a profile manually."
+                actionLabel="Create VPN"
+                actionIcon={Plus}
+                onAction={() => (showVpnDrawer = true)}
+              />
+            </div>
+          {:else if filteredVpnProfiles.length === 0}
+            <div class="vpn-empty">
+              <EmptyState
+                icon={Info}
+                title="No profiles match your filter"
+                description={`Nothing matched "${vpnFilter}". Try a different term.`}
+                actionLabel="Clear filter"
+                onAction={() => (vpnFilter = '')}
+              />
             </div>
           {:else}
-            <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
-              {#each vpnProfiles as vpn}
-                <div class="card" style="display:flex; flex-direction:column; gap:12px; border: 1px solid var(--color-border);">
-                  <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                      <Key size={16} style="color:var(--color-accent);" />
-                      <span style="font-weight:600; color:var(--color-text-primary); font-size:15px;">{vpn.name}</span>
+            <div class="vpn-grid">
+              {#each filteredVpnProfiles as vpn (vpn.uuid)}
+                <div class="vpn-card" class:is-active={vpn.active}>
+                  <div class="vpn-card-top">
+                    <div class="vpn-card-id">
+                      <span class="vpn-card-icon">
+                        {#if vpn.vpn_type === 'wireguard'}<ShieldCheck size={14} />{:else}<Key size={14} />{/if}
+                      </span>
+                      <div class="vpn-card-name-wrap">
+                        <span class="vpn-card-name" title={vpn.name}>{vpn.name}</span>
+                        <span class="vpn-card-proto">{vpnProtocolLabel(vpn)}</span>
+                      </div>
                     </div>
-                    <span class="badge {vpn.active ? 'badge-success' : 'badge-muted'}">{vpn.active ? 'active' : 'inactive'}</span>
+                    <Badge variant={vpn.active ? 'success' : 'muted'}>
+                      {vpn.active ? 'connected' : 'inactive'}
+                    </Badge>
                   </div>
-                  <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--color-text-secondary);">
-                    <span>Protocol: {vpn.vpn_type === 'vpn' ? 'OpenVPN' : 'WireGuard'}</span>
+
+                  <div class="vpn-card-meta">
+                    {#if vpn.active && vpn.device}
+                      <span class="vpn-meta-item">
+                        <Laptop size={11} /> <code>{vpn.device}</code>
+                      </span>
+                    {:else}
+                      <span class="vpn-meta-item vpn-meta-dim">
+                        <Link size={11} /> Not connected
+                      </span>
+                    {/if}
                   </div>
-                  <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px; border-top:1px solid rgba(255,255,255,0.03); padding-top:10px;">
-                    <Button variant="outline" style="padding: 4px 8px; font-size:12px; color:var(--color-error); border-color:var(--color-error);" onclick={() => deleteConnection(vpn.uuid)}>
-                      <Trash2 size={12} style="margin-right:4px;" /> Delete
+
+                  <div class="vpn-card-actions">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => deleteConnection(vpn.uuid)}
+                      title="Delete profile"
+                      aria-label="Delete {vpn.name}"
+                    >
+                      <Trash2 size={13} />
                     </Button>
-                    <Button variant={vpn.active ? 'outline' : 'primary'} style="padding: 4px 10px; font-size:12px;" onclick={() => vpn.active ? disconnectConnection(vpn.uuid) : connectVpn(vpn.uuid)}>
-                      {#if vpn.active}
-                        <Square size={12} style="margin-right:4px;" /> Disconnect
-                      {:else}
-                        <Play size={12} style="margin-right:4px;" /> Connect
-                      {/if}
-                    </Button>
+                    {#if vpn.active}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={vpnBusyUuid === vpn.uuid}
+                        onclick={() => disconnectVpn(vpn.uuid)}
+                      >
+                        {#if vpnBusyUuid === vpn.uuid}
+                          <RefreshCw size={12} class="animate-spin-slow" /> Disconnecting
+                        {:else}
+                          <Square size={12} /> Disconnect
+                        {/if}
+                      </Button>
+                    {:else}
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={vpnBusyUuid === vpn.uuid}
+                        onclick={() => connectVpn(vpn.uuid)}
+                      >
+                        {#if vpnBusyUuid === vpn.uuid}
+                          <RefreshCw size={12} class="animate-spin-slow" /> Connecting
+                        {:else}
+                          <Play size={12} /> Connect
+                        {/if}
+                      </Button>
+                    {/if}
                   </div>
                 </div>
               {/each}
@@ -1041,10 +1227,10 @@
     </div>
   {/if}
 
-  <SideDrawer bind:isOpen={showVpnDrawer} title="Create VPN Profile" width="480px">
-    <div style="display:flex; flex-direction:column; gap:16px; padding:8px 0;">
+  <SideDrawer bind:isOpen={showVpnDrawer} title="Create VPN Profile" width="520px">
+    <div class="vpn-drawer-form">
       <div class="form-group">
-        <label for="vpn-name">Profile Name</label>
+        <label for="vpn-name">Profile Name <span class="req">*</span></label>
         <input id="vpn-name" type="text" class="form-input" bind:value={vpnForm.name} placeholder="e.g. Work VPN" />
       </div>
       
@@ -1058,12 +1244,29 @@
       
       <div class="form-group">
         <label for="vpn-gateway">
-          {vpnForm.type === 'openvpn' ? 'Gateway Address' : 'Peer Endpoint (e.g. 198.51.100.1:51820)'}
+          {vpnForm.type === 'openvpn' ? 'Gateway Address' : 'Peer Endpoint (e.g. 198.51.100.1:51820)'} <span class="req">*</span>
         </label>
         <input id="vpn-gateway" type="text" class="form-input" bind:value={vpnForm.gateway} placeholder={vpnForm.type === 'openvpn' ? 'vpn.example.com' : '198.51.100.1:51820'} />
       </div>
       
-      {#if vpnForm.type === 'openvpn'}
+      {#if vpnForm.type === 'wireguard'}
+        <div class="form-group">
+          <label for="vpn-peer-key">Peer Public Key <span class="req">*</span></label>
+          <input
+            id="vpn-peer-key"
+            type="text"
+            class="form-input mono-field"
+            bind:value={vpnForm.peerPublicKey}
+            placeholder="xTIBA5rboUvnmu4CCG1FSStV2wJI="
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <span class="form-hint">
+            The server's public key (<code>wg show</code> on the server). Without it the tunnel cannot
+            authenticate and will never connect.
+          </span>
+        </div>
+      {:else}
         <div class="form-group">
           <label for="vpn-username">Username (Optional)</label>
           <input id="vpn-username" type="text" class="form-input" bind:value={vpnForm.username} placeholder="vpnuser" />
@@ -1072,17 +1275,274 @@
           <label for="vpn-password">Password (Optional)</label>
           <input id="vpn-password" type="password" class="form-input" bind:value={vpnForm.password} placeholder="••••••••" />
         </div>
+
+        <div class="form-group">
+          <span class="form-label">Certificates (Optional)</span>
+          <span class="form-hint">
+            Importing a <code>.ovpn</code> file fills these in automatically. For a manual profile they are
+            required for the tunnel to authenticate.
+          </span>
+          <div class="cert-row">
+            <input class="form-input mono-field" value={vpnForm.caCert} placeholder="CA certificate" readonly />
+            <Button variant="outline" size="sm" onclick={() => pickVpnFile('caCert')} title="Choose CA certificate">
+              <FileUp size={13} />
+            </Button>
+          </div>
+          <div class="cert-row">
+            <input class="form-input mono-field" value={vpnForm.clientCert} placeholder="Client certificate" readonly />
+            <Button variant="outline" size="sm" onclick={() => pickVpnFile('clientCert')} title="Choose client certificate">
+              <FileUp size={13} />
+            </Button>
+          </div>
+          <div class="cert-row">
+            <input class="form-input mono-field" value={vpnForm.clientKey} placeholder="Client key" readonly />
+            <Button variant="outline" size="sm" onclick={() => pickVpnFile('clientKey')} title="Choose client key">
+              <FileUp size={13} />
+            </Button>
+          </div>
+        </div>
       {/if}
       
-      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+      <div class="drawer-footer-row">
         <Button variant="outline" onclick={() => showVpnDrawer = false}>Cancel</Button>
-        <Button variant="primary" onclick={handleCreateVpn}>Create Profile</Button>
+        <Button variant="primary" onclick={handleCreateVpn} disabled={!vpnFormValid}>Create Profile</Button>
       </div>
     </div>
   </SideDrawer>
 </div>
 
 <style>
+  /* ── VPN Profiles tab ────────────────────────────────────────── */
+  .vpn-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* Header band — raised surface so it reads as a header, not as content */
+  .vpn-header-band {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+
+  .vpn-header-chip {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: var(--color-module-icon-bg);
+    border: 1px solid var(--color-module-icon-border);
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .vpn-header-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+  }
+
+  .vpn-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .vpn-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+
+  .vpn-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    transition: border-color 0.15s ease;
+  }
+
+  .vpn-card:hover {
+    border-color: var(--color-border-hover);
+  }
+
+  /* A connected profile is marked with an accent rail, not just a badge */
+  .vpn-card.is-active {
+    border-color: var(--color-accent-glow);
+    box-shadow: inset 3px 0 0 var(--color-accent);
+  }
+
+  .vpn-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .vpn-card-id {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+  }
+
+  .vpn-card-icon {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: var(--color-bg-raised);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .vpn-card.is-active .vpn-card-icon {
+    background: var(--color-accent-muted);
+    border: 1px solid var(--color-accent-glow);
+    color: var(--color-accent);
+  }
+
+  .vpn-card-name-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .vpn-card-name {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .vpn-card-proto {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .vpn-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+  }
+
+  .vpn-meta-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .vpn-meta-item code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .vpn-meta-dim {
+    color: var(--color-text-muted);
+  }
+
+  .vpn-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    border-top: 1px solid var(--color-border-subtle);
+    padding-top: 10px;
+  }
+
+  .vpn-empty {
+    padding: 20px;
+  }
+
+  .vpn-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 60px 24px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+  }
+
+  /* ── Create VPN drawer ──────────────────────────────────────── */
+  .vpn-drawer-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 4px 0;
+  }
+
+  .req {
+    color: var(--color-error);
+    font-weight: 700;
+  }
+
+  .mono-field {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .form-hint {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+
+  .form-hint code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--color-bg-raised);
+  }
+
+  .cert-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .cert-row .form-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .drawer-footer-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
   /* ── Layout & Structure ─────────────────────────────────────────────────── */
   .editor-header-bar {
     display: flex;
@@ -1210,13 +1670,15 @@
     gap: 6px;
   }
 
-  .form-group label {
+  .form-group label,
+  .form-group .form-label {
     font-size: 12px;
     font-weight: 600;
     color: var(--color-text-secondary);
   }
 
-  :global(html.light-mode) .form-group label {
+  :global(html.light-mode) .form-group label,
+  :global(html.light-mode) .form-group .form-label {
     color: #475569;
   }
 
@@ -1595,6 +2057,4 @@
   }
 
   .text-accent { color: var(--color-accent); }
-  .text-danger { color: var(--color-error); }
-  .flex-shrink-0 { flex-shrink: 0; }
 </style>

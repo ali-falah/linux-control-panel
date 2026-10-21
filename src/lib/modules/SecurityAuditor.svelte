@@ -711,23 +711,7 @@
 <head>
   <meta charset="utf-8"/>
   <title>Linux Security Audit Report - ${dateStr}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
-    .container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }
-    .score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: var(--color-accent-muted); color: var(--color-accent); border: 1px solid var(--color-accent); }
-    .finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }
-    .finding-card.Critical { border-left-color: #ef4444; }
-    .finding-card.Warning { border-left-color: #f59e0b; }
-    .finding-card.Good { border-left-color: #10b981; }
-    .title { font-weight: bold; font-size: 16px; margin-bottom: 6px; display: flex; justify-content: space-between; }
-    .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; font-weight: bold; }
-    .badge.Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
-    .badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
-    .badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-    .desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }
-    .remediation { background: var(--color-accent-muted); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--color-accent); font-family: monospace; }
-  </style>
+  <style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }.container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }:global(.header) { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }.score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: var(--color-accent-muted); color: var(--color-accent); border: 1px solid var(--color-accent); }.finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }.finding-card.Critical { border-left-color: #ef4444; }.finding-card.Warning { border-left-color: #f59e0b; }.finding-card.Good { border-left-color: #10b981; }.title { font-weight: bold; font-size: 16px; margin-bottom: 6px; display: flex; justify-content: space-between; }.badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; font-weight: bold; }.badge.Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; }.badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }.badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }.desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }.remediation { background: var(--color-accent-muted); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--color-accent); font-family: monospace; }</style>
 </head>
 <body>
   <div class="container">
@@ -1312,28 +1296,6 @@
   }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(2, 6, 23, 0.6);
-    backdrop-filter: blur(12px);
-    flex-shrink: 0;
-  }
-
-  .header-title {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .header-title h2 {
-    margin: 0;
-    font-size: 17px;
-    font-weight: 600;
-  }
 
   .header-score-pill {
     font-size: 12px;
@@ -1342,12 +1304,6 @@
     border-radius: 20px;
     border: 1px solid;
     letter-spacing: 0.3px;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
 
   /* ── Content Scroll Container ────────────────────────────────────────────── */
@@ -1867,13 +1823,6 @@
   }
 
   /* ── Findings Section ────────────────────────────────────────────────────── */
-  .findings-section {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    flex: 1;
-    min-height: 0;
-  }
 
   .findings-header {
     position: sticky;
@@ -1970,18 +1919,6 @@
     border-left-color: var(--color-text-muted) !important;
   }
 
-  .std-tag {
-    font-size: 10px;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: rgba(168, 85, 247, 0.15);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.3);
-    white-space: nowrap;
-  }
-
   .finding-card.expanded {
     border-color: rgba(255, 255, 255, 0.1);
     border-left-color: var(--sev-color);
@@ -2029,13 +1966,6 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--color-text-primary);
-  }
-
-  .finding-badges {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
   }
 
   .sev-badge {
@@ -2259,11 +2189,6 @@
     background: #F3F4F6 !important;
     color: #374151 !important;
     border: 1px solid #E5E7EB !important;
-  }
-  :global(html.light-mode) .std-tag {
-    background: rgba(37, 99, 235, 0.08) !important;
-    color: #1D4ED8 !important;
-    border: 1px solid rgba(37, 99, 235, 0.20) !important;
   }
   :global(html.light-mode) .issue-badge {
     background: #F3F4F6 !important;

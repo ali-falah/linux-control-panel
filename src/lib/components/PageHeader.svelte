@@ -318,15 +318,12 @@
   </div>
 </div>
 
-<style>
-  .header-wrapper {
+<style>.header-wrapper {
     display: flex;
     flex-direction: column;
     margin: -24px -24px 8px -24px;
     padding-top: 6px;
-  }
-
-  .page-header {
+  }.page-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -334,23 +331,16 @@
     background: var(--color-bg-base);
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     min-height: 44px;
-  }
-
-  :global(html.light-mode) .page-header {
+  }:global(html.light-mode) .page-header {
     border-bottom-color: #EDEEF1;
-  }
-
-  .breadcrumb {
+  }.breadcrumb {
     display: flex;
     align-items: center;
     gap: 8px;
     font-size: 12px;
     min-width: 0;
     flex-shrink: 1;
-  }
-
-  /* Back Split Button Container */
-  .back-split-container {
+  }/* Back Split Button Container */ .back-split-container {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -360,18 +350,12 @@
     padding: 1px;
     transition: border-color 0.15s ease;
     flex-shrink: 0;
-  }
-
-  :global(html.light-mode) .back-split-container {
+  }:global(html.light-mode) .back-split-container {
     background: #FFFFFF;
     border-color: #CBD5E1;
-  }
-
-  .back-split-container:hover {
+  }.back-split-container:hover {
     border-color: var(--color-accent, rgba(0, 218, 243, 0.35));
-  }
-
-  .back-main-btn {
+  }.back-main-btn {
     display: flex;
     align-items: center;
     gap: 3px;
@@ -385,18 +369,12 @@
     cursor: pointer;
     transition: color 0.15s ease, background 0.15s ease;
     border-radius: 5px 0 0 5px;
-  }
-
-  .back-main-btn:hover {
+  }.back-main-btn:hover {
     color: var(--color-text-primary);
     background: rgba(255, 255, 255, 0.06);
-  }
-
-  :global(html.light-mode) .back-main-btn:hover {
+  }:global(html.light-mode) .back-main-btn:hover {
     background: #F1F5F9;
-  }
-
-  .back-dropdown-btn {
+  }.back-dropdown-btn {
     display: flex;
     align-items: center;
     gap: 3px;
@@ -408,27 +386,18 @@
     cursor: pointer;
     transition: all 0.15s ease;
     border-radius: 0 5px 5px 0;
-  }
-
-  :global(html.light-mode) .back-dropdown-btn {
+  }:global(html.light-mode) .back-dropdown-btn {
     border-left-color: #CBD5E1;
-  }
-
-  .back-dropdown-btn:hover, .back-dropdown-btn.open {
+  }.back-dropdown-btn:hover, .back-dropdown-btn.open {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     color: var(--color-accent);
-  }
-
-  .crumb-divider-bar {
+  }.crumb-divider-bar {
     color: var(--color-text-muted);
     opacity: 0.2;
     font-size: 13px;
     user-select: none;
     flex-shrink: 0;
-  }
-
-  /* History Floating Dropdown Menu */
-  .history-dropdown-menu {
+  }/* History Floating Dropdown Menu */ .history-dropdown-menu {
     position: absolute;
     top: calc(100% + 6px);
     left: 0;
@@ -443,20 +412,13 @@
     flex-direction: column;
     gap: 2px;
     animation: menu-fade 0.15s ease;
-  }
-
-  :global(html.light-mode) .history-dropdown-menu {
+  }:global(html.light-mode) .history-dropdown-menu {
     background: #FFFFFF;
     border-color: #E2E8F0;
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
   }
-
-  @keyframes menu-fade {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  .history-menu-title {
+@keyframes menu-fade {from { opacity: 0; transform: translateY(-4px); }to { opacity: 1; transform: translateY(0); }
+}.history-menu-title {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -468,13 +430,9 @@
     padding: 4px 8px 6px;
     border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
     margin-bottom: 2px;
-  }
-
-  :global(html.light-mode) .history-menu-title {
+  }:global(html.light-mode) .history-menu-title {
     border-bottom-color: #E2E8F0;
-  }
-
-  .history-menu-item {
+  }.history-menu-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -489,33 +447,22 @@
     cursor: pointer;
     text-align: left;
     transition: all 0.12s ease;
-  }
-
-  .history-item-label {
+  }.history-item-label {
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-
-  .history-menu-item:hover {
+  }.history-menu-item:hover {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
     color: var(--color-text-primary);
-  }
-
-  .history-menu-item.current {
+  }.history-menu-item.current {
     color: var(--color-accent);
     font-weight: 600;
-  }
-
-  .active-dot {
+  }.active-dot {
     width: 5px;
     height: 5px;
     border-radius: 50%;
     background: var(--color-accent);
-  }
-
-  /* Interactive Breadcrumb Trail */
-  .breadcrumb-trail {
+  }/* Interactive Breadcrumb Trail */ .breadcrumb-trail {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -523,13 +470,9 @@
     overflow-x: auto;
     scrollbar-width: none;
     padding: 2px 0;
-  }
-
-  .breadcrumb-trail::-webkit-scrollbar {
+  }.breadcrumb-trail::-webkit-scrollbar {
     display: none;
-  }
-
-  .crumb-node {
+  }.crumb-node {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -542,66 +485,45 @@
     border: none;
     background: transparent;
     color: var(--color-text-muted);
-  }
-
-  .crumb-node.link {
+  }.crumb-node.link {
     cursor: pointer;
     font-weight: 500;
-  }
-
-  .crumb-node.link:hover {
+  }.crumb-node.link:hover {
     color: var(--color-accent);
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
     transform: translateY(-0.5px);
-  }
-
-  .crumb-node.current {
+  }.crumb-node.current {
     color: var(--color-text-primary);
     font-weight: 600;
     cursor: default;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  :global(html.light-mode) .crumb-node.current {
+  }:global(html.light-mode) .crumb-node.current {
     background: #FFFFFF;
     border-color: #E2E8F0;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  }
-
-  .crumb-icon {
+  }:global(.crumb-icon) {
     flex-shrink: 0;
     opacity: 0.7;
     transition: opacity 0.15s ease;
-  }
-
-  .crumb-node.link:hover .crumb-icon {
+  }.crumb-node.link:hover :global(.crumb-icon) {
     opacity: 1;
     color: var(--color-accent);
-  }
-
-  .crumb-icon.active {
+  }:global(.crumb-icon):global(.active) {
     opacity: 1;
     color: var(--color-accent);
-  }
-
-  .crumb-text {
+  }.crumb-text {
     line-height: 1.3;
-  }
-
-  .crumb-chevron {
+  }.crumb-chevron {
     display: inline-flex;
     align-items: center;
     color: var(--color-text-muted);
     opacity: 0.35;
     flex-shrink: 0;
     margin: 0 1px;
-  }
-
-  .header-actions {
+  }.header-actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
-  }
-</style>
+  }</style>

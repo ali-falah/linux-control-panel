@@ -2382,7 +2382,8 @@
       onclick={() => {
         const proc = processContextMenu.proc!;
         closeAllContextMenus();
-        uiStore.journalUnitFilter = proc.name;
+        uiStore.preAppliedJournalPriority = 'all';
+        uiStore.preAppliedJournalSearch = proc.name;
         uiStore.navigateTo('journal-logs', 'journal');
         uiStore.addToast(`Jumped to Journal logs for ${proc.name}`, 'info');
       }}
