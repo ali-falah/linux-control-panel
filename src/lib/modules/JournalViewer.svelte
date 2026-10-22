@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { 
@@ -370,38 +370,60 @@
    * Apply deep-link filters coming from another module (Dashboard, Service
    * Manager …) exactly once — they are consumed here so that later state
    * changes never overwrite what the user typed.
+   *
+   * Only the three deep-link fields are tracked. Applying them (and the
+   * fetch that follows) is untracked on purpose: an effect that reads and
+   * writes the same state re-triggers itself and Svelte aborts the update
+   * with "Maximum update depth exceeded".
    */
   let hasLoadedOnce = false;
   $effect(() => {
     const prio = uiStore.preAppliedJournalPriority;
     const search = uiStore.preAppliedJournalSearch;
     const unit = uiStore.preAppliedJournalUnit;
-    let applied = false;
 
-    if (prio && prio !== 'all') {
-      filterPriority = prio;
+    untrack(() => {
+      let applied = false;
+
+      if (prio && prio !== 'all') {
+        filterPriority = prio;
+        applied = true;
+      }
+      if (search) {
+        searchQuery = search;
+        applied = true;
+      }
+      if (unit) {
+        currentUnitFilter = unit;
+        applied = true;
+      }
+
+      // consume the deep link so it is not applied again on the next visit
       uiStore.preAppliedJournalPriority = 'all';
-      applied = true;
-    }
-    if (search) {
-      searchQuery = search;
       uiStore.preAppliedJournalSearch = '';
-      applied = true;
-    }
-    if (unit) {
-      currentUnitFilter = unit;
       uiStore.preAppliedJournalUnit = '';
-      applied = true;
-    }
-    // The first run loads the page: either with the deep-linked filters or
-    // the default tab. Later runs only refetch when a filter was applied.
-    if (applied) {
-      fetchLogs();
-      hasLoadedOnce = true;
-    } else if (!hasLoadedOnce) {
-      refreshActiveTab();
-      hasLoadedOnce = true;
-    }
+
+      // remember the applied context — the page header shows it as a
+      // breadcrumb, but the pre-applied fields are already cleared here
+      if (applied) {
+        uiStore.journalDeepLinkContext = { unit: unit ?? '', search: search ?? '' };
+      }
+
+      // The first run loads the page: either with the deep-linked filters or
+      // the default tab. Later runs only refetch when a filter was applied.
+      if (applied) {
+        fetchLogs();
+        hasLoadedOnce = true;
+      } else if (!hasLoadedOnce) {
+        refreshActiveTab();
+        hasLoadedOnce = true;
+      }
+    });
+  });
+
+  // the deep-link context only belongs to this view
+  onDestroy(() => {
+    uiStore.journalDeepLinkContext = null;
   });
 
   onMount(() => {

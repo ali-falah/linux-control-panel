@@ -143,7 +143,8 @@
 
     // Special deep-link spatial contexts:
     // A) Jump to Journal Logs for a specific systemd unit
-    if (currentTabId === 'journal-logs' && uiStore.preAppliedJournalUnit) {
+    const journalContext = uiStore.journalDeepLinkContext;
+    if (currentTabId === 'journal-logs' && journalContext?.unit) {
       if (!trail.some(t => t.tab === 'service-manager')) {
         trail.push({
           label: 'Services',
@@ -153,17 +154,17 @@
         });
       }
       trail.push({
-        label: uiStore.preAppliedJournalUnit,
+        label: journalContext.unit,
         icon: Terminal,
         isCurrent: false,
         action: () => {
-          uiStore.jumpToJournalService(uiStore.preAppliedJournalUnit);
+          uiStore.jumpToJournalService(journalContext.unit);
         }
       });
     }
 
     // B) Jump to Journal Logs for a path / disk (e.g. /var/log from storage)
-    if (currentTabId === 'journal-logs' && uiStore.preAppliedJournalSearch && !uiStore.preAppliedJournalUnit) {
+    if (currentTabId === 'journal-logs' && journalContext?.search && !journalContext?.unit) {
       if (!trail.some(t => t.tab === 'device-manager' || t.tab === 'system-monitor')) {
         trail.push({
           label: 'Storage & Disks',
@@ -174,7 +175,7 @@
         });
       }
       trail.push({
-        label: uiStore.preAppliedJournalSearch,
+        label: journalContext.search,
         icon: Search,
         isCurrent: false
       });
@@ -340,6 +341,8 @@
     font-size: 12px;
     min-width: 0;
     flex-shrink: 1;
+    /* keep the trail inside the header instead of sliding under the toolbar */
+    overflow: hidden;
   }/* Back Split Button Container */ .back-split-container {
     position: relative;
     display: inline-flex;
@@ -470,6 +473,9 @@
     overflow-x: auto;
     scrollbar-width: none;
     padding: 2px 0;
+    /* a flex item keeps its content width by default — without this the
+       trail slides underneath the header toolbar instead of scrolling */
+    min-width: 0;
   }.breadcrumb-trail::-webkit-scrollbar {
     display: none;
   }.crumb-node {
@@ -525,5 +531,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex-shrink: 0;
+    /* may give way, but never below its own content width */
+    flex-shrink: 1;
   }</style>

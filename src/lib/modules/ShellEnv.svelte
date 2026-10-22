@@ -1626,50 +1626,69 @@
     transition: color 0.2s;
   }.sg-add-row:hover {
     color: var(--color-accent);
-  }/* ─── Light Mode Explicit Contrast Overrides ────────────────── */ html.light-mode .shell-group-card {
+  }/* ─── Light Mode Explicit Contrast Overrides ────────────────── */
+  /* `:global()` is required: without it Svelte scopes the `html` ancestor to
+     the component and drops the whole rule as unused — the overrides would
+     never apply. */
+  :global(html.light-mode) .shell-group-card {
     background: #FFFFFF !important;
     border: 1px solid #E5E7EB !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
-  }html.light-mode .sg-name {
+  }
+  :global(html.light-mode) .sg-name {
     color: #111827 !important;
-  }html.light-mode .sg-table-header {
+  }
+  :global(html.light-mode) .sg-table-header {
     background: #F9FAFB !important;
     border-bottom: 1px solid #E5E7EB !important;
     color: #6B7280 !important;
     font-weight: 600 !important;
-  }html.light-mode .sg-row {
+  }
+  :global(html.light-mode) .sg-row {
     border-bottom: 1px solid #E5E7EB !important;
-  }html.light-mode .col-name {
+  }
+  :global(html.light-mode) .col-name {
     color: #111827 !important;
-  }html.light-mode .sg-input {
+  }
+  :global(html.light-mode) .sg-input {
     background: #F9FAFB !important;
     border: 1px solid #E5E7EB !important;
     color: #111827 !important;
-  }html.light-mode .sg-input:focus, html.light-mode .sg-input:not([readonly]) {
+  }
+  :global(html.light-mode) .sg-input:focus,
+  :global(html.light-mode) .sg-input:not([readonly]) {
     background: #FFFFFF !important;
     border-color: #2563EB !important;
-  }html.light-mode .user-badge {
+  }
+  :global(html.light-mode) .user-badge {
     background: #F3F4F6 !important;
     border: 1px solid #E5E7EB !important;
     color: #374151 !important;
-  }html.light-mode .user-badge.system-badge {
+  }
+  :global(html.light-mode) .user-badge.system-badge {
     background: rgba(217, 119, 6, 0.12) !important;
     color: #B45309 !important;
     border: 1px solid rgba(217, 119, 6, 0.25) !important;
-  }html.light-mode .var-count {
+  }
+  :global(html.light-mode) .var-count {
     color: #4B5563 !important;
-  }html.light-mode .src-badge {
+  }
+  :global(html.light-mode) .src-badge {
     background: rgba(37, 99, 235, 0.08) !important;
     color: #1D4ED8 !important;
-  }html.light-mode .icon-btn {
+  }
+  :global(html.light-mode) .icon-btn {
     background: #FFFFFF !important;
     border: 1px solid #E5E7EB !important;
     color: #4B5563 !important;
-  }html.light-mode .icon-btn:hover {
+  }
+  :global(html.light-mode) .icon-btn:hover {
     background: #F3F4F6 !important;
     color: #111827 !important;
-  }html.light-mode .sg-add-row {
+  }
+  :global(html.light-mode) .sg-add-row {
     color: #374151 !important;
-  }html.light-mode .sg-add-row:hover {
+  }
+  :global(html.light-mode) .sg-add-row:hover {
     color: #2563EB !important;
   }</style>

@@ -212,6 +212,15 @@ class UIStore {
   preAppliedJournalPriority = $state<string>('all');
   preAppliedJournalSearch = $state<string>('');
   preAppliedJournalUnit = $state<string>('');
+  /**
+   * Deep-link context that is currently applied to the Journal view.
+   *
+   * The `preAppliedJournal*` fields above are *consumed* (cleared) by the
+   * Journal viewer as soon as it applies them, so they cannot be used to show
+   * where the user came from. This field keeps the applied context around
+   * until the Journal view is left again.
+   */
+  journalDeepLinkContext = $state<{ unit: string; search: string } | null>(null);
   availableUpdatesCount = $state<number>(0);
 
   jumpToJournalService(serviceName: string) {
