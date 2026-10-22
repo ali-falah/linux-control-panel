@@ -341,8 +341,8 @@
     font-size: 12px;
     min-width: 0;
     flex-shrink: 1;
-    /* keep the trail inside the header instead of sliding under the toolbar */
-    overflow: hidden;
+    /* no `overflow: hidden` here — the history dropdown is a child of this
+       element and would be clipped. The trail clips its own content. */
   }/* Back Split Button Container */ .back-split-container {
     position: relative;
     display: inline-flex;
