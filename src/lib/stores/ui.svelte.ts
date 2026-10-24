@@ -426,6 +426,40 @@ class UIStore {
     this.toasts = this.toasts.filter((t) => t.id !== id);
   }
 
+  /**
+   * Dialog that asks the user for the administrator password.
+   *
+   * The password is never stored in the store — it is handed straight to the
+   * caller, which pipes it into the privileged program.
+   */
+  passwordDialog = $state<{ isOpen: boolean; title: string; message: string }>({
+    isOpen: false,
+    title: '',
+    message: ''
+  });
+  private passwordResolver: ((value: string | null) => void) | null = null;
+
+  requestAdminPassword(title: string, message: string): Promise<string | null> {
+    this.passwordDialog = { isOpen: true, title, message };
+    return new Promise((resolve) => {
+      this.passwordResolver = resolve;
+    });
+  }
+
+  submitAdminPassword(value: string) {
+    const resolver = this.passwordResolver;
+    this.passwordResolver = null;
+    this.passwordDialog = { isOpen: false, title: '', message: '' };
+    resolver?.(value);
+  }
+
+  cancelAdminPassword() {
+    const resolver = this.passwordResolver;
+    this.passwordResolver = null;
+    this.passwordDialog = { isOpen: false, title: '', message: '' };
+    resolver?.(null);
+  }
+
   confirm(title: string, message: string, onConfirm: () => void | Promise<void>, danger = false) {
     this.confirmDialog = { isOpen: true, title, message, onConfirm, danger };
   }

@@ -1161,15 +1161,10 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        // Read compressed log using gzip -dc
-        if let Ok(out) = Command::new("pkexec")
-            .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", path, lines_str)])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // Read the compressed log with a validated argument list — no shell,
+        // so a file name can never be interpreted as a command.
+        if let Ok(tail) = read_log_tail_as_root(&path, lines as usize).await {
+            content = tail;
         }
     } else {
         // 1. Try reading from the requested active file
@@ -1202,25 +1197,12 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
                 let needed = (lines as usize) - current_count;
                 let needed_str = needed.to_string();
                 let prefix = if path.contains("access") { "access.log-" } else { "error.log-" };
-                let find_cmd = format!("find /var/log/nginx -maxdepth 1 -name '{}*' -type f | sort -r | head -n 1", prefix);
-                if let Ok(out) = Command::new("pkexec")
-                    .args(["sh", "-c", &find_cmd])
-                    .output()
-                    .await
-                {
-                    if out.status.success() {
-                        let rotated_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Ok(rotated_path) = find_rotated_log_as_root(prefix).await {
                         if !rotated_path.is_empty() {
                             let mut rotated_content = String::new();
                             if rotated_path.ends_with(".gz") {
-                                if let Ok(zout) = Command::new("pkexec")
-                                    .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", rotated_path, needed_str)])
-                                    .output()
-                                    .await
-                                {
-                                    if zout.status.success() {
-                                        rotated_content = String::from_utf8_lossy(&zout.stdout).to_string();
-                                    }
+                                if let Ok(zout) = read_log_tail_as_root(&rotated_path, needed as usize).await {
+                                    rotated_content = zout;
                                 }
                             } else if let Ok(tout) = Command::new("pkexec")
                                 .args(["tail", "-n", &needed_str, &rotated_path])
@@ -1241,7 +1223,6 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -1553,14 +1534,9 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        if let Ok(out) = Command::new("pkexec")
-            .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n 15000", path)])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // Validated argument list instead of a shell command.
+        if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
+            content = tail;
         }
     } else {
         // 1. Try reading with pkexec
@@ -1587,25 +1563,12 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
             if current_count < 15000 {
                 let needed = 15000 - current_count;
                 let prefix = if path.contains("access") { "access.log-" } else { "error.log-" };
-                let find_cmd = format!("find /var/log/nginx -maxdepth 1 -name '{}*' -type f | sort -r | head -n 1", prefix);
-                if let Ok(out) = Command::new("pkexec")
-                    .args(["sh", "-c", &find_cmd])
-                    .output()
-                    .await
-                {
-                    if out.status.success() {
-                        let rotated_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Ok(rotated_path) = find_rotated_log_as_root(prefix).await {
                         if !rotated_path.is_empty() {
                             let mut rotated_content = String::new();
                             if rotated_path.ends_with(".gz") {
-                                if let Ok(zout) = Command::new("pkexec")
-                                    .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", rotated_path, needed)])
-                                    .output()
-                                    .await
-                                {
-                                    if zout.status.success() {
-                                        rotated_content = String::from_utf8_lossy(&zout.stdout).to_string();
-                                    }
+                                if let Ok(zout) = read_log_tail_as_root(&rotated_path, needed as usize).await {
+                                    rotated_content = zout;
                                 }
                             } else if let Ok(tout) = Command::new("pkexec")
                                 .args(["tail", "-n", &needed.to_string(), &rotated_path])
@@ -1625,7 +1588,6 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
                                 }
                             }
                         }
-                    }
                 }
             }
         }
@@ -1988,3 +1950,69 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
         hourly_traffic,
     })
 }
+
+/// Read the last `lines` lines of a log file with administrator rights.
+///
+/// The file is read with a validated argument list — no shell is involved, so
+/// a file name can never turn into a command.
+async fn read_log_tail_as_root(path: &str, lines: usize) -> Result<String, String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    if !path.starts_with("/var/log/") {
+        return Err("Log path must be under /var/log/".to_string());
+    }
+    if path.contains('\n') || path.contains('\r') || path.contains('\0') {
+        return Err("Invalid log path.".to_string());
+    }
+
+    if path.ends_with(".gz") {
+        let args = vec![String::from("-dc"), path.to_string()];
+        let output = run_privileged_output("/usr/bin/gzip", &args, &RootAuth::Polkit).await?;
+        if !output.status.success() {
+            return Err(format!("Could not read {path}"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let all: Vec<&str> = text.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        return Ok(all[start..].join("\n"));
+    }
+
+    let args = vec![String::from("-n"), lines.to_string(), path.to_string()];
+    let output = run_privileged_output("/usr/bin/tail", &args, &RootAuth::Polkit).await?;
+    if !output.status.success() {
+        return Err(format!("Could not read {path}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Find the most recent rotated log file that starts with `prefix`.
+async fn find_rotated_log_as_root(prefix: &str) -> Result<String, String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    if !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+        return Err("Invalid log prefix.".to_string());
+    }
+
+    let args = vec![
+        String::from("/var/log/nginx"),
+        String::from("-maxdepth"),
+        String::from("1"),
+        String::from("-name"),
+        format!("{prefix}*"),
+        String::from("-type"),
+        String::from("f"),
+    ];
+    let output = run_privileged_output("/usr/bin/find", &args, &RootAuth::Polkit).await?;
+    if !output.status.success() {
+        return Err("Could not list the rotated log files.".to_string());
+    }
+    let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    files.sort();
+    files.reverse();
+    Ok(files.first().cloned().unwrap_or_default())
+}
+

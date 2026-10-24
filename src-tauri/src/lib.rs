@@ -10,10 +10,11 @@ use commands::{
         list_cron_jobs, add_cron_job, delete_cron_job,
         cron_list_timers, cron_toggle_timer,
     },
+    admin::{admin_auth_state, admin_install_helper},
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
-        dnf_check_updates, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
+        dnf_check_updates, dnf_update_advisories, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
@@ -206,8 +207,11 @@ pub fn run() {
             dnf_check,
             dnf_makecache_cmd,
             dnf_check_updates,
+            dnf_update_advisories,
             dnf_run_upgrade,
             dnf_dry_run_upgrade,
+            admin_install_helper,
+            admin_auth_state,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,
@@ -492,6 +496,16 @@ pub fn run() {
             pm2_get_startup_status,
         ])
         .setup(|_app| {
+            // Record which build is running — after an update the log then
+            // shows the exact code that produced an error.
+            log_to_file(
+                "INFO",
+                &format!(
+                    "control panel started (build {} at {})",
+                    env!("CARGO_PKG_VERSION"),
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                ),
+            );
             tauri::async_runtime::spawn(async {
                 let _ = commands::service_manager::get_boot_times(Some(false)).await;
                 let _ = commands::service_manager::get_boot_blame(Some(false)).await;

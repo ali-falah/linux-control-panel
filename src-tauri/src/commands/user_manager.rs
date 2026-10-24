@@ -1,3 +1,5 @@
+use crate::utils::privilege::ensure_safe_operand;
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use crate::utils::privilege::tokio::Command;
@@ -107,6 +109,7 @@ pub async fn list_users() -> Result<Vec<UserInfo>, String> {
 
 #[tauri::command]
 pub async fn add_user(username: String, fullname: String) -> Result<String, String> {
+    ensure_safe_operand(&username, "user name")?;
     let mut args = vec!["/usr/sbin/useradd".to_string(), "-m".to_string()]; // -m creates home dir
     if !fullname.is_empty() {
         args.push("-c".to_string());
@@ -169,17 +172,18 @@ pub async fn delete_user(username: String, remove_home: bool) -> Result<String, 
 
 #[tauri::command]
 pub async fn change_password(username: String, password: String) -> Result<String, String> {
-    // We must pass the password to chpasswd via stdin
-    let script = format!(
-        "echo '{}:{}' | /usr/sbin/chpasswd",
-        username,
-        password.replace("'", "'\\''")
-    );
-    let output = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec chpasswd: {e}"))?;
+    // The password is handed to chpasswd through its standard input. It never
+    // appears in the argument list of a command and therefore never in the
+    // process list, where every other user could read it.
+    let input = format!("{username}:{password}\n");
+    let output = privileged::run_privileged_with_stdin(
+        "/usr/sbin/chpasswd",
+        &[],
+        &privileged::RootAuth::Polkit,
+        &input,
+    )
+    .await
+    .map_err(|e| format!("Failed to run chpasswd: {e}"))?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());

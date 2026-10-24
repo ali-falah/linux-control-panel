@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
+use crate::utils::privilege::{build_privileged_tokio_command, RootAuth};
 use tauri::{AppHandle, Emitter};
 use std::sync::Mutex;
 
@@ -28,6 +29,27 @@ pub struct DnfUpdateEntry {
     pub version: String,
     pub repo: String,
     pub size: String,
+}
+
+/// An advisory (updateinfo) that covers a package.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnfAdvisory {
+    /// e.g. "FEDORA-2026-546bad4cdb"
+    pub id: String,
+    /// "security" | "enhancement" | "bugfix"
+    pub kind: String,
+    /// "Critical" | "Important" | "Moderate" | "Low" | "None"
+    pub severity: String,
+    /// Where the user can read why the update is recommended.
+    pub url: String,
+}
+
+/// The advisories that cover one package upgrade.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnfPackageAdvisory {
+    /// The full NEVRA of the update, e.g. "amd-gpu-firmware-20261019-1.fc44.noarch"
+    pub nevra: String,
+    pub advisories: Vec<DnfAdvisory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +156,15 @@ fn parse_apt_history() -> Vec<DnfHistoryEntry> {
 
 fn parse_dnf_history(output: &str) -> Vec<DnfHistoryEntry> {
     let mut entries = Vec::new();
-    let re = regex::Regex::new(
+    // DNF4 uses pipe separated columns with a date like "22 Oct 2026 05:46 PM":
+    // "  12 | dnf upgrade -y | 22 Oct 2026 05:46 PM | Upgrade |   24"
+    // DNF5 uses space separated columns with an ISO date:
+    // "  12 dnf upgrade -y 2026-10-22 05:46:59 Upgrade 24"
+    let dnf4_re = regex::Regex::new(
+        r"^\s*(\d+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.*?)\s*\|\s*(\d+)\s*$",
+    )
+    .unwrap();
+    let dnf5_re = regex::Regex::new(
         r"^\s*(\d+)\s+(.+?)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})(?:\s+(.*?))?\s+(\d+)\s*$",
     )
     .unwrap();
@@ -144,14 +174,18 @@ fn parse_dnf_history(output: &str) -> Vec<DnfHistoryEntry> {
         if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.starts_with("ID") {
             continue;
         }
-        if let Some(caps) = re.captures(line) {
-            let id = caps.get(1).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
-            let command = caps.get(2).map_or("", |m| m.as_str()).to_string();
-            let date = caps.get(3).map_or("", |m| m.as_str()).to_string();
-            let action = caps.get(4).map_or("", |m| m.as_str()).to_string();
-            let altered = caps.get(5).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
-            entries.push(DnfHistoryEntry { id, command, date, action, altered });
-        }
+
+        let caps = dnf4_re
+            .captures(line)
+            .or_else(|| dnf5_re.captures(line));
+        let Some(caps) = caps else { continue };
+
+        let id = caps.get(1).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
+        let command = caps.get(2).map_or("", |m| m.as_str()).to_string();
+        let date = caps.get(3).map_or("", |m| m.as_str()).to_string();
+        let action = caps.get(4).map_or("", |m| m.as_str()).to_string();
+        let altered = caps.get(5).map_or(0, |m| m.as_str().parse::<u32>().unwrap_or(0));
+        entries.push(DnfHistoryEntry { id, command, date, action, altered });
     }
     entries
 }
@@ -363,6 +397,16 @@ fn format_log_timestamp(raw: &str) -> String {
 
 #[tauri::command]
 pub fn dnf_read_log() -> Result<String, String> {
+    // DNF5 (Fedora 41+) no longer writes /var/log/dnf.log — every transaction
+    // goes to the systemd journal instead. Reading the stale file would show
+    // the user a log from months ago while the real upgrade output is only in
+    // the journal, so prefer the journal whenever DNF5 is the active manager.
+    if std::path::Path::new("/usr/bin/dnf5").exists() {
+        if let Some(journal) = read_dnf5_journal() {
+            return Ok(journal);
+        }
+    }
+
     let log_paths = [
         "/var/log/dnf5.log",
         "/var/log/dnf.log",
@@ -386,6 +430,29 @@ pub fn dnf_read_log() -> Result<String, String> {
 
     let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read {path}: {e}"))?;
 
+    Ok(format_log_lines(&content))
+}
+
+/// Read the DNF5 transaction log from the systemd journal (DNF5 does not
+/// write a log file any more).
+fn read_dnf5_journal() -> Option<String> {
+    let output = std::process::Command::new("journalctl")
+        .args(["_COMM=dnf5", "-n", "500", "--no-pager", "--output=short-iso"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let content = String::from_utf8_lossy(&output.stdout).to_string();
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(format_log_lines(&content))
+}
+
+/// Normalise a package manager log: ISO timestamps become human readable and
+/// the newest entry ends up on top.
+fn format_log_lines(content: &str) -> String {
     let iso_re = regex::Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{4}|Z)?)(.*)$").unwrap();
 
     let mut formatted_lines = Vec::new();
@@ -407,7 +474,7 @@ pub fn dnf_read_log() -> Result<String, String> {
     // Reverse line order so newest entries appear at the top
     formatted_lines.reverse();
 
-    Ok(formatted_lines.join("\n"))
+    formatted_lines.join("\n")
 }
 
 // ─── Check Updates ────────────────────────────────────────────────────────────
@@ -429,6 +496,7 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut entries = Vec::new();
         let mut current_entry = DnfUpdateEntry::default();
+        let mut current_epoch = String::new();
 
         let extract_value = |line: &str| -> String {
             let parts: Vec<&str> = line.splitn(2, ':').collect();
@@ -443,13 +511,22 @@ pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
                     if !current_entry.package.is_empty() {
                         entries.push(current_entry.clone());
                         current_entry = DnfUpdateEntry::default();
+                        current_epoch.clear();
                     }
                     current_entry.package = val;
                 }
             } else if line.starts_with("Architecture") {
                 current_entry.arch = extract_value(line);
+            } else if line.starts_with("Epoch") {
+                current_epoch = extract_value(line);
             } else if line.starts_with("Version") {
-                current_entry.version = extract_value(line);
+                let version = extract_value(line);
+                // keep the epoch — it is part of the real package version
+                current_entry.version = if current_epoch.is_empty() || current_epoch == "0" {
+                    version
+                } else {
+                    format!("{}:{}", current_epoch, version)
+                };
             } else if line.starts_with("Release") {
                 let rel = extract_value(line);
                 if !current_entry.version.is_empty() {
@@ -670,11 +747,22 @@ pub async fn dnf_run_upgrade(
     app: AppHandle,
     packages: Vec<String>,
     expected_packages: Vec<DnfPackageDiff>,
+    sudo_password: Option<String>,
 ) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
     validate_update_package_names(&packages)?;
+
+    // How the administrator rights are obtained. A password the user typed
+    // into the app is piped into sudo's stdin — it never appears in the
+    // argument list, in an environment variable or in a log line. Without a
+    // password the desktop PolicyKit agent collects it (the app then never
+    // sees the password at all).
+    let auth = match sudo_password {
+        Some(password) if !password.is_empty() => RootAuth::SudoPassword(password),
+        _ => RootAuth::Polkit,
+    };
 
     // ── Guard 2: Package manager lock check ───────────────────────────────────
     let lock_info = dnf_check_lock_status().await?;
@@ -706,12 +794,20 @@ pub async fn dnf_run_upgrade(
     }
 
     if is_dnf {
-        let preview = dnf_dry_run_upgrade(packages.clone()).await?;
+        // The verification preview runs with the same privileges as the
+        // transaction that follows, so the user can never approve a different
+        // transaction than the one that is applied.
+        let preview = run_dnf_dry_run(&packages, Some(&auth)).await?;
         if preview.packages.is_empty() {
             return Err("No updates are available in the current transaction. No changes were made.".to_string());
         }
         if !same_package_transaction(&preview.packages, &expected_packages) {
-            return Err("The DNF transaction changed after the preview. Review the new transaction and confirm again.".to_string());
+            return Err(
+                "The DNF transaction changed after the preview (the repository metadata was refreshed in \
+                 between). Nothing was changed.\n\nStart the update again to review the current \
+                 transaction before it is applied."
+                    .to_string(),
+            );
         }
         let protected_removals: Vec<&str> = preview.packages.iter()
             .filter(|package| package.action == "Remove" && crate::commands::flatpak_rpm::is_protected_package(&package.name))
@@ -748,42 +844,58 @@ pub async fn dnf_run_upgrade(
         }
     }
 
-    // ── Launch upgrade process through the system authorization agent ────────
-    let mut cmd = tokio::process::Command::new("pkexec");
-    cmd.arg("/usr/bin/stdbuf")
-       .arg("-oL")
-       .arg("-eL");
+    // ── Launch the upgrade with administrator rights ─────────────────────────
+    // stdbuf keeps the output line buffered so the progress is streamed live.
+    let mut args: Vec<String> = vec![String::from("-oL"), String::from("-eL")];
 
     if is_dnf {
-        cmd.arg("/usr/bin/dnf")
-           .arg("upgrade")
-           .arg("--best")
-           .arg("-y");
+        args.push(String::from("/usr/bin/dnf"));
+        args.push(String::from("upgrade"));
+        args.push(String::from("--best"));
+        args.push(String::from("-y"));
 
         // Put package names BEFORE flags so `dnf history list` displays
         // exact package names instead of truncating flags in UI output
         if !packages.is_empty() {
-            cmd.args(&packages);
+            args.extend(packages.iter().cloned());
         }
 
-        cmd.arg("--setopt=timeout=120");
-
-        cmd.env("PYTHONUNBUFFERED", "1");
+        // Same option as the preview — otherwise a slow mirror can fail the
+        // preview while the real transaction would have succeeded.
+        args.push(String::from("--setopt=timeout=120"));
     } else {
-        cmd.arg("/usr/bin/apt-get");
+        args.push(String::from("/usr/bin/apt-get"));
         if !packages.is_empty() {
-            cmd.arg("install").arg("--only-upgrade").arg("-y");
-            cmd.args(&packages);
+            args.push(String::from("install"));
+            args.push(String::from("--only-upgrade"));
+            args.push(String::from("-y"));
+            args.extend(packages.iter().cloned());
         } else {
-            cmd.arg("dist-upgrade").arg("-y");
+            args.push(String::from("dist-upgrade"));
+            args.push(String::from("-y"));
         }
-        cmd.env("DEBIAN_FRONTEND", "noninteractive");
     }
+
+    let (mut cmd, password) = build_privileged_tokio_command("/usr/bin/stdbuf", &args, &auth)?;
 
     cmd.stdout(Stdio::piped())
        .stderr(Stdio::piped());
+    if password.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    // The password goes into sudo's stdin and is closed afterwards, so it can
+    // never be read by the upgraded program itself.
+    if let Some(password) = password {
+        use ::tokio::io::AsyncWriteExt;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(password.as_bytes()).await;
+            let _ = stdin.write_all(b"\n").await;
+            let _ = stdin.shutdown().await;
+        }
+    }
 
     // Store PID for cancel support
     if let Some(pid) = child.id() {
@@ -827,6 +939,11 @@ pub async fn dnf_run_upgrade(
     });
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    // The cached sudo credential is only valid for this action.
+    if auth.password().is_some() {
+        crate::utils::privilege::invalidate_cached_credentials();
+    }
 
     // Clear the PID
     {
@@ -874,7 +991,12 @@ fn dnf_preview_detail(output: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnfDryRunResult {
     pub packages: Vec<DnfPackageDiff>,
+    /// Size of the packages that still have to be fetched.
     pub total_download_size: String,
+    /// Total size of the transaction — DNF reports "Need to download 0 B" when
+    /// everything is already in the local cache, which looks like a bug in the
+    /// UI even though the transaction is 836 MiB big.
+    pub total_inbound_size: String,
     pub disk_space_change: String,
     pub to_upgrade_count: usize,
     pub to_install_count: usize,
@@ -917,6 +1039,7 @@ fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult 
     let mut current_action: Option<String> = None;
     let mut in_summary_section = false;
     let mut total_download_size = String::new();
+    let mut total_inbound_size = String::new();
     let mut disk_space_change = String::new();
 
     let mut to_upgrade_count = 0;
@@ -939,17 +1062,33 @@ fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult 
             continue;
         }
 
-        // 2. Metrics Extractors (works anywhere in output)
-        if lower.contains("need to download") {
-            if let Some(pos) = line.find("Need to download") {
-                total_download_size = line[pos + "Need to download".len()..].trim().trim_end_matches('.').to_string();
-            }
-            continue;
-        } else if lower.starts_with("total download size:") {
+        // 2. Metrics Extractors (works anywhere in output).
+        // DNF5 prints both numbers on one line:
+        // "Total size of inbound packages is 836 MiB. Need to download 0 B."
+        let mut is_metric_line = false;
+        if let Some(pos) = line.find("Need to download") {
+            total_download_size = line[pos + "Need to download".len()..]
+                .trim()
+                .trim_end_matches('.')
+                .to_string();
+            is_metric_line = true;
+        }
+        if let Some(pos) = line.find("Total size of inbound packages is") {
+            total_inbound_size = line[pos + "Total size of inbound packages is".len()..]
+                .trim()
+                .trim_end_matches('.')
+                .to_string();
+            is_metric_line = true;
+        }
+        if lower.starts_with("total download size:") {
             total_download_size = trimmed["Total download size:".len()..].trim().to_string();
-            continue;
-        } else if lower.starts_with("after this operation") {
+            is_metric_line = true;
+        }
+        if lower.starts_with("after this operation") {
             disk_space_change = trimmed.to_string();
+            is_metric_line = true;
+        }
+        if is_metric_line {
             continue;
         }
 
@@ -1058,6 +1197,7 @@ fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult 
     DnfDryRunResult {
         packages,
         total_download_size,
+        total_inbound_size,
         disk_space_change,
         to_upgrade_count,
         to_install_count,
@@ -1067,33 +1207,64 @@ fn parse_dnf_dry_run(stdout_text: &str, full_raw_text: &str) -> DnfDryRunResult 
     }
 }
 
-#[tauri::command]
-pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResult, String> {
+/// Preview of an update transaction.
+///
+/// With `auth` the preview is calculated with the same privileges as the
+/// transaction that will be applied, so the preview is exactly what root will
+/// do — same repositories, same metadata, same cache.
+async fn run_dnf_dry_run(
+    packages: &[String],
+    auth: Option<&RootAuth>,
+) -> Result<DnfDryRunResult, String> {
     use std::process::Stdio;
-    validate_update_package_names(&packages)?;
-    let mut cmd = tokio::process::Command::new("dnf");
+    validate_update_package_names(packages)?;
 
-    cmd.arg("--color=never")
-       .arg("upgrade")
-       .arg("--best")
-       .arg("--assumeno");
-    cmd.env("LC_ALL", "C").env("LANG", "C");
-
+    let mut args: Vec<String> = vec![
+        String::from("--color=never"),
+        String::from("upgrade"),
+        String::from("--best"),
+        String::from("--assumeno"),
+    ];
     if !packages.is_empty() {
-        cmd.args(&packages);
+        args.extend(packages.iter().cloned());
     }
+    args.push(String::from("--setopt=timeout=120"));
 
-    cmd.arg("--setopt=timeout=60");
-
-    cmd.stdout(Stdio::piped())
-       .stderr(Stdio::piped());
-
-    let child = cmd.spawn().map_err(|e| format!("Failed to spawn DNF dry-run: {e}"))?;
-
-    let output = child.wait_with_output().await.map_err(|e| format!("Error waiting for DNF dry-run: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let (success, stdout, stderr) = match auth {
+        Some(auth) => {
+            let output = crate::utils::privilege::run_privileged_output("/usr/bin/dnf", &args, auth)
+                .await
+                .map_err(|e| format!("Failed to run the DNF preview with administrator rights: {e}"))?;
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        }
+        None => {
+            let mut cmd = tokio::process::Command::new("dnf");
+            cmd.args(&args);
+            cmd.env("LC_ALL", "C").env("LANG", "C");
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let child = cmd.spawn().map_err(|e| format!("Failed to spawn DNF dry-run: {e}"))?;
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|e| format!("Error waiting for DNF dry-run: {e}"))?;
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        }
+    };
     let full_text = format!("{}\n{}", stdout, stderr);
+
+    if auth.is_some() && crate::utils::privilege::is_auth_failure(&stderr, &stdout) {
+        return Err(
+            "Administrator authentication was cancelled or failed. No changes were made.".to_string(),
+        );
+    }
 
     let parsed = parse_dnf_dry_run(&stdout, &full_text);
     let lower_text = full_text.to_lowercase();
@@ -1114,8 +1285,8 @@ pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResul
     let has_summary = lower_text.contains("transaction summary");
     let expected_assumeno_exit = lower_text.contains("operation aborted");
     let has_remove_section = lower_text.lines().any(|line| line.trim().starts_with("removing:"));
-    if (known_noop && !output.status.success())
-        || (!known_noop && (parsed.packages.is_empty() || !has_summary || (!output.status.success() && !expected_assumeno_exit)))
+    if (known_noop && !success)
+        || (!known_noop && (parsed.packages.is_empty() || !has_summary || (!success && !expected_assumeno_exit)))
         || (has_remove_section && parsed.to_remove_count == 0)
     {
         return Err(format!(
@@ -1154,4 +1325,131 @@ pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResul
     }
 
     Ok(parsed)
+}
+
+/// Collect the available advisories (updateinfo) and the packages they cover.
+///
+/// The result lets the UI mark security updates and show the user *why* an
+/// update is recommended before they tick it.
+#[tauri::command]
+pub async fn dnf_update_advisories() -> Result<Vec<DnfPackageAdvisory>, String> {
+    if !crate::binary_exists("dnf").await {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("dnf")
+        .arg("updateinfo")
+        .arg("list")
+        .arg("--available")
+        .output()
+        .await
+        .map_err(|e| format!("Could not read the available advisories: {e}"))?;
+
+    if !output.status.success() {
+        // No advisories is not an error — the UI simply shows no security marks.
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(parse_updateinfo(&stdout))
+}
+
+/// Parse the output of `dnf updateinfo list --available`.
+///
+/// The columns are: Name, Type, Severity, Package, Issued.
+fn parse_updateinfo(output: &str) -> Vec<DnfPackageAdvisory> {
+    let mut packages: Vec<DnfPackageAdvisory> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        // the header and the "Last metadata expiration check" line
+        if trimmed.is_empty() || trimmed.starts_with("Name ") || trimmed.contains("expiration") {
+            continue;
+        }
+        let columns: Vec<&str> = trimmed.split_whitespace().collect();
+        if columns.len() < 4 {
+            continue;
+        }
+        let (id, kind, severity, nevra) = (columns[0], columns[1], columns[2], columns[3]);
+        if !id.starts_with("FEDORA-") && !id.starts_with("RHSA-") && !id.starts_with("RHBA-") {
+            continue;
+        }
+        // the severity column can be "None"
+        let severity = if severity == "None" { String::new() } else { severity.to_string() };
+
+        let advisory = DnfAdvisory {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            severity,
+            url: advisory_url(id),
+        };
+
+        match packages.iter_mut().find(|entry| entry.nevra == nevra) {
+            Some(entry) => {
+                if !entry.advisories.iter().any(|a| a.id == advisory.id) {
+                    entry.advisories.push(advisory);
+                }
+            }
+            None => packages.push(DnfPackageAdvisory {
+                nevra: nevra.to_string(),
+                advisories: vec![advisory],
+            }),
+        }
+    }
+
+    packages
+}
+
+/// The place where the user can read the advisory.
+fn advisory_url(id: &str) -> String {
+    if id.starts_with("FEDORA-") {
+        format!("https://bodhi.fedoraproject.org/updates/{id}")
+    } else if id.starts_with("RHSA-") || id.starts_with("RHBA-") {
+        format!("https://access.redhat.com/errata/{id}")
+    } else {
+        String::new()
+    }
+}
+
+#[tauri::command]
+pub async fn dnf_dry_run_upgrade(packages: Vec<String>) -> Result<DnfDryRunResult, String> {
+    run_dnf_dry_run(&packages, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+Name                   Type        Severity                                      Package              Issued
+FEDORA-2026-4d8bb4d38f enhancement None            mesa-dri-drivers-26.2.5-1.fc44.x86_64 2026-10-21 16:43:43
+FEDORA-2026-546bad4cdb security    Moderate      amd-gpu-firmware-20261019-1.fc44.noarch 2026-10-21 16:43:43
+FEDORA-2026-546bad4cdb security    Moderate      amd-ucode-firmware-20261019-1.fc44.noarch 2026-10-21 16:43:43
+";
+
+    #[test]
+    fn the_advisories_are_parsed_with_their_severity_and_url() {
+        let parsed = parse_updateinfo(SAMPLE);
+        assert_eq!(parsed.len(), 3);
+
+        let security = parsed
+            .iter()
+            .find(|entry| entry.nevra.starts_with("amd-gpu-firmware"))
+            .expect("the security advisory must be found");
+        assert_eq!(security.advisories.len(), 1);
+        assert_eq!(security.advisories[0].kind, "security");
+        assert_eq!(security.advisories[0].severity, "Moderate");
+        assert_eq!(
+            security.advisories[0].url,
+            "https://bodhi.fedoraproject.org/updates/FEDORA-2026-546bad4cdb"
+        );
+
+        // an enhancement advisory has no severity
+        let enhancement = parsed
+            .iter()
+            .find(|entry| entry.nevra.starts_with("mesa-dri-drivers"))
+            .expect("the enhancement advisory must be found");
+        assert_eq!(enhancement.advisories[0].kind, "enhancement");
+        assert_eq!(enhancement.advisories[0].severity, "");
+    }
 }

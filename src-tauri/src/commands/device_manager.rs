@@ -1,3 +1,4 @@
+use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege::Command;
 use serde::Serialize;
 
@@ -202,6 +203,9 @@ pub fn device_set_module_state(module: String, action: String) -> Result<String,
         }
     }
 
+    // The module name is an operand of modprobe/rmmod — a name that starts
+    // with a dash would be read as an option.
+    ensure_safe_operand(&module, "kernel module name")?;
     let (cmd, arg) = match action.as_str() {
         "unload" => ("rmmod", module.as_str()),
         _ => ("modprobe", module.as_str()),

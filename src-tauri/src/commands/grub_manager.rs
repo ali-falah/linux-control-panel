@@ -1,6 +1,6 @@
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use crate::utils::privilege::tokio::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrubConfig {
@@ -284,15 +284,15 @@ pub async fn rebuild_grub() -> Result<String, String> {
     }
 
     // Generate, validate, back up, and atomically replace the boot config in one authorized action.
-    let script = format!(
+    let script = String::from(
         r#"set -eu
-target='{cfg_path}'
-test ! -L "$target" || {{ echo 'Boot configuration is a symbolic link; refusing to replace it.' >&2; exit 1; }}
-backup="${{target}}.control-panel.bak"
-test ! -L "$backup" || {{ echo 'Boot configuration backup is a symbolic link; refusing to continue.' >&2; exit 1; }}
-tmp=$(mktemp "${{target}}.tmp.XXXXXX")
+target="$1"
+test ! -L "$target" || { echo 'Boot configuration is a symbolic link; refusing to replace it.' >&2; exit 1; }
+backup="${target}.control-panel.bak"
+test ! -L "$backup" || { echo 'Boot configuration backup is a symbolic link; refusing to continue.' >&2; exit 1; }
+tmp=$(mktemp "${target}.tmp.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-{generator} -o "$tmp"
+"$2" -o "$tmp"
 test -s "$tmp"
 checker=$(command -v grub2-script-check || command -v grub-script-check || true)
 if [ -z "$checker" ]; then echo 'GRUB script checker is unavailable; refusing to replace the boot configuration.' >&2; exit 1; fi
@@ -303,11 +303,13 @@ chmod --reference="$target" "$tmp"
 mv -f "$tmp" "$target"
 trap - EXIT"#
     );
-    let output = Command::new("pkexec")
-        .args(["/bin/bash", "-c", &script])
-        .output()
-        .await
-        .map_err(|e| format!("Could not request authorization to rebuild GRUB: {e}"))?;
+    // The target file and the generator are passed as positional parameters.
+    let output = privileged::run_privileged_script_with_args(
+        &script,
+        &[cfg_path.to_string(), generator.to_string()],
+    )
+    .await
+    .map_err(|e| format!("Could not request authorization to rebuild GRUB: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("GRUB rebuild was not applied: {stderr}"));

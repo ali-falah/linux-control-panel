@@ -1,6 +1,6 @@
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::process::Stdio;
 use crate::utils::privilege::tokio::Command;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,11 +66,7 @@ pub async fn get_auth_events(
     fi
     "#;
 
-    let output = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .stderr(Stdio::piped())
-        .output()
-        .await;
+    let output = privileged::run_privileged_script(script).await;
 
     match output {
         Ok(o) if o.status.success() => {
@@ -401,11 +397,7 @@ fi
 systemctl enable --now auditd || systemctl restart auditd || true
 "#;
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .stderr(Stdio::piped())
-        .output()
-        .await
+    let out = privileged::run_privileged_script(script).await
         .map_err(|e| e.to_string())?;
 
     if out.status.success() {
@@ -510,11 +502,7 @@ pub async fn get_command_audit_logs(
     } else {
         // Fall back to the flat audit log file (needs root)
         let script = "cat /var/log/audit/audit.log 2>/dev/null | tail -n 20000";
-        let output = Command::new("pkexec")
-            .args(["bash", "-c", script])
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let output = privileged::run_privileged_script(script).await;
 
         match output {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {

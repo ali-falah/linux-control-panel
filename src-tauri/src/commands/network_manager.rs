@@ -1,3 +1,4 @@
+use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege::Command;
 use crate::utils::privilege::Command as PrivCommand;
 
@@ -63,6 +64,11 @@ pub fn network_get_connection(uuid: String) -> Result<String, String> {
 #[tauri::command]
 pub fn network_save_connection(uuid: String, settings: std::collections::HashMap<String, String>) -> Result<String, String> {
     let is_new = uuid.is_empty();
+    if !is_new {
+        // The connection id is an operand of nmcli — a value that starts with
+        // a dash would be read as an option.
+        ensure_safe_operand(&uuid, "connection id")?;
+    }
     let mut cmd = PrivCommand::new("pkexec");
     cmd.arg("nmcli").arg("connection");
     if is_new {

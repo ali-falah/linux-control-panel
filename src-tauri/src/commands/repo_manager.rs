@@ -1,3 +1,4 @@
+use crate::utils::privilege::{ensure_repo_file_path, ensure_safe_operand};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -307,6 +308,9 @@ fn parse_apt_sources_file(path: &Path, entries: &mut Vec<RepoEntry>) {
 /// Enable or disable a specific repo in its file (.repo, .list, or .sources) via pkexec + sed
 #[tauri::command]
 pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String) -> Result<(), String> {
+    // The path comes from the frontend, so it is checked against the directories
+    // the package manager uses before the file is touched with root rights.
+    ensure_repo_file_path(&file_path)?;
     if file_path.ends_with(".sources") {
         let val = if enabled { "yes" } else { "no" };
         let script = format!("s/^Enabled:\\s*.*/Enabled: {}/I", val);
@@ -379,6 +383,12 @@ pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String) -> R
 pub async fn add_repo(url: String) -> Result<String, String> {
     if url.trim().is_empty() {
         return Err("URL cannot be empty".to_string());
+    }
+    // The URL is handed to dnf as an operand — a value that starts with a dash
+    // would be read as an option by dnf and could change its configuration.
+    ensure_safe_operand(url.trim(), "repository URL")?;
+    if !url.contains("://") && !url.starts_with('/') {
+        return Err("The repository URL must be a full URL or an absolute path.".to_string());
     }
 
     if binary_exists("dnf").await {
@@ -1153,6 +1163,9 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
 
 #[tauri::command]
 pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), String> {
+    // The path comes from the frontend, so it is checked against the directories
+    // the package manager uses before the file is deleted with root rights.
+    ensure_repo_file_path(&file_path)?;
     let path = std::path::Path::new(&file_path);
     if !path.exists() {
         return Ok(());

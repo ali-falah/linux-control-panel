@@ -2,6 +2,13 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use crate::utils::privilege::tokio::Command;
+
+/// Is this a Debian based system? The dpkg/dpkg-query tools only exist there —
+/// on Fedora they are missing and every call fails with "No such file or
+/// directory".
+fn is_debian_based() -> bool {
+    crate::utils::distro::detect_distro().pkg_manager == "apt"
+}
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tauri::{AppHandle, Emitter};
 
@@ -118,7 +125,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                             }
                         }
                     }
-                    if !is_native {
+                    if !is_native && is_debian_based() {
                         if let Ok(output) = Command::new("dpkg")
                             .arg("-S")
                             .arg(&path)
@@ -213,14 +220,16 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
             }
         }
         // Fallback for dpkg on Debian / Ubuntu
-        if let Ok(output) = Command::new("dpkg-query")
-            .args(["-W", "-f=${Installed-Size}", &package_id])
-            .output().await
-        {
-            if output.status.success() {
-                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Ok(kb) = s.parse::<u64>() {
-                    return Ok(AppMeta { size_bytes: kb * 1024, install_date: 0 });
+        if is_debian_based() {
+            if let Ok(output) = Command::new("dpkg-query")
+                .args(["-W", "-f=${Installed-Size}", &package_id])
+                .output().await
+            {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if let Ok(kb) = s.parse::<u64>() {
+                        return Ok(AppMeta { size_bytes: kb * 1024, install_date: 0 });
+                    }
                 }
             }
         }
@@ -290,7 +299,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             }
         }
 
-        if version == "Unknown" {
+        if version == "Unknown" && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query").args(["-s", &package_id]).output().await {
                 if output.status.success() {
                     let info = String::from_utf8_lossy(&output.stdout).to_string();
@@ -324,7 +333,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
                 }
             }
         }
-        if files.is_empty() {
+        if files.is_empty() && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query").args(["-L", &package_id]).output().await {
                 if output.status.success() {
                     let list = String::from_utf8_lossy(&output.stdout).to_string();
@@ -659,7 +668,7 @@ pub async fn get_app_dependencies(package_id: String, source: String) -> Result<
                 }
             }
         }
-        if deps.is_empty() {
+        if deps.is_empty() && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query")
                 .arg("-W")
                 .arg("-f=${Depends}")

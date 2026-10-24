@@ -636,7 +636,9 @@ pub async fn renice_process(pid: u32, priority: i32) -> Result<String, String> {
     }
 
     let output = if priority < 0 {
-        tokio::process::Command::new("pkexec")
+        // Lowering the priority of another user's process needs root rights —
+        // the hardened wrapper validates the program before it is executed.
+        crate::utils::privilege::tokio::Command::new("pkexec")
             .args(["renice", "-n", &priority.to_string(), "-p", &pid.to_string()])
             .output()
             .await

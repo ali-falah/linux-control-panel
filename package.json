@@ -8,8 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:dev": "npm run sidecar && tauri dev",
+    "tauri:build": "npm run sidecar:release && node scripts/build-app.mjs",
+    "sidecar": "node scripts/build-sidecar.mjs",
+    "sidecar:release": "node scripts/build-sidecar.mjs --release",
+    "tauri:build:appimage": "npm run sidecar:release && node scripts/build-app.mjs --appimage"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.2",

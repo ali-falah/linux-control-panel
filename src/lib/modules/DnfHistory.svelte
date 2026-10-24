@@ -15,7 +15,8 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
-  import { AlertTriangle, Lock, Ban, Sparkles } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert } from '@lucide/svelte';
+  import Select from '../components/ui/Select.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
@@ -129,6 +130,15 @@
   let selectedUpdates = new SvelteSet<string>();
   let loadingUpdates = $state(false);
 
+  /**
+   * Identity of an update row. A package name can appear several times (one
+   * row per architecture), so the architecture has to be part of the key —
+   * otherwise the selection collapses the rows and the counter lies.
+   */
+  function updateKey(u: DnfUpdateEntry): string {
+    return `${u.package}.${u.arch}`;
+  }
+
   /** Last 40 lines of upgradeOutput — what is shown in the non-scrollable terminal */
   let terminalLines = $derived(() => {
     const lines = dnfStore.upgradeOutput.split('\n');
@@ -137,6 +147,47 @@
 
   let selectAllUpdates = $derived(
     updates.length > 0 && selectedUpdates.size === updates.length
+  );
+
+  // ─── Update list filters ────────────────────────────────────────────────────
+
+  let updateSearch = $state('');
+  let repoFilter = $state('all');
+  let archFilter = $state('all');
+  let securityOnly = $state(false);
+  let showFailedOnly = $state(false);
+
+  /** The repositories that offer updates, with the number of packages each. */
+  let repoCounts = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const u of updates) counts.set(u.repo, (counts.get(u.repo) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  });
+
+  let archList = $derived([...new Set(updates.map((u) => u.arch))].sort());
+
+  /** The updates that pass the search, repository, architecture and security filter. */
+  let filteredUpdates = $derived(
+    updates.filter((u) => {
+      if (repoFilter !== 'all' && u.repo !== repoFilter) return false;
+      if (archFilter !== 'all' && u.arch !== archFilter) return false;
+      if (securityOnly && !dnfStore.isSecurityUpdate(u.package, u.arch, u.version)) return false;
+      const query = updateSearch.trim().toLowerCase();
+      if (query && !`${u.package} ${u.version} ${u.repo} ${u.arch}`.toLowerCase().includes(query)) {
+        return false;
+      }
+      return true;
+    })
+  );
+
+  /** The download size of every available update. */
+  let totalListSize = $derived(
+    formatSize(updates.reduce((acc, u) => acc + parseSize(u.size), 0))
+  );
+
+  /** How many of the available updates are covered by a security advisory. */
+  let securityUpdateCount = $derived(
+    updates.filter((u) => dnfStore.isSecurityUpdate(u.package, u.arch, u.version)).length
   );
 
   // ─── Size helpers ─────────────────────────────────────────────────────────────
@@ -163,10 +214,18 @@
   let totalSelectedSize = $derived(
     formatSize(
       updates
-        .filter(u => selectedUpdates.has(u.package))
+        .filter(u => selectedUpdates.has(updateKey(u)))
         .reduce((acc, u) => acc + parseSize(u.size), 0)
     )
   );
+
+  // A machine with many updates would render hundreds of table rows at once.
+  // The list is therefore filled step by step — the selection and the totals
+  // always cover every update, only the rendering is limited.
+  const UPDATE_PAGE_SIZE = 100;
+  let visibleUpdateCount = $state(UPDATE_PAGE_SIZE);
+  let visibleUpdates = $derived(filteredUpdates.slice(0, visibleUpdateCount));
+  let hiddenUpdateCount = $derived(Math.max(0, filteredUpdates.length - visibleUpdateCount));
 
   // ─── Selection ───────────────────────────────────────────────────────────────
 
@@ -174,18 +233,18 @@
     const checked = (e.target as HTMLInputElement).checked;
     if (checked) {
       for (const u of updates) {
-        selectedUpdates.add(u.package);
+        selectedUpdates.add(updateKey(u));
       }
     } else {
       selectedUpdates.clear();
     }
   }
 
-  function toggleUpdateSelection(pkg: string) {
-    if (selectedUpdates.has(pkg)) {
-      selectedUpdates.delete(pkg);
+  function toggleUpdateSelection(key: string) {
+    if (selectedUpdates.has(key)) {
+      selectedUpdates.delete(key);
     } else {
-      selectedUpdates.add(pkg);
+      selectedUpdates.add(key);
     }
   }
 
@@ -196,6 +255,24 @@
     loadingUpdates = true;
     statusStore.setBusy('Checking for updates…');
     try {
+      await refreshUpdates();
+      // The advisories decide which updates are security relevant — they are
+      // read in the background, the list is usable right away.
+      void dnfStore.loadAdvisories();
+    } finally {
+      loadingUpdates = false;
+      statusStore.clearBusy();
+    }
+  }
+
+  /**
+   * Re-read the available updates without leaving the upgrade view — used
+   * after a finished transaction so the list and the counters no longer show
+   * the packages that were just upgraded.
+   */
+  async function refreshUpdates() {
+    visibleUpdateCount = UPDATE_PAGE_SIZE;
+    try {
       updates = await invoke<DnfUpdateEntry[]>('dnf_check_updates');
       uiStore.availableUpdatesCount = updates.length;
       statusStore.setLastCommand('dnf check-update', 0, true);
@@ -204,9 +281,6 @@
       statusStore.setLastCommand('dnf check-update', 1, false);
       updates = [];
       uiStore.availableUpdatesCount = 0;
-    } finally {
-      loadingUpdates = false;
-      statusStore.clearBusy();
     }
   }
 
@@ -214,6 +288,34 @@
     if (selectedUpdates.size === 0) return;
     const pkgs = Array.from(selectedUpdates).map(p => p.trim()).filter(Boolean);
     await dnfStore.requestUpgrade(pkgs);
+  }
+
+  /**
+   * The tooltip of an update row: the full NEVRA (so the user can see the
+   * epoch) and the advisories that recommend it.
+   */
+  function updateTooltip(u: DnfUpdateEntry): string {
+    const cleanVersion = u.version.includes(':') ? u.version.split(':').slice(1).join(':') : u.version;
+    const parts = [`${u.package}-${cleanVersion}.${u.arch}`, u.repo, u.size];
+    const advisories = dnfStore.advisoriesFor(u.package, u.arch, u.version);
+    if (advisories.length) {
+      parts.push(
+        advisories
+          .map((a) => `${a.id}${a.severity ? ` (${a.severity})` : ''}`)
+          .join(', ')
+      );
+    }
+    return parts.join('\n');
+  }
+
+  /** Upgrade every available update, not only the ticked rows. */
+  function startUpgradeAll() {
+    uiStore.confirm(
+      'Update all packages',
+      `This upgrades all ${updates.length} available updates (${totalListSize} to download). The full transaction is shown before anything is changed.`,
+      () => dnfStore.requestUpgrade([]),
+      false
+    );
   }
 
   // ─── History ─────────────────────────────────────────────────────────────────
@@ -393,6 +495,13 @@
     checkUpdates();
   });
 
+  // After a finished transaction the list still shows the packages that were
+  // just upgraded (and the counters still count them) — refresh it so the
+  // page reflects what is actually still pending.
+  $effect(() => {
+    if (dnfStore.upgradeFinished) refreshUpdates();
+  });
+
   $effect(() => {
     if (activeTab === 'maintenance') checkLockStatus();
   });
@@ -443,8 +552,14 @@
       {#if activeTab === 'history'}
         <SearchBar bind:value={historySearch} placeholder="Search history by command or action…" style="margin: 0;" />
       {:else if activeTab === 'updates'}
-        <span style="font-size:13px; color:var(--color-text-secondary);">{updates.length} updates available</span>
+        <span style="font-size:13px; color:var(--color-text-secondary);">
+          {updates.length} update{updates.length !== 1 ? 's' : ''} available · {totalListSize} total
+        </span>
         {#if updates.length > 0}
+          <Button variant="outline" size="sm" onclick={startUpgradeAll} disabled={dnfStore.isUpgrading}>
+            <RefreshCw size={13} class={dnfStore.isUpgrading ? 'animate-spin-slow' : ''} />
+            Update All
+          </Button>
           <Button variant="primary" size="sm" onclick={startUpgrade} disabled={selectedUpdates.size === 0 || dnfStore.isUpgrading}>
             <RefreshCw size={13} class={dnfStore.isUpgrading ? 'animate-spin-slow' : ''} />
             Update {selectedUpdates.size} Package{selectedUpdates.size !== 1 ? 's' : ''} ({totalSelectedSize})
@@ -460,6 +575,67 @@
 
   <!-- ── Updates Tab ─────────────────────────────────────────────────────────── -->
   {#if activeTab === 'updates'}
+    <!-- Search, repository, architecture and security filter -->
+    <div class="update-filters">
+      <SearchBar
+        bind:value={updateSearch}
+        placeholder="Filter by package, version or repository…"
+      />
+
+      <Select bind:value={archFilter} aria-label="Filter by architecture">
+        <option value="all">All architectures</option>
+        {#each archList as arch}
+          <option value={arch}>{arch}</option>
+        {/each}
+      </Select>
+
+      <button
+        type="button"
+        class="filter-toggle"
+        class:active={securityOnly}
+        onclick={() => (securityOnly = !securityOnly)}
+        title="Show only updates that are covered by a security advisory"
+      >
+        <ShieldAlert size={13} />
+        Security only
+        {#if securityUpdateCount > 0}
+          <span class="filter-count">{securityUpdateCount}</span>
+        {/if}
+      </button>
+
+      <span class="selection-summary">
+        {selectedUpdates.size} of {updates.length} selected
+        {#if filteredUpdates.length !== updates.length}
+          · {filteredUpdates.length} shown
+        {/if}
+        {#if totalSelectedSize !== '0 B'}
+          · {totalSelectedSize} selected
+        {/if}
+      </span>
+
+      <div class="repo-chips">
+        <button
+          type="button"
+          class="repo-chip"
+          class:active={repoFilter === 'all'}
+          onclick={() => (repoFilter = 'all')}
+        >
+          All <span class="repo-chip-count">{updates.length}</span>
+        </button>
+        {#each repoCounts as [repo, count]}
+          <button
+            type="button"
+            class="repo-chip"
+            class:active={repoFilter === repo}
+            onclick={() => (repoFilter = repo)}
+            title={repo}
+          >
+            {repo} <span class="repo-chip-count">{count}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+
     <div class="card" style="display:flex; flex-direction:column; padding: 0; flex: 1; min-height: 0;">
 
       <!-- External Lock Warning Banner -->
@@ -517,9 +693,48 @@
             </div>
           {/if}
 
+          <!-- Summary of the finished transaction -->
+          {#if dnfStore.upgradeSummary}
+            <div class="upgrade-summary">
+              <div class="summary-item">
+                <span class="summary-value">{dnfStore.upgradeSummary.applied}</span>
+                <span class="summary-label">packages changed</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-value">{dnfStore.upgradeSummary.upgrading}</span>
+                <span class="summary-label">upgraded</span>
+              </div>
+              <div class="summary-item">
+                <span class="summary-value">{dnfStore.upgradeSummary.skipped}</span>
+                <span class="summary-label">skipped</span>
+              </div>
+              <div class="summary-item" class:has-errors={dnfStore.upgradeSummary.errors.length > 0}>
+                <span class="summary-value">{dnfStore.upgradeSummary.errors.length}</span>
+                <span class="summary-label">errors</span>
+              </div>
+              <div class="summary-spacer"></div>
+              {#if dnfStore.upgradeSummary.errors.length > 0}
+                <button
+                  type="button"
+                  class="summary-filter"
+                  class:active={showFailedOnly}
+                  onclick={() => (showFailedOnly = !showFailedOnly)}
+                >
+                  {showFailedOnly ? 'Show full log' : `Show failed only (${dnfStore.upgradeSummary.errors.length})`}
+                </button>
+              {/if}
+            </div>
+          {/if}
+
           <!-- Non-scrollable terminal: always shows last 40 lines -->
           <div class="upgrade-terminal">
-            {terminalLines()}
+            {#if showFailedOnly && (dnfStore.upgradeSummary?.errors.length ?? 0) > 0}
+              {#each dnfStore.upgradeSummary?.errors ?? [] as line}
+                <div class="error-line">{line}</div>
+              {/each}
+            {:else}
+              {terminalLines()}
+            {/if}
           </div>
 
           <!-- Post-upgrade: full scrollable log -->
@@ -561,22 +776,43 @@
                 </tr>
               </thead>
               <tbody>
-                {#each updates as pkg}
-                  <tr onclick={() => toggleUpdateSelection(pkg.package)} style="cursor:pointer;" class:row-selected={selectedUpdates.has(pkg.package)}>
+                {#each visibleUpdates as pkg}
+                  <tr onclick={() => toggleUpdateSelection(updateKey(pkg))} style="cursor:pointer;" class:row-selected={selectedUpdates.has(updateKey(pkg))}>
                     <td style="text-align:center;" onclick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
-                        checked={selectedUpdates.has(pkg.package)}
-                        onchange={() => toggleUpdateSelection(pkg.package)}
+                        checked={selectedUpdates.has(updateKey(pkg))}
+                        onchange={() => toggleUpdateSelection(updateKey(pkg))}
                       />
                     </td>
-                    <td style="font-weight:500;">{pkg.package}</td>
-                    <td style="font-family:var(--font-mono); font-size:12px;">{pkg.version}</td>
-                    <td style="font-size:12px; font-weight:500;">{pkg.size}</td>
+                    <td style="font-weight:500;">
+                      <span title={updateTooltip(pkg)}>{pkg.package}</span>
+                      {#if dnfStore.advisoriesFor(pkg.package, pkg.arch, pkg.version).length > 0}
+                        {@const advisory = dnfStore.advisoriesFor(pkg.package, pkg.arch, pkg.version)[0]}
+                        <span
+                          class="badge {advisory.kind === 'security' ? 'badge-error' : 'badge-muted'}"
+                          title={advisory.id + (advisory.severity ? ` (${advisory.severity})` : '')}
+                        >
+                          <ShieldAlert size={10} />
+                          {advisory.kind === 'security' ? 'Security' : advisory.kind}
+                        </span>
+                      {/if}
+                    </td>
+                    <td style="font-family:var(--font-mono); font-size:12px; white-space:nowrap;">{pkg.version}</td>
+                    <td style="font-size:12px; font-weight:500; white-space:nowrap;">{pkg.size}</td>
                     <td style="color:var(--color-text-secondary);">{pkg.arch}</td>
                     <td><span class="badge badge-muted">{pkg.repo}</span></td>
                   </tr>
                 {/each}
+                {#if hiddenUpdateCount > 0}
+                  <tr>
+                    <td colspan="6" style="text-align:center; padding: 12px;">
+                      <Button variant="outline" size="sm" onclick={() => visibleUpdateCount += UPDATE_PAGE_SIZE}>
+                        Show {Math.min(hiddenUpdateCount, UPDATE_PAGE_SIZE)} more ({hiddenUpdateCount} hidden)
+                      </Button>
+                    </td>
+                  </tr>
+                {/if}
               </tbody>
             </Table>
           {/if}
@@ -622,7 +858,7 @@
                     <Calendar size={12} /> {formatToLocalDate(entry.date)}
                   </div>
                 </td>
-                <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Unknown'}</span></td>
+                <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Transaction'}</span></td>
                 <td style="text-align:right; font-weight:500;">{entry.altered}</td>
                 <td style="text-align:right">
                   <KebabMenu>
@@ -813,6 +1049,182 @@
 <DnfDryRunModal onConfirm={() => selectedUpdates.clear()} />
 
 <style>
+  /* ── Update filters ──────────────────────────────────────────────────── */
+  .update-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 0 10px;
+    flex-shrink: 0;
+  }
+
+  /* The select defaults to width:100% — in the filter row it has to keep its
+     own width, otherwise it takes the whole row and pushes the other filters
+     onto separate lines. */
+  .update-filters :global(.ui-select-container) {
+    width: 170px;
+    flex: 0 0 auto;
+  }
+
+  .update-filters :global(.search-bar-container) {
+    flex: 0 1 260px;
+    min-width: 170px;
+  }
+
+  .filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-input, rgba(255, 255, 255, 0.03));
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .filter-toggle:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+
+  .filter-toggle.active {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .filter-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  }
+
+  .repo-chips {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .repo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .repo-chip:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+
+  .repo-chip.active {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
+  .repo-chip-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+
+  .repo-chip.active .repo-chip-count {
+    color: var(--color-accent);
+  }
+
+  .selection-summary {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  /* ── Transaction summary ─────────────────────────────────────────────── */
+  .upgrade-summary {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 10px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-bg-card);
+    flex-shrink: 0;
+  }
+
+  .summary-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .summary-value {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }
+
+  .summary-item.has-errors .summary-value {
+    color: var(--color-error);
+  }
+
+  .summary-label {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .summary-spacer {
+    flex: 1;
+  }
+
+  .summary-filter {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+
+  .summary-filter:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+
+  .summary-filter.active {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+  }
+
+  .error-line {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-error);
+    white-space: pre-wrap;
+  }
+
   /* ── Pagination Bar ─────────────────────────────────────────────────── */
   .pagination-bar {
     display: flex;

@@ -1,3 +1,4 @@
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 use std::sync::Mutex;
@@ -1325,26 +1326,26 @@ pub async fn security_fix_ssh_param(param: String, value: String, revert_value: 
 
     let config_file = "/etc/ssh/sshd_config";
     // If the key exists (commented or not), replace it. Otherwise append.
-    let script = format!(
+    let script = String::from(
         r#"set -eu
-cfg={cfg}
+cfg="$1"
 backup="${{cfg}}.control-panel.bak"
 test -f "$cfg"
 cp -p "$cfg" "$backup"
-if grep -qiE '^#?{param}[[:space:]]' "$cfg"; then
-    sed -i "s|^#\\?{param}.*|{param} {val}|gI" "$cfg"
+if grep -qiE "^#?$2[[:space:]]" "$cfg"; then
+    sed -i "s|^#\\?$2.*|$2 $3|gI" "$cfg"
 else
-    printf '%s %s\n' '{param}' '{val}' >> "$cfg"
+    printf '%s %s\n' "$2" "$3" >> "$cfg"
 fi
 if ! sshd -t -f "$cfg"; then
     cp -p "$backup" "$cfg"
     exit 1
 fi
-effective=$(sshd -T | grep -i -m1 '^{param}[[:space:]]' | sed -E 's/^[^[:space:]]+[[:space:]]+//' || true)
-if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "{val}s" ]; then effective="{val}"; fi
-if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "1m" ] && [ "{val}" = "60" ]; then effective=60; fi
-if [ "{param}" = "LoginGraceTime" ] && [ "$effective" = "2m" ] && [ "{val}" = "120" ]; then effective=120; fi
-if [ "$effective" != "{val}" ]; then
+effective=$(sshd -T | grep -i -m1 "^$2[[:space:]]" | sed -E 's/^[^[:space:]]+[[:space:]]+//' || true)
+if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "$3s" ]; then effective="$3"; fi
+if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "1m" ] && [ "$3" = "60" ]; then effective=60; fi
+if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "2m" ] && [ "$3" = "120" ]; then effective=120; fi
+if [ "$effective" != "$3" ]; then
     cp -p "$backup" "$cfg"
     echo 'The requested SSH setting is overridden by another configuration file; no change was kept.' >&2
     exit 1
@@ -1355,14 +1356,16 @@ elif systemctl is-active --quiet ssh; then
     if ! systemctl reload ssh; then cp -p "$backup" "$cfg"; exit 1; fi
 fi
 "#,
-        param = param,
-        val = target_value,
-        cfg = config_file
     );
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .output().await.map_err(|e| e.to_string())?;
+    // The parameter, the value and the file are passed as positional
+    // parameters — they are never interpolated into the script.
+    let out = privileged::run_privileged_script_with_args(
+        &script,
+        &[config_file.to_string(), param.to_string(), target_value.to_string()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     if out.status.success() {
         Ok(format!("SSH {} set to '{}'.", param, target_value))
@@ -1398,23 +1401,25 @@ pub async fn security_fix_kernel_param(key: String, value: String, revert_value:
     //   4. Writes the file BEFORE running sysctl -w, so on any failure the live value
     //      is not changed either.
     //   5. Verifies the write with `sysctl -p` (reloads from the file).
-    let script = format!(
+    let script = String::from(
         "set -e\n\
          mkdir -p /etc/sysctl.d\n\
          TMP=$(mktemp /tmp/sysctl_harden_XXXXXX)\n\
          trap 'rm -f \"$TMP\"' EXIT\n\
-         if [ -f '{cfg}' ]; then grep -v '^{key}' '{cfg}' > \"$TMP\" 2>/dev/null || true; fi\n\
-         printf '%s = %s\\n' '{key}' '{val}' >> \"$TMP\"\n\
-         install -m 0644 -o root -g root \"$TMP\" '{cfg}'\n\
-         sysctl -w '{key}={val}'\n\
-         sysctl -p '{cfg}'",
-        key = key, val = target, cfg = conf_file
+         if [ -f \"$1\" ]; then grep -v \"^$2\" \"$1\" > \"$TMP\" 2>/dev/null || true; fi\n\
+         printf '%s = %s\\n' \"$2\" \"$3\" >> \"$TMP\"\n\
+         install -m 0644 -o root -g root \"$TMP\" \"$1\"\n\
+         sysctl -w \"$2=$3\"\n\
+         sysctl -p \"$1\"",
     );
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .stderr(std::process::Stdio::piped())
-        .output().await.map_err(|e| e.to_string())?;
+    // The file, the key and the value are passed as positional parameters.
+    let out = privileged::run_privileged_script_with_args(
+        &script,
+        &[conf_file.to_string(), key.to_string(), target.to_string()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     if out.status.success() {
         if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
@@ -1439,14 +1444,20 @@ pub async fn security_fix_kernel_param(key: String, value: String, revert_value:
 pub async fn security_fix_firewall() -> Result<String, String> {
     let has_firewalld = crate::binary_exists("firewall-cmd").await;
     if has_firewalld {
-        let out = Command::new("pkexec").args(["bash", "-c", "set -e; systemctl enable --now firewalld; firewall-cmd --state; firewall-cmd --set-default-zone=drop; firewall-cmd --state"])
-            .output().await.map_err(|e| e.to_string())?;
+        let out = privileged::run_privileged_script(
+            "set -e; systemctl enable --now firewalld; firewall-cmd --state; firewall-cmd --set-default-zone=drop; firewall-cmd --state",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         if out.status.success() { return Ok("Firewalld enabled with default drop zone.".to_string()); }
     }
     let has_ufw = crate::binary_exists("ufw").await;
     if has_ufw {
-        let out = Command::new("pkexec").args(["bash", "-c", "set -e; ufw --force enable; ufw default deny incoming; ufw status | grep -q 'Status: active'"])
-            .output().await.map_err(|e| e.to_string())?;
+        let out = privileged::run_privileged_script(
+            "set -e; ufw --force enable; ufw default deny incoming; ufw status | grep -q 'Status: active'",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         if out.status.success() { return Ok("UFW enabled with default deny incoming.".to_string()); }
     }
     Err("Neither firewalld nor ufw could be configured.".to_string())
@@ -1469,8 +1480,7 @@ mv -f "$tmp" "$cfg"
 grep -Eq '^[[:space:]]*PASS_MAX_DAYS[[:space:]]+90([[:space:]]|$)' "$cfg"
 grep -Eq '^[[:space:]]*PASS_MIN_LEN[[:space:]]+12([[:space:]]|$)' "$cfg"
 trap - EXIT"#;
-    let out = Command::new("pkexec").args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok("Password policy: PASS_MAX_DAYS=90, PASS_MIN_LEN=12 applied.".to_string())
     } else {
@@ -1487,8 +1497,7 @@ pub async fn security_fix_selinux(enable: bool) -> Result<String, String> {
         "sed -i 's/^SELINUX=.*/SELINUX=permissive/g' /etc/selinux/config"
     };
 
-    let out = Command::new("pkexec").args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         if enable {
@@ -1561,10 +1570,7 @@ pub async fn security_fix_tmp_sticky(enable: bool) -> Result<String, String> {
          rm -f /etc/tmpfiles.d/tmp-sticky.conf"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .stderr(std::process::Stdio::piped())
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         if enable {
@@ -1648,9 +1654,7 @@ pub async fn security_log_fix(
 /// Fix /etc/passwd permissions.
 #[tauri::command]
 pub async fn security_fix_passwd_perms() -> Result<String, String> {
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", "chmod 644 /etc/passwd && chown root:root /etc/passwd"])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script("chmod 644 /etc/passwd && chown root:root /etc/passwd").await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok("/etc/passwd permissions set to 644, owner root:root.".to_string())
     } else {
@@ -1661,9 +1665,7 @@ pub async fn security_fix_passwd_perms() -> Result<String, String> {
 /// Fix /etc/shadow permissions.
 #[tauri::command]
 pub async fn security_fix_shadow_perms() -> Result<String, String> {
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", "chmod 000 /etc/shadow && chown root:root /etc/shadow"])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script("chmod 000 /etc/shadow && chown root:root /etc/shadow").await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok("/etc/shadow permissions set to 000, owner root:root.".to_string())
     } else {
@@ -1708,9 +1710,7 @@ if [ "${#users[@]}" -eq 0 ]; then
 fi
 for username in "${users[@]}"; do passwd -l -- "$username"; done"#;
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script, "--", &username])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script_with_args(script, &[username.clone()]).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
@@ -1733,9 +1733,7 @@ pub async fn security_fix_pam_faillock(enable: bool) -> Result<String, String> {
         "rm -f /etc/security/faillock.conf.d/50-hardening.conf"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
@@ -1758,9 +1756,7 @@ pub async fn security_fix_umask(enable: bool) -> Result<String, String> {
         "sed -i 's/^\\s*UMASK.*/UMASK 022/g' /etc/login.defs"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
@@ -1788,9 +1784,7 @@ pub async fn security_fix_ssh_idle_timeout(enable: bool) -> Result<String, Strin
          systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
@@ -1815,9 +1809,7 @@ pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, S
         "rm -f /etc/modprobe.d/disable-unused-fs.conf"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();
@@ -1864,9 +1856,7 @@ pub async fn security_fix_legal_banner(enable: bool) -> Result<String, String> {
          systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
     };
 
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
+    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
 
     if out.status.success() {
         invalidate_audit_cache();

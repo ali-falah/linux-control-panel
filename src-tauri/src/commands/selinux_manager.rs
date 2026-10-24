@@ -1,3 +1,4 @@
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 
@@ -126,7 +127,7 @@ pub async fn set_selinux_state(mode: String) -> Result<String, String> {
     }
 
     let setenforce_value = if mode_lower == "enforcing" { "1" } else { "0" };
-    let script = format!(
+    let script = String::from(
         r#"set -eu
 config=/etc/selinux/config
 backup=/etc/selinux/config.bak
@@ -135,23 +136,26 @@ test ! -L "$backup" || {{ echo 'SELinux backup path is a symbolic link; refusing
 tmp=$(mktemp /etc/selinux/config.XXXXXX)
 trap 'rm -f "$tmp"' EXIT
 cp -p "$config" "$tmp"
-sed -i 's/^SELINUX=.*/SELINUX={mode_lower}/' "$tmp"
+sed -i "s/^SELINUX=.*/SELINUX=$1/" "$tmp"
 count=$(grep -c '^SELINUX=' "$tmp" || true)
-test "$count" -eq 1 && grep -q '^SELINUX={mode_lower}$' "$tmp" || {{ echo 'SELINUX setting could not be safely updated.' >&2; exit 1; }}
+test "$count" -eq 1 && grep -q "^SELINUX=$1$" "$tmp" || {{ echo 'SELINUX setting could not be safely updated.' >&2; exit 1; }}
 cp -p "$config" "$backup"
 mv -f "$tmp" "$config"
-if ! /usr/sbin/setenforce {setenforce_value}; then
+if ! /usr/sbin/setenforce "$2"; then
     cp -p "$backup" "$config"
     echo 'Runtime mode change failed; persistent configuration was restored.' >&2
     exit 1
 fi
 trap - EXIT"#
     );
-    let output = Command::new("pkexec")
-        .args(["/bin/bash", "-c", &script])
-        .output()
-        .await
-        .map_err(|e| format!("Could not request authorization to change SELinux mode: {e}"))?;
+    // The mode is passed as a positional parameter — it is never interpolated
+    // into the script itself.
+    let output = privileged::run_privileged_script_with_args(
+        &script,
+        &[mode_lower.to_string(), setenforce_value.to_string()],
+    )
+    .await
+    .map_err(|e| format!("Could not request authorization to change SELinux mode: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

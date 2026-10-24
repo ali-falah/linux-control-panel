@@ -1,3 +1,4 @@
+use crate::utils::privilege::ensure_safe_operand;
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 use crate::{binary_exists, log_to_file};
@@ -570,6 +571,9 @@ pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<
         );
 
         if needs_elevation {
+            // The unit name is an operand of systemctl — a name that starts
+            // with a dash would be read as an option.
+            ensure_safe_operand(&name, "service name")?;
             Command::new("pkexec")
                 .args(["systemctl", &action_str, &name])
                 .output()

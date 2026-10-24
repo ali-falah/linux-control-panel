@@ -102,6 +102,12 @@
             <p class="drawer-subtitle">
               {#if dnfStore.isUpgrading}
                 Upgrading {dnfStore.packagesBeingUpgraded.length} selected packages in background
+                {#if dnfStore.upgradeSizes.total}
+                  · {dnfStore.upgradeSizes.total} total
+                  {#if dnfStore.upgradeSizes.download && dnfStore.upgradeSizes.download !== dnfStore.upgradeSizes.total}
+                    · {dnfStore.upgradeSizes.download} to download
+                  {/if}
+                {/if}
               {:else}
                 Background transaction output stream
               {/if}

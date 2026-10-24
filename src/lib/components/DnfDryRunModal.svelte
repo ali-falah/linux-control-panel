@@ -156,7 +156,14 @@
 
             <div class="kpi-card">
               <div class="kpi-label">Total Download Size</div>
-              <div class="kpi-val">{dnfStore.dryRunResult.total_download_size}</div>
+              <div class="kpi-val">
+                {dnfStore.dryRunResult.total_inbound_size || dnfStore.dryRunResult.total_download_size || '—'}
+              </div>
+              {#if dnfStore.dryRunResult.total_inbound_size && dnfStore.dryRunResult.total_download_size && dnfStore.dryRunResult.total_inbound_size !== dnfStore.dryRunResult.total_download_size}
+                <div class="kpi-hint">
+                  {dnfStore.dryRunResult.total_download_size} left to download — the rest is already cached
+                </div>
+              {/if}
             </div>
           </div>
 
@@ -628,6 +635,12 @@
     font-weight: 700;
     font-family: var(--font-mono);
     line-height: 1.2;
+  }
+  .kpi-hint {
+    margin-top: 3px;
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--color-text-muted);
   }
 
   .danger-warning-banner {

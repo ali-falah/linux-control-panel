@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod copr_browser;
 pub mod cron_manager;
 pub mod dnf_history;

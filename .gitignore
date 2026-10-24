@@ -42,3 +42,6 @@ yarn-error.log*
 # ─── OS Artifacts ────────────────────────────────────────────────────
 .DS_Store
 desktop.ini
+# the privileged helper sidecar is built by scripts/build-sidecar.mjs
+src-tauri/binaries/
+src-tauri/helper/target/

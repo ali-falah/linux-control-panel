@@ -60,6 +60,9 @@
       "appimage": {
         "bundleMediaFramework": true
       }
-    }
+    },
+    "externalBin": [
+      "binaries/lcp-admin"
+    ]
   }
 }

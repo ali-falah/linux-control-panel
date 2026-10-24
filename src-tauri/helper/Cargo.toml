@@ -1,0 +1,24 @@
+# The privileged helper of the Control Panel.
+#
+# It is a standalone crate on purpose: the helper has to be built *before* the
+# application is bundled (the Tauri build script checks that the sidecar
+# exists), and it must not drag in the whole Tauri application.
+[package]
+name = "lcp-admin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "lcp-admin"
+path = "src/main.rs"
+
+# Keep it out of the parent workspace.
+[workspace]
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

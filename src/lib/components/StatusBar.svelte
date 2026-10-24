@@ -1,6 +1,46 @@
 <script lang="ts">
   import { CheckCircle2, XCircle, Loader, Terminal, Wifi, Network, Copy, ExternalLink, Search } from '@lucide/svelte';
   import { statusStore } from '../stores/status.svelte.ts';
+  import { refreshAdminAuthState } from '../stores/dnfStore.svelte.ts';
+  import { ShieldCheck } from '@lucide/svelte';
+
+  // The badge shows the remaining lifetime of the administrator
+  // authorisation, so the clock ticks once a second while it is visible.
+  let tick = $state(0);
+  $effect(() => {
+    if (!statusStore.hasAdminRights) return;
+    const timer = setInterval(() => { tick += 1; }, 1000);
+    return () => clearInterval(timer);
+  });
+
+  const adminRemaining = $derived.by(() => {
+    tick; // re-evaluate once per second
+    return statusStore.adminRightsRemaining;
+  });
+
+  // The authorisation state lives in the backend, so it is refreshed while
+  // the window is visible — the badge then appears right after any
+  // administrator action.
+  $effect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled || document.hidden) return;
+      await refreshAdminAuthState();
+    };
+    void poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  });
+
+  const adminRemainingLabel = $derived.by(() => {
+    if (adminRemaining === null) return '';
+    const minutes = Math.floor(adminRemaining / 60);
+    const seconds = adminRemaining % 60;
+    return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
+  });
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
 
@@ -135,6 +175,15 @@
 
   <!-- RIGHT: Application status -->
   <div class="status-right">
+    {#if adminRemaining !== null}
+      <span
+        class="pill pill-admin"
+        title="Administrator rights are active. PolicyKit keeps the authorisation for {statusStore.adminAuth.lifetimeSecs} seconds, so further privileged actions do not ask again."
+      >
+        <ShieldCheck size={11} />
+        Admin rights · {adminRemainingLabel}
+      </span>
+    {/if}
     {#if statusStore.lastEntry}
       <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}" title="Process Exit Code">
         {#if statusStore.lastEntry.success}
@@ -149,7 +198,21 @@
   </div>
 </footer>
 
-<style>.status-bar {
+<style>
+  .pill-admin {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+    white-space: nowrap;
+  }
+  .status-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;

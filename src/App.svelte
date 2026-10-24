@@ -3,6 +3,7 @@
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
+  import AdminPasswordDialog from './lib/components/AdminPasswordDialog.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
 
   import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
@@ -11,7 +12,7 @@
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
-  import { dnfStore } from './lib/stores/dnfStore.svelte.ts';
+  import { dnfStore, refreshAdminAuthState } from './lib/stores/dnfStore.svelte.ts';
 
   onMount(() => {
     uiStore.initTheme();
@@ -20,6 +21,7 @@
     uiStore.initSearchHistory();
     uiStore.initVisibilityListener();
     dnfStore.initGlobalListeners();
+    void refreshAdminAuthState();
     dnfStore.checkLockStatus();
 
     function handleGlobalKeyDown(e: KeyboardEvent) {
@@ -278,6 +280,7 @@
 
 <ToastContainer />
 <ConfirmDialog />
+<AdminPasswordDialog />
 <SettingsModal />
 <DnfGlobalUpgradeWidget />
 <AiUniversalModal />
