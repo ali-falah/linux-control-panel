@@ -14,7 +14,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::utils::privilege::{is_auth_failure, run_privileged_script_with_args, verify_trusted_binary};
+use crate::utils::privilege::{
+    is_auth_failure, resolve_root_program, run_privileged_output, run_privileged_with_stdin,
+    verify_trusted_binary, RootAuth,
+};
 
 /// Where the root owned helper is installed when the app sets it up itself.
 pub const HELPER_PATH: &str = "/usr/local/libexec/lcp-admin";
@@ -22,27 +25,14 @@ pub const HELPER_PATH: &str = "/usr/local/libexec/lcp-admin";
 /// Where the helper lives when it was installed as part of the package.
 pub const PACKAGED_HELPER_PATH: &str = "/usr/bin/lcp-admin";
 
-/// Where the PolicyKit rule is installed.
-pub const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/50-linux-control-panel.rules";
+/// Where the PolicyKit rule is installed. The single source of truth for the
+/// path and the rule text is `root_policy.rs` — the helper carries the same
+/// constants and refuses to write anything that does not match byte for byte.
+pub const POLKIT_RULE_PATH: &str = crate::utils::root_policy::POLKIT_RULE_FILE;
 
-/// The PolicyKit rule: the helper may be run as root for an *active* local
-/// session, and the authorisation is kept for the default five minutes
-/// (`auth_admin_keep`) instead of asking for a password every time.
-const POLKIT_RULE: &str = r#"// Installed by the Linux Control Panel.
-// Grants the root owned helper (and only the helper) the right to run with
-// administrator rights. The authorisation is kept for the default
-// timestamp_timeout (5 minutes), so a multi step action asks only once.
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.policykit.exec" &&
-        subject.active && subject.local &&
-        subject.isInGroup("wheel")) {
-        var key = action.lookup("program");
-        if (key == "/usr/local/libexec/lcp-admin") {
-            return polkit.Result.AUTH_ADMIN_KEEP;
-        }
-    }
-});
-"#;
+/// The PolicyKit rule the bootstrap installs; the helper's
+/// `install_polkit_rule` action verifies the content against this constant.
+use crate::utils::root_policy::POLKIT_RULE_TEXT as POLKIT_RULE;
 
 /// Is the helper installed and trustworthy (root owned, not writable by others)?
 ///
@@ -105,40 +95,87 @@ pub async fn admin_install_helper() -> Result<bool, String> {
             .to_string()
     })?;
 
-    // The rule is passed base64 encoded so that nothing needs to be escaped.
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    let encoded_rule = BASE64.encode(POLKIT_RULE.as_bytes());
+    // The copy must start out trustworthy: root owned and not user writable.
+    // The helper-side `install` template re-checks this, and a dev-built
+    // helper in `target/` is refused here with a way out.
+    if let Err(reason) = verify_trusted_binary(&source.to_string_lossy()) {
+        return Err(format!(
+            "The helper binary is not trusted as an installation source: {reason}. \
+             In a development checkout the build is yours, not root's — install \
+             it manually with: sudo install -m 0755 -o root -g root \
+             '{src}' /usr/local/libexec/lcp-admin",
+            src = source.to_string_lossy()
+        ));
+    }
 
-    // A fixed script of the app — the paths are passed as positional
-    // parameters, they are never interpolated into the script.
-    let script = r#"set -eu
-install -d -m 0755 -o root -g root /usr/local/libexec
-install -d -m 0755 -o root -g root /etc/polkit-1/rules.d
-install -m 0755 -o root -g root "$1" /usr/local/libexec/lcp-admin
-printf '%s' "$2" | base64 -d > /etc/polkit-1/rules.d/50-linux-control-panel.rules.tmp
-chown root:root /etc/polkit-1/rules.d/50-linux-control-panel.rules.tmp
-chmod 0644 /etc/polkit-1/rules.d/50-linux-control-panel.rules.tmp
-mv -f /etc/polkit-1/rules.d/50-linux-control-panel.rules.tmp /etc/polkit-1/rules.d/50-linux-control-panel.rules
-"#;
+    let source_path = source.to_string_lossy().to_string();
+    let auth = RootAuth::Polkit;
 
-    let output = run_privileged_script_with_args(
-        script,
-        &[
-            source.to_string_lossy().to_string(),
-            encoded_rule,
-        ],
-    )
-    .await
-    .map_err(|e| format!("Could not install the administrator helper: {e}"))?;
-
+    // 1. The target directories exist (both are trusted, fixed paths).
+    let directories: [String; 2] = [
+        "/usr/local/libexec".to_string(),
+        "/etc/polkit-1/rules.d".to_string(),
+    ];
+    let mkdir_args: Vec<String> = std::iter::once("-p".to_string())
+        .chain(directories.into_iter())
+        .collect();
+    let program = resolve_root_program("mkdir").ok_or_else(|| {
+        "mkdir was not found — this is not a Fedora system the panel supports.".to_string()
+    })?;
+    let output = run_privileged_output(&program, &mkdir_args, &auth)
+        .await
+        .map_err(|e| format!("Could not prepare the helper directories: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if is_auth_failure(&stderr, "") {
             return Err(
-                "Administrator authentication was cancelled — the helper was not installed.".to_string(),
+                "Administrator authentication was cancelled — the helper was not installed."
+                    .to_string(),
+            );
+        }
+        return Err(format!("Could not prepare the helper directories: {stderr}"));
+    }
+
+    // 2. The helper itself, from the verified source, with the one fixed
+    //    template the helper accepts (see check_install in root_policy.rs).
+    let install_args: Vec<String> = [
+        "-m", "0755", "-o", "root", "-g", "root", &source_path, HELPER_PATH,
+    ]
+    .iter()
+    .map(|part| part.to_string())
+    .collect();
+    let program = resolve_root_program("install").ok_or_else(|| {
+        "install was not found — this is not a Fedora system the panel supports.".to_string()
+    })?;
+    let output = run_privileged_output(&program, &install_args, &auth)
+        .await
+        .map_err(|e| format!("Could not install the administrator helper: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if is_auth_failure(&stderr, "") {
+            return Err(
+                "Administrator authentication was cancelled — the helper was not installed."
+                    .to_string(),
             );
         }
         return Err(format!("Could not install the administrator helper: {stderr}"));
+    }
+
+    // 3. The PolicyKit rule, through the helper's own action: the content
+    //    travels on stdin and only gets written when it matches the rule the
+    //    helper knows byte for byte.
+    let output = run_privileged_with_stdin(HELPER_PATH, &["install_polkit_rule".to_string()], &auth, POLKIT_RULE)
+        .await
+        .map_err(|e| format!("Could not install the PolicyKit rule: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if is_auth_failure(&stderr, "") {
+            return Err(
+                "Administrator authentication was cancelled — the rule was not installed."
+                    .to_string(),
+            );
+        }
+        return Err(format!("Could not install the PolicyKit rule: {stderr}"));
     }
 
     Ok(helper_is_installed())

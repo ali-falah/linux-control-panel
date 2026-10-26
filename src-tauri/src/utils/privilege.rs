@@ -17,8 +17,9 @@ use std::process::{Child, Output, Stdio};
 //    validated argument vector.
 
 pub use crate::utils::root_policy::{
-    ensure_no_shell_escape, ensure_program_allowed, ensure_repo_file_path, ensure_safe_arguments,
-    ensure_safe_operand, resolve_root_program, verify_trusted_binary, ALLOWED_ROOT_PROGRAMS,
+    ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
+    ensure_repo_file_path, ensure_safe_arguments, ensure_safe_operand, resolve_root_program,
+    verify_trusted_binary, ALLOWED_ROOT_PROGRAMS,
 };
 
 /// When the last privileged call succeeded — PolicyKit keeps the
@@ -90,6 +91,8 @@ pub fn build_privileged_command(
     ensure_no_shell_escape(program, args)?;
     ensure_safe_arguments(args)?;
     verify_trusted_binary(program)?;
+    // NOTE: the per-program argument policy is enforced inside
+    // `privileged_argv` (the single place the final argv is built).
 
     let argv = privileged_argv(program, args, auth)?;
     let mut cmd = std::process::Command::new(&argv[0]);
@@ -114,6 +117,8 @@ pub fn privileged_argv(
     ensure_program_allowed(program)?;
     ensure_no_shell_escape(program, args)?;
     ensure_safe_arguments(args)?;
+    // the per-program argument policy: same rules the helper enforces
+    ensure_arguments_for_program(program, args)?;
     verify_trusted_binary(program)?;
 
     let mut argv: Vec<String> = Vec::new();
@@ -125,6 +130,16 @@ pub fn privileged_argv(
             // pkexec itself is addressed by its absolute path as well, so the
             // call does not depend on the PATH of the desktop session.
             argv.push(pkexec_path());
+            if program.ends_with("/lcp-admin") {
+                // named action on the helper itself: the helper is the pkexec
+                // target, so there is no program argument — the action and its
+                // parameters follow directly (their policy is
+                // `ensure_arguments_for_program`'s check_helper_action).
+                return Ok(vec![pkexec_path(), program.to_string()]
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect());
+            }
             // When the root owned helper is installed the request goes through
             // it. PolicyKit then only ever authorises the helper — a cached
             // authorisation can not be used to run dnf, systemctl or a shell
@@ -653,7 +668,32 @@ mod tests {
         assert!(ensure_program_allowed("/usr/bin/systemctl").is_ok());
         // the frontend can never pick an arbitrary program
         assert!(ensure_program_allowed("/usr/bin/curl").is_err());
-        assert!(ensure_program_allowed("/bin/sh").is_ok());
+        // shells (and the other migrated call types) are refused even when
+        // known — until their named actions exist
+        assert!(ensure_program_allowed("/bin/sh").is_err());
+    }
+
+    #[test]
+    fn call_types_pending_migration_are_refused_with_a_migration_message() {
+        for name in [
+            "bash", "sh", "stdbuf", "awk", "gawk", "find", "sed", "tee", "cp", "mv", "rm",
+            "chmod", "chown", "visudo", "ln", "link", "touch", "mktemp", "gzip",
+            "x509", "crontab", "chpasswd", "passwd", "gpasswd", "usermod",
+        ] {
+            let error = ensure_program_allowed(&format!("/usr/bin/{name}"))
+                .expect_err("the call type must be refused");
+            assert!(
+                error.contains("temporarily disabled"),
+                "the refusal must say the call type is pending migration: {error}"
+            );
+        }
+        // pure readers and services are untouched
+        assert!(ensure_program_allowed("/usr/bin/cat").is_ok());
+        assert!(ensure_program_allowed("/usr/bin/systemctl").is_ok());
+        assert!(ensure_program_allowed("/usr/bin/useradd").is_ok());
+        // `install` left the migration list again — but only its strict
+        // bootstrap template is allowed (tested in root_policy.rs)
+        assert!(ensure_program_allowed("/usr/bin/install").is_ok());
     }
 
     #[test]
