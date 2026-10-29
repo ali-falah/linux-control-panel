@@ -19,6 +19,7 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { highlightSegments } from '../utils/highlight.ts';
 
   // raw state: a large journal page is replaced wholesale, never mutated in
   // place — deep reactivity would proxy every one of the 20k entries
@@ -627,16 +628,10 @@
     return 'log-debug';
   }
 
-  function escapeRegex(s: string) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  function highlight(text: string, q: string): string {
-    if (!q || !text) return text || '';
-    try {
-      return text.replace(new RegExp(`(${escapeRegex(q)})`, 'gi'), '<mark class="hl">$1</mark>');
-    } catch { return text; }
-  }
+  // Highlight rendering: journal content is UNTRUSTED, so it is never put
+  // through `{@html}`. The `mark` snippet renders plain, framework-escaped
+  // text nodes and wraps literal query matches (case-insensitive) with
+  // `<mark class="hl">`. See src/lib/utils/highlight.ts.
 
   interface LogItem {
     PRIORITY: string | number;
@@ -880,6 +875,9 @@
 </script>
 
 <div class="module-page">
+  {#snippet mark(text: string)}
+    {#each highlightSegments(text, searchQuery) as seg, i (i)}{#if seg.hit}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+  {/snippet}
   <PageHeader title="Journal Logs" icon={FileText}>
     <!-- Single unified toolbar strip -->
     <div class="log-toolbar">
@@ -1103,10 +1101,10 @@
                 <tr class="log-row {getPriorityClass(log.PRIORITY)}" onclick={() => openLogDrawer(log)} style="cursor: pointer;">
                   <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
                   <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    {@html highlight(unit, searchQuery)}
+                    {@render mark(unit)}
                   </td>
                   <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
-                    {@html highlight(log.MESSAGE, searchQuery)}
+                    {@render mark(log.MESSAGE)}
                     {#if (log.count ?? 1) > 1}
                       <span class="repeat-badge">×{log.count}</span>
                     {/if}
@@ -1221,15 +1219,15 @@
                 <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
                   <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
                   <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
-                    {@html highlight(ev.user, searchQuery)}
+                    {@render mark(ev.user)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.event_type.includes('SSH') ? 'info' : (ev.event_type.includes('Sudo') ? 'warning' : 'muted')} style="font-size: 10px;">
-                      {@html highlight(ev.event_type, searchQuery)}
+                      {@render mark(ev.event_type)}
                     </Badge>
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary);">
-                    {@html highlight(ev.source_ip, searchQuery)}
+                    {@render mark(ev.source_ip)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
@@ -1237,7 +1235,7 @@
                     </Badge>
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.details}>
-                    {@html highlight(ev.details, searchQuery)}
+                    {@render mark(ev.details)}
                   </td>
                 </tr>
               {/each}
@@ -1324,13 +1322,13 @@
                 <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
                   <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
                   <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
-                    {@html highlight(ev.user, searchQuery)}
+                    {@render mark(ev.user)}
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-accent); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.command}>
-                    {@html highlight(ev.command, searchQuery)}
+                    {@render mark(ev.command)}
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.cwd}>
-                    {@html highlight(ev.cwd, searchQuery)}
+                    {@render mark(ev.cwd)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
@@ -1436,7 +1434,7 @@
                   <div style="display:flex; align-items:center; gap:8px;">
                     <ShieldAlert size={16} color={threat.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)'} />
                     <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: var(--color-text-primary);">
-                      {@html highlight(threat.title, searchQuery)}
+                      {@render mark(threat.title)}
                     </h3>
                     <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="font-size: 9px; text-transform: uppercase;">
                       {threat.severity}
@@ -1444,7 +1442,7 @@
                     <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">{threat.timestamp}</span>
                   </div>
                   <p style="font-size: 12px; color: var(--color-text-secondary); margin: 4px 0 0 0; line-height: 1.5;">
-                    {@html highlight(threat.description, searchQuery)}
+                    {@render mark(threat.description)}
                   </p>
                   <div style="margin-top: 8px;">
                     <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: rgba(255,255,255,0.05); color: var(--color-text-muted);">

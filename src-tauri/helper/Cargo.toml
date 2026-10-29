@@ -9,6 +9,22 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[dependencies]
+# Descriptor-relative filesystem calls (openat, fchmod, fchown, renameat,
+# statat) for the named actions — so a rename or symlink an attacker plants
+# inside a user-owned directory can never redirect a later step to a
+# different inode. Kernel-syscall backend, no libc dependency.
+# `process` provides getuid/getgid for the compile-time test-fixture builds
+# (their fixture directories are owned by the test user instead of root).
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process"] }
+
+[features]
+# Compile-time test fixture for the named-action dispatch tests. Redirects
+# the helper's privileged destination constants to /tmp fixtures — debug
+# builds only (opt-in via `cargo test --features test-fixture`), and
+# refused outright in release builds by a compile_error!.
+test-fixture = []
+
 [[bin]]
 name = "lcp-admin"
 path = "src/main.rs"

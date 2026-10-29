@@ -17,84 +17,21 @@ pub struct ServiceUnit {
 }
 
 pub fn get_service_protection(unit_name: &str) -> (bool, String, Option<String>) {
-    let clean_name = unit_name.to_lowercase();
-    let base_name = clean_name.strip_suffix(".service").unwrap_or(&clean_name);
-
-    // 1. Critical Core System Services (Immortal: Cannot Stop, Disable, or Mask)
-    let critical_services = [
-        "dbus",
-        "dbus-broker",
-        "polkit",
-        "systemd-journald",
-        "systemd-logind",
-        "systemd-udevd",
-        "systemd-sysctl",
-        "systemd-remount-fs",
-        "systemd-tmpfiles-setup",
-        "systemd-tmpfiles-setup-dev",
-        "systemd-user-sessions",
-        "systemd-modules-load",
-        "default.target",
-        "basic.target",
-        "sysinit.target",
-        "multi-user.target",
-        "graphical.target",
-        "local-fs.target",
-        "local-fs-pre.target",
-        "network.target",
-        "remote-fs.target",
-        "swap.target",
-        "cryptsetup.target",
-        "rescue.target",
-        "emergency.target",
-        "init.target",
-        "systemd.target",
-        "sockets.target",
-        "timers.target",
-        "shutdown.target",
-        "reboot.target",
-        "poweroff.target",
-        "emergency",
-        "rescue",
-        "init",
-    ];
-
-    if critical_services.iter().any(|&s| clean_name == s || base_name == s || base_name.starts_with("systemd-journald") || base_name.starts_with("systemd-udev") || base_name.starts_with("dbus")) {
-        return (
+    // The table of protected units lives in root_policy.rs so that the helper
+    // enforces the very same protection; the reason strings are UX text.
+    match crate::utils::root_policy::service_protection_level(unit_name) {
+        Some("critical") => (
             true,
             "critical".to_string(),
-            Some("Critical operating system core component. Stopping, disabling, or masking will cause system instability or lockup.".to_string())
-        );
-    }
-
-    // 2. Essential System Infrastructure (Guarded: Cannot Disable or Mask)
-    let essential_services = [
-        "networkmanager",
-        "systemd-networkd",
-        "systemd-resolved",
-        "systemd-timesyncd",
-        "sshd",
-        "firewalld",
-        "nftables",
-        "iptables",
-        "auditd",
-        "chronyd",
-        "chrony",
-        "gdm",
-        "sddm",
-        "lightdm",
-        "systemd-homed",
-    ];
-
-    if essential_services.iter().any(|&s| clean_name == s || base_name == s || base_name.starts_with("networkmanager") || base_name.starts_with("firewalld")) {
-        return (
+            Some("Critical operating system core component. Stopping, disabling, or masking will cause system instability or lockup.".to_string()),
+        ),
+        Some("essential") => (
             true,
             "essential".to_string(),
-            Some("Essential system infrastructure service. Masking or disabling will cause loss of network, security, or display access.".to_string())
-        );
+            Some("Essential system infrastructure service. Masking or disabling will cause loss of network, security, or display access.".to_string()),
+        ),
+        _ => (false, String::new(), None),
     }
-
-    (false, String::new(), None)
 }
 
 fn is_valid_unit_name(name: &str) -> bool {

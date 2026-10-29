@@ -426,55 +426,58 @@ pub async fn user_kill_session(session_id: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn user_get_ssh_keys(username: String) -> Result<String, String> {
-    let path = if username == "root" {
-        "/root/.ssh/authorized_keys".to_string()
-    } else {
-        format!("/home/{}/.ssh/authorized_keys", username)
-    };
+    // the account name never becomes a path fragment: the shared policy
+    // validates it before anything is called
+    crate::utils::root_policy::is_valid_account_name(&username)?;
 
-    let output = Command::new("pkexec")
-        .args(["cat", &path])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    // the key file of another user may only be read with root rights —
+    // through the helper's validated own action, never a raw `cat`
+    let Some(helper) = crate::commands::admin::installed_helper_path() else {
+        return Err("The administrator helper is not installed. Install it with the package (sudo dnf install linux-control-panel).".to_string());
+    };
+    let authorize_action = vec![String::from("read_user_ssh_keys"), username.clone()];
+    let output = crate::utils::privilege::run_privileged_output(
+        helper,
+        &authorize_action,
+        &crate::utils::privilege::RootAuth::Polkit,
+    )
+    .await
+    .map_err(|e| format!("Could not read the SSH keys of '{username}': {e}"))?;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
-        Ok("".to_string())
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
 #[tauri::command]
 pub async fn user_save_ssh_keys(username: String, keys: String) -> Result<String, String> {
-    let (home_dir, owner) = if username == "root" {
-        ("/root".to_string(), "root:root".to_string())
-    } else {
-        (format!("/home/{}", username), format!("{}:{}", username, username))
-    };
-
-    let ssh_dir = format!("{}/.ssh", home_dir);
-    let keys_file = format!("{}/authorized_keys", ssh_dir);
-
-    let _ = Command::new("pkexec").args(["mkdir", "-p", &ssh_dir]).output().await;
-    let _ = Command::new("pkexec").args(["chmod", "700", &ssh_dir]).output().await;
-    let _ = Command::new("pkexec").args(["chown", &owner, &ssh_dir]).output().await;
-
-    let tmp_path = format!("/tmp/keys_{}", username);
-    let _ = tokio::fs::write(&tmp_path, keys).await.map_err(|e| e.to_string())?;
-
-    let mv_out = Command::new("pkexec")
-        .args(["mv", &tmp_path, &keys_file])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to move keys file: {}", e))?;
-
-    if !mv_out.status.success() {
-        return Err(String::from_utf8_lossy(&mv_out.stderr).to_string());
+    crate::utils::root_policy::is_valid_account_name(&username)?;
+    if keys.contains('\0') {
+        return Err("The key content must not contain NUL bytes.".to_string());
     }
 
-    let _ = Command::new("pkexec").args(["chmod", "600", &keys_file]).output().await;
-    let _ = Command::new("pkexec").args(["chown", &owner, &keys_file]).output().await;
+    // the helper's write action takes the content on stdin: no temp file in
+    // a user-writable /tmp (the old TOCTOU), no mv, and the ownership and
+    // modes (0700 .ssh / 0600 authorized_keys, account-owned) are fixed by
+    // the helper itself
+    let Some(helper) = crate::commands::admin::installed_helper_path() else {
+        return Err("The administrator helper is not installed. Install it with the package (sudo dnf install linux-control-panel).".to_string());
+    };
+    let authorize_action = vec![String::from("write_user_ssh_keys"), username.clone()];
+    let output = crate::utils::privilege::run_privileged_with_stdin(
+        helper,
+        &authorize_action,
+        &crate::utils::privilege::RootAuth::Polkit,
+        &keys,
+    )
+    .await
+    .map_err(|e| format!("Could not save the SSH keys of '{username}': {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
 
     Ok("SSH keys saved successfully.".to_string())
 }

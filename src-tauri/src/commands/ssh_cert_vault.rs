@@ -561,9 +561,21 @@ pub async fn vault_get_sshd_hardening(elevated: bool) -> Result<SshdHardeningSta
 
     // 1. Try evaluating active sshd daemon config directly (sshd -T)
     let sshd_t = if elevated {
-        PrivCommand::new("pkexec").args([sshd_bin, "-T"]).output().await
+        // root reads go through the main privilege chokepoint (policy-checked)
+        let sshd_path = crate::utils::privilege::resolve_root_program("sshd")
+            .unwrap_or_else(|| sshd_bin.to_string());
+        crate::utils::privilege::run_privileged_output(
+            &sshd_path,
+            &["-T".to_string()],
+            &crate::utils::privilege::RootAuth::Polkit,
+        )
+        .await
     } else {
-        PrivCommand::new(sshd_bin).args(["-T"]).output().await
+        PrivCommand::new(sshd_bin)
+            .args(["-T"])
+            .output()
+            .await
+            .map_err(|e| e.to_string())
     };
 
     if let Ok(out) = sshd_t {
@@ -591,9 +603,18 @@ pub async fn vault_get_sshd_hardening(elevated: bool) -> Result<SshdHardeningSta
 
     // 2. Fallback: Cat config file with root privileges if sshd -T had an issue
     let cat_res = if elevated {
-        PrivCommand::new("pkexec").args(["/usr/bin/cat", config_path]).output().await
+        crate::utils::privilege::run_privileged_output(
+            "/usr/bin/cat",
+            &[config_path.to_string()],
+            &crate::utils::privilege::RootAuth::Polkit,
+        )
+        .await
     } else {
-        PrivCommand::new("cat").arg(config_path).output().await
+        PrivCommand::new("cat")
+            .arg(config_path)
+            .output()
+            .await
+            .map_err(|e| e.to_string())
     };
 
     if let Ok(out) = cat_res {

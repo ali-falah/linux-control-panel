@@ -7,6 +7,29 @@
 
 use std::path::Path;
 
+// ─── compile-time test fixture (`--features test-fixture`) ───────────────────
+//
+// The dispatch-success tests (scope A of the STEP 3B plan) have to exercise
+// named helper actions end to end — exit code 0, real writes — without
+// touching the host's real /etc/profile.d, /etc/passwd or polkit rules.d.
+// The helper therefore carries a *compile-time only* feature that switches
+// its privileged destination constants to fixture paths below
+// /tmp/lcp-admin-test-fixture:
+//
+// * it is never a default feature — an ordinary or packaged build (no
+//   `--features` flag) has no fixture path compiled in and cannot reach any
+//   fixture-redirected code,
+// * production paths are redirected by nothing at runtime: neither an
+//   environment variable nor an argument can turn a compiled production
+//   path into a fixture path,
+// * release/packaged builds refuse the feature outright via the
+//   `compile_error!` below.
+#[cfg(all(feature = "test-fixture", not(debug_assertions)))]
+compile_error!(
+    "the test-fixture feature is a debug-only test aid; a release or packaged \
+     build must never be produced with it"
+);
+
 /// Root programs the app may execute (matched by their base name, the
 /// absolute path is resolved at runtime and then verified).
 pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
@@ -24,8 +47,6 @@ pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
     // overwrite, replace or relabel a file belongs to a named action)
     "cat", "ls", "stat", "grep", "tail", "head", "zcat", "cut", "sort", "wc", "tr",
     "mkdir", "date", "readlink", "dirname", "basename",
-    // the bootstrap's copy-template only (see check_install): fixed destinations
-    "install",
     // hardware and boot
     "modprobe", "rmmod", "grub2-mkconfig", "grub-mkconfig", "grub2-script-check",
     "grub-script-check", "fail2ban-client",
@@ -48,9 +69,9 @@ pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
 ///   `awk` runs `system()`, `stdbuf` launches a child binary),
 /// * the file generalists can create, overwrite, relabel or destroy any file
 ///   up to `/etc/shadow` (`cp`, `mv`, `rm`, `sed -i`, `tee`, `chmod`, `chown`,
-///   `ln`, `touch`, `mktemp`, `gzip`, and `x509` via `-out`) — `install` was
-///   pulled back out of the list for the bootstrap's fixed-destination
-///   template (`check_install`),
+///   `ln`, `touch`, `mktemp`, `gzip`, and `x509` via `-out`) — including
+///   `install`: the app must never overwrite its own root helper (the copy
+///   that everything else is authorised on); the helper ships with the RPM,
 /// * `crontab` turns content into delayed root code execution,
 /// * the authentication tools hand out root (`chpasswd`/`passwd` set any
 ///   password including root's, `gpasswd`/`usermod` can grant wheel, `visudo`
@@ -64,7 +85,7 @@ pub const MIGRATING_ROOT_PROGRAMS: &[&str] = &[
     "bash", "sh", "stdbuf", "awk", "gawk", "find",
     // arbitrary file write/relabel/destroy
     "sed", "tee", "cp", "mv", "rm", "chmod", "chown", "visudo", "ln", "link",
-    "touch", "mktemp", "gzip", "x509",
+    "install", "touch", "mktemp", "gzip", "x509",
     // delayed root code execution
     "crontab",
     // root/grant-primitives
@@ -76,11 +97,23 @@ pub const MIGRATING_ROOT_PROGRAMS: &[&str] = &[
 /// Where the PolicyKit rule is installed, by the bootstrap and by the
 /// helper's `install_polkit_rule` action. The only rule file the helper will
 /// ever write.
+#[cfg(not(feature = "test-fixture"))]
 pub const POLKIT_RULE_FILE: &str = "/etc/polkit-1/rules.d/50-linux-control-panel.rules";
+
+/// Compile-time fixture twin of `POLKIT_RULE_FILE` for `--features
+/// test-fixture` builds of the helper (never present in a production build).
+#[cfg(feature = "test-fixture")]
+pub const POLKIT_RULE_FILE: &str =
+    "/tmp/lcp-admin-test-fixture/etc/polkit-1/rules.d/50-linux-control-panel.rules";
 
 /// The PolicyKit rule: the helper may be run as root for an *active* local
 /// session, and the authorisation is kept for the default five minutes
 /// (`auth_admin_keep`) instead of asking for a password every time.
+///
+/// The helper is matched at *both* install paths — the developer hand
+/// install and the distro package path (the RPM/DEB sidecar). They are the
+/// same root-owned binary; the runtime additionally verifies ownership and
+/// mode before either copy is used.
 ///
 /// The `install_polkit_rule` helper action requires its stdin content to be
 /// byte-identical to this constant — content the app controls *and* the
@@ -90,12 +123,14 @@ pub const POLKIT_RULE_TEXT: &str = r#"// Installed by the Linux Control Panel.
 // Grants the root owned helper (and only the helper) the right to run with
 // administrator rights. The authorisation is kept for the default
 // timestamp_timeout (5 minutes), so a multi step action asks only once.
+// The helper lives at the developer install path (/usr/local/libexec) or
+// at the distro package path (/usr/bin) — both are that same helper.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.policykit.exec" &&
         subject.active && subject.local &&
         subject.isInGroup("wheel")) {
         var key = action.lookup("program");
-        if (key == "/usr/local/libexec/lcp-admin") {
+        if (key == "/usr/local/libexec/lcp-admin" || key == "/usr/bin/lcp-admin") {
             return polkit.Result.AUTH_ADMIN_KEEP;
         }
     }
@@ -257,11 +292,7 @@ pub fn ensure_repo_file_path(path: &str) -> Result<(), String> {
         return Err("The repository file path must not contain relative parts.".to_string());
     }
 
-    let allowed_dirs = [
-        "/etc/yum.repos.d",
-        "/etc/dnf",
-        "/etc/apt/sources.list.d",
-    ];
+    let allowed_dirs = REPO_ALLOWED_DIRS;
     let parent = candidate.parent().map(|p| p.to_string_lossy().to_string());
     let in_allowed_dir = parent
         .as_deref()
@@ -296,6 +327,741 @@ pub fn ensure_repo_file_path(path: &str) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+// ─── Shell-environment destinations (F-1) ────────────────────────────────────
+//
+// The shell feature used to write *arbitrary* root-level files and to copy
+// files with root rights. Both are now confined: the only root-owned
+// destination it may touch is one `.sh` file directly inside `/etc/profile.d`,
+// and the only content that may pass is what the panel itself writes — export
+// assignments per line, no free shell text.
+
+/// The root-owned directory the shell feature may write into.
+#[cfg(not(feature = "test-fixture"))]
+pub const PROFILE_D_DIR: &str = "/etc/profile.d";
+
+/// Compile-time fixture twin of `PROFILE_D_DIR` for `--features
+/// test-fixture` builds of the helper (never present in a production build).
+#[cfg(feature = "test-fixture")]
+pub const PROFILE_D_DIR: &str = "/tmp/lcp-admin-test-fixture/etc/profile.d";
+
+/// Compile-time fixture stand-in for `/etc/passwd`, only read by
+/// `--features test-fixture` builds of the helper.
+#[cfg(feature = "test-fixture")]
+pub const FIXTURE_PASSWD_FILE: &str = "/tmp/lcp-admin-test-fixture/etc/passwd";
+
+/// Upper bound for a profile.d file's name (including the `.sh` extension).
+const PROFILE_NAME_MAX: usize = 64;
+
+/// `path` must address exactly one regular, non-symlink `<name>.sh` file
+/// directly inside `/etc/profile.d` — no traversal, no dot files, no second
+/// directory component, no symlinked directory entry.
+pub fn validate_profile_sh_path(path: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    if path.chars().any(char::is_control) {
+        return Err("The profile file path must not contain control characters.".to_string());
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("The profile file path must be absolute: {path}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err("The profile file path must not contain relative parts.".to_string());
+    }
+
+    let parent = candidate
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if parent != PROFILE_D_DIR {
+        return Err(format!(
+            "The only root-owned profile destination is {PROFILE_D_DIR}/<name>.sh, not {path}"
+        ));
+    }
+
+    let name = candidate
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(base) = name.strip_suffix(".sh") else {
+        return Err(format!("The profile file name must end in '.sh': {name}"));
+    };
+    if name.is_empty() || name.starts_with('.') || base.is_empty() || name.len() > PROFILE_NAME_MAX
+    {
+        return Err(format!("Invalid profile file name: {name}"));
+    }
+    if !base
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "The profile file name may only contain letters, digits, '_' and '-': {name}"
+        ));
+    }
+
+    // the file itself and every parent directory must be real entries —
+    // a symlinked /etc/profile.d or a symlinked target must never be
+    // replaced or written through
+    let mut walked = std::path::PathBuf::from("/");
+    for component in candidate.components() {
+        walked.push(component);
+        let last = walked == candidate;
+        match walked.symlink_metadata() {
+            Ok(m) => {
+                if m.file_type().is_symlink() {
+                    return Err("The profile file path must not contain a symbolic link.".to_string());
+                }
+                if !last && !m.is_dir() {
+                    return Err("The profile file path parents must be directories.".to_string());
+                }
+            }
+            // a not-yet-existing target is fine: it is created by the action
+            Err(_) if last => {}
+            Err(_) => return Err("The profile file parent is not accessible.".to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Upper bound for a profile.d file's content.
+const PROFILE_CONTENT_MAX: usize = 256 * 1024;
+
+/// One shell helper: identifier shape the panel exports.
+fn is_export_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The only value shapes that can never smuggle shell code passed a quote
+/// boundary: double-quoted (no shell substitution characters inside),
+/// single-quoted (no quotes inside), or a bare token with no shell-special
+/// character at all.
+fn is_safe_export_value(value: &str) -> bool {
+    if value.len() > 4096 {
+        return false;
+    }
+    let quoted_double = value.len() >= 2 && value.starts_with('"') && value.ends_with('"');
+    let quoted_single = value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'');
+    if quoted_double || quoted_single {
+        let inner = &value[1..value.len() - 1];
+        let forbidden = if quoted_double {
+            |c: char| c.is_control() || matches!(c, '"' | '$' | '`' | '\\' | '\0')
+        } else {
+            |c: char| c.is_control() || matches!(c, '\'' | '\0')
+        };
+        return !inner.chars().any(forbidden);
+    }
+    // bare value: nothing the shell evaluates, nothing that leaves the token
+    !value.chars().any(|c: char| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '$' | '`' | '\\' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}'
+                    | '*' | '?' | '[' | ']' | '#' | '!' | '~'
+            )
+    })
+}
+
+/// Validate the full text of a root-owned profile.d file before it may be
+/// written. Every non-empty, non-comment line must be exactly
+/// `export NAME=<safe value>` — profile.d scripts run in *every* login shell,
+/// so free shell text must never get there.
+pub fn validate_profile_sh_content(content: &str) -> Result<(), String> {
+    if content.len() > PROFILE_CONTENT_MAX {
+        return Err("The profile file is too large.".to_string());
+    }
+    if content.contains('\0') {
+        return Err("The profile file must not contain NUL bytes.".to_string());
+    }
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let rest = trimmed
+            .strip_prefix("export ")
+            .map(str::trim)
+            .ok_or_else(|| format!("Line {} is not an export assignment: {trimmed}", index + 1))?;
+        let Some((name, value)) = rest.split_once('=') else {
+            return Err(format!("Line {} is not an export assignment: {trimmed}", index + 1));
+        };
+        let name = name.trim();
+        if !is_export_name(name) {
+            return Err(format!("Line {} has an invalid variable name: {name}", index + 1));
+        }
+        let value = value.trim();
+        if !is_safe_export_value(value) {
+            return Err(format!("Line {} has an unsafe value for {name}.", index + 1));
+        }
+    }
+    Ok(())
+}
+
+// ─── Repository content policy (F-2) ─────────────────────────────────────────
+//
+// `ensure_repo_file_path` confines *where* a repository file may live. That
+// alone lets the UI-defined file body itself reconfigure the package system's
+// sources with root authority (a `file://` baseurl, signature checking off, or
+// directives the panel never writes). This policy validates the *content*
+// before a privileged write may see it.
+
+/// Upper bound for a repository file's content — shared with the helper, so
+/// its (not yet registered) `write_repo_file` action can impose the same
+/// stdin limit.
+pub const REPO_CONTENT_MAX: usize = 256 * 1024;
+
+/// The directories a repository file may live in. `--features test-fixture`
+/// builds of the helper see their fixture twins, so the write-repo-file
+/// action core can be exercised on temporary directories.
+#[cfg(not(feature = "test-fixture"))]
+pub(crate) const REPO_ALLOWED_DIRS: [&str; 3] =
+    ["/etc/yum.repos.d", "/etc/dnf", "/etc/apt/sources.list.d"];
+#[cfg(feature = "test-fixture")]
+pub(crate) const REPO_ALLOWED_DIRS: [&str; 3] = [
+    "/tmp/lcp-admin-test-fixture/etc/yum.repos.d",
+    "/tmp/lcp-admin-test-fixture/etc/dnf",
+    "/tmp/lcp-admin-test-fixture/etc/apt/sources.list.d",
+];
+
+/// Upper bound for `[section]` ids.
+const REPO_SECTION_MAX: usize = 64;
+
+/// Directives a repository file may carry. File generalists and anything dnf
+/// executes or imports configurably stay off the list by construction.
+const REPO_KEYS: &[&str] = &[
+    "name", "baseurl", "metalink", "mirrorlist", "gpgkey", "gpgcheck", "repo_gpgcheck",
+    "enabled", "priority", "countme", "skip_if_unavailable", "fastestmirror", "cost",
+    "includepkgs", "excludepkgs", "module_hotfixes", "metadata_expire",
+];
+
+/// Values dnf expands inside URLs — the only `$` sequences allowed.
+const REPO_URL_VARS: &[&str] = &["$releasever", "$basearch", "$releasever_major", "$releasever_minor"];
+
+/// `$` sequences: dnf's URL/stanza variables only — anything else is refused.
+fn dnf_vars_only(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(dollar) = rest.find('$') {
+        rest = &rest[dollar..];
+        let Some(var) = REPO_URL_VARS.iter().find(|v| rest.starts_with(*v)).copied() else {
+            return false;
+        };
+        rest = &rest[var.len()..];
+    }
+    true
+}
+
+/// One URL token (dnf baseurls and gpgkeys are whitespace-separated): internet
+/// schemes only, no local-file or executable handlers, no shell characters.
+fn is_safe_repo_url_token(token: &str) -> bool {
+    let ok_length = !token.is_empty() && token.len() <= 512;
+    let ok_chars = token.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '.' | '_' | '~' | '/' | ':' | '?' | '&' | '=' | '%' | '+' | '@'
+                | '!' | '#' | ',' | '(' | ')' | '*' | '[' | ']' | ';' | '$')
+    });
+    if !ok_length || !ok_chars {
+        return false;
+    }
+    // no quotes, backslashes or backticks slipped past the charset above —
+    // re-check the characters the panel must never carry into a repo file
+    if token.chars().any(|c| matches!(c, '"' | '\'' | '\\' | '`')) {
+        return false;
+    }
+    // $ must be one of dnf's URL variables, never anything else
+    if !dnf_vars_only(token) {
+        return false;
+    }
+    // internet schemes only — local-file sources defeat the package
+    // system's signature-on-establishment model
+    let scheme_ok = ["http://", "https://"].iter().any(|scheme| token.starts_with(*scheme));
+    scheme_ok
+}
+
+fn is_on_off_flag_value(value: &str) -> bool {
+    matches!(value, "0" | "1")
+}
+
+/// A `.repo` directive value: free printable text for names, strict shapes for
+/// everything privilege-adjacent.
+fn validate_repo_key(key: &str, value: &str, line_no: usize) -> Result<(), String> {
+    let reject = |what: &str| Err(format!("Line {line_no}: {what}"));
+    match key {
+        "name" => {
+            if !value.chars().all(|c| !c.is_control())
+                || value.chars().any(|c| matches!(c, '"' | '`' | '\\' | '\''))
+                || value.len() > 256
+                || !dnf_vars_only(value)
+            {
+                reject("the 'name' value has unsafe characters")
+            } else {
+                Ok(())
+            }
+        }
+        "baseurl" | "gpgkey" => {
+            if value.is_empty() {
+                return reject(&format!("'{key}' needs at least one URL"));
+            }
+            let tokens = value.split_ascii_whitespace().collect::<Vec<_>>();
+            if tokens.is_empty() {
+                return reject(&format!("'{key}' needs at least one URL"));
+            }
+            for token in tokens {
+                if !is_safe_repo_url_token(token) {
+                    return Err(format!(
+                        "Line {line_no}: '{key}' URL '{token}' is not a safe http(s) URL"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "metalink" | "mirrorlist" | "proxy" => {
+            let tokens = value.split_ascii_whitespace().collect::<Vec<_>>();
+            if tokens.len() != 1 || !is_safe_repo_url_token(tokens[0]) {
+                reject(&format!("'{key}' must be exactly one safe http(s) URL"))
+            } else {
+                Ok(())
+            }
+        }
+        // disabled signature verification is rejected outright
+        "gpgcheck" | "repo_gpgcheck" => {
+            if value != "1" {
+                reject("signature checking must stay enabled ('gpgcheck=1')")
+            } else {
+                Ok(())
+            }
+        }
+        "enabled" | "skip_if_unavailable" | "fastestmirror" | "module_hotfixes" => {
+            if !is_on_off_flag_value(value) {
+                reject(&format!("'{key}' must be 0 or 1"))
+            } else {
+                Ok(())
+            }
+        }
+        "priority" | "cost" | "countme" | "metadata_expire" => {
+            if value.is_empty() || value.len() > 16
+                || !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'))
+            {
+                reject(&format!("'{key}' value is not a simple number or duration"))
+            } else {
+                Ok(())
+            }
+        }
+        "includepkgs" | "excludepkgs" => {
+            if value.is_empty()
+                || value.len() > 4096
+                || !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '*' | '?' | '.' | '-' | '_'))
+            {
+                reject(&format!("'{key}' must be a space-separated package name list"))
+            } else {
+                Ok(())
+            }
+        }
+        _ => reject("directive is not on the repository allowlist"),
+    }
+}
+
+/// A deb822 `.sources` stanza key.
+const SOURCES_KEYS: &[&str] = &["Types", "URIs", "Suites", "Components", "Signed-By", "Enabled", "Architectures", "Origin", "Label", "Site", "Date"];
+
+/// URI schemes the panel accepts in an APT source (one-line format and
+/// deb822 alike). Local-file (`file:`, `copy:`, `cdrom:`) and every other
+/// scheme are refused by construction.
+const APT_URI_SCHEMES: &[&str] = &["http://", "https://", "tor+http://", "tor+https://"];
+
+/// Root-owned directories whose keyring files are approved as `signed-by`
+/// targets. Only these two locations are explicitly approved; a keyring must
+/// never come from a user-controlled path.
+const APT_KEYRING_DIRS: &[&str] = &["/usr/share/keyrings/", "/etc/apt/keyrings/"];
+
+/// One URI token of an APT source: internet scheme (checked by the caller),
+/// a printable URL charset, no quotes, backslashes, backticks or brackets.
+/// `$` stays allowed (plain text in an apt source, inert there).
+fn is_safe_apt_uri_token(token: &str) -> bool {
+    let ok_length = !token.is_empty() && token.len() <= 2048;
+    let ok_chars = token.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '.' | '_' | '~' | '/' | ':' | '?' | '&' | '=' | '%' | '+' | '@'
+                | '!' | '#' | ',' | '(' | ')' | '*' | ';' | '$')
+    });
+    if !ok_length || !ok_chars {
+        return false;
+    }
+    // quotes/backslashes/backticks slipped past the charset check above are
+    // re-refused here; brackets are refused because `[`/`]` are the option
+    // syntax of the .list format and must never appear in a URI token
+    if token.chars().any(|c| matches!(c, '"' | '\'' | '\\' | '`' | '[' | ']')) {
+        return false;
+    }
+    true
+}
+
+/// A deb822 `URIs:` value — one or more whitespace-separated URI tokens. Flat
+/// relative URIs (a token without a scheme) are refused as ambiguous.
+fn is_safe_apt_uri_string(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2048 {
+        return false;
+    }
+    for token in value.split_ascii_whitespace() {
+        if !is_safe_apt_uri_token(token) {
+            return false;
+        }
+        if !APT_URI_SCHEMES.iter().any(|scheme| token.starts_with(*scheme)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A `signed-by=`/`Signed-By` keyring path: exactly one file element directly
+/// below an approved root-owned keyring directory, a `.gpg`/`.asc` file, no
+/// dot files, no traversal, no interior slash.
+fn is_approved_apt_keyring_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > 256 {
+        return false;
+    }
+    let Some(base) = APT_KEYRING_DIRS
+        .iter()
+        .find_map(|dir| path.strip_prefix(dir))
+    else {
+        return false;
+    };
+    if base.is_empty() || base.contains('/') || base.starts_with('.') {
+        return false;
+    }
+    base.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && (base.ends_with(".gpg") || base.ends_with(".asc"))
+}
+
+/// A `distribution`/`suite` token of a one-line entry (e.g. `bookworm`,
+/// `trixie/updates`, `./` for a flat repository).
+fn is_safe_apt_suite_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '~'))
+}
+
+/// A `component` token (e.g. `main`, `contrib`, `non-free-firmware`).
+fn is_safe_apt_component_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+}
+
+/// Validate the full text of a `.repo`, `.list` or `.sources` repository file
+/// before a privileged write may replace it with root authority.
+///
+/// The extension decides the grammar (dnf INI, deb flat lines, deb822
+/// key/value stanzas); anything the panel does not write is rejected with a
+/// line-local message instead of silently replaced.
+pub fn ensure_repo_file_content(path: &str, content: &str) -> Result<(), String> {
+    if content.len() > REPO_CONTENT_MAX {
+        return Err("The repository file is too large.".to_string());
+    }
+    if content.contains('\0') {
+        return Err("The repository file must not contain NUL bytes.".to_string());
+    }
+    let ext = Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "repo" => validate_dnf_repo_content(content),
+        "list" => validate_apt_list_content(content),
+        "sources" | "sources.list" => validate_apt_sources_content(content),
+        _ => Err("Unsupported repository file type.".to_string()),
+    }
+}
+
+fn validate_dnf_repo_content(content: &str) -> Result<(), String> {
+    let mut sections = 0usize;
+    for (index, line) in content.lines().enumerate() {
+        let line_no = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            sections += 1;
+            if sections > 64 {
+                return Err("The repository file has too many sections.".to_string());
+            }
+            if section.is_empty()
+                || section.len() > REPO_SECTION_MAX
+                || !section
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            {
+                return Err(format!("Line {line_no}: invalid repository section id"));
+            }
+            continue;
+        }
+        // dnf INI also accepts an optional leading whitespace around '=';
+        // key normalization is lowercase, as dnf treats it case-insensitively
+        let Some((raw_key, value)) = trimmed.split_once('=') else {
+            return Err(format!("Line {line_no}: not a [section], key=value or comment"));
+        };
+        let key = raw_key.trim().to_lowercase();
+        if !REPO_KEYS.contains(&key.as_str()) {
+            return Err(format!(
+                "Line {line_no}: the '{key}' directive is not allowed in a repository file"
+            ));
+        }
+        validate_repo_key(&key, value.trim(), line_no)?;
+    }
+    Ok(())
+}
+
+/// Validate a one-line `.list` entry: `deb [options] uri suite [components…]`.
+///
+/// Strictly parsed instead of merely character-checked:
+///
+/// * the bracket-options group is only supported **directly after**
+///   `deb`/`deb-src`, and only for `arch=` and `signed-by=` — every other
+///   option (signature-verification disablers like `trusted=yes` included)
+///   is refused, and a bracket group after the *suite* is refused as
+///   unsupported syntax,
+/// * `signed-by` must point only at root-owned keyrings in the approved
+///   directories — a user-controlled keyring path could make apt import an
+///   attacker-signed repository as trusted,
+/// * every URI token needs an internet scheme; `file:`, `copy:`, `cdrom:`
+///   bare or otherwise are refused,
+/// * one line, one entry: there is no continuation syntax in this format
+///   (the line-based parser refuses nothing else).
+fn validate_apt_list_content(content: &str) -> Result<(), String> {
+    for (index, line) in content.lines().enumerate() {
+        let line_no = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        validate_apt_list_line(trimmed, line_no)?;
+    }
+    Ok(())
+}
+
+/// One bracket option of a one-line entry — `arch` and `signed-by` only.
+fn validate_apt_list_option(option: &str, line_no: usize) -> Result<(), String> {
+    let reject = |what: &str| Err(format!("Line {line_no}: {what}"));
+    let Some((name, value)) = option.split_once('=') else {
+        return reject(&format!("the bracket option '{option}' is not supported"));
+    };
+    if value.is_empty() {
+        return reject(&format!("the bracket option '{name}' has an empty value"));
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "arch" => {
+            if value.len() > 128
+                || !value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '-' | '_' | '.'))
+            {
+                reject("the 'arch' option value is invalid")
+            } else {
+                Ok(())
+            }
+        }
+        "signed-by" => {
+            for path in value.split(',') {
+                if !is_approved_apt_keyring_path(path) {
+                    return reject(&format!(
+                        "'signed-by' must point at a .gpg/.asc keyring in {}",
+                        APT_KEYRING_DIRS.join(" or ")
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => reject(&format!("the bracket option '{name}' is not allowed")),
+    }
+}
+
+fn validate_apt_list_line(line: &str, line_no: usize) -> Result<(), String> {
+    let reject = |what: &str| Err(format!("Line {line_no}: {what}"));
+    if line.chars().any(|c| c.is_control()) {
+        return reject("control character in the entry");
+    }
+    let tokens: Vec<&str> = line.split_ascii_whitespace().collect();
+    let Some(source_type) = tokens.first().copied() else {
+        return reject("not a deb/deb-src line");
+    };
+    if source_type != "deb" && source_type != "deb-src" {
+        return reject("not a deb/deb-src line");
+    }
+    let mut rest = &tokens[1..];
+    // optional bracket-options group, only directly after the source type
+    if let Some(first) = rest.first().copied() {
+        if first.starts_with('[') {
+            let Some(end) = rest.iter().position(|token| token.ends_with(']')) else {
+                return reject("unterminated bracket options group");
+            };
+            let group = &rest[..=end];
+            rest = &rest[end + 1..];
+            for (position, raw_option) in group.iter().enumerate() {
+                let mut option = *raw_option;
+                if position == 0 {
+                    option = option.strip_prefix('[').unwrap_or(option);
+                }
+                if position == group.len() - 1 {
+                    option = option.strip_suffix(']').unwrap_or(option);
+                }
+                if option.is_empty() {
+                    continue;
+                }
+                validate_apt_list_option(option, line_no)?;
+            }
+        }
+    }
+    let Some(uri) = rest.first().copied() else {
+        return reject("repository URI is missing");
+    };
+    if !is_safe_apt_uri_token(uri)
+        || !APT_URI_SCHEMES.iter().any(|scheme| uri.starts_with(scheme))
+    {
+        return reject("repository URI is not a safe http(s) URL");
+    }
+    let Some(suite) = rest.get(1).copied() else {
+        return reject("distribution/suite is missing");
+    };
+    if !is_safe_apt_suite_token(suite) {
+        return reject("invalid distribution/suite token");
+    }
+    for component in &rest[2..] {
+        if !is_safe_apt_component_token(component) {
+            return reject("invalid component token");
+        }
+    }
+    Ok(())
+}
+
+/// Validate a deb822 `.sources` stanza.
+///
+/// Strictly parsed instead of merely character-checked:
+///
+/// * multi-line continued values (a continuation line under `Signed-By:` and
+///   friends) are refused as unsupported — a misparsed continuation could
+///   mean a value the panel never saw,
+/// * every field may appear only once — apt merges repeated fields, so a
+///   second occurrence would change the meaning of the document after
+///   validation,
+/// * `Types:` must list `deb`/`deb-src`, `Signed-By:` may only point at
+///   approved root-owned keyrings, `URIs:` demands per-token internet
+///   schemes, `Architectures:`/`Suites:`/`Components:` are word lists,
+/// * only the fields the panel understands are accepted at all.
+fn validate_apt_sources_content(content: &str) -> Result<(), String> {
+    let mut seen_keys = std::collections::HashSet::new();
+    for (index, line) in content.lines().enumerate() {
+        let line_no = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // a deb822 continuation line starts with whitespace — whatever it
+        // carries, this validator does not understand that document shape
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(format!(
+                "Line {line_no}: multi-line continued field values are not supported"
+            ));
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(format!("Line {line_no}: control character in the stanza"));
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            return Err(format!("Line {line_no}: not a key: value stanza line"));
+        };
+        let key = key.trim();
+        let canonical = key.to_ascii_lowercase();
+        if !SOURCES_KEYS.iter().any(|k| k.eq_ignore_ascii_case(key)) {
+            return Err(format!("Line {line_no}: the '{key}' field is not allowed in a .sources file"));
+        }
+        if !seen_keys.insert(canonical.clone()) {
+            return Err(format!("Line {line_no}: repeated '{key}' field"));
+        }
+        let value = value.trim();
+        let reject = |what: String| Err(format!("Line {line_no}: {what}"));
+        match canonical.as_str() {
+            "enabled" => {
+                if !matches!(value, "yes" | "no") {
+                    return reject("'Enabled' must be yes or no".to_string());
+                }
+            }
+            "uris" => {
+                if !is_safe_apt_uri_string(value) {
+                    return reject("unsafe URIs value".to_string());
+                }
+            }
+            "types" => {
+                if value.split_ascii_whitespace().count() == 0
+                    || !value
+                        .split_ascii_whitespace()
+                        .all(|word| matches!(word, "deb" | "deb-src"))
+                {
+                    return reject(
+                        "'Types' must be a space-separated list of 'deb' and 'deb-src'"
+                            .to_string(),
+                    );
+                }
+            }
+            "signed-by" => {
+                if value.split(',').any(|path| {
+                    !is_approved_apt_keyring_path(path)
+                }) {
+                    return reject(format!(
+                        "'Signed-By' must be a comma-separated list of .gpg/.asc keyrings in {}",
+                        APT_KEYRING_DIRS.join(" or ")
+                    ));
+                }
+            }
+            "architectures" => {
+                if value.is_empty()
+                    || value.len() > 256
+                    || !value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '-' | '_' | '.'))
+                {
+                    return reject("'Architectures' must be a comma/space word list".to_string());
+                }
+            }
+            "suites" => {
+                if value.is_empty()
+                    || !value.split_ascii_whitespace().all(is_safe_apt_suite_token)
+                {
+                    return reject("'Suites' must be one or more suite words".to_string());
+                }
+            }
+            "components" => {
+                if value.is_empty()
+                    || !value
+                        .split_ascii_whitespace()
+                        .all(is_safe_apt_component_token)
+                {
+                    return reject("'Components' must be one or more component words".to_string());
+                }
+            }
+            // Origin, Label, Site, Date — free printable words with spaces
+            _ => {
+                if value.is_empty()
+                    || value.len() > 2048
+                    || value
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '"' | '$' | '`' | '\\' | '\'' | '[' | ']'))
+                {
+                    return reject(format!("unsafe '{key}' value"));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -514,6 +1280,55 @@ const SYSTEMCTL_VERBS: &[&str] = &[
     "is-active", "is-enabled", "daemon-reload",
 ];
 
+// ─── protected systemd units (shared with the app's service UI) ──────────────
+
+/// Critical core: the helper refuses stop/disable outright. Stopping or
+/// disabling these from a same-user process (even with the panel closed)
+/// would break the session or the journal.
+const PROTECTED_UNIT_CRITICAL: &[&str] = &[
+    "dbus", "dbus-broker", "polkit",
+    "systemd-journald", "systemd-logind", "systemd-udevd", "systemd-sysctl",
+    "systemd-remount-fs", "systemd-tmpfiles-setup", "systemd-tmpfiles-setup-dev",
+    "systemd-user-sessions", "systemd-modules-load",
+    "default.target", "basic.target", "sysinit.target", "multi-user.target",
+    "graphical.target", "local-fs.target", "local-fs-pre.target", "network.target",
+    "remote-fs.target", "swap.target", "cryptsetup.target", "rescue.target",
+    "emergency.target", "init.target", "systemd.target", "sockets.target",
+    "timers.target", "shutdown.target", "reboot.target", "poweroff.target",
+    "emergency", "rescue", "init",
+];
+
+/// Essential infrastructure: the helper refuses stop/disable too — losing
+/// these would cut network, security or display access off the machine.
+const PROTECTED_UNIT_ESSENTIAL: &[&str] = &[
+    "networkmanager", "systemd-networkd", "systemd-resolved", "systemd-timesyncd",
+    "sshd", "firewalld", "nftables", "iptables", "auditd", "chronyd", "chrony",
+    "gdm", "sddm", "lightdm", "systemd-homed",
+];
+
+/// `Some("critical")` or `Some("essential")` for a unit the helper (and,
+/// via this shared function, the service UI) protects, `None` otherwise.
+/// The same unit shapes match: the whole name, the base name without its
+/// `.service` suffix, and the known prefix families.
+pub fn service_protection_level(unit_name: &str) -> Option<&'static str> {
+    let clean_name = unit_name.to_lowercase();
+    let base_name = clean_name.strip_suffix(".service").unwrap_or(&clean_name);
+    if PROTECTED_UNIT_CRITICAL.iter().any(|&s| clean_name == s || base_name == s)
+        || base_name.starts_with("systemd-journald")
+        || base_name.starts_with("systemd-udev")
+        || base_name.starts_with("dbus")
+    {
+        return Some("critical");
+    }
+    if PROTECTED_UNIT_ESSENTIAL.iter().any(|&s| clean_name == s || base_name == s)
+        || base_name.starts_with("networkmanager")
+        || base_name.starts_with("firewalld")
+    {
+        return Some("essential");
+    }
+    None
+}
+
 fn check_systemctl(args: &[String]) -> Result<(), String> {
     const PROGRAM: &str = "systemctl";
     for arg in args {
@@ -554,12 +1369,28 @@ fn check_systemctl(args: &[String]) -> Result<(), String> {
                     "daemon-reload must not be combined with additional arguments",
                 ));
             }
-            _ => require(
-                PROGRAM,
-                arg,
-                "a systemd unit name (e.g. nginx.service)",
-                is_unit_name,
-            )?,
+            _ => {
+                require(
+                    PROGRAM,
+                    arg,
+                    "a systemd unit name (e.g. nginx.service)",
+                    is_unit_name,
+                )?;
+                // protected units: stop/disable is refused by the helper
+                // itself, not only by the UI (which a same-user process can
+                // bypass by calling the helper directly)
+                if verb == "stop" || verb == "disable" {
+                    if let Some(level) = service_protection_level(arg) {
+                        return Err(operand_not_allowed(
+                            PROGRAM,
+                            arg,
+                            &format!(
+                                "the {level} unit cannot be stopped or disabled with administrator rights through this panel"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1327,6 +2158,11 @@ fn check_setsebool(args: &[String]) -> Result<(), String> {
 /// fixed, approved source directory is phase 3 work.
 fn check_semodule(args: &[String]) -> Result<(), String> {
     const PROGRAM: &str = "semodule";
+    // The one directory policy packages may be installed from. It is owned by
+    // root and not writable by other users, so the same user who calls the
+    // helper can not swap the package after it passed validation (and
+    // `ensure_trusted_path` additionally refuses symlinked paths).
+    const POLICY_DIR: &str = "/var/lib/linux-control-panel/policy";
     let mut saw_install = false;
     let mut saw_other_flag = false;
     let mut index = 0;
@@ -1337,6 +2173,27 @@ fn check_semodule(args: &[String]) -> Result<(), String> {
                 "-i" => {
                     let value = flag_value(PROGRAM, arg, &mut index, args)?;
                     ensure_trusted_path(PROGRAM, &value, "policy package file")?;
+                    if !value.starts_with(&format!("{POLICY_DIR}/")) {
+                        return Err(operand_not_allowed(
+                            PROGRAM,
+                            &value,
+                            "policy packages must be staged in /var/lib/linux-control-panel/policy (a root-owned directory), not in a user-writable location",
+                        ));
+                    }
+                    // the package is installed by root: verify the reachable
+                    // target is root owned and not user writable
+                    match std::fs::canonicalize(&value) {
+                        Ok(canonical) => {
+                            verify_trusted_binary(&canonical.to_string_lossy())?;
+                        }
+                        Err(_) => {
+                            return Err(operand_not_allowed(
+                                PROGRAM,
+                                &value,
+                                "the policy package must exist and be reachable",
+                            ));
+                        }
+                    }
                     saw_install = true;
                 }
                 "-l" => saw_other_flag = true,
@@ -1418,6 +2275,110 @@ fn check_mkdir(args: &[String]) -> Result<(), String> {
 /// be an absolute, canonical path. Reading arbitrary absolute files as root
 /// stays possible *for reads* — a confidentiality residual tracked in the
 /// phase 2 report; integrity is not affected, these programs cannot write.
+/// Paths a root *reader* may look at — a fixed allowlist, because even a pure
+/// reading program reveals `/etc/shadow` and `/etc/sudoers` when run as root.
+/// Everything else (allowed directories first, then one exact file each):
+const READER_DIR_ALLOWLIST: &[&str] = &[
+    // system and web server logs
+    "/var/log/",
+    "/etc/nginx/",
+    // the audit rules the panel writes
+    "/etc/audit/rules.d/",
+    // ssh include fragments (not the host keys, which live next door in
+    // /etc/ssh itself and stay off the list)
+    "/etc/ssh/sshd_config.d/",
+    // the boot loader configuration the auditors read
+    "/boot/grub2/",
+];
+
+const READER_FILE_ALLOWLIST: &[&str] = &[
+    "/etc/hosts",
+    "/etc/hostname",
+    "/etc/os-release",
+    // the ssh daemon's main config (the .d/ directory is below)
+    "/etc/ssh/sshd_config",
+];
+
+/// Categories that are never readable through the helper, no matter what a
+/// later allowlist entry might match — credentials and the privilege policy.
+const READER_DENIED_PREFIXES: &[&str] = &[
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/sudoers",
+    "/etc/ssl/private",
+    "/root",
+];
+
+/// The panel's own log directory inside any user's home (the XDG config
+/// location). A user-owned directory; its contents are only the panel's log.
+fn panel_log_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    match parts.first() {
+        Some(&"home") => {
+            parts.len() >= 5 && parts[2..5] == [".config", "control-panel", "logs"]
+        }
+        Some(&"root") => parts.len() >= 4 && parts[1..4] == [".config", "control-panel", "logs"],
+        _ => false,
+    }
+}
+
+/// One path operand for a reader program, checked twice: for the path as
+/// given (no symlink may appear anywhere inside) and again after full
+/// canonicalization — a symlink that resolves outside the allowlist can not
+/// even be named, and a directory that later turns user-writable can not
+/// smuggle the resolution through.
+fn check_reader_path(program: &str, path: &str) -> Result<(), String> {
+    ensure_trusted_path(program, path, "file path")?;
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => {
+            let resolved = canonical.to_string_lossy().into_owned();
+            ensure_reader_target(program, path, &resolved)?;
+            ensure_reader_target(program, &resolved, &resolved)
+        }
+        // The path can not be resolved (it does not exist yet, or it sits in
+        // a directory only root may traverse). Its components were
+        // symlink-checked above, so judging it by the literal path is sound;
+        // the actual read fails later without touching anything.
+        Err(_) => ensure_reader_target(program, path, path),
+    }
+}
+
+fn ensure_reader_target(program: &str, given: &str, resolved: &str) -> Result<(), String> {
+    // denial first: an explicit "never" has the last word even if a future
+    // allowlist entry would match the same path
+    if let Some(reason) = reader_denial_reason(resolved) {
+        return Err(operand_not_allowed(program, given, &reason));
+    }
+    if READER_FILE_ALLOWLIST.contains(&resolved)
+        || READER_DIR_ALLOWLIST
+            .iter()
+            .any(|prefix| {
+                resolved.starts_with(prefix) || resolved == prefix.trim_end_matches('/')
+            })
+        || panel_log_path(resolved)
+    {
+        return Ok(());
+    }
+    Err(operand_not_allowed(
+        program,
+        given,
+        "the file is not in the small set of locations this panel reads (system and nginx logs, /etc/hosts, /etc/hostname, /etc/os-release, audit rules, the panel's own logs)",
+    ))
+}
+
+fn reader_denial_reason(resolved: &str) -> Option<String> {
+    let denied: Option<&'static str> = if READER_DENIED_PREFIXES.iter().any(|p| resolved.starts_with(p)) {
+        Some("this location holds credentials or system policy and is never readable through the helper")
+    } else if resolved.split('/').any(|part| part == ".ssh") {
+        Some("SSH private directories are never readable through the helper")
+    } else if resolved.ends_with("shadow") || resolved.ends_with("gshadow") || resolved.contains("/sudoers") {
+        Some("credential and privilege-policy files are never readable through the helper")
+    } else {
+        None
+    };
+    denied.map(|s| s.to_string())
+}
+
 fn check_log_reader(program: &str, args: &[String], allowed_flags: &[&str]) -> Result<(), String> {
     let mut saw_path = false;
     let mut index = 0;
@@ -1433,7 +2394,7 @@ fn check_log_reader(program: &str, args: &[String], allowed_flags: &[&str]) -> R
                 _ => return Err(flag_not_allowed(program, arg)),
             }
         } else {
-            ensure_trusted_path(program, arg, "file path")?;
+            check_reader_path(program, arg)?;
             saw_path = true;
         }
         index += 1;
@@ -1468,7 +2429,7 @@ fn check_grep(args: &[String]) -> Result<(), String> {
                 _ => return Err(flag_not_allowed(PROGRAM, arg)),
             }
         } else if saw_pattern_or_path {
-            ensure_trusted_path(PROGRAM, arg, "file path")?;
+            check_reader_path(PROGRAM, arg)?;
         } else {
             require(PROGRAM, arg, "a search pattern", |v| {
                 v.len() <= 256 && v.chars().all(|c| !c.is_control() && c != '\0')
@@ -1564,122 +2525,52 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The bootstrap's copy template — the only shape `install` may ever get. The
-/// helper binary must come from a root-owned, non-user-writable source
-/// (`verify_trusted_binary`): a user-writable file installed as the root
-/// helper would hand root rights to whoever replaces that file later, since
-/// PolicyKit authorises exactly this path. Nothing works without `-o root
-/// -g root` and the fixed destination.
-fn check_install(args: &[String]) -> Result<(), String> {
-    const PROGRAM: &str = "install";
-    const HELPER_DEST: &str = "/usr/local/libexec/lcp-admin";
-
-    let mut mode_is_correct = false;
-    let mut owner = false;
-    let mut group = false;
-    let mut operands: Vec<&str> = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        match arg {
-            // the binary is installed 0755, owned by root:root — no other
-            // mode, no other owner
-            "-m" => {
-                let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                if mode_is_correct {
-                    return Err(operand_not_allowed(PROGRAM, "-m", "-m is given more than once"));
-                }
-                if value != "0755" {
-                    return Err(operand_not_allowed(
-                        PROGRAM,
-                        &value,
-                        "the mode of the installed helper must be 0755",
-                    ));
-                }
-                mode_is_correct = true;
-            }
-            "-o" => {
-                let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                if owner {
-                    return Err(operand_not_allowed(PROGRAM, "-o", "-o is given more than once"));
-                }
-                if value != "root" {
-                    return Err(operand_not_allowed(
-                        PROGRAM,
-                        &value,
-                        "the installed helper must be owned by root",
-                    ));
-                }
-                owner = true;
-            }
-            "-g" => {
-                let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                if group {
-                    return Err(operand_not_allowed(PROGRAM, "-g", "-g is given more than once"));
-                }
-                if value != "root" {
-                    return Err(operand_not_allowed(
-                        PROGRAM,
-                        &value,
-                        "the installed helper must be owned by group root",
-                    ));
-                }
-                group = true;
-            }
-            // no -d (directories go through mkdir), no other flag
-            _ if arg.starts_with('-') => return Err(flag_not_allowed(PROGRAM, arg)),
-            _ => {
-                if operands.len() >= 2 {
-                    return Err(operand_not_allowed(
-                        PROGRAM,
-                        arg,
-                        "install takes only a source and a destination",
-                    ));
-                }
-                operands.push(arg);
-            }
-        }
-        index += 1;
-    }
-
-    let [source, destination] = &operands[..] else {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            "",
-            "install needs exactly '<trusted source> /usr/local/libexec/lcp-admin'",
-        ));
-    };
-    if *destination != HELPER_DEST {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            destination,
-            &format!("the destination of install must be {HELPER_DEST}"),
-        ));
-    }
-    if !mode_is_correct || !owner || !group {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            "",
-            "install requires -m 0755 -o root -g root",
-        ));
-    }
-    ensure_trusted_path(PROGRAM, source, "helper source")?;
-    // the copy must start out trustworthy: root owned, not user writable
-    verify_trusted_binary(source)?;
-    Ok(())
-}
+/// sshd shape stays with `check_daemon_flags` (flags only: `-T` to print the
+/// effective configuration, `-t` to validate it — no operands, no key paths).
 
 /// The helper's named-action calls (the first slice of the phase 3 CLI):
-/// `lcp-admin <action> [params]`. Actions so far: `install_polkit_rule`
-/// (content via stdin, see the action in helper/src/main.rs).
-const HELPER_ACTIONS: &[&str] = &["install_polkit_rule"];
+/// `lcp-admin <action> [params]`.
+///
+/// * `install_polkit_rule` — content via stdin, no parameters (see the action
+///   in helper/src/main.rs).
+/// * `read_user_ssh_keys <account>` / `write_user_ssh_keys <account>` — an
+///   account's authorized_keys; for the write the content travels on stdin.
+const HELPER_ACTIONS: &[&str] = &[
+    "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys", "write_profile_sh",
+];
+
+/// The user-management actions take exactly one parameter: an account name.
+const HELPER_ACCOUNT_ACTIONS: &[&str] = &["read_user_ssh_keys", "write_user_ssh_keys"];
+
+/// `write_profile_sh <path>` takes exactly one parameter: a profile.d
+/// destination (validated by `validate_profile_sh_path`; the content travels
+/// on stdin and is validated by the action itself).
+const HELPER_PATH_ACTIONS: &[&str] = &["write_profile_sh"];
+
+/// Check that a name may address a local account in panel commands. It exists
+/// so that user-supplied strings never become file path fragments (`/home/
+/// {name}` and friends): no slashes, no dot files, no traversal — the actual
+/// existence of the account is the helper's business (its passwd lookup).
+pub fn is_valid_account_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= 32
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("'{name}' is not a valid account name for this panel"))
+    }
+}
 
 fn check_helper_action(args: &[String]) -> Result<(), String> {
-    let [action] = args else {
+    let Some(action) = args.first() else {
         return Err(operand_not_allowed(
             "lcp-admin",
             "",
-            "exactly one action name must be given",
+            "an action name must be given",
         ));
     };
     if !HELPER_ACTIONS.contains(&action.as_str()) {
@@ -1687,6 +2578,39 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             "lcp-admin",
             action,
             "this action does not exist",
+        ));
+    }
+    if HELPER_ACCOUNT_ACTIONS.contains(&action.as_str()) {
+        let [_, account] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one account name",
+            ));
+        };
+        is_valid_account_name(account).map_err(|reason| {
+            operand_not_allowed("lcp-admin", account, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_PATH_ACTIONS.contains(&action.as_str()) {
+        let [_, path] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one profile file path",
+            ));
+        };
+        validate_profile_sh_path(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        return Ok(());
+    }
+    if args.len() != 1 {
+        return Err(operand_not_allowed(
+            "lcp-admin",
+            action,
+            "this action takes no further arguments",
         ));
     }
     Ok(())
@@ -1731,7 +2655,6 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
         "ls" => check_log_reader("ls", args, &["-l", "-a", "-la", "-lh", "-A"]),
         "stat" | "readlink" | "zcat" => check_log_reader(base.as_str(), args, &[]),
         "grep" => check_grep(args),
-        "install" => check_install(args),
         "lcp-admin" => check_helper_action(args),
         _ => check_no_flags_at_all(base.as_str(), args),
     }
@@ -1821,6 +2744,78 @@ mod argument_policy_tests {
         refused("systemctl", &["start", "nginx;id"]);
         refused("systemctl", &["daemon-reload", "nginx"]);
         refused("systemctl", &["status", "nginx\n.service"]);
+    }
+
+    #[test]
+    fn protected_units_cannot_be_stopped_or_disabled_through_the_helper() {
+        // critical core
+        refused("systemctl", &["stop", "systemd-logind"]);
+        refused("systemctl", &["disable", "systemd-logind.service"]);
+        refused("systemctl", &["stop", "dbus-broker"]);
+        refused("systemctl", &["disable", "multi-user.target"]);
+        // essential infrastructure
+        refused("systemctl", &["stop", "firewalld"]);
+        refused("systemctl", &["stop", "sshd"]);
+        refused("systemctl", &["disable", "NetworkManager"]);
+        refused("systemctl", &["stop", "NetworkManager.service"]);
+        refused("systemctl", &["disable", "sshd"]);
+        // prefix families
+        refused("systemctl", &["stop", "systemd-journald-extra.service"]);
+        refused("systemctl", &["stop", "networkmanager-wait-online.service"]);
+        // unnamespaced traffic stays allowed
+        ok("systemctl", &["stop", "nginx"]);
+        ok("systemctl", &["disable", "httpd"]);
+        ok("systemctl", &["restart", "sshd"]);
+        ok("systemctl", &["enable", "--now", "multi-user.target"]);
+        ok("systemctl", &["status", "auditd"]);
+        ok("systemctl", &["is-active", "auditd"]);
+    }
+
+    // ── reader path allowlist ─────────────────────────────────────────────────
+
+    #[test]
+    fn readers_only_see_the_allowlist() {
+        ok("cat", &["/etc/hosts"]);
+        ok("cat", &["/etc/hostname"]);
+        // /etc/os-release is a symlink (../usr/lib/os-release) on Fedora:
+        // the no-symlink rule wins over the allowlist entry — by design
+        refused("cat", &["/etc/os-release"]);
+        ok("tail", &["-n", "5", "/var/log/messages"]);
+        ok("cat", &["/var/log/nginx/access.log"]);
+        ok("ls", &["-l", "/etc/nginx"]);
+        ok("grep", &["-i", "server", "/etc/nginx/nginx.conf"]);
+        ok("ls", &["/etc/audit/rules.d/99-control-panel.rules"]);
+        ok("cat", &["/home/marvin/.config/control-panel/logs/control-panel.log"]);
+        // /boot/grub2 (the auditors read grub.cfg) and the ssh config lane
+        ok("cat", &["/boot/grub2/grub.cfg"]);
+        ok("cat", &["/etc/ssh/sshd_config"]);
+        ok("cat", &["/etc/ssh/sshd_config.d/10-hardening.conf"]);
+        // the host keys live in /etc/ssh itself and stay off the list
+        refused("cat", &["/etc/ssh/ssh_host_ed25519_key"]);
+        // the /root deny also applies to the root user's copy of the panel
+        // log — the helper would be reading for itself anyway
+        refused("cat", &["/root/.config/control-panel/logs/control-panel.log"]);
+        // outside the allowlist
+        refused("cat", &["/etc/passwd"]);
+        refused("cat", &["/var/tmp/whatever.log"]);
+        refused("cat", &["/tmp/keys_test"]);
+    }
+
+    #[test]
+    fn credential_and_policy_files_are_never_readable_and_can_not_escape() {
+        refused("cat", &["/etc/shadow"]);
+        refused("cat", &["/etc/shadow-"]);
+        refused("cat", &["/etc/gshadow"]);
+        refused("cat", &["/etc/gshadow-"]);
+        refused("cat", &["/etc/sudoers"]);
+        refused("grep", &["-i", "pattern", "/etc/sudoers.d/panel"]);
+        refused("cat", &["/etc/ssl/private/server.key"]);
+        refused("cat", &["/root/.ssh/id_rsa"]);
+        refused("tail", &["-n", "5", "/home/marvin/.ssh/id_rsa"]);
+        // symlink leaf: refused before it can be resolved
+        refused("cat", &["/proc/self/root/etc/shadow"]);
+        refused("cat", &["/etc/../root/authorized_keys"]);
+        refused("tail", &["-n", "5", "/var/log/../etc/shadow"]);
     }
 
     // ── requirement 3: dnf/rpm ───────────────────────────────────────────────
@@ -1969,7 +2964,11 @@ mod argument_policy_tests {
         refused("setsebool", &["-P"]);
         refused("setsebool", &["ftpd_full_access", "on", "extra"]);
 
-        ok("semodule", &["-i", "/tmp/audit2allow/mod.pp"]);
+        ok("semodule", &["-l"]);
+        // installs are only allowed from the panel's root-owned policy dir;
+        // on dev machines that file does not exist → also refused
+        refused("semodule", &["-i", "/tmp/audit2allow/mod.pp"]);
+        refused("semodule", &["-i", "/var/lib/linux-control-panel/policy/mod.pp"]);
         refused("semodule", &["-B"]);
         refused("semodule", &["-i"]);
         // an existing symlinked prefix must not be usable to escape
@@ -2023,47 +3022,7 @@ mod argument_policy_tests {
         refused("grep", &["-i"]);
     }
 
-    // ── the bootstrap copy template (install) and the helper action ──────────
-
-    #[test]
-    fn install_only_accepts_the_strict_helper_template() {
-        // /usr/bin/cat is a real, root-owned, non-user-writable file — dnf
-        // would be a symlink and rightly refused by ensure_trusted_path
-        ok("install", &[
-            "-m", "0755",
-            "-o", "root",
-            "-g", "root",
-            "/usr/bin/cat",
-            "/usr/local/libexec/lcp-admin",
-        ]);
-        // flags may come in any order — the app sends it in this order
-        ok("install", &[
-            "-o", "root", "-g", "root", "-m", "0755",
-            "/usr/bin/cat", "/usr/local/libexec/lcp-admin",
-        ]);
-        // wrong mode / owner / group
-        refused("install", &["-m", "0644", "-o", "root", "-g", "root", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        refused("install", &["-m", "0755", "-o", "bin", "-g", "root", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        refused("install", &["-m", "0755", "-o", "root", "-g", "bin", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        refused("install", &["-o", "root", "-g", "root", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        refused("install", &["-m", "0755", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        refused("install", &["-m", "0755", "-o", "root", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        // foreign destinations and extra operands are refused
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "/usr/bin/cat", "/etc/shadow"]);
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "/usr/bin/cat", "/usr/local/libexec/other"]);
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "/usr/bin/cat", "/usr/local/libexec/lcp-admin", "extra"]);
-        // no -d, no recursive/dereference flags
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "-d", "/usr/local/libexec"]);
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "-D", "/usr/bin/cat", "/usr/local/libexec/lcp-admin"]);
-        // a single operand is not the template
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "/usr/local/libexec/lcp-admin"]);
-        // missing operands entirely
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root"]);
-        // the src must be an absolute path in the first place
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "relative/lcp-admin", "/usr/local/libexec/lcp-admin"]);
-        // a symlinked source (dnf → dnf-3 on Fedora) is refused
-        refused("install", &["-m", "0755", "-o", "root", "-g", "root", "/usr/bin/dnf", "/usr/local/libexec/lcp-admin"]);
-    }
+    // ── the helper action ─────────────────────────────────────────────────────
 
     #[test]
     fn helper_action_calls_accept_only_known_actions() {
@@ -2073,5 +3032,553 @@ mod argument_policy_tests {
         refused("lcp-admin", &["some_other_action"]);
         refused("lcp-admin", &["-rf", "/x"]);
         refused("lcp-admin", &["/usr/bin/dnf"]);
+        // `write_repo_file` exists in the helper source (STEP 3B scope C) but
+        // is deliberately NOT registered as an action yet: until it is
+        // explicitly enabled in a later step, both gates must keep it
+        // fail-closed at dispatch.
+        refused("lcp-admin", &["write_repo_file", "/etc/yum.repos.d/x.repo"]);
+    }
+
+    #[test]
+    fn ssh_key_actions_take_one_valid_account_name_only() {
+        ok("lcp-admin", &["read_user_ssh_keys", "marvin"]);
+        ok("lcp-admin", &["write_user_ssh_keys", "root"]);
+        ok("lcp-admin", &["write_user_ssh_keys", "a_1-b"]);
+        // the account name never becomes a path fragment: no dots, no slashes
+        refused("lcp-admin", &["read_user_ssh_keys", "../root"]);
+        refused("lcp-admin", &["read_user_ssh_keys", "/etc/shadow"]);
+        refused("lcp-admin", &["read_user_ssh_keys", "mar vin"]);
+        refused("lcp-admin", &["read_user_ssh_keys", "marvin;reboot"]);
+        refused("lcp-admin", &["read_user_ssh_keys", "-x"]);
+        refused("lcp-admin", &["read_user_ssh_keys", ""]);
+        refused("lcp-admin", &["read_user_ssh_keys"]);
+        refused("lcp-admin", &["write_user_ssh_keys", "marvin", "extra"]);
+        // and neither action takes any other shape
+        refused("lcp-admin", &["read_user_ssh_keys", "marvin", "marvin"]);
+    }
+
+    #[test]
+    fn write_profile_sh_takes_exactly_one_profile_d_sh_path() {
+        use super::ensure_arguments_for_program as check;
+
+        // keep the fixture PROFILE_D_DIR real for the validator's path walk
+        #[cfg(feature = "test-fixture")]
+        std::fs::create_dir_all(std::path::Path::new(super::PROFILE_D_DIR)).unwrap();
+
+        fn path_ok(path: &str) {
+            let argv: Vec<String> =
+                ["write_profile_sh", path].iter().map(|s| s.to_string()).collect();
+            assert!(check("lcp-admin", &argv).is_ok(), "must be allowed: {path}");
+        }
+        fn path_refused(path: &str) {
+            let argv: Vec<String> =
+                ["write_profile_sh", path].iter().map(|s| s.to_string()).collect();
+            assert!(check("lcp-admin", &argv).is_err(), "must be refused: {path}");
+        }
+        // PROFILE_D_DIR keeps this test meaningful in production and in a
+        // test-fixture build of the helper alike
+        let d = super::PROFILE_D_DIR;
+        path_ok(&format!("{d}/10-lang.sh"));
+        path_ok(&format!("{d}/foo.sh"));
+        path_refused("/etc/shadow");
+        path_refused(d);
+        path_refused(&format!("{d}/x.conf"));
+        path_refused(&format!("{d}/../shadow.sh"));
+        path_refused(&format!("{d}/sub/x.sh"));
+        path_refused(&format!("{d}/.hidden.sh"));
+        path_refused(&format!("{d}/wow*x.sh"));
+        path_refused("/etc/hosts");
+    }
+}
+
+// ─── profile.d destination and content policy (F-1) ─────────────────────────
+
+#[cfg(test)]
+mod profile_sh_policy_tests {
+    use super::{validate_profile_sh_content, validate_profile_sh_path, PROFILE_D_DIR};
+
+    /// A test-fixture build's PROFILE_D_DIR is a temp twin whose directory
+    /// tree the validator's real path walk must see. Production builds need
+    /// nothing (the validator only walks real directories that always exist
+    /// for the allowed shapes).
+    #[cfg(feature = "test-fixture")]
+    fn ensure_profile_dir() {
+        std::fs::create_dir_all(std::path::Path::new(PROFILE_D_DIR)).unwrap();
+    }
+    #[cfg(not(feature = "test-fixture"))]
+    fn ensure_profile_dir() {}
+
+    fn path_ok(path: &str) {
+        assert!(validate_profile_sh_path(path).is_ok(), "path must pass: {path}");
+    }
+    fn path_refused(path: &str) {
+        assert!(validate_profile_sh_path(path).is_err(), "path must fail: {path}");
+    }
+
+    #[test]
+    fn profile_paths_must_be_exact_profile_d_sh_names() {
+        ensure_profile_dir();
+        // PROFILE_D_DIR is the /etc/profile.d in production and its fixture
+        // twin in a test-fixture build of the helper — the tests keep both
+        // meaningful.
+        let d = PROFILE_D_DIR;
+        path_ok(&format!("{d}/lang.sh"));
+        path_ok(&format!("{d}/99-panel.sh"));
+        path_refused("/etc/shadow");
+        path_refused(d);
+        path_refused(&format!("{d}/"));
+        path_refused(&format!("{d}/x.conf"));
+        path_refused(&format!("{d}/sh"));
+        path_refused(&format!("{d}/sub/x.sh"));
+        path_refused(&format!("{d}/../hosts"));
+        path_refused(&format!("{d}/../shadow.sh"));
+        path_refused(&format!("{d}/.hidden.sh"));
+        path_refused(&format!("{d}/x.sh/../y.sh"));
+        path_refused(&format!("{d}/bad name.sh"));
+        path_refused(&format!("{d}/wow*x.sh"));
+        path_refused(&format!("{d}/wow;.sh"));
+        path_refused(&format!("{}\u{0}", format!("{d}/ctrl.sh")));
+        path_refused("profile.d/x.sh");
+    }
+
+    #[test]
+    fn profile_names_reject_non_name_basenames() {
+        assert!(validate_profile_sh_path("/etc/profile.d/café.sh").is_err());
+        assert!(validate_profile_sh_path(
+            "/etc/profile.d/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sh"
+        ).is_err(), "names over 64 characters are refused");
+    }
+
+    fn content_ok(content: &str) {
+        assert!(validate_profile_sh_content(content).is_ok(), "content must pass: {content:?}");
+    }
+    fn content_refused(content: &str) {
+        assert!(validate_profile_sh_content(content).is_err(), "content must fail: {content:?}");
+    }
+
+    #[test]
+    fn profile_content_accepts_only_export_lines() {
+        content_ok("");
+        content_ok("#!/usr/bin/env bash\n# Created by Linux Control Panel\n");
+        content_ok("export FOO=\"bar\"\n");
+        content_ok("export FOO=\"bar\"\n# comment\n\nexport BAZ='qux'\n");
+        content_ok("export EMPTY=\"\"\n");
+        content_ok("export NODOT=QnVh\n");
+        content_ok("export URL=\"https://example.com/path?x=1\"\n");
+        content_ok("export WEIRD=\"spaces  are  fine\"\n");
+        content_ok("export PATHLIKE=\"Value Value\"\n");
+    }
+
+    #[test]
+    fn profile_content_rejects_shell_code() {
+        // free command text
+        content_refused("ls -la\n");
+        content_refused("echo hello\n");
+        content_refused("rm -rf /\n");
+        // command substitution, expansion, escapes
+        content_refused("export X=\"$(touch /tmp/pwned)\"\n");
+        content_refused("export X=\"`touch /tmp/pwned`\"\n");
+        content_refused("export X=\"${IARGA}\\${READY}\"\n");
+        content_refused("export X=\"a\"\"b\"\n");
+        content_refused("export X='a'\"; touch\" \n");
+        // unquoted specials
+        content_refused("export X=a|b\n");
+        content_refused("export X=a>b\n");
+        content_refused("export X=a;b\n");
+        content_refused("export X='a'; touch /tmp/pwned\n");
+        // not an assignment
+        content_refused("[ -x /bin/su ] && cat /etc/passwd\n");
+        content_refused(". /tmp/script\n");
+        content_refused("source /tmp/script\n");
+        // NUL never passes
+        content_refused("\0");
+        // control characters anywhere
+        content_refused("export X=\"a\nb\"\n");
+    }
+
+    #[test]
+    fn oversized_profile_content_is_refused() {
+        let long = format!("export A=\"{}\"\n", "x".repeat(260 * 1024));
+        assert!(validate_profile_sh_content(&long).is_err());
+    }
+}
+
+// ─── repository content policy (F-2) ────────────────────────────────────────
+
+#[cfg(test)]
+mod repo_content_policy_tests {
+    use super::ensure_repo_file_content;
+
+    fn ok_file(path: &str, content: &str) {
+        if let Err(reason) = ensure_repo_file_content(path, content) {
+            panic!("must pass {path}: {content:?} — rejected with: {reason}");
+        }
+    }
+    fn refused_file(path: &str, content: &str, because: &str) {
+        assert!(
+            ensure_repo_file_content(path, content).is_err(),
+            "must be refused ({because}): {path} — {content:?}"
+        );
+    }
+
+    const GOOD: &str = "[test-repo]\n\
+        name=Test Repo\n\
+        baseurl=https://download.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/\n\
+        gpgkey=https://download.fedoraproject.org/pub/fedora/linux/RPM-GPG-KEY-fedora\n\
+        gpgcheck=1\n\
+        enabled=1\n";
+
+    #[test]
+    fn valid_repo_content_passes() {
+        ok_file("/etc/yum.repos.d/test.repo", GOOD);
+        // metalink style, without gpgcheck (dnf defaults it on)
+        ok_file(
+            "/etc/yum.repos.d/fedora-updates.repo",
+            "[updates]\n\
+             name=Fedora $releasever - $basearch\n\
+             metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f$releasever&arch=$basearch\n\
+             enabled=1\n",
+        );
+        // a file emptied by a section delete is harmless
+        ok_file("/etc/yum.repos.d/emptied.repo", "");
+        ok_file("/etc/yum.repos.d/emptied.repo", "[one]\nname=A\nbaseurl=https://example.com/one\n");
+    }
+
+    #[test]
+    fn local_file_sources_are_rejected() {
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=file:///home/evil/repo\n", "file://");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=ftp://host/pub\n", "ftp://");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=/mnt/local/repo\n", "bare path");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=cdrom:\n", "cdrom:");
+        refused_file("/etc/apt/sources.list.d/x.list", "deb file:///srv/local one main\n", "apt file://");
+        refused_file("/etc/apt/sources.list.d/x.list", "deb cdrom:[Debian] / stable main\n", "apt cdrom:");
+    }
+
+    #[test]
+    fn disabled_signature_verification_is_rejected() {
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=https://example.com/repo\ngpgcheck=0\n", "gpgcheck=0");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=https://example.com/repo\nrepo_gpgcheck=0\n", "repo_gpgcheck=0");
+        // lying separators or mangled booleans cannot sneak it back in
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl=https://example.com/repo\ngpgcheck=1?0\n", "mangled");
+    }
+
+    #[test]
+    fn unexpected_directives_are_rejected() {
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\ndefine=whatever\n", "unknown key");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nexec=post.sh\n", "exec-like key");
+        refused_file("/etc/apt/sources.list.d/x.sources", "Types: deb\nURIs: https://good.example/one\nHook: /usr/bin/gadget\n", "unknown stanza key");
+    }
+
+    #[test]
+    fn malformed_repo_files_are_rejected() {
+        refused_file("/etc/yum.repos.d/x.repo", "this is not ini\n", "no section");
+        refused_file("/etc/yum.repos.d/x.repo", "[r]\nbaseurl\n", "no '='");
+        refused_file("/etc/yum.repos.d/x.repo", "[../big]\n", "bad section id");
+        refused_file("/etc/apt/sources.list.d/x.sources", "Types deb\n", "not key: value");
+        refused_file("/etc/apt/sources.list.d/x.sources", "Types: deb\nURIs: file:///srv\n", "sources file://");
+        refused_file("/etc/yum.repos.d/x.ini", GOOD, "unsupported extension");
+    }
+
+    #[test]
+    fn repo_content_size_and_nul_gates() {
+        refused_file("/etc/yum.repos.d/x.repo", "\0", "NUL");
+        refused_file(
+            "/etc/yum.repos.d/x.repo",
+            &format!("[r]\nname={}\n", "a".repeat(300 * 1024)),
+            "oversized",
+        );
+    }
+
+    // ── scope B (STEP 3B): signed-by / bracket options / deb822 ──────────────
+
+    const DEB_BASE: &str = "https://deb.debian.org/debian bookworm main contrib non-free-firmware";
+    const KEYRING: &str = "/usr/share/keyrings/some-repo-archive-keyring.gpg";
+
+    #[test]
+    fn apt_list_plain_and_flat_entries_still_pass() {
+        ok_file("/etc/apt/sources.list.d/debian.list", &format!("deb {DEB_BASE}\n"));
+        ok_file("/etc/apt/sources.list.d/debian.list", &format!("deb-src {DEB_BASE}\n"));
+        // flat repository: suite "./", zero components
+        ok_file("/etc/apt/sources.list.d/flat.list", "deb https://apt.example.com ./\n");
+        ok_file("/etc/apt/sources.list.d/flat.list", "deb https://apt.example.com ./ main\n");
+        // tor-hidden sources stay allowed
+        ok_file(
+            "/etc/apt/sources.list.d/tor.list",
+            "deb tor+https://mirror.example.org/debian trixie main\n",
+        );
+        // arch option and an approved signed-by keyring
+        ok_file(
+            "/etc/apt/sources.list.d/strict.list",
+            "deb [arch=amd64,arm64] http://host.example/debian stable main\n",
+        );
+        ok_file(
+            "/etc/apt/sources.list.d/strict.list",
+            &format!("deb [signed-by={KEYRING}] {DEB_BASE}\n"),
+        );
+        ok_file(
+            "/etc/apt/sources.list.d/strict.list",
+            "deb [signed-by=/etc/apt/keyrings/nginx_signing.asc] http://host.example/deb ./\n",
+        );
+        // comma-separated approved keyring paths
+        ok_file(
+            "/etc/apt/sources.list.d/strict.list",
+            &format!("deb [signed-by={KEYRING},/etc/apt/keyrings/a-b_1.asc] {DEB_BASE}\n"),
+        );
+        // empty options group is inert
+        ok_file(
+            "/etc/apt/sources.list.d/strict.list",
+            &format!("deb [] {DEB_BASE}\n"),
+        );
+    }
+
+    #[test]
+    fn apt_list_refuses_user_controlled_signed_by_paths() {
+        // the core V-1 fix: a keyring must come from the approved root-owned
+        // directories, never from a user-controlled location
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/home/attacker/evil.gpg] https://host.example/debian stable main\n",
+            "keyring in the user's home",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/tmp/evil.gpg] https://host.example/debian stable main\n",
+            "keyring in /tmp",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/etc/attacker/evil.gpg] https://host.example/debian stable main\n",
+            "keyring outside the approved dirs",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/usr/share/keyrings/../etc/cron.d/pwn.gpg] https://host.example/deb ./\n",
+            "keyring path traversal",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/usr/share/keyrings/] https://host.example/deb ./\n",
+            "keyring path is a directory",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/usr/share/keyrings/evil] https://host.example/deb ./\n",
+            "missing keyring extension",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [signed-by=/usr/share/keyrings/.hidden.gpg] https://host.example/deb ./\n",
+            "dot-file keyring",
+        );
+        // the first approved path must not hide a hostile second one
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            &format!(
+                "deb [signed-by={KEYRING},/home/attacker/evil.gpg] https://host.example/deb ./\n"
+            ),
+            "second keyring path is hostile",
+        );
+        // whitespace-separating the keyring list is unsupported (ambiguous)
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            &format!("deb [signed-by={KEYRING} /etc/apt/keyrings/b.gpg] {DEB_BASE}\n"),
+            "whitespace-separated keyring paths",
+        );
+        // and the same policy in the deb822 format
+        refused_file(
+            "/etc/apt/sources.list.d/evil.sources",
+            "Types: deb\nURIs: https://host.example/debian\nSuites: stable\nComponents: main\nSigned-By: /home/attacker/evil.gpg\n",
+            "deb822 keyring in the user's home",
+        );
+    }
+
+    #[test]
+    fn apt_list_refuses_signature_disablers_and_unknown_options() {
+        // trusted=yes hands root package trust to an unsigned source
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [trusted=yes] https://host.example/debian stable main\n",
+            "trusted=yes",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [trusted=yes,arch=amd64] https://host.example/debian stable main\n",
+            "trusted=yes mixed into a group with an allowed option",
+        );
+        // unknown/unsupported options are refused rather than sanitized
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [date=2024] https://host.example/debian stable main\n",
+            "unknown option",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [x-sneak=https://evil] https://host.example/debian stable main\n",
+            "unknown option",
+        );
+        // bare words in the group are not options
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [trusted] https://host.example/debian stable main\n",
+            "bare bracket word",
+        );
+        // case tricks on the option name do not bypass the allowlist
+        refused_file(
+            "/etc/apt/sources.list.d/evil.list",
+            "deb [TRUSTED=yes] https://host.example/debian stable main\n",
+            "uppercase unknown option",
+        );
+    }
+
+    #[test]
+    fn apt_list_refuses_ambiguous_bracket_placements_and_broken_lines() {
+        // bracket after the suite → unsupported second options group
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.list",
+            "deb https://host.example/debian stable [arch=amd64] main\n",
+            "bracket group after the suite",
+        );
+        // unterminated group
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.list",
+            "deb [arch=amd64 https://host.example/debian stable main\n",
+            "unterminated bracket group",
+        );
+        // a bracket alone
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.list",
+            "deb [ https://host.example/debian stable main\n",
+            "lone bracket",
+        );
+        // brackets anywhere else in the line
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.list",
+            "deb https://host.example/debian stable ma[in\n",
+            "bracket in a component",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.list",
+            "deb [signed-by=/usr/share/keyrings/a.gpg]https://host.example/deb ./\n",
+            "URI glued to the options group",
+        );
+        // missing pieces
+        refused_file(
+            "/etc/apt/sources.list.d/broken.list",
+            "deb\n",
+            "type only",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/broken.list",
+            "deb https://host.example/debian\n",
+            "no suite",
+        );
+        // URI without an internet scheme (file/copy/cdrom already existed)
+        refused_file(
+            "/etc/apt/sources.list.d/broken.list",
+            "deb file:///srv/repo stable main\n",
+            "file scheme",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/broken.list",
+            "deb ftp://host/repo stable main\n",
+            "ftp scheme",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/broken.list",
+            "deb not-a-url stable main\n",
+            "scheme-less URI",
+        );
+    }
+
+    #[test]
+    fn deb822_strict_stanzas_pass_and_duplication_is_refused() {
+        ok_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            &format!(
+                "Types: deb\nURIs: https://deb.debian.org/debian https://deb.debian.org/debian-security\nSuites: bookworm bookworm-security\nComponents: main contrib non-free-firmware\nSigned-By: {KEYRING}\nEnabled: yes\n"
+            ),
+        );
+        ok_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb deb-src\nURIs: tor+https://host.example/debian\nSuites: trixie/updates\nComponents: main\nArchitectures: amd64,arm64\nOrigin: The Example Distro\nLabel: Example\n",
+        );
+        // repeated fields must be refused: apt merges them, so the document
+        // apt would read differs from the one validated here
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.sources",
+            "Types: deb\nURIs: https://host.example/debian\nURIs: https://evil.example/debian\n",
+            "repeated URIs field",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.sources",
+            "Types: deb\nURIs: https://host.example/debian\nComponents: main\ntypes: deb\n",
+            "repeated Types field (case-insensitive)",
+        );
+        // deb822 continuation lines are unsupported — a misparsed one would
+        // carry content the panel never validated
+        refused_file(
+            "/etc/apt/sources.list.d/ambiguous.sources",
+            "Types: deb\nURIs: https://host.example/debian\nSuites: stable\nComponents: main\nSigned-By: /usr/share/keyrings/a.gpg\n extra-continuation\n",
+            "continuation line",
+        );
+        // empty lines and comments stay fine
+        ok_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            &format!("\n# a comment\n\nTypes: deb\nURIs: https://host.example/debian\nSigned-By: {KEYRING}\n"),
+        );
+    }
+
+    #[test]
+    fn deb822_field_shape_rules() {
+        // Types only understands deb / deb-src words
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: binary\nURIs: https://host.example/debian\n",
+            "unknown type word",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types:\nURIs: https://host.example/debian\n",
+            "empty Types",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb\rdeb-src\nURIs: https://host.example/debian\n",
+            "control-r squeezed into the Types words",
+        );
+        // URIs demand per-token internet schemes
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "URIs: no-scheme-here\n",
+            "scheme-less URI token",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "URIs: https://host.example/debian [weird]\n",
+            "brackets inside URIs",
+        );
+        // Suites / Components are word lists only, never paths or options
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb\nURIs: https://host.example/debian\nSuites: st(able\n",
+            "parenthesis in a suite",
+        );
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb\nURIs: https://host.example/debian\nComponents: main;extra\n",
+            "semicolon in a component",
+        );
+        // inline keys (fingerprint material) are unsupported
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb\nURIs: https://host.example/debian\nSigned-By: 99A7BBF0ABCD\n",
+            "inline key blob instead of a keyring path",
+        );
+        // bracket-ish values cannot reach any field
+        refused_file(
+            "/etc/apt/sources.list.d/strict.sources",
+            "Types: deb\nURIs: https://host.example/debian\nOrigin: Exa[mple]\n",
+            "brackets in a free-form field",
+        );
     }
 }

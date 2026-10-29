@@ -38,6 +38,14 @@ libc = "0.2"
 thiserror = "1"
 base64 = "0.22"
 
+[features]
+# Shared with the helper crate (`helper/Cargo.toml`), which enables it for its
+# fixture-dispatch tests. In this crate nothing is behind it except the
+# fixture-path constants in `utils/root_policy.rs`; declaring it keeps every
+# `cfg(feature = "test-fixture")` a real, warning-free condition instead of an
+# always-false typo. Off by default — production paths stay `/etc/...`.
+test-fixture = []
+
 [profile.release]
 panic = "abort"   # Strip expensive panic clean-up logic
 codegen-units = 1 # Compile crates one at a time so the compiler can optimize better

@@ -89,23 +89,47 @@ async fn read_cmd(args: &[&str]) -> String {
     }
 }
 
-/// Read a file safely without blocking prompts.
+/// Read a file safely without blocking prompts. The unprivileged read is
+/// tried first (it covers everything world-readable); when that yields
+/// nothing, the read goes through the panel's main privilege chokepoint —
+/// the helper's validated `cat` — instead of a raw `sudo -n` bypass.
+///
+/// The shared policy is consulted before the privileged call: a reader call
+/// the helper would refuse anyway (`/etc/shadow`, `/etc/sudoers`, …) is not
+/// attempted at all, so the audit does not trigger an authentication prompt
+/// just to be told "no" — the caller then reports "could not verify".
 async fn read_privileged_file(path: &str) -> String {
     if let Ok(content) = tokio::fs::read_to_string(path).await {
         if !content.trim().is_empty() {
             return content;
         }
     }
-    let out = read_cmd(&["sudo", "-n", "cat", path]).await;
-    if !out.trim().is_empty() {
-        return out;
+    let args = [path.to_string()];
+    if privileged::ensure_arguments_for_program("/usr/bin/cat", &args).is_err() {
+        return String::new();
     }
-    String::new()
+    match privileged::run_privileged_output("/usr/bin/cat", &args, &privileged::RootAuth::Polkit)
+        .await
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
 }
 
 /// Read a world-readable file directly.
 async fn read_file(path: &str) -> String {
     tokio::fs::read_to_string(path).await.unwrap_or_default()
+}
+
+/// Octal permission string of a path — unprivileged metadata lookups only
+/// (st_mode), the same numbers `stat -c %a` used to report. `""` when the
+/// path can not be looked at at all.
+async fn permissions_of(path: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::metadata(path)
+        .await
+        .map(|meta| format!("{:o}", meta.permissions().mode() & 0o7777))
+        .unwrap_or_default()
 }
 
 /// Read a sysctl value from /proc or sysctl command.
@@ -194,17 +218,41 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // CATEGORY 1: SSH HARDENING
         // ═══════════════════════════════════════════════════════════════════════
         let cat_ssh = "SSH Hardening";
-        // Use `sshd -T` or direct config parsing without blocking prompts
-        let sshd_t = read_cmd(&["bash", "-c",
-            "sudo -n sshd -T 2>/dev/null || \
-             sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || \
-             sshd -T 2>/dev/null || \
-             /usr/sbin/sshd -T 2>/dev/null || true"]).await;
+        // Evaluate the active sshd configuration. The privileged shape is a
+        // plain `sshd -T` through the helper (flags only, per the shared
+        // policy) — no bash, no `sudo -n`. When that is not available the
+        // config files are parsed instead.
+        let sshd_cfg_args = ["-T".to_string()];
+        let sshd_t_res = if privileged::ensure_arguments_for_program("/usr/sbin/sshd", &sshd_cfg_args).is_ok() {
+            privileged::run_privileged_output("/usr/sbin/sshd", &sshd_cfg_args, &privileged::RootAuth::Polkit).await
+        } else {
+            Err("sshd is not available for a validated privileged read".to_string())
+        };
+        let sshd_t = match sshd_t_res {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+            _ => String::new(),
+        };
         let ssh_full = if !sshd_t.trim().is_empty() {
             sshd_t
         } else {
             let ssh_cfg = read_privileged_file("/etc/ssh/sshd_config").await;
-            let ssh_cfg_d = read_cmd(&["bash", "-c", "sudo -n cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await;
+            // the include fragments are enumerated unprivileged and each one
+            // is read through the validated path gate as well
+            let mut ssh_cfg_d = String::new();
+            if let Ok(entries) = std::fs::read_dir("/etc/ssh/sshd_config.d") {
+                let mut names: Vec<_> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                    .collect();
+                names.sort();
+                for path in names {
+                    if let Some(path) = path.to_str() {
+                        ssh_cfg_d.push_str(&read_privileged_file(path).await);
+                        ssh_cfg_d.push('\n');
+                    }
+                }
+            }
             format!("{}\n{}", ssh_cfg, ssh_cfg_d)
         };
 
@@ -433,7 +481,22 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 2g. Disable Unused Filesystem Modules
         kernel_max += 5;
-        let modprobe_conf = read_cmd(&["bash", "-c", "cat /etc/modprobe.d/*.conf 2>/dev/null || true"]).await;
+        // kernel_max/5 - enumerated unprivileged (the .conf files are
+        // world-readable); no shell glob needed
+        let mut modprobe_conf = String::new();
+        if let Ok(entries) = std::fs::read_dir("/etc/modprobe.d") {
+            let mut names: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                .collect();
+            names.sort();
+            for path in names {
+                if let Some(path) = path.to_str() {
+                    modprobe_conf.push_str(&read_file(path).await);
+                }
+            }
+        }
         let fs_disabled = modprobe_conf.contains("cramfs") && modprobe_conf.contains("hfs");
         if fs_disabled {
             kernel_cur += 5;
@@ -529,32 +592,42 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 3b. Users with Empty Passwords
         user_max += 5;
         let shadow = read_privileged_file("/etc/shadow").await;
-        let empty_pw_users: Vec<String> = shadow.lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, ':').collect();
-                if parts.len() >= 2 {
-                    let hash = parts[1];
-                    // Empty or "!" or "*" means no/locked password; "" means empty (insecure)
-                    if hash.is_empty() { Some(parts[0].to_string()) } else { None }
-                } else { None }
-            })
-            .collect();
-        if empty_pw_users.is_empty() {
-            user_cur += 5;
-            findings.push(good("empty_passwords", "No Accounts with Empty Passwords",
-                "All user accounts have a password set or are properly locked.",
-                "Regularly audit user accounts and ensure all have strong passwords.", cat_user, Some("CIS 5.4.2")));
+        // /etc/shadow is on the reader policy's permanent deny list — the
+        // empty output means "could not look", never "none found"
+        if shadow.trim().is_empty() {
+            findings.push(warn("empty_passwords", "Empty Passwords Could Not Be Verified",
+                "The helper refuses to read /etc/shadow (she holds password hashes), so the empty-password accounts could not be checked automatically.",
+                "Check manually: sudo awk -F: '($2 == \"\") {print $1}' /etc/shadow", cat_user, false, None));
         } else {
-            findings.push(crit("empty_passwords", "Accounts with Empty Passwords Found",
-                &format!("The following accounts have no password: {}. Anyone can log in as these users without credentials.", empty_pw_users.join(", ")),
-                "Run 'passwd <username>' to set passwords, or click Apply Fix to lock accounts via 'passwd -l'.", cat_user, true, Some("CIS 5.4.2")));
+            let empty_pw_users: Vec<String> = shadow.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, ':').collect();
+                    if parts.len() >= 2 {
+                        let hash = parts[1];
+                        // Empty or "!" or "*" means no/locked password; "" means empty (insecure)
+                        if hash.is_empty() { Some(parts[0].to_string()) } else { None }
+                    } else { None }
+                })
+                .collect();
+            if empty_pw_users.is_empty() {
+                user_cur += 5;
+                findings.push(good("empty_passwords", "No Accounts with Empty Passwords",
+                    "All user accounts have a password set or are properly locked.",
+                    "Regularly audit user accounts and ensure all have strong passwords.", cat_user, Some("CIS 5.4.2")));
+            } else {
+                findings.push(crit("empty_passwords", "Accounts with Empty Passwords Found",
+                    &format!("The following accounts have no password: {}. Anyone can log in as these users without credentials.", empty_pw_users.join(", ")),
+                    "Run 'passwd <username>' to set passwords, or click Apply Fix to lock accounts via 'passwd -l'.", cat_user, true, Some("CIS 5.4.2")));
+            }
         }
 
         // 3c. NOPASSWD in sudoers
         user_max += 5;
-        let sudoers = read_privileged_file("/etc/sudoers").await;
-        let sudoers_d = read_cmd(&["bash", "-c", "cat /etc/sudoers.d/* 2>/dev/null || true"]).await;
-        let sudoers_full = format!("{}\n{}", sudoers, sudoers_d);
+        // Reading /etc/sudoers (and the root-only sudoers.d) through the
+        // helper is on the reader policy's permanent deny list, so the scan
+        // degrades honestly when the content is unavailable instead of
+        // reporting a false "no NOPASSWD entries".
+        let sudoers_full = read_privileged_file("/etc/sudoers").await;
         let nopasswd_lines: Vec<String> = sudoers_full.lines()
             .filter(|l| {
                 let t = l.trim();
@@ -562,7 +635,11 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             })
             .map(|l| l.trim().to_string())
             .collect();
-        if nopasswd_lines.is_empty() {
+        if sudoers_full.trim().is_empty() {
+            findings.push(warn("sudo_nopasswd", "NOPASSWD Sudoers Rules Could Not Be Verified",
+                "The helper refuses to read /etc/sudoers (it is the system's privilege policy), so NOPASSWD entries could not be checked automatically.",
+                "Check manually: sudo grep -r NOPASSWD /etc/sudoers /etc/sudoers.d/", cat_user, false, None));
+        } else if nopasswd_lines.is_empty() {
             user_cur += 5;
             findings.push(good("sudo_nopasswd", "No Dangerous NOPASSWD Sudoers Rules",
                 "No sudoers entries grant passwordless ALL privileges. Privilege escalation requires authentication.",
@@ -630,7 +707,22 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 3f. PAM Faillock Lockout Policy
         user_max += 5;
         let faillock_conf = read_privileged_file("/etc/security/faillock.conf").await;
-        let faillock_d = read_cmd(&["bash", "-c", "cat /etc/security/faillock.conf.d/*.conf 2>/dev/null || true"]).await;
+        // the include fragments are enumerated unprivileged; the .conf files
+        // are world-readable
+        let mut faillock_d = String::new();
+        if let Ok(entries) = std::fs::read_dir("/etc/security/faillock.conf.d") {
+            let mut names: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                .collect();
+            names.sort();
+            for path in names {
+                if let Some(path) = path.to_str() {
+                    faillock_d.push_str(&read_file(path).await);
+                }
+            }
+        }
         let faillock_full = format!("{}\n{}", faillock_conf, faillock_d);
         let has_faillock = faillock_full.lines().any(|l| l.trim().starts_with("deny") && !l.trim().starts_with('#'));
         if has_faillock {
@@ -702,7 +794,8 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4a. /etc/passwd permissions
         fs_max += 5;
-        let passwd_perms = read_cmd(&["stat", "-c", "%a", "/etc/passwd"]).await;
+        // permission metadata is world-readable; no privileged stat needed
+        let passwd_perms = permissions_of("/etc/passwd").await;
         let passwd_perms = passwd_perms.trim();
         // Should be 644
         if passwd_perms == "644" {
@@ -723,7 +816,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4b. /etc/shadow permissions
         fs_max += 5;
-        let shadow_perms = read_cmd(&["stat", "-c", "%a", "/etc/shadow"]).await;
+        let shadow_perms = permissions_of("/etc/shadow").await;
         let shadow_perms = shadow_perms.trim();
         // Should be 000 or 640
         let shadow_ok = matches!(shadow_perms, "0" | "000" | "640" | "400");
@@ -740,7 +833,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4c. /tmp sticky bit
         fs_max += 5;
-        let tmp_perms = read_cmd(&["stat", "-c", "%a", "/tmp"]).await;
+        let tmp_perms = permissions_of("/tmp").await;
         let tmp_perms = tmp_perms.trim();
         // Sticky bit = leading 1 (e.g. 1777)
         let tmp_sticky = tmp_perms.starts_with('1');
@@ -758,7 +851,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 4d. World-writable files in /etc
         fs_max += 5;
         let ww_etc = read_cmd(&["find", "/etc", "-maxdepth", "2", "-type", "f",
-            "-perm", "-o+w", "-not", "-path", "/etc/passwd", "2>/dev/null"]).await;
+            "-perm", "-o+w", "-not", "-path", "/etc/passwd"]).await;
         let ww_files: Vec<&str> = ww_etc.lines().filter(|l| !l.trim().is_empty()).collect();
         if ww_files.is_empty() {
             fs_cur += 5;
@@ -814,8 +907,12 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4f. World-Writable Files in Temp Partitions
         fs_max += 5;
-        let ww_output = read_cmd(&["bash", "-c", "find /tmp /var/tmp /dev/shm -maxdepth 2 -type f -perm -0002 2>/dev/null | head -5"]).await;
-        let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        // a direct find over the shared temp directories, truncated here —
+        // no shell pipe needed
+        let ww_output = read_cmd(&["find", "/tmp", "/var/tmp", "/dev/shm",
+            "-maxdepth", "2", "-type", "f", "-perm", "-0002"]).await;
+        let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()).take(5).collect();
         if ww_files.is_empty() {
             fs_cur += 5;
             findings.push(good("fs_world_writable", "No World-Writable Files Found in Key Paths",
@@ -829,8 +926,10 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4g. Unowned Files / Groups in Temp Partitions
         fs_max += 5;
-        let unowned_out = read_cmd(&["bash", "-c", "find /tmp /var/tmp -maxdepth 2 \\( -nouser -o -nogroup \\) 2>/dev/null | head -5"]).await;
-        let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        let unowned_out = read_cmd(&["find", "/tmp", "/var/tmp", "-maxdepth", "2",
+            "(", "-nouser", "-o", "-nogroup", ")"]).await;
+        let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()).take(5).collect();
         if unowned_files.is_empty() {
             fs_cur += 5;
             findings.push(good("fs_unowned_files", "No Unowned Files Detected",

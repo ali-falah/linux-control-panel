@@ -487,6 +487,21 @@ pub async fn save_repo_details(
     gpgcheck: bool,
     priority: Option<u32>,
 ) -> Result<(), String> {
+    // the path comes from the frontend, so it is confined to the package
+    // managers' own directories before anything reads or writes it
+    ensure_repo_file_path(&file_path)?;
+    // repository ids and display names are active inside root-owned INI
+    // files: pin their shapes before anything else runs
+    if repo_id.is_empty()
+        || repo_id.len() > 64
+        || !repo_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!("'{repo_id}' is not a valid repository identifier"));
+    }
+    ensure_safe_operand(&name, "repository name")?;
+
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read repo file: {e}"))?;
 
@@ -560,6 +575,14 @@ pub async fn save_repo_details(
     }
 
     let final_content = new_lines.join("\n") + "\n";
+
+    // The content policy (F-2): path validation alone lets anything reconfigure
+    // the package system's sources with root authority — the *body* of the
+    // repository file is therefore validated here, in full, before the
+    // privileged write. Disabling signature verification, local-file sources
+    // and directives the panel never writes are rejected with a line-local
+    // message instead of replaced.
+    crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
 
     crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
 
@@ -1213,6 +1236,10 @@ pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), Strin
     }
 
     let final_content = new_lines.join("\n") + "\n";
+    // The content policy (F-2) also guards the delete flow's rewrite: the
+    // remaining sections pass the same body validation before the privileged
+    // write sees them.
+    crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
     crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
     log_to_file("INFO", &format!("Deleted repo section [{}] from {}", repo_id, file_path));
     Ok(())

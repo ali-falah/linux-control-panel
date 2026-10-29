@@ -142,13 +142,40 @@ sudo dnf install ./src-tauri/target/release/bundle/rpm/linux-control-panel-*.x86
 
 The application uses PolicyKit for graphical privilege escalation — **no `sudo` required**.
 
-To allow privileged operations (modifying system files, managing services, package management), install the Polkit policy:
+All privileged operations go through the small root-owned helper `lcp-admin`.
+The only polkit policy the panel installs (or ships) is
+`src-tauri/polkit/com.controlpanel.pkexec.policy`, which annotates exactly two
+executable paths — `/usr/local/libexec/lcp-admin` (hand install) and
+`/usr/bin/lcp-admin` (RPM/DEB) — and nothing else. Generic root programs
+(`tee`, `sed`, `cp`, `rm`, `chmod`, shells, …) are **never** annotated, so
+`pkexec` on them keeps polkit's built-in `org.freedesktop.policykit.exec`
+defaults (a full password prompt, no caching).
+
+For privileged operations (modifying system files, managing services, package
+management), install the policy in a root terminal:
 
 ```bash
 sudo install -m 644 \
   src-tauri/polkit/com.controlpanel.pkexec.policy \
   /usr/share/polkit-1/actions/
 ```
+
+⚠️ Replace any older copy you may have installed from a previous panel
+version. Older releases shipped a policy that annotated generic utilities
+with `auth_admin_keep`, which let one password open a five-minute window on
+`pkexec`, `tee` or even a shell. Verify your installed copy matches:
+
+```bash
+grep -o 'policykit.exec.path">[^<]*' \
+  /usr/share/polkit-1/actions/com.controlpanel.pkexec.policy
+# every path must end in lcp-admin — any tee/sed/other path means the
+# old broken copy is still installed
+```
+
+The five-minute authorisation keep (`AUTH_ADMIN_KEEP`) is granted exclusively
+by the rules.d rule the helper installs at
+`/etc/polkit-1/rules.d/50-linux-control-panel.rules` — it matches the helper's
+two paths and nothing else.
 
 ---
 

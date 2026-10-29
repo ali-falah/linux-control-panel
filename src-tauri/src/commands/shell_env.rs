@@ -522,32 +522,206 @@ pub async fn shell_get_live_env() -> Result<Vec<LiveEnvVar>, String> {
     Ok(vars)
 }
 
+/// The profile files the preview may execute. This is exactly the list the
+/// UI shows (`shell_list_profile_files`), so the renderer can not name an
+/// arbitrary file to be sourced.
+fn ensure_approved_source_file(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Refusing to source an empty path.".to_string());
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("Refusing to source '{path}': the path must be absolute."));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir))
+    {
+        return Err(format!(
+            "Refusing to source '{path}': the path contains relative components."
+        ));
+    }
+    if !all_profile_files().iter().any(|approved| approved == candidate) {
+        return Err(format!(
+            "Refusing to source '{path}': not one of the profile files this panel manages."
+        ));
+    }
+    if !candidate.is_file() {
+        return Err(format!("Refusing to source '{path}': not a regular file."));
+    }
+    Ok(())
+}
+
+/// The argv for the preview shell. The file path is a **positional parameter**
+/// (`$1`) of the script, never spliced into the command text — shell
+/// metacharacters, separators and substitutions in a path can not be
+/// interpreted.
+fn source_file_argv(path: &str) -> Vec<String> {
+    vec![
+        String::from("-c"),
+        String::from("source \"$1\" && env"),
+        String::from("lcp-source"), // $0
+        path.to_string(),           // $1
+    ]
+}
+
+/// Turn `env` output into preview rows: each value's definition is taken from
+/// the sourced file and `in_sync` is a real comparison — never a hard-coded
+/// `true`. Same rule `shell_get_live_env` uses for its preview.
+fn live_env_with_definitions(
+    stdout: &str,
+    definitions: &[(String, String)],
+    path: &str,
+) -> Vec<LiveEnvVar> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let eq = line.find('=')?;
+            let name = line[..eq].to_string();
+            let live_value = line[eq + 1..].to_string();
+            let defined_value = definitions
+                .iter()
+                .find(|(defined_name, _)| defined_name == &name)
+                .map(|(_, value)| value.clone());
+            let in_sync = defined_value
+                .as_ref()
+                .map(|defined| defined == &live_value)
+                .unwrap_or(true);
+            Some(LiveEnvVar {
+                name,
+                live_value,
+                defined_value,
+                in_sync,
+                source_path: Some(path.to_string()),
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn shell_source_file(path: String) -> Result<Vec<LiveEnvVar>, String> {
+    // Only the panel's own profile files may be executed by the preview.
+    ensure_approved_source_file(&path)?;
+
+    // The path travels as a positional argument, so it is never parsed by a
+    // shell (previously: `format!("source {path} && env")` — injection).
     let out = Command::new("bash")
-        .args(["-c", &format!("source {path} && env")])
+        .args(source_file_argv(&path))
         .output()
         .await
         .map_err(|e| format!("Failed to source {path}: {e}"))?;
 
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let vars = stdout
-        .lines()
-        .filter_map(|line| {
-            let eq = line.find('=')?;
-            Some(LiveEnvVar {
-                name: line[..eq].to_string(),
-                live_value: line[eq + 1..].to_string(),
-                defined_value: None,
-                in_sync: true,
-                source_path: Some(path.clone()),
-            })
-        })
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read the sourced file {path}: {e}"))?;
+    let definitions: Vec<(String, String)> = parse_exports_from_content(&content, &path)
+        .into_iter()
+        .map(|var| (var.name, var.value))
         .collect();
 
-    Ok(vars)
+    Ok(live_env_with_definitions(
+        &String::from_utf8_lossy(&out.stdout),
+        &definitions,
+        &path,
+    ))
+}
+
+// ─── tests: shell_source_file (no shell interpolation, real in_sync) ────────
+
+#[cfg(test)]
+mod shell_source_file_tests {
+    use super::*;
+
+    #[test]
+    fn shell_source_file_argv_keeps_the_path_out_of_the_command_text() {
+        let payload = "/tmp/a; touch /tmp/pwned $(id) `id` $HOME 'q' \"dq\" && rm -rf /";
+        let argv = source_file_argv(payload);
+        assert_eq!(argv.len(), 4);
+        assert_eq!(argv[0], "-c");
+        assert_eq!(argv[1], "source \"$1\" && env");
+        assert!(
+            !argv[1].contains(payload) && !argv[1].contains("; touch"),
+            "the path must never be spliced into the script text: {:?}",
+            argv[1]
+        );
+        assert_eq!(argv[2], "lcp-source");
+        assert_eq!(argv[3], payload, "the path is passed verbatim as $1");
+    }
+
+    #[tokio::test]
+    async fn shell_source_file_missing_or_unapproved_path_returns_err() {
+        for path in [
+            String::new(),
+            String::from("/nonexistent/lcp-definitely-missing.sh"),
+            String::from("relative/profile.sh"),
+            String::from("/etc/profile.d/../../etc/shadow"),
+            String::from("/etc/shadow"),
+            String::from("/tmp/attacker-supplied.sh"),
+        ] {
+            let result = shell_source_file(path.clone()).await;
+            assert!(result.is_err(), "must refuse {path:?}, got {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_source_file_does_not_execute_metacharacters_in_the_path() {
+        let marker = std::env::temp_dir().join(format!(
+            "lcp-source-injection-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        for payload in [
+            format!("/tmp/x.sh; touch {}", marker.display()),
+            format!("/tmp/x.sh && touch {}", marker.display()),
+            format!("/tmp/x.sh $(touch {})", marker.display()),
+            format!("/tmp/x.sh `touch {}`", marker.display()),
+            format!("/tmp/x.sh | touch {}", marker.display()),
+        ] {
+            assert!(shell_source_file(payload).await.is_err());
+            assert!(
+                !marker.exists(),
+                "a shell metacharacter in the path was executed"
+            );
+        }
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn shell_source_file_computes_in_sync_from_the_sourced_definitions() {
+        let stdout = "LCP_MATCH=one\nLCP_DIFF=two\nLCP_UNDEFINED=three\n";
+        let definitions = vec![
+            (String::from("LCP_MATCH"), String::from("one")),
+            (String::from("LCP_DIFF"), String::from("different")),
+        ];
+        let vars = live_env_with_definitions(stdout, &definitions, "/etc/profile.d/x.sh");
+        let by = |name: &str| vars.iter().find(|var| var.name == name).unwrap();
+
+        assert!(by("LCP_MATCH").in_sync, "defined == live must be in sync");
+        assert!(!by("LCP_DIFF").in_sync, "defined != live must not be in sync");
+        assert!(by("LCP_UNDEFINED").in_sync, "no definition means nothing to diverge from");
+        assert_eq!(by("LCP_DIFF").defined_value.as_deref(), Some("different"));
+        assert_eq!(by("LCP_MATCH").source_path.as_deref(), Some("/etc/profile.d/x.sh"));
+    }
+
+    #[test]
+    fn shell_source_file_definitions_come_from_real_export_lines() {
+        let content = "# comment\nexport LCP_ALPHA=\"one\"\nexport PATH=\"$PATH:/opt/bin\"\nexport LCP_BETA=two\n";
+        let definitions: Vec<(String, String)> =
+            parse_exports_from_content(content, "/etc/profile.d/x.sh")
+                .into_iter()
+                .map(|var| (var.name, var.value))
+                .collect();
+        assert!(definitions.iter().any(|(name, _)| name == "LCP_ALPHA"));
+        assert!(definitions.iter().any(|(name, _)| name == "LCP_BETA"));
+        assert!(
+            !definitions.iter().any(|(name, _)| name == "PATH"),
+            "PATH extensions are handled by the PATH tab"
+        );
+
+        let vars = live_env_with_definitions("LCP_ALPHA=one\nLCP_BETA=two\n", &definitions, "/x");
+        assert!(vars.iter().all(|var| var.in_sync));
+    }
 }

@@ -18,8 +18,9 @@ use std::process::{Child, Output, Stdio};
 
 pub use crate::utils::root_policy::{
     ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
-    ensure_repo_file_path, ensure_safe_arguments, ensure_safe_operand, resolve_root_program,
-    verify_trusted_binary, ALLOWED_ROOT_PROGRAMS,
+    ensure_repo_file_content, ensure_repo_file_path, ensure_safe_arguments, ensure_safe_operand,
+    resolve_root_program, verify_trusted_binary, validate_profile_sh_content,
+    validate_profile_sh_path, ALLOWED_ROOT_PROGRAMS,
 };
 
 /// When the last privileged call succeeded — PolicyKit keeps the
@@ -677,7 +678,7 @@ mod tests {
     fn call_types_pending_migration_are_refused_with_a_migration_message() {
         for name in [
             "bash", "sh", "stdbuf", "awk", "gawk", "find", "sed", "tee", "cp", "mv", "rm",
-            "chmod", "chown", "visudo", "ln", "link", "touch", "mktemp", "gzip",
+            "chmod", "chown", "visudo", "ln", "link", "install", "touch", "mktemp", "gzip",
             "x509", "crontab", "chpasswd", "passwd", "gpasswd", "usermod",
         ] {
             let error = ensure_program_allowed(&format!("/usr/bin/{name}"))
@@ -691,9 +692,6 @@ mod tests {
         assert!(ensure_program_allowed("/usr/bin/cat").is_ok());
         assert!(ensure_program_allowed("/usr/bin/systemctl").is_ok());
         assert!(ensure_program_allowed("/usr/bin/useradd").is_ok());
-        // `install` left the migration list again — but only its strict
-        // bootstrap template is allowed (tested in root_policy.rs)
-        assert!(ensure_program_allowed("/usr/bin/install").is_ok());
     }
 
     #[test]
@@ -729,14 +727,22 @@ mod tests {
 
     #[test]
     fn only_repository_files_of_the_package_manager_are_allowed() {
-        assert!(ensure_repo_file_path("/etc/yum.repos.d/example.repo").is_ok());
-        assert!(ensure_repo_file_path("/etc/apt/sources.list.d/example.list").is_ok());
+        // Assert against the list the validator itself uses. Under
+        // `--features test-fixture` that list is the /tmp mirror, so
+        // hard-coded /etc paths would test the wrong configuration.
+        let allowed = crate::utils::root_policy::REPO_ALLOWED_DIRS;
+        let repo = format!("{}/example.repo", allowed[0]);
+        let list = format!("{}/example.list", allowed[2]);
+        assert!(ensure_repo_file_path(&repo).is_ok(), "{repo} must be allowed");
+        assert!(ensure_repo_file_path(&list).is_ok(), "{list} must be allowed");
         // an arbitrary file must never be touched with root rights
         assert!(ensure_repo_file_path("/etc/shadow").is_err());
         assert!(ensure_repo_file_path("/etc/passwd").is_err());
-        assert!(ensure_repo_file_path("/etc/yum.repos.d/../../shadow").is_err());
+        assert!(ensure_repo_file_path(&format!("{}/../../shadow", allowed[0])).is_err());
         assert!(ensure_repo_file_path("/tmp/whatever.repo").is_err());
         assert!(ensure_repo_file_path("relative/path.repo").is_err());
+        // a repository file outside every allowed directory is refused
+        assert!(ensure_repo_file_path("/etc/example.repo").is_err());
     }
 
     #[test]
@@ -788,5 +794,161 @@ mod tests {
         assert!(is_auth_failure("Error executing command as another user: Not authorized", ""));
         assert!(is_auth_failure("Sorry, try again.", ""));
         assert!(!is_auth_failure("Complete!", ""));
+    }
+
+    // ── STEP 5A regression guards (W-C1, W-9, W-7) ────────────────────────
+
+    /// The shipped pkexec policy may annotate nothing but the two lcp-admin
+    /// paths, and its defaults must never cache an authorisation. (W-C1)
+    #[test]
+    fn the_pkexec_policy_annotates_only_the_lcp_admin_helper_without_caching() {
+        let policy = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("polkit/com.controlpanel.pkexec.policy"),
+        )
+        .expect("the bundled polkit policy must exist in the repository");
+
+        // every executable-path annotation is the helper, nothing else
+        let mut annotated = 0;
+        for line in policy.lines() {
+            let Some(rest) = line.split("org.freedesktop.policykit.exec.path").nth(1) else {
+                continue;
+            };
+            annotated += 1;
+            let value = rest
+                .split('>')
+                .nth(1)
+                .and_then(|r| r.split('<').next())
+                .unwrap_or("");
+            assert!(
+                value.ends_with("/lcp-admin"),
+                "the policy annotates a program other than the helper: {value:?}"
+            );
+        }
+        assert_eq!(
+            annotated, 2,
+            "one action per helper install path, nothing more"
+        );
+
+        // the policy must not cache an authorisation — the five-minute keep
+        // lives exclusively in the rules.d rule the helper installs. XML
+        // comments are stripped first so prose cannot mask a real value.
+        let body = strip_xml_comments(&policy);
+        assert!(
+            !body.contains("keep"),
+            "the policy must not use auth_admin_keep defaults (W-C1)"
+        );
+    }
+
+    /// The webview capability set grants no direct shell execution. (W-9)
+    #[test]
+    fn the_capability_set_grants_no_direct_shell_execution() {
+        let caps = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("capabilities/default.json"),
+        )
+        .expect("the default capability must exist");
+
+        assert!(
+            !caps.contains("allow-spawn"),
+            "the frontend must not be able to spawn shell processes"
+        );
+        assert!(
+            !caps.contains("allow-execute"),
+            "no direct frontend pkexec — the Rust command layer owns privileged calls"
+        );
+        assert!(
+            !caps.contains("\"args\""),
+            "no shell command may accept arbitrary arguments straight from JS"
+        );
+
+        // opening URLs in the user's browser must keep working
+        let json: serde_json::Value = serde_json::from_str(&caps).unwrap();
+        assert!(
+            json["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p.as_str() == Some("shell:allow-open")),
+            "shell:allow-open must remain for legitimate URL opening"
+        );
+        // and no off-scope entry like the old `{"name": …, "path": ".*"}`
+        assert!(
+            !caps.contains("\"path\""),
+            "shell:allow-open takes no scope entries — the plugin-config regex governs it"
+        );
+    }
+
+    /// The webview CSP is restrictive and `shell.open` is scheme-limited. (W-9/W-10)
+    #[test]
+    fn the_webview_csp_is_restrictive_and_shell_open_is_https_only() {
+        let conf = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"),
+        )
+        .expect("tauri.conf.json must exist");
+
+        let json: serde_json::Value = serde_json::from_str(&conf).unwrap();
+        let csp = json["app"]["security"]["csp"]
+            .as_str()
+            .expect("a restrictive CSP must be configured");
+        assert!(csp.contains("script-src 'self'"), "only local scripts");
+        assert!(
+            !csp.contains("'unsafe-eval'"),
+            "no eval-shaped hole in the CSP"
+        );
+        assert!(
+            csp.contains("https://fonts.googleapis.com")
+                && csp.contains("https://fonts.gstatic.com"),
+            "the Google-fonts load the UI relies on must keep working"
+        );
+        assert!(
+            json["plugins"]["shell"]["open"].as_str() == Some("https?://\\S+"),
+            "shell.open must be limited to http(s) URLs via the plugin regex"
+        );
+    }
+
+    /// The rules.d rule matches exactly the two helper install paths — the
+    /// one explicit path contract. (W-7)
+    #[test]
+    fn the_polkit_rule_matches_exactly_the_two_helper_paths() {
+        let rule = crate::utils::root_policy::POLKIT_RULE_TEXT;
+        assert!(
+            rule.contains("\"org.freedesktop.policykit.exec\""),
+            "the rule targets the exec action"
+        );
+        for path in [
+            crate::commands::admin::HELPER_PATH,
+            crate::commands::admin::PACKAGED_HELPER_PATH,
+        ] {
+            assert!(
+                rule.contains(&format!("key == \"{path}\"")),
+                "the rule must cover the helper at {path} (W-7)"
+            );
+        }
+        // every quoted path in the rule is one of the two helper installs —
+        // no other program may ever gain the authorisation
+        for piece in rule.split('"').filter(|p| p.starts_with("/usr/")) {
+            assert!(
+                piece == crate::commands::admin::HELPER_PATH
+                    || piece == crate::commands::admin::PACKAGED_HELPER_PATH,
+                "unexpected path in the polkit rule: {piece:?}"
+            );
+        }
+    }
+
+    /// Strips `<!-- … -->` XML comments so value checks see only the policy body.
+    fn strip_xml_comments(xml: &str) -> String {
+        let mut out = String::with_capacity(xml.len());
+        let mut rest = xml;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            let Some(end) = rest[start..].find("-->") else {
+                rest = "";
+                break;
+            };
+            rest = &rest[start + end + 3..];
+        }
+        out.push_str(rest);
+        out
     }
 }

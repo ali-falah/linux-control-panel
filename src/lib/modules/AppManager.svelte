@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { Command } from '@tauri-apps/plugin-shell';
   import { 
     AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, 
     HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers,
