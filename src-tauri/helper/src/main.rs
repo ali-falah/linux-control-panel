@@ -21,8 +21,9 @@ mod root_policy;
 use root_policy::{
     ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
     ensure_safe_arguments, ensure_repo_file_content, ensure_repo_file_path, resolve_root_program,
-    verify_trusted_binary, is_valid_account_name, validate_profile_sh_content,
-    validate_profile_sh_path, POLKIT_RULE_FILE, POLKIT_RULE_TEXT, REPO_CONTENT_MAX,
+    restore_profile_sh_backup_shape, verify_trusted_binary, is_valid_account_name,
+    validate_profile_sh_content, validate_profile_sh_path, PROFILE_CONTENT_MAX, PROFILE_D_DIR,
+    POLKIT_RULE_FILE, POLKIT_RULE_TEXT, REPO_CONTENT_MAX,
 };
 
 use rustix::fs::{AtFlags, CWD, Gid, Mode, OFlags, Stat, Uid};
@@ -75,8 +76,8 @@ fn privileged_gid() -> u32 {
 /// `check_helper_action`) in root_policy.rs, and register its app-side
 /// caller. Until then the action name is refused at dispatch, fail-closed.
 const ROOT_ACTIONS: &[&str] = &[
-    "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
-    "write_profile_sh",
+    "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
+    "write_profile_sh", "restore_profile_sh",
 ];
 
 /// Read everything the caller pipes into the helper (up to `limit + 1`
@@ -110,7 +111,17 @@ fn main() {
     // result — the process only reaches exit 0 for an operation that
     // succeeded, and exit 2 (with the reason on stderr) for everything else.
     if ROOT_ACTIONS.contains(&requested.as_str()) {
-        let outcome = if requested == "install_polkit_rule" {
+        let outcome = if requested == "admin_keep" {
+            // Exists only to take the panel's one kept authorisation: the
+            // polkit rule grants AUTH_ADMIN_KEEP to this helper and the
+            // authorisation is stored for the invoking process. No file is
+            // opened, no data is read or written, nothing is printed.
+            if args.len() == 1 {
+                Ok(())
+            } else {
+                Err(format!("lcp-admin: the action '{requested}' takes no further arguments."))
+            }
+        } else if requested == "install_polkit_rule" {
             if args.len() == 1 {
                 install_polkit_rule_action()
             } else {
@@ -122,6 +133,14 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly one profile file path."
+                ))
+            }
+        } else if requested == "restore_profile_sh" {
+            if args.len() == 3 {
+                restore_profile_sh_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one profile file path and one backup sibling path."
                 ))
             }
         } else if args.len() == 2 {
@@ -563,7 +582,97 @@ fn write_profile_sh_action(path: &str) -> Result<(), String> {
     validate_profile_sh_path(path)?;
     let content = read_stdin_content(256 * 1024, "profile content")?;
     validate_profile_sh_content(&content)?;
-    install_root_owned_file(path, &content, "profile file")
+    // The backup path (None for a brand-new file) is the action's only stdout
+    // output, so the app can show the user exactly which revision was kept.
+    if let Some(backup) = install_root_owned_file(path, &content, "profile file")? {
+        println!("{backup}");
+    }
+    Ok(())
+}
+
+/// The `restore_profile_sh <path> <backup>` action: replaces the profile file
+/// at `path` with the content of one exact revision sibling the write core
+/// itself created.
+///
+/// The backup's bytes never travel through the app: the helper opens it
+/// through the confined directory descriptor (`O_NOFOLLOW` — a symlinked
+/// backup is refused, not followed), refuses anything that is not a
+/// privileged-owned regular file, and re-validates the historical content
+/// with the same `validate_profile_sh_content` policy the write path uses.
+/// A backup that fails that policy is refused with a message telling the
+/// user to restore it manually — the destination is left untouched.
+/// Publishing goes through `install_root_owned_file`, which keeps the
+/// current content as a fresh revision backup before the rename; a restore
+/// is therefore itself reversible and needs no separate pre-restore backup.
+fn restore_profile_sh_action(path: &str, backup_path: &str) -> Result<(), String> {
+    use std::io::Read;
+
+    // both halves of the policy hold independently — the helper must not
+    // depend on the app having validated anything
+    validate_profile_sh_path(path)?;
+    restore_profile_sh_backup_shape(path, backup_path)?;
+
+    let backup_name = std::path::Path::new(backup_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let dir = open_dir_nofollow(CWD, PROFILE_D_DIR, PROFILE_D_DIR)?;
+    // inspect the backup without ever following a symlink, then open it the
+    // same descriptor-pinned way
+    let stat = rustix::fs::statat(&dir, backup_name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(
+        |_| {
+            format!(
+                "lcp-admin: the backup '{backup_path}' could not be inspected; refusing to restore."
+            )
+        },
+    )?;
+    if (stat.st_mode & S_IFMT) != S_IFREG {
+        return Err(format!(
+            "lcp-admin: the backup '{backup_path}' is not a regular file; refusing to restore."
+        ));
+    }
+    if stat.st_uid != privileged_uid() {
+        return Err(format!(
+            "lcp-admin: the backup '{backup_path}' is not owned by the required account; refusing to restore."
+        ));
+    }
+    let fd = rustix::fs::openat(
+        &dir,
+        backup_name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| {
+        format!("lcp-admin: the backup '{backup_path}' could not be opened; refusing to restore.")
+    })?;
+    let file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    file.take((PROFILE_CONTENT_MAX + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            format!("lcp-admin: the backup '{backup_path}' could not be read; refusing to restore.")
+        })?;
+    if bytes.len() > PROFILE_CONTENT_MAX {
+        return Err("lcp-admin: the backup is too large to be a profile file.".to_string());
+    }
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => {
+            return Err(format!(
+                "lcp-admin: this backup predates the current content policy (it is not plain UTF-8 import lines); restore it manually."
+            ))
+        }
+    };
+    validate_profile_sh_content(&content).map_err(|reason| {
+        format!(
+            "lcp-admin: this backup predates the current content policy ({reason}); restore it manually."
+        )
+    })?;
+
+    if let Some(backup) = install_root_owned_file(path, &content, "profile file")? {
+        println!("{backup}");
+    }
+    Ok(())
 }
 
 /// The `write_repo_file <path>` action: writes the repository-manager's one
@@ -595,7 +704,7 @@ fn write_repo_file_action(path: &str) -> Result<(), String> {
     ensure_repo_file_path(path)?;
     let content = read_stdin_content(REPO_CONTENT_MAX as u64, "repository content")?;
     ensure_repo_file_content(path, &content)?;
-    install_root_owned_file(path, &content, "repository file")
+    install_root_owned_file(path, &content, "repository file").map(|_| ())
 }
 
 /// The descriptor-pinned write core behind the root-owned config-file
@@ -607,14 +716,24 @@ fn write_repo_file_action(path: &str) -> Result<(), String> {
 ///   policy confined `path` to before this core ever sees a name,
 /// * an existing destination is stat'ed *without* following symlinks — a
 ///   symlinked destination is refused, never written through,
+/// * an existing destination is copied to a timestamped `<name>.<ts>.bak`
+///   sibling (fsynced) **before** the rename; if the backup cannot be made
+///   the write is abandoned and the original is left untouched. A new file
+///   has no backup,
 /// * the content lands in a uniquely named `O_CREAT|O_EXCL|O_NOFOLLOW` temp
 ///   sibling, then one `renameat` publishes it (replacing whatever sits at
 ///   the destination name instead of following it),
 /// * owner/mode transfer happens on the temp descriptor *before* the
 ///   rename, so there is no path-based `chmod`/`chown` race window,
-/// * an existing file keeps its owner and mode; a new file gets 0644
-///   `privileged:privileged`.
-fn install_root_owned_file(path: &str, content: &str, what: &str) -> Result<(), String> {
+/// * an existing file keeps its owner but the mode is **forced to 0644**; a
+///   new file is 0644 `privileged:privileged`.
+///
+/// Returns the absolute path of the backup, or `None` for a new file.
+fn install_root_owned_file(
+    path: &str,
+    content: &str,
+    what: &str,
+) -> Result<Option<String>, String> {
     use std::io::Write;
 
     let parent = std::path::Path::new(path)
@@ -648,7 +767,7 @@ fn install_root_owned_file(path: &str, content: &str, what: &str) -> Result<(), 
                     "lcp-admin: '{path}' exists but is not a regular file; refusing to replace it."
                 ));
             }
-            Some((stat.st_uid, stat.st_gid, stat.st_mode & 0o7777))
+            Some((stat.st_uid, stat.st_gid))
         }
         Err(err) if err == rustix::io::Errno::NOENT => None,
         Err(_) => {
@@ -667,11 +786,12 @@ fn install_root_owned_file(path: &str, content: &str, what: &str) -> Result<(), 
     )
     .map_err(|_| format!("lcp-admin: could not create the temporary {what}"))?;
 
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<Option<String>, String> {
         let mut file = std::fs::File::from(fd);
-        let (target_uid, target_gid, target_mode) = existing
-            .unwrap_or((dir_stat.st_uid, dir_stat.st_gid, 0o644));
-        rustix::fs::fchmod(&file, Mode::from_raw_mode(target_mode))
+        let (target_uid, target_gid) = existing.unwrap_or((dir_stat.st_uid, dir_stat.st_gid));
+        // the destination is always 0644 — an existing file must not keep a
+        // group/world-writable mode it may have had before
+        rustix::fs::fchmod(&file, Mode::from_raw_mode(0o644))
             .map_err(|_| format!("lcp-admin: could not set the {what} mode"))?;
         // the helper runs as root, so a *new* file is already
         // privileged:privileged; an existing file keeps its owner — set it
@@ -692,22 +812,88 @@ fn install_root_owned_file(path: &str, content: &str, what: &str) -> Result<(), 
         file.write_all(content.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("lcp-admin: could not write the {what} content: {e}"))?;
+        // keep the previous revision, flushed, before the rename can replace
+        // it — a failed backup aborts the whole write
+        let backup = if existing.is_some() {
+            Some(create_backup_sibling(&dir, name.as_str(), &parent, what)?)
+        } else {
+            None
+        };
         rustix::fs::renameat(
             dir.as_fd(),
             temp_name.as_str(),
             dir.as_fd(),
             name.as_str(),
         )
-        .map_err(|_| format!("lcp-admin: could not publish the {what}"))
+        .map_err(|_| format!("lcp-admin: could not publish the {what}"))?;
+        Ok(backup)
     })();
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(backup) => Ok(backup),
         Err(message) => {
             let _ = rustix::fs::unlinkat(&dir, temp_name.as_str(), AtFlags::empty());
             Err(message)
         }
     }
+}
+
+/// Copy the current destination to a timestamped sibling through the pinned
+/// directory descriptor, before the rename publishes the new content.
+/// Refuses a symlinked destination (the caller already checked) and unlinking
+/// its own partial file if anything fails.
+fn create_backup_sibling(
+    dir: &rustix::fd::OwnedFd,
+    name: &str,
+    parent: &str,
+    what: &str,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
+
+    let src_fd = rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| {
+        format!("lcp-admin: could not open the existing {what} for its backup; refusing.")
+    })?;
+    let mut src = std::fs::File::from(src_fd);
+    let mut bytes = Vec::new();
+    src.read_to_end(&mut bytes).map_err(|_| {
+        format!("lcp-admin: could not read the existing {what} for its backup; refusing.")
+    })?;
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let backup_name = format!("{name}.{secs}_{}.bak", unique_suffix());
+    let backup_fd = rustix::fs::openat(
+        dir,
+        backup_name.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )
+    .map_err(|_| format!("lcp-admin: could not create the {what} backup; refusing."))?;
+    let mut backup = std::fs::File::from(backup_fd);
+
+    let write_result = (|| -> Result<(), String> {
+        backup
+            .write_all(&bytes)
+            .map_err(|_| format!("lcp-admin: could not write the {what} backup; refusing."))?;
+        rustix::fs::fchmod(&backup, Mode::from_raw_mode(0o644))
+            .map_err(|_| format!("lcp-admin: could not set the {what} backup mode; refusing."))?;
+        backup
+            .sync_all()
+            .map_err(|_| format!("lcp-admin: could not flush the {what} backup; refusing."))
+    })();
+    if let Err(message) = write_result {
+        let _ = rustix::fs::unlinkat(dir, backup_name.as_str(), AtFlags::empty());
+        return Err(message);
+    }
+    Ok(format!("{parent}/{backup_name}"))
 }
 
 // ─── tests: descriptor-pinned filesystem core ────────────────────────────────

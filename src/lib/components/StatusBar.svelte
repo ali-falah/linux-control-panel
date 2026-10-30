@@ -1,31 +1,53 @@
 <script lang="ts">
   import { CheckCircle2, XCircle, Loader, Terminal, Wifi, Network, Copy, ExternalLink, Search } from '@lucide/svelte';
-  import { statusStore } from '../stores/status.svelte.ts';
-  import { refreshAdminAuthState } from '../stores/dnfStore.svelte.ts';
+  import { statusStore, refreshAdminModeState, setAdminMode } from '../stores/status.svelte.ts';
   import { ShieldCheck } from '@lucide/svelte';
 
-  // The badge shows the remaining lifetime of the administrator
-  // authorisation, so the clock ticks once a second while it is visible.
+  // The countdown ticks once a second from PolicyKit's real expiry; the
+  // five-second poll below corrects any drift.
   let tick = $state(0);
   $effect(() => {
-    if (!statusStore.hasAdminRights) return;
+    if (!statusStore.adminMode.on) return;
     const timer = setInterval(() => { tick += 1; }, 1000);
     return () => clearInterval(timer);
   });
 
   const adminRemaining = $derived.by(() => {
     tick; // re-evaluate once per second
-    return statusStore.adminRightsRemaining;
+    return statusStore.adminModeRemaining;
   });
 
-  // The authorisation state lives in the backend, so it is refreshed while
-  // the window is visible — the badge then appears right after any
-  // administrator action.
+  const adminState = $derived.by(() => {
+    if (!statusStore.adminMode.on) return 'off';
+    return adminRemaining === null ? 'expired' : 'on';
+  });
+
+  const adminRemainingLabel = $derived.by(() => {
+    if (adminRemaining === null) return '';
+    const minutes = Math.floor(adminRemaining / 60);
+    const seconds = adminRemaining % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  });
+
+  const adminTooltip = $derived.by(() => {
+    if (adminState === 'on') {
+      return 'Admin mode is on. PolicyKit keeps this authorisation until the timer runs out; click to revoke it now.';
+    }
+    if (adminState === 'expired') {
+      return 'The PolicyKit authorisation has run out. Click to switch admin mode off.';
+    }
+    return 'Admin mode is off. Click to request administrator rights (one PolicyKit prompt); privileged actions are blocked until then.';
+  });
+
+  const adminError = $derived(statusStore.adminActionError ?? statusStore.adminMode.error);
+
+  // Read the real PolicyKit state every five seconds while the window is
+  // visible. This also notices an expiry and turns it into a calm note.
   $effect(() => {
     let cancelled = false;
     const poll = async () => {
       if (cancelled || document.hidden) return;
-      await refreshAdminAuthState();
+      await refreshAdminModeState();
     };
     void poll();
     const timer = setInterval(poll, 5000);
@@ -35,12 +57,23 @@
     };
   });
 
-  const adminRemainingLabel = $derived.by(() => {
-    if (adminRemaining === null) return '';
-    const minutes = Math.floor(adminRemaining / 60);
-    const seconds = adminRemaining % 60;
-    return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
+  // "Admin mode off" / "Admin mode expired" stays for a few seconds only.
+  $effect(() => {
+    if (!statusStore.adminNotice) return;
+    const timer = setTimeout(() => statusStore.clearAdminNotice(), 4000);
+    return () => clearTimeout(timer);
   });
+
+  let toggling = $state(false);
+  async function toggleAdminMode() {
+    if (toggling) return;
+    toggling = true;
+    try {
+      await setAdminMode(!statusStore.adminMode.on);
+    } finally {
+      toggling = false;
+    }
+  }
   import { uiStore } from '../stores/ui.svelte.ts';
   import { invoke } from '@tauri-apps/api/core';
 
@@ -175,15 +208,31 @@
 
   <!-- RIGHT: Application status -->
   <div class="status-right">
-    {#if adminRemaining !== null}
-      <span
-        class="pill pill-admin"
-        title="Administrator rights are active. PolicyKit keeps the authorisation for {statusStore.adminAuth.lifetimeSecs} seconds, so further privileged actions do not ask again."
-      >
-        <ShieldCheck size={11} />
-        Admin rights · {adminRemainingLabel}
-      </span>
+    {#if adminError}
+      <span class="admin-error" title={adminError}>{adminError}</span>
     {/if}
+    {#if statusStore.adminNotice}
+      <span class="admin-note" role="status">{statusStore.adminNotice}</span>
+    {/if}
+    <button
+      type="button"
+      class="admin-toggle"
+      class:on={adminState === 'on'}
+      class:expired={adminState === 'expired'}
+      role="switch"
+      aria-checked={adminState === 'on'}
+      aria-label="Admin mode"
+      title={adminTooltip}
+      disabled={toggling}
+      onclick={toggleAdminMode}
+    >
+      <span class="admin-track" aria-hidden="true"><span class="admin-knob"></span></span>
+      <ShieldCheck size={11} />
+      <span>Admin mode: {adminState === 'on' ? 'On' : adminState === 'expired' ? 'Expired' : 'Off'}</span>
+      {#if adminState === 'on' && adminRemainingLabel}
+        <span class="admin-time">{adminRemainingLabel}</span>
+      {/if}
+    </button>
     {#if statusStore.lastEntry}
       <span class="pill {statusStore.lastEntry.success ? 'pill-ok' : 'pill-fail'}" title="Process Exit Code">
         {#if statusStore.lastEntry.success}
@@ -199,18 +248,80 @@
 </footer>
 
 <style>
-  .pill-admin {
+  /* ── Admin mode toggle ───────────────────────────────────────────────── */
+  .admin-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 1px 7px;
+    gap: 6px;
+    padding: 2px 9px 2px 5px;
     border-radius: 999px;
     font-size: 10.5px;
     font-weight: 600;
-    color: var(--color-accent);
-    background: color-mix(in srgb, var(--color-accent) 14%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    cursor: pointer;
     white-space: nowrap;
+    transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+  }
+  .admin-toggle:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+  .admin-toggle:disabled {
+    cursor: progress;
+    opacity: 0.65;
+  }
+  .admin-toggle.on {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 38%, transparent);
+  }
+  .admin-toggle.expired {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 38%, transparent);
+  }
+  .admin-track {
+    position: relative;
+    width: 20px;
+    height: 11px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-text-muted) 35%, transparent);
+    flex-shrink: 0;
+    transition: background 0.18s ease;
+  }
+  .admin-knob {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.18s ease;
+  }
+  .admin-toggle.on .admin-track { background: var(--color-success); }
+  .admin-toggle.on .admin-knob { transform: translateX(9px); }
+  .admin-toggle.expired .admin-track { background: var(--color-warning); }
+  .admin-time {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.9;
+  }
+  .admin-note {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+  .admin-error {
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10.5px;
+    color: var(--color-error);
   }
   .status-bar {
     display: flex;

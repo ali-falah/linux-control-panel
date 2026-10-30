@@ -314,3 +314,22 @@ fn write_profile_sh_path_policy_is_enforced_by_the_helper_itself() {
     refused("write_profile_sh", &["relative/x.sh"], "relative path");
     refused("write_profile_sh", &["/etc/profile.d/x.sh/../y.sh"], "relative parts");
 }
+
+// ── admin mode: the prompt-raising no-op action ─────────────────────────────
+
+#[test]
+fn admin_keep_does_nothing_but_exit_zero() {
+    // The status bar's admin-mode toggle raises its one polkit prompt with
+    // this action. It must be inert: no arguments, no output and no side
+    // effects — only the successful exit that lets PolicyKit keep the
+    // authorisation for the invoking process.
+    let out = Command::new(HELPER)
+        .arg("admin_keep")
+        .output()
+        .expect("admin_keep: unexpected spawn error");
+    assert_eq!(out.status.code(), Some(0), "admin_keep must exit 0: {out:?}");
+    assert!(out.stdout.is_empty(), "admin_keep must not print: {:?}", out.stdout);
+    assert!(out.stderr.is_empty(), "admin_keep must not print: {:?}", out.stderr);
+
+    refused("admin_keep", &["extra"], "the action takes no further arguments");
+}

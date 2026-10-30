@@ -106,6 +106,26 @@ pub const POLKIT_RULE_FILE: &str = "/etc/polkit-1/rules.d/50-linux-control-panel
 pub const POLKIT_RULE_FILE: &str =
     "/tmp/lcp-admin-test-fixture/etc/polkit-1/rules.d/50-linux-control-panel.rules";
 
+/// The PolicyKit action ids the bundled `.policy` file defines for the two
+/// helper install paths — the ids pkexec actually authorises under.
+///
+/// pkexec first requests the generic `org.freedesktop.policykit.exec` action
+/// with the program path as a detail; if the path matches a `.policy` action's
+/// `org.freedesktop.policykit.exec.path` annotation, polkit substitutes that
+/// action for the whole check — its defaults are used and any temporary
+/// authorization is recorded under the substituted id. The generic action is
+/// therefore never what appears in `pkcheck --list-temp` for our helper.
+///
+/// The `.policy` file is the pin: each id maps to exactly one `exec.path`
+/// (a root-owned file), so matching the id is equivalent to matching the
+/// program path. `the_pkexec_policy…`/`the_polkit_rule…` tests in
+/// `utils::privilege` cross-check this constant against the real file so the
+/// two cannot drift apart.
+pub const HELPER_ACTION_IDS: [&str; 2] = [
+    "com.controlpanel.helper.system",
+    "com.controlpanel.helper.packaged",
+];
+
 /// The PolicyKit rule: the helper may be run as root for an *active* local
 /// session, and the authorisation is kept for the default five minutes
 /// (`auth_admin_keep`) instead of asking for a password every time.
@@ -125,14 +145,16 @@ pub const POLKIT_RULE_TEXT: &str = r#"// Installed by the Linux Control Panel.
 // timestamp_timeout (5 minutes), so a multi step action asks only once.
 // The helper lives at the developer install path (/usr/local/libexec) or
 // at the distro package path (/usr/bin) — both are that same helper.
+// These are the action ids of the app's com.controlpanel.pkexec.policy:
+// pkexec authorises under the annotated action, never under the generic
+// exec action (which must not get the keep — every other root program
+// goes through it).
 polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.policykit.exec" &&
+    if ((action.id == "com.controlpanel.helper.system" ||
+         action.id == "com.controlpanel.helper.packaged") &&
         subject.active && subject.local &&
         subject.isInGroup("wheel")) {
-        var key = action.lookup("program");
-        if (key == "/usr/local/libexec/lcp-admin" || key == "/usr/bin/lcp-admin") {
-            return polkit.Result.AUTH_ADMIN_KEEP;
-        }
+        return polkit.Result.AUTH_ADMIN_KEEP;
     }
 });
 "#;
@@ -429,8 +451,10 @@ pub fn validate_profile_sh_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Upper bound for a profile.d file's content.
-const PROFILE_CONTENT_MAX: usize = 256 * 1024;
+/// Upper bound for a profile.d file's content — shared with the helper, so
+/// its `restore_profile_sh` action can impose the same limit on the backup
+/// it reads.
+pub const PROFILE_CONTENT_MAX: usize = 256 * 1024;
 
 /// One shell helper: identifier shape the panel exports.
 fn is_export_name(name: &str) -> bool {
@@ -470,10 +494,50 @@ fn is_safe_export_value(value: &str) -> bool {
     })
 }
 
+/// The single, deliberately narrow exception to "no `$` in a value": the
+/// `PATH` extension lines the panel itself writes,
+/// `export PATH="$PATH:<dir>[:<dir>...]"`.
+///
+/// One optional pair of double quotes is stripped (the panel always writes
+/// them, but a bare `$PATH:/opt/bin` means the same thing to the shell). What
+/// remains must be exactly `$PATH` followed by one or more `:<segment>`, with
+/// every segment made only of `[A-Za-z0-9_./-]`. That alphabet excludes
+/// whitespace, quotes, backslash, the other `$`, backtick, `;`, `|`, `&`, the
+/// redirection characters, parentheses, braces, globs and `#` — so the value
+/// can never leave its word, start a command, or name another variable.
+/// Callers must gate this on `name == "PATH"`; it is not a general value
+/// rule.
+fn is_path_extension_value(value: &str) -> bool {
+    let inner = if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    if inner.len() > 4096 {
+        return false;
+    }
+    let Some(rest) = inner.strip_prefix("$PATH:") else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    rest.split(':').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+    })
+}
+
 /// Validate the full text of a root-owned profile.d file before it may be
 /// written. Every non-empty, non-comment line must be exactly
 /// `export NAME=<safe value>` — profile.d scripts run in *every* login shell,
 /// so free shell text must never get there.
+///
+/// `PATH` is the one exception, and only for the exact `$PATH:<dir>` shape
+/// above: the PATH tab has to extend the inherited search path, which no
+/// other value shape can express.
 pub fn validate_profile_sh_content(content: &str) -> Result<(), String> {
     if content.len() > PROFILE_CONTENT_MAX {
         return Err("The profile file is too large.".to_string());
@@ -498,7 +562,9 @@ pub fn validate_profile_sh_content(content: &str) -> Result<(), String> {
             return Err(format!("Line {} has an invalid variable name: {name}", index + 1));
         }
         let value = value.trim();
-        if !is_safe_export_value(value) {
+        let accepted = is_safe_export_value(value)
+            || (name == "PATH" && is_path_extension_value(value));
+        if !accepted {
             return Err(format!("Line {} has an unsafe value for {name}.", index + 1));
         }
     }
@@ -2533,10 +2599,13 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 ///
 /// * `install_polkit_rule` — content via stdin, no parameters (see the action
 ///   in helper/src/main.rs).
+/// * `admin_keep` — no parameters, no data: exists only to raise and keep the
+///   panel's administrator authorisation (see `admin_mode_on`).
 /// * `read_user_ssh_keys <account>` / `write_user_ssh_keys <account>` — an
 ///   account's authorized_keys; for the write the content travels on stdin.
 const HELPER_ACTIONS: &[&str] = &[
-    "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys", "write_profile_sh",
+    "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
+    "write_profile_sh", "restore_profile_sh",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -2546,6 +2615,73 @@ const HELPER_ACCOUNT_ACTIONS: &[&str] = &["read_user_ssh_keys", "write_user_ssh_
 /// destination (validated by `validate_profile_sh_path`; the content travels
 /// on stdin and is validated by the action itself).
 const HELPER_PATH_ACTIONS: &[&str] = &["write_profile_sh"];
+
+/// `restore_profile_sh <path> <backup>` takes exactly two parameters: a
+/// profile.d destination and one exact revision sibling the helper's own
+/// write core created — never an arbitrary path claiming to be a backup.
+const HELPER_RESTORE_ACTIONS: &[&str] = &["restore_profile_sh"];
+
+/// A helper revision backup must be the exact shape `create_backup_sibling`
+/// produces for `dest`: the same confined parent directory, the name derived
+/// from the destination (`<dest>.<unix-seconds>_<pid>.<nanos>.bak`). This is
+/// enforced both by the app (before the privileged call exists) and again
+/// inside the helper — both halves hold independently.
+pub fn restore_profile_sh_backup_shape(dest: &str, backup: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    if backup.chars().any(char::is_control) {
+        return Err(format!("The backup path must not contain control characters: {backup:?}"));
+    }
+    let candidate = Path::new(backup);
+    if !candidate.is_absolute() {
+        return Err(format!("The backup path must be absolute: {backup}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!("The backup path must not contain relative parts: {backup}"));
+    }
+    if candidate.parent() != Some(Path::new(PROFILE_D_DIR)) {
+        return Err(format!(
+            "The backup must be a revision sibling of the destination in {PROFILE_D_DIR}, not {backup}"
+        ));
+    }
+    let dest_name = Path::new(dest)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let backup_name = candidate
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(remainder) = backup_name.strip_prefix(&dest_name).and_then(|rest| {
+        rest.strip_prefix('.').and_then(|rev| rev.strip_suffix(".bak"))
+    }) else {
+        return Err(format!(
+            "The backup file name {backup_name:?} must start with the destination name {:?} and carry a '.<timestamp>_<suffix>.bak' revision.",
+            dest_name
+        ));
+    };
+    // <unix-seconds>_<pid>.<nanos> — the revision `create_backup_sibling`
+    // writes; a free-form name would let any file pose as "a backup".
+    let Some((secs, suffix)) = remainder.split_once('_') else {
+        return Err(format!(
+            "The backup revision {remainder:?} must be <unix-seconds>_<suffix>.bak."
+        ));
+    };
+    if secs.is_empty() || secs.len() > 20 || !secs.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "The backup revision {remainder:?} must start with unix-seconds digits."
+        ));
+    }
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return Err(format!(
+            "The backup revision suffix {suffix:?} may only contain letters, digits and dots."
+        ));
+    }
+    Ok(())
+}
 
 /// Check that a name may address a local account in panel commands. It exists
 /// so that user-supplied strings never become file path fragments (`/home/
@@ -2603,6 +2739,22 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         };
         validate_profile_sh_path(path).map_err(|reason| {
             operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_RESTORE_ACTIONS.contains(&action.as_str()) {
+        let [_, path, backup] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one profile file path and one backup sibling path",
+            ));
+        };
+        validate_profile_sh_path(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        restore_profile_sh_backup_shape(path, backup).map_err(|reason| {
+            operand_not_allowed("lcp-admin", backup, &reason)
         })?;
         return Ok(());
     }
@@ -3027,6 +3179,8 @@ mod argument_policy_tests {
     #[test]
     fn helper_action_calls_accept_only_known_actions() {
         ok("lcp-admin", &["install_polkit_rule"]);
+        ok("lcp-admin", &["admin_keep"]);
+        refused("lcp-admin", &["admin_keep", "extra"]);
         refused("lcp-admin", &[]);
         refused("lcp-admin", &["install_polkit_rule", "extra"]);
         refused("lcp-admin", &["some_other_action"]);
@@ -3088,6 +3242,68 @@ mod argument_policy_tests {
         path_refused(&format!("{d}/.hidden.sh"));
         path_refused(&format!("{d}/wow*x.sh"));
         path_refused("/etc/hosts");
+    }
+
+    /// `restore_profile_sh <dest> <backup-sibling>`: exactly two absolute
+    /// validated paths — the destination through `validate_profile_sh_path`,
+    /// the backup through the revision-sibling shape rule.
+    #[test]
+    fn restore_profile_sh_takes_one_dest_and_one_backup_sibling() {
+        use super::{ensure_arguments_for_program as check, restore_profile_sh_backup_shape};
+
+        // keep the fixture PROFILE_D_DIR real for the validator's path walk
+        #[cfg(feature = "test-fixture")]
+        std::fs::create_dir_all(std::path::Path::new(super::PROFILE_D_DIR)).unwrap();
+
+        fn argv_ok(dest: &str, backup: &str) {
+            let argv: Vec<String> = ["restore_profile_sh", dest, backup]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert!(
+                check("lcp-admin", &argv).is_ok(),
+                "must be allowed: {dest}, {backup}"
+            );
+        }
+        fn argv_refused(dest: &str, backup: &str) {
+            let argv: Vec<String> = ["restore_profile_sh", dest, backup]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert!(
+                check("lcp-admin", &argv).is_err(),
+                "must be refused: {dest}, {backup}"
+            );
+        }
+
+        let d = super::PROFILE_D_DIR;
+        let dest = format!("{d}/10-lang.sh");
+        argv_ok(&dest, &format!("{d}/10-lang.sh.1700000000_1.2.bak"));
+
+        // arity
+        argv_refused(&dest, "");
+        assert!(check(
+            "lcp-admin",
+            &["restore_profile_sh".to_string(), dest.clone()]
+        )
+        .is_err());
+
+        // destination policy
+        argv_refused("/etc/shadow", &format!("{d}/10-lang.sh.1700000000_1.2.bak"));
+        argv_refused(&format!("{d}/x.conf"), &format!("{d}/x.conf.1700000000_1.2.bak"));
+
+        // backup shape policy (foreign directory, foreign name, no numeric
+        // revision, hostile suffix charset) — the shape rule is shared with
+        // the helper, so it is cross-checked here directly
+        argv_refused(&dest, "/tmp/hostile.bak");
+        argv_refused(&dest, &format!("{d}/19-other.sh.1700000000_1.2.bak"));
+        argv_refused(&dest, &format!("{d}/10-lang.sh.bak"));
+        argv_refused(&dest, &format!("{d}/10-lang.sh.17000000;.txt.bak"));
+        assert_eq!(
+            restore_profile_sh_backup_shape(&dest, &format!("{d}/10-lang.sh.1700000000_123.456.bak")),
+            Ok(()),
+            "the exact suffix shape create_backup_sibling writes must count as a revision"
+        );
     }
 }
 
@@ -3194,6 +3410,42 @@ mod profile_sh_policy_tests {
         content_refused("\0");
         // control characters anywhere
         content_refused("export X=\"a\nb\"\n");
+    }
+
+    #[test]
+    fn profile_content_accepts_only_the_narrow_path_extension() {
+        // the exact shape the PATH tab writes, quoted and bare
+        content_ok("export PATH=\"$PATH:/opt/bin\"\n");
+        content_ok("export PATH=\"$PATH:/opt/bin:/usr/local/foo\"\n");
+        content_ok("export PATH=$PATH:/opt/bin\n");
+        content_ok("export PATH=\"$PATH:/opt/my_tools-1.2/bin:/usr/lib64\"\n");
+        content_ok("export FOO=\"bar\"\nexport PATH=\"$PATH:/opt/bin\"\n");
+        // single quotes never expand: this is a literal, already allowed by
+        // the strict rule, and is not the exception
+        content_ok("export PATH='$PATH:/opt/bin'\n");
+
+        // the exception is a grammar, not a loosened rule: every one of these
+        // leaves the single word the shell is allowed to expand
+        content_refused("export PATH=\"$PATH;rm -rf /\"\n");
+        content_refused("export PATH=\"$(touch /tmp/x)\"\n");
+        content_refused("export PATH=\"$HOME/bin\"\n");
+        content_refused("export PATH=\"$PATH\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin;touch /tmp/x\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:/tmp/a b\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:`id`\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:/tmp/x|y\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:/tmp/x&y\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin/$(id)\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:/tmp/x)y\"\n");
+        content_refused("export PATH=\"$PATH::/opt/bin\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin:\"\n");
+        content_refused("export PATH=\"$PATHx:/opt/bin\"\n");
+        content_refused("export PATH=\"$PATH:/opt/bin\\foo\"\n");
+
+        // PATH-only: the same value under any other name stays refused
+        content_refused("export FOO=\"$PATH:/opt/bin\"\n");
+        content_refused("export PATH_EXTRA=\"$PATH:/opt/bin\"\n");
+        content_refused("export Path=\"$PATH:/opt/bin\"\n");
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
-  import { dnfStore, refreshAdminAuthState } from './lib/stores/dnfStore.svelte.ts';
+  import { dnfStore, refreshHelperInstalled } from './lib/stores/dnfStore.svelte.ts';
 
   onMount(() => {
     uiStore.initTheme();
@@ -21,7 +21,7 @@
     uiStore.initSearchHistory();
     uiStore.initVisibilityListener();
     dnfStore.initGlobalListeners();
-    void refreshAdminAuthState();
+    void refreshHelperInstalled();
     dnfStore.checkLockStatus();
 
     function handleGlobalKeyDown(e: KeyboardEvent) {

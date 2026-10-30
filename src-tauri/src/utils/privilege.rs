@@ -14,7 +14,10 @@ use std::process::{Child, Output, Stdio};
 //  * the program is verified to be a root owned binary that no other user can
 //    modify, so a user writable copy can never be executed with root rights,
 //  * no shell is involved: a privileged call is always a program plus a
-//    validated argument vector.
+//    validated argument vector,
+//  * no `pkexec` call is even started while admin mode is off — the status
+//    bar's toggle (backed by the real PolicyKit state) is the only way to
+//    turn it on, so a privileged step can never raise a prompt uninvited.
 
 pub use crate::utils::root_policy::{
     ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
@@ -23,36 +26,132 @@ pub use crate::utils::root_policy::{
     validate_profile_sh_path, ALLOWED_ROOT_PROGRAMS,
 };
 
-/// When the last privileged call succeeded — PolicyKit keeps the
-/// authorisation for a few minutes after that, which the status bar shows.
-static LAST_AUTHORISED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+use crate::commands::admin::AdminModeState;
 
-/// How long PolicyKit keeps an authorisation by default
-/// (`timestamp_timeout`, five minutes).
-pub const AUTHORISATION_LIFETIME_SECS: u64 = 300;
+/// The message shown when a privileged action is attempted while admin mode is
+/// off. The call is refused before anything is started, so no prompt can
+/// appear uninvited.
+pub const ADMIN_MODE_OFF_MESSAGE: &str =
+    "Admin mode is off — turn it on in the status bar to continue";
 
-/// Seconds the authorisation is still valid, `None` when it is not (or no
-/// longer) valid.
-pub fn authorisation_remaining() -> Option<u64> {
-    let guard = LAST_AUTHORISED.lock().ok()?;
-    let last = (*guard)?;
-    let elapsed = last.elapsed().as_secs();
-    if elapsed >= AUTHORISATION_LIFETIME_SECS {
-        return None;
+/// The last real PolicyKit snapshot and when it was taken. The status bar's
+/// five-second poll feeds it; the gate reuses it and re-reads only when it is
+/// older than `ADMIN_STATE_MAX_AGE`, so a burst of calls can not hammer
+/// pkcheck.
+static ADMIN_STATE: std::sync::Mutex<Option<(std::time::Instant, AdminModeState)>> =
+    std::sync::Mutex::new(None);
+
+/// How long a snapshot may be reused before the gate asks PolicyKit again.
+const ADMIN_STATE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Record a real PolicyKit reading: it becomes the snapshot the gate reuses.
+pub(crate) fn record_admin_state(state: &AdminModeState) {
+    if let Ok(mut guard) = ADMIN_STATE.lock() {
+        *guard = Some((std::time::Instant::now(), state.clone()));
     }
-    Some(AUTHORISATION_LIFETIME_SECS - elapsed)
+}
+
+/// The real admin state, from the last snapshot when it is fresh enough.
+pub fn admin_state() -> AdminModeState {
+    if let Ok(guard) = ADMIN_STATE.lock() {
+        if let Some((at, state)) = guard.as_ref() {
+            if at.elapsed() < ADMIN_STATE_MAX_AGE {
+                return state.clone();
+            }
+        }
+    }
+    refresh_admin_state()
+}
+
+/// Read the real state now. Used after a call that may have changed it.
+pub fn refresh_admin_state() -> AdminModeState {
+    crate::commands::admin::read_admin_mode_state()
+}
+
+/// Whether this is the admin-mode prompt raiser itself — the one pkexec call
+/// that must be allowed while admin mode is off, because taking the
+/// authorisation is what turns it on. The helper's `admin_keep` action is
+/// inert: it opens nothing and only exits 0.
+fn raises_admin_authorisation(program: &str, args: &[String]) -> bool {
+    // Two call shapes reach here: the resolved helper directly
+    // (`lcp-admin admin_keep`) and the command wrapper
+    // (`pkexec /usr/bin/lcp-admin admin_keep`).
+    let (target, rest) = if program == "pkexec" {
+        match args.split_first() {
+            Some((first, rest)) => (first.as_str(), rest),
+            None => return false,
+        }
+    } else {
+        (program, args)
+    };
+    std::path::Path::new(target)
+        .file_name()
+        .is_some_and(|name| name == "lcp-admin")
+        && rest.len() == 1
+        && rest[0] == "admin_keep"
+}
+
+/// Refuse a privileged call while admin mode is off, before anything is
+/// started. A state that can not be read fails closed: the specific error is
+/// returned instead of claiming ON or raising a prompt.
+fn ensure_admin_mode(program: &str, args: &[String]) -> Result<(), String> {
+    if raises_admin_authorisation(program, args) {
+        return Ok(());
+    }
+    let state = admin_state();
+    if state.on {
+        Ok(())
+    } else {
+        Err(state.error.unwrap_or_else(|| ADMIN_MODE_OFF_MESSAGE.to_string()))
+    }
+}
+
+fn permission_denied(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, message)
+}
+
+#[cfg(test)]
+static SPAWN_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only spy: proves a refused call never reached the kernel.
+fn note_spawn_attempt() {
+    #[cfg(test)]
+    SPAWN_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test-only: inject a snapshot instead of querying the host's PolicyKit.
+/// The snapshot is cleared when the guard drops, and the lock keeps the tests
+/// that manipulate it from overwriting each other.
+#[cfg(test)]
+fn cache_admin_state_for_test(state: AdminModeState) -> AdminStateGuard {
+    let lock = ADMIN_STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Ok(mut guard) = ADMIN_STATE.lock() {
+        *guard = Some((std::time::Instant::now(), state));
+    }
+    AdminStateGuard(lock)
+}
+
+#[cfg(test)]
+static ADMIN_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+struct AdminStateGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+impl Drop for AdminStateGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = ADMIN_STATE.lock() {
+            *guard = None;
+        }
+    }
 }
 
 /// Write a privileged call to the application log — the exact command that
 /// ran is needed when something goes wrong.
 fn log_privileged_call(args: &[String]) {
     crate::log_to_file("INFO", &format!("privileged call: {}", args.join(" ")));
-}
-
-fn note_authorised() {
-    if let Ok(mut guard) = LAST_AUTHORISED.lock() {
-        *guard = Some(std::time::Instant::now());
-    }
 }
 
 /// How a privileged step authenticates the user.
@@ -88,6 +187,9 @@ pub fn build_privileged_command(
     args: &[String],
     auth: &RootAuth,
 ) -> Result<(std::process::Command, Option<String>), String> {
+    if matches!(auth, RootAuth::Polkit) {
+        ensure_admin_mode(program, args)?;
+    }
     ensure_program_allowed(program)?;
     ensure_no_shell_escape(program, args)?;
     ensure_safe_arguments(args)?;
@@ -170,6 +272,9 @@ pub fn build_privileged_tokio_command(
     args: &[String],
     auth: &RootAuth,
 ) -> Result<(::tokio::process::Command, Option<String>), String> {
+    if matches!(auth, RootAuth::Polkit) {
+        ensure_admin_mode(program, args)?;
+    }
     let argv = privileged_argv(program, args, auth)?;
     let mut cmd = ::tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -193,6 +298,7 @@ pub async fn run_privileged_output(
         cmd.stdin(Stdio::piped());
     }
 
+    note_spawn_attempt();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start {program} with administrator rights: {e}"))?;
@@ -209,8 +315,11 @@ pub async fn run_privileged_output(
         .wait_with_output()
         .await
         .map_err(|e| format!("Failed to run {program} with administrator rights: {e}"))?;
-    // the agent authorised the request, so the authorisation is valid now
-    note_authorised();
+    // Read the authorisation back from PolicyKit; a sudo password is not a
+    // PolicyKit authorisation, so nothing is recorded for that path.
+    if matches!(auth, RootAuth::Polkit) {
+        let _ = refresh_admin_state();
+    }
     Ok(output)
 }
 
@@ -237,6 +346,7 @@ pub async fn run_privileged_with_stdin(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
+    note_spawn_attempt();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start {program} with administrator rights: {e}"))?;
@@ -254,8 +364,9 @@ pub async fn run_privileged_with_stdin(
         .wait_with_output()
         .await
         .map_err(|e| format!("Failed to run {program} with administrator rights: {e}"))?;
-    // the agent authorised the request, so the authorisation is valid now
-    note_authorised();
+    // Read the authorisation back from PolicyKit instead of starting an
+    // app-side timer.
+    let _ = refresh_admin_state();
     Ok(output)
 }
 
@@ -297,6 +408,7 @@ pub async fn run_privileged_script_with_args(
     })?;
     ensure_program_allowed(&shell).map_err(deny)?;
     verify_trusted_binary(&shell).map_err(deny)?;
+    ensure_admin_mode(&shell, args).map_err(deny)?;
 
     let argv = privileged_script_argv(&shell, script, args);
     let mut cmd = ::tokio::process::Command::new(&argv[0]);
@@ -304,9 +416,15 @@ pub async fn run_privileged_script_with_args(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    cmd.output()
+    note_spawn_attempt();
+    let output = cmd
+        .output()
         .await
-        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to run the administrator script: {e}")))
+        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to run the administrator script: {e}")))?;
+    if output.status.success() {
+        let _ = refresh_admin_state();
+    }
+    Ok(output)
 }
 
 /// Drop the cached sudo credential again, so a password typed for one action
@@ -444,6 +562,9 @@ impl Command {
     pub fn output(&mut self) -> std::io::Result<Output> {
         let mut cmd = std::process::Command::new(&self.program);
         let privileged = self.program == "pkexec" || self.program == "sudo";
+        if self.program == "pkexec" {
+            ensure_admin_mode(&self.program, &self.args).map_err(permission_denied)?;
+        }
         match validated_privileged_argv(&self.program, &self.args)? {
             Some(argv) => {
                 cmd = std::process::Command::new(&argv[0]);
@@ -453,15 +574,19 @@ impl Command {
                 cmd.args(&self.args);
             }
         }
+        note_spawn_attempt();
         let output = cmd.output()?;
-        if privileged && output.status.success() {
-            note_authorised();
+        if privileged && output.status.success() && self.program == "pkexec" {
+            let _ = refresh_admin_state();
         }
         Ok(output)
     }
 
     pub fn spawn(&mut self) -> std::io::Result<Child> {
         let mut cmd = std::process::Command::new(&self.program);
+        if self.program == "pkexec" {
+            ensure_admin_mode(&self.program, &self.args).map_err(permission_denied)?;
+        }
         match validated_privileged_argv(&self.program, &self.args)? {
             Some(argv) => {
                 cmd = std::process::Command::new(&argv[0]);
@@ -471,6 +596,7 @@ impl Command {
                 cmd.args(&self.args);
             }
         }
+        note_spawn_attempt();
         cmd.spawn()
     }
 }
@@ -537,6 +663,9 @@ pub mod tokio {
         pub async fn output(&mut self) -> std::io::Result<Output> {
             let mut cmd = ::tokio::process::Command::new(&self.program);
             let privileged = self.program == "pkexec" || self.program == "sudo";
+            if self.program == "pkexec" {
+                ensure_admin_mode(&self.program, &self.args).map_err(permission_denied)?;
+            }
             if let Some(ref path) = self.current_dir {
                 cmd.current_dir(path);
             }
@@ -554,6 +683,7 @@ pub mod tokio {
             }
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
+            note_spawn_attempt();
             let output = cmd.output().await.map_err(|e| {
                 // Name the command in the error — "No such file or directory"
                 // on its own says nothing about what could not be started.
@@ -568,14 +698,17 @@ pub mod tokio {
             if privileged {
                 log_privileged_call(&self.args);
             }
-            if privileged && output.status.success() {
-                note_authorised();
+            if privileged && output.status.success() && self.program == "pkexec" {
+                let _ = refresh_admin_state();
             }
             Ok(output)
         }
 
         pub fn spawn(&mut self) -> std::io::Result<TokioChild> {
             let mut cmd = ::tokio::process::Command::new(&self.program);
+            if self.program == "pkexec" {
+                ensure_admin_mode(&self.program, &self.args).map_err(permission_denied)?;
+            }
             if let Some(ref path) = self.current_dir {
                 cmd.current_dir(path);
             }
@@ -593,6 +726,7 @@ pub mod tokio {
             }
             if self.capture_stdout { cmd.stdout(Stdio::piped()); }
             if self.capture_stderr { cmd.stderr(Stdio::piped()); }
+            note_spawn_attempt();
             cmd.spawn()
         }
     }
@@ -754,15 +888,22 @@ mod tests {
             String::from("restart"),
             String::from("nginx.service"),
         ];
+        // this is the path the app really takes: the wrapper turns
+        // `pkexec systemctl restart nginx.service` into the final argv.
+        // When the root owned helper is installed every request is re-routed
+        // through it — so the program offset depends on the (host) install
+        // state, never on the rule of the test.
+        let helper_prefix = crate::commands::admin::installed_helper_path().is_some();
+        let offset = usize::from(helper_prefix) + 1;
         let argv = validated_privileged_argv("pkexec", &call).unwrap().unwrap();
         // pkexec is addressed by its absolute path, so the call does not
         // depend on the PATH of the desktop session
         assert_eq!(argv[0], "/usr/bin/pkexec");
         // pkexec would try to run a program called "--"
         assert!(!argv.iter().any(|arg| arg == "--"));
-        assert_eq!(argv[1], "/usr/bin/systemctl");
-        assert_eq!(argv[2], "restart");
-        assert_eq!(argv[3], "nginx.service");
+        assert_eq!(argv[offset], "/usr/bin/systemctl");
+        assert_eq!(argv[offset + 1], "restart");
+        assert_eq!(argv[offset + 2], "nginx.service");
     }
 
     #[test]
@@ -907,33 +1048,77 @@ mod tests {
         );
     }
 
-    /// The rules.d rule matches exactly the two helper install paths — the
-    /// one explicit path contract. (W-7)
+    /// The rules.d rule and the bundled `.policy` file must name each other
+    /// exactly: the rule may only match the custom action ids the policy
+    /// annotates with an exec path, and every such id must be matched. This
+    /// is the drift guard for the live finding that the rule checked the
+    /// generic `org.freedesktop.policykit.exec` action — an id pkexec only
+    /// substitutes away, so the rule never fired and the keep never existed.
+    /// (W-7)
     #[test]
-    fn the_polkit_rule_matches_exactly_the_two_helper_paths() {
-        let rule = crate::utils::root_policy::POLKIT_RULE_TEXT;
-        assert!(
-            rule.contains("\"org.freedesktop.policykit.exec\""),
-            "the rule targets the exec action"
+    fn the_polkit_rule_matches_exactly_the_actions_the_policy_annotates() {
+        let policy = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("polkit/com.controlpanel.pkexec.policy"),
+        )
+        .expect("the bundled polkit policy must exist in the repository");
+
+        // The two custom action ids, each pinned to one helper install path.
+        let mut annotated: Vec<&str> = Vec::new();
+        let mut annotated_paths: Vec<String> = Vec::new();
+        let policy_body = strip_xml_comments(&policy);
+        for block in policy_body.split("<action id=\"").skip(1) {
+            let id = block.split('"').next().unwrap_or_default();
+            // find the block's own body (up to the next action, if any)
+            let body = match block.find("<action id=\"") {
+                Some(next) => &block[..next],
+                None => block,
+            };
+            let Some(rest) = body.split("org.freedesktop.policykit.exec.path").nth(1) else {
+                continue;
+            };
+            let value = rest
+                .split('>')
+                .nth(1)
+                .and_then(|r| r.split('<').next())
+                .unwrap_or_default()
+                .to_string();
+            annotated.push(id);
+            annotated_paths.push(value);
+        }
+
+        assert_eq!(
+            annotated,
+            Vec::from(crate::utils::root_policy::HELPER_ACTION_IDS),
+            "the policy's annotated action ids and the constants the app and rule use must be identical"
         );
-        for path in [
-            crate::commands::admin::HELPER_PATH,
-            crate::commands::admin::PACKAGED_HELPER_PATH,
-        ] {
-            assert!(
-                rule.contains(&format!("key == \"{path}\"")),
-                "the rule must cover the helper at {path} (W-7)"
-            );
+        assert_eq!(
+            annotated_paths,
+            vec![
+                crate::commands::admin::HELPER_PATH.to_string(),
+                crate::commands::admin::PACKAGED_HELPER_PATH.to_string(),
+            ],
+            "each annotated action must pin exactly one known helper install path"
+        );
+
+        // The rule must match exactly those ids — the generic exec action
+        // never carries the keep, and no other id may gain it.
+        let rule = crate::utils::root_policy::POLKIT_RULE_TEXT;
+        let mut rule_ids: Vec<&str> = Vec::new();
+        let mut rest = rule;
+        while let Some(rest_at) = rest.find("action.id == \"") {
+            rest = &rest[rest_at + "action.id == \"".len()..];
+            rule_ids.push(rest.split('"').next().unwrap_or_default());
         }
-        // every quoted path in the rule is one of the two helper installs —
-        // no other program may ever gain the authorisation
-        for piece in rule.split('"').filter(|p| p.starts_with("/usr/")) {
-            assert!(
-                piece == crate::commands::admin::HELPER_PATH
-                    || piece == crate::commands::admin::PACKAGED_HELPER_PATH,
-                "unexpected path in the polkit rule: {piece:?}"
-            );
-        }
+        assert_eq!(
+            rule_ids,
+            annotated,
+            "the rule must check every annotated action id and nothing else"
+        );
+        assert!(
+            !rule.contains("org.freedesktop.policykit.exec"),
+            "the generic exec action must not appear in the rule: pkexec substitutes it away, so the keep would never fire"
+        );
     }
 
     /// Strips `<!-- … -->` XML comments so value checks see only the policy body.
@@ -950,5 +1135,90 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    // ── STEP 2: the admin-mode gate ───────────────────────────────────────
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        ::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a test runtime")
+            .block_on(future)
+    }
+
+    #[test]
+    fn a_privileged_call_while_admin_mode_is_off_is_refused_without_spawning() {
+        let _state = cache_admin_state_for_test(AdminModeState {
+            on: false,
+            expires_at: None,
+            error: None,
+        });
+        let before = SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let error = block_on(run_privileged_output(
+            "/usr/bin/systemctl",
+            &["restart".to_string(), "nginx.service".to_string()],
+            &RootAuth::Polkit,
+        ))
+        .expect_err("a call while admin mode is off must be refused");
+        assert_eq!(error, ADMIN_MODE_OFF_MESSAGE);
+        assert_eq!(
+            SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "no process may be spawned while admin mode is off"
+        );
+    }
+
+    #[test]
+    fn the_pkexec_command_wrapper_is_refused_without_spawning() {
+        let _state = cache_admin_state_for_test(AdminModeState {
+            on: false,
+            expires_at: None,
+            error: None,
+        });
+        let before = SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let mut cmd = super::tokio::Command::new("pkexec");
+        cmd.args(["systemctl", "restart", "nginx.service"]);
+        let error = block_on(cmd.output()).expect_err("admin mode is off");
+        assert_eq!(error.to_string(), ADMIN_MODE_OFF_MESSAGE);
+        assert_eq!(
+            SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "the wrapper must not spawn while admin mode is off"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_admin_state_fails_closed_instead_of_prompting() {
+        let _state = cache_admin_state_for_test(AdminModeState {
+            on: false,
+            expires_at: None,
+            error: Some("PolicyKit (pkcheck) is not available: missing".to_string()),
+        });
+        assert_eq!(
+            ensure_admin_mode("/usr/bin/systemctl", &["restart".to_string()]).unwrap_err(),
+            "PolicyKit (pkcheck) is not available: missing"
+        );
+    }
+
+    #[test]
+    fn only_the_inert_admin_keep_call_bypasses_the_gate() {
+        let keep = vec![String::from("admin_keep")];
+        assert!(raises_admin_authorisation("/usr/local/libexec/lcp-admin", &keep));
+        assert!(raises_admin_authorisation(
+            "pkexec",
+            &[String::from("/usr/bin/lcp-admin"), String::from("admin_keep")]
+        ));
+        // any other helper action, any extra argument and any other program
+        // must still be gated
+        assert!(!raises_admin_authorisation(
+            "/usr/bin/lcp-admin",
+            &["read_user_ssh_keys".to_string(), "marvin".to_string()]
+        ));
+        assert!(!raises_admin_authorisation(
+            "/usr/bin/lcp-admin",
+            &["admin_keep".to_string(), "extra".to_string()]
+        ));
+        assert!(!raises_admin_authorisation("/usr/bin/systemctl", &keep));
     }
 }

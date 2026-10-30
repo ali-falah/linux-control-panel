@@ -75,29 +75,19 @@ const HANG_THRESHOLD_MS = 60_000;
 export async function ensureAdminHelper(): Promise<boolean> {
   try {
     const installed = await invoke<boolean>('admin_install_helper');
-    await refreshAdminAuthState();
+    await refreshHelperInstalled();
     return installed;
   } catch {
     return false;
   }
 }
 
-/** Read the administrator authorisation state from the backend. */
-export async function refreshAdminAuthState(): Promise<void> {
+/** Read whether the root owned helper is installed. */
+export async function refreshHelperInstalled(): Promise<void> {
   try {
-    const state = await invoke<{
-      helper_installed: boolean;
-      authorised_for: number | null;
-      lifetime_secs: number;
-    }>('admin_auth_state');
-    statusStore.setAdminAuth({
-      helperInstalled: state.helper_installed,
-      authorisedUntil:
-        state.authorised_for === null ? null : Date.now() + state.authorised_for * 1000,
-      lifetimeSecs: state.lifetime_secs
-    });
+    statusStore.helperInstalled = await invoke<boolean>('helper_installed');
   } catch {
-    // the status bar simply keeps its last known state
+    // the last known state stands — reading it again is only opportunistic
   }
 }
 
@@ -186,7 +176,7 @@ class DnfStore {
         if (event.payload) {
           uiStore.addToast('DNF upgrade completed successfully', 'success');
           statusStore.setLastCommand('dnf upgrade -y', 0, true);
-          void refreshAdminAuthState();
+          void refreshHelperInstalled();
         } else {
           uiStore.addToast('DNF upgrade failed — check terminal logs', 'error');
           statusStore.setLastCommand('dnf upgrade -y', 1, false);
@@ -429,12 +419,12 @@ class DnfStore {
     // the password itself.
     // Set the helper up once — afterwards the desktop's PolicyKit agent asks
     // for the password and keeps the authorisation for a few minutes.
-    if (!statusStore.adminAuth.helperInstalled) {
+    if (!statusStore.helperInstalled) {
       await ensureAdminHelper();
     }
 
     let password: string | undefined;
-    if (!statusStore.adminAuth.helperInstalled) {
+    if (!statusStore.helperInstalled) {
       const entered = await uiStore.requestAdminPassword(
         'Administrator authentication required',
         'The package transaction needs administrator rights. Enter your password to continue.'
