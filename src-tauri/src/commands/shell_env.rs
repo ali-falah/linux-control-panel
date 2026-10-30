@@ -197,6 +197,23 @@ async fn write_file_content(path: &str, content: &str) -> Result<(), String> {
     }
 }
 
+/// The unprivileged home-profile write core, with the allowlist and backups
+/// directory injectable so tests never touch the real home directory. Only
+/// `user_profile_files()` paths pass; free-form content is deliberately
+/// allowed — these are the user's own files, not world-sourced exports.
+async fn write_home_profile_file(
+    path: &str,
+    content: &str,
+    backups_dir: &Path,
+    allowed: &[PathBuf],
+) -> Result<(), String> {
+    if !allowed.iter().any(|p| p.as_path() == Path::new(path)) {
+        return Err(unmanaged_path_error(path));
+    }
+    backup_file_into(path, backups_dir).await?;
+    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {e}"))
+}
+
 /// Is `path` a direct child of the root-owned profile directory? Only those
 /// paths are allowed to take the privileged `lcp-admin` route; everything else
 /// (the user's own `~/.bashrc` and friends) keeps the unprivileged writer.
@@ -208,6 +225,42 @@ fn profile_d_name(path: &str) -> Option<String> {
     candidate
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
+}
+
+/// The refusal every profile-file write command gives for a path that is
+/// neither a direct `/etc/profile.d` child nor a managed home profile file.
+fn unmanaged_path_error(path: &str) -> String {
+    format!("'{path}' is not a profile file this panel manages.")
+}
+
+/// Which managed route a renderer-supplied profile path may take. The
+/// renderer can name any path at all, so every writing command decides the
+/// route **first** — a refusal happens before any backup, file creation or
+/// write, and the only paths that may ever be touched belong to these two
+/// families:
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ProfileWriteRoute {
+    /// A direct `/etc/profile.d/*.sh` child — the privileged helper route
+    /// (`write_profile_d_as_root`, which re-validates name and content and
+    /// never takes a separate app-side backup: the helper keeps the revision
+    /// `.bak` itself on every write).
+    ProfileD(String),
+    /// A managed home profile file (`user_profile_files()`) — unprivileged,
+    /// free-form content (these are the user's own files), with a panel
+    /// backups-dir copy kept first.
+    Home,
+    /// Anything else — refused before anything runs.
+    Refused,
+}
+
+fn profile_write_route(path: &str) -> ProfileWriteRoute {
+    if let Some(file_name) = profile_d_name(path) {
+        return ProfileWriteRoute::ProfileD(file_name);
+    }
+    if user_profile_files().iter().any(|p| p.as_path() == Path::new(path)) {
+        return ProfileWriteRoute::Home;
+    }
+    ProfileWriteRoute::Refused
 }
 
 /// Turn a bare file name into the one privileged destination this panel may
@@ -392,19 +445,20 @@ pub async fn shell_write_var(
     if CRITICAL_VARS.contains(&name.as_str()) && name == "PATH" {
         return Err(format!("'{name}' is a critical system variable. Use the PATH Manager tab to modify it."));
     }
-    if !std::path::Path::new(&path).exists()
-        && !std::path::Path::new(&path).starts_with("/etc")
-    {
-        // create user file if not exists
-        std::fs::write(&path, "").map_err(|e| format!("Cannot create {path}: {e}"))?;
-    }
-
-    // `/etc/profile.d` is written by the root helper, which makes its own
-    // backup; every other profile file is written directly as the user.
-    let profile_file = profile_d_name(&path);
-    if profile_file.is_none() {
-        backup_file(&path).await?;
-    }
+    // The route is decided first — a renderer-supplied path outside the two
+    // managed families is refused before any backup, file creation or write.
+    let profile_file = match profile_write_route(&path) {
+        ProfileWriteRoute::ProfileD(file_name) => Some(file_name),
+        ProfileWriteRoute::Home => {
+            // create user file if not exists
+            if !std::path::Path::new(&path).exists() {
+                std::fs::write(&path, "").map_err(|e| format!("Cannot create {path}: {e}"))?;
+            }
+            backup_file(&path).await?;
+            None
+        }
+        ProfileWriteRoute::Refused => return Err(unmanaged_path_error(&path)),
+    };
 
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let new_line = format!("export {name}=\"{value}\"");
@@ -434,6 +488,10 @@ pub async fn shell_write_var(
 
 #[tauri::command]
 pub async fn shell_delete_var(path: String, raw_line: String) -> Result<(), String> {
+    // Refused before the file is even read — let alone backed up or written.
+    if matches!(profile_write_route(&path), ProfileWriteRoute::Refused) {
+        return Err(unmanaged_path_error(&path));
+    }
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let new_content = content
         .lines()
@@ -452,8 +510,25 @@ pub async fn shell_delete_var(path: String, raw_line: String) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn shell_write_profile_file(path: String, content: String) -> Result<(), String> {
-    backup_file(&path).await?;
-    write_file_content(&path, &content).await
+    match profile_write_route(&path) {
+        ProfileWriteRoute::ProfileD(file_name) => {
+            // Content policy before anything else — the editor surfaces the
+            // validator's line-numbered error instead of a generic transport
+            // failure, and no backup or privileged call is made for content
+            // the panel would refuse. `write_profile_d_as_root` re-validates
+            // the same policy (and the helper once more): no single half is
+            // trusted on its own. `/etc/profile.d` takes no separate backup
+            // here — the helper keeps the revision `.bak` on every publish.
+            validate_profile_sh_content(&content)?;
+            write_profile_d_as_root(&file_name, &content).await.map(|_| ())
+        }
+        // Home profile files keep free-form content and the unprivileged
+        // writer, with the current content backed up first.
+        ProfileWriteRoute::Home =>
+            write_home_profile_file(&path, &content, &backup_dir(), &user_profile_files()).await,
+        // Refused before any backup, creation or write call.
+        ProfileWriteRoute::Refused => Err(unmanaged_path_error(&path)),
+    }
 }
 
 #[tauri::command]
@@ -697,6 +772,10 @@ pub async fn shell_parse_path() -> Result<Vec<PathEntry>, String> {
 
 #[tauri::command]
 pub async fn shell_add_path_entry(directory: String, profile_path: String) -> Result<(), String> {
+    // Refused before the file is even read — let alone backed up or written.
+    if matches!(profile_write_route(&profile_path), ProfileWriteRoute::Refused) {
+        return Err(unmanaged_path_error(&profile_path));
+    }
     let content = std::fs::read_to_string(&profile_path).unwrap_or_default();
     let new_content = content_with_path_entry(&content, &directory);
     match profile_d_name(&profile_path) {
@@ -710,6 +789,10 @@ pub async fn shell_add_path_entry(directory: String, profile_path: String) -> Re
 
 #[tauri::command]
 pub async fn shell_remove_path_entry(directory: String, profile_path: String) -> Result<(), String> {
+    // Refused before the file is even read — let alone backed up or written.
+    if matches!(profile_write_route(&profile_path), ProfileWriteRoute::Refused) {
+        return Err(unmanaged_path_error(&profile_path));
+    }
     let content = std::fs::read_to_string(&profile_path).map_err(|e| e.to_string())?;
     let new_content = content_without_path_entry(&content, &directory);
     match profile_d_name(&profile_path) {
@@ -1329,5 +1412,264 @@ mod profile_restore_tests {
             home.join(".profile"),
         ];
         assert_eq!(user_profile_files(), expected);
+    }
+}
+
+// ─── tests: shell_write_profile_file routing (ProfileD / Home / Refused) ──────
+
+#[cfg(test)]
+mod profile_write_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "lcp-profile-write-{}-{}-{name}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 1: a direct `/etc/profile.d/*.sh` child routes to the hardened
+    /// privileged writer, and export-only content passes the policy it
+    /// enforces — nothing free-form is required.
+    #[test]
+    fn a_profile_d_write_with_valid_export_content_routes_through_the_hardened_path() {
+        let dest = format!("{PROFILE_D_DIR}/10-lang.sh");
+        assert_eq!(
+            profile_write_route(&dest),
+            ProfileWriteRoute::ProfileD("10-lang.sh".to_string())
+        );
+
+        let content = "#!/usr/bin/env bash\n# comment\nexport LCP_ALPHA=\"one\"\nexport LCP_BETA=two\n";
+        validate_profile_sh_content(content).expect("export-only content must pass the policy");
+    }
+
+    /// 2: free-form shell content to a profile.d destination is refused with
+    /// exactly which line and rule failed — before any backup or write.
+    #[test]
+    fn free_form_shell_content_to_profile_d_is_refused_with_the_failing_line() {
+        let dest = format!("{PROFILE_D_DIR}/10-lang.sh");
+        assert_eq!(
+            profile_write_route(&dest),
+            ProfileWriteRoute::ProfileD("10-lang.sh".to_string())
+        );
+
+        let content = "export GOOD=\"yes\"\nrm -rf /\n";
+        let error = validate_profile_sh_content(content).expect_err("shell code must be refused");
+        assert!(error.contains("Line 2"), "{error}");
+        assert!(error.contains("is not an export assignment"), "{error}");
+
+        let content = "export 1BAD=\"yes\"\n";
+        let error = validate_profile_sh_content(content).expect_err("a bad name must be refused");
+        assert!(error.contains("Line 1") && error.contains("invalid variable name"), "{error}");
+
+        let content = "export GOOD=\"$(rm -rf /)\"\n";
+        let error = validate_profile_sh_content(content).expect_err("an unsafe value must be refused");
+        assert!(error.contains("Line 1") && error.contains("unsafe value for GOOD"), "{error}");
+    }
+
+    /// 3: managed home profile files keep free-form content and the
+    /// unprivileged writer, with the current content backed up first.
+    #[tokio::test]
+    async fn a_home_profile_file_still_accepts_free_form_content() {
+        let backups_dir = unique_dir("backups");
+        let home = unique_dir("home");
+        let original = home.join(".bashrc");
+        std::fs::write(&original, "old content\n").unwrap();
+        let free_form = "ulimit -n 4096\nsource ~/.extra\n# some manual note\n";
+
+        write_home_profile_file(
+            original.to_str().unwrap(),
+            free_form,
+            &backups_dir,
+            &vec![original.clone()],
+        )
+        .await
+        .expect("an allowlisted home file must accept free-form content");
+
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), free_form);
+
+        let mut backup_names = Vec::new();
+        for entry in std::fs::read_dir(&backups_dir).unwrap().flatten() {
+            backup_names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert_eq!(backup_names.len(), 1, "{backup_names:?}");
+        assert!(backup_names[0].starts_with(".bashrc.") && backup_names[0].ends_with(".bak"));
+        assert_eq!(
+            std::fs::read_to_string(backups_dir.join(&backup_names[0])).unwrap(),
+            "old content\n"
+        );
+    }
+
+    /// 4: a path in neither managed family is refused with the specific
+    /// message, and nothing at all runs — no backup, no write, no creation.
+    #[tokio::test]
+    async fn an_unmanaged_path_is_refused_before_anything_runs() {
+        // exists already: the refusal itself must be the error, not an I/O one
+        let error =
+            shell_write_profile_file("/etc/fstab".to_string(), "export OK=\"1\"\n".to_string())
+                .await
+                .expect_err("/etc files outside profile.d must be refused");
+        assert_eq!(error, unmanaged_path_error("/etc/fstab"));
+
+        // an unmanaged home file: refused, and not created as a side effect
+        let home = unique_dir("home");
+        let stranger = home.join(".profile2");
+        let error = shell_write_profile_file(
+            stranger.to_str().unwrap().to_string(),
+            "export OK=\"1\"\n".to_string(),
+        )
+        .await
+        .expect_err("an unmanaged home file must be refused");
+        assert_eq!(error, unmanaged_path_error(stranger.to_str().unwrap()));
+        assert!(!stranger.exists(), "nothing may be created for a refused path");
+
+        // a profile.d-adjacent path with a relative component is not a direct child
+        let error = shell_write_profile_file(
+            format!("{PROFILE_D_DIR}/../10-lang.sh"),
+            "export OK=\"1\"\n".to_string(),
+        )
+        .await
+        .expect_err("a relative escape is not a managed destination");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+    }
+
+    /// 5 (UI decision B): viewing/opening is unaffected; saving refuses
+    /// non-conforming content with the validator's line error; and editing
+    /// the file *into* conformity works — the editor becomes a migration path.
+    #[test]
+    fn a_non_conforming_profile_d_file_can_be_viewed_and_edited_into_conformity() {
+        let dest = format!("{PROFILE_D_DIR}/10-lang.sh");
+        assert_eq!(
+            profile_write_route(&dest),
+            ProfileWriteRoute::ProfileD("10-lang.sh".to_string())
+        );
+        // reading a non-conforming file is not a policy operation — it stays
+        // the plain `shell_read_profile_file` read, unchanged in this step
+
+        // third-party style content pre-existing on disk; only the save refuses
+        let on_disk = "#!/usr/bin/env bash\n# log-session helper\nlog_session()\n{\n  echo hi\n}\n";
+        let error = validate_profile_sh_content(on_disk).expect_err("the function block must be refused");
+        assert!(error.contains("Line 3") && error.contains("is not an export assignment"), "{error}");
+
+        // deleting/fixing the offending lines is how a pre-existing file is
+        // saved again with the normal Save button — the healed buffer passes
+        let healed = "#!/usr/bin/env bash\n# log-session helper\nexport SESSION_LOG=\"yes\"\n";
+        validate_profile_sh_content(healed).expect("a buffer edited into conformity must save");
+    }
+
+    /// The route decision is exactly the two managed families: the panel's
+    /// three home files and the direct profile.d children — nothing invented.
+    #[test]
+    fn the_home_write_route_matches_the_managed_file_list() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+        for file in [".bashrc", ".bash_profile", ".profile"] {
+            let path = home.join(file);
+            assert_eq!(
+                profile_write_route(path.to_str().unwrap()),
+                ProfileWriteRoute::Home,
+                "{path:?} must be the managed Home route"
+            );
+        }
+        assert_eq!(
+            profile_write_route(&format!("{PROFILE_D_DIR}/99-x.sh")),
+            ProfileWriteRoute::ProfileD("99-x.sh".to_string())
+        );
+        assert!(matches!(profile_write_route("/etc/hosts"), ProfileWriteRoute::Refused));
+        assert!(matches!(profile_write_route("/tmp/x.sh"), ProfileWriteRoute::Refused));
+        assert!(matches!(
+            profile_write_route(&format!("{}/other/.bashrc", home.display())),
+            ProfileWriteRoute::Refused
+        ));
+    }
+
+    // ── refinement 3: the four fall-through commands ────────────────────────
+
+    /// shell_write_var: an unmanaged path is refused before the legacy
+    /// create-user-file step or any backup/write — the old code would have
+    /// *created* an arbitrary home path this way.
+    #[tokio::test]
+    async fn shell_write_var_refuses_an_unmanaged_path_before_backup_or_write() {
+        let home = unique_dir("home");
+        let stranger = home.join(".profile2");
+        let error = shell_write_var(
+            stranger.to_str().unwrap().to_string(),
+            "LCP_EVIL".to_string(),
+            "yes".to_string(),
+            None,
+        )
+        .await
+        .expect_err("an unmanaged home path must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+        assert!(
+            !stranger.exists(),
+            "the legacy create-user-file step must not run for a refused path"
+        );
+
+        let error = shell_write_var(
+            "/etc/hosts".to_string(),
+            "LCP_EVIL".to_string(),
+            "yes".to_string(),
+            None,
+        )
+        .await
+        .expect_err("an /etc file outside profile.d must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+    }
+
+    /// shell_delete_var: refused before the file is even read — an existing
+    /// unmanaged file is neither modified nor backed up.
+    #[tokio::test]
+    async fn shell_delete_var_refuses_an_unmanaged_path_before_it_reads_the_file() {
+        let error = shell_delete_var("/etc/hosts".to_string(), "127.0.0.1 localhost".to_string())
+            .await
+            .expect_err("an unmanaged path must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+        assert!(
+            std::fs::read_to_string("/etc/hosts")
+                .unwrap()
+                .contains("localhost"),
+            "/etc/hosts must be untouched"
+        );
+    }
+
+    /// shell_add_path_entry: an unmanaged path is refused before the read and
+    /// the rewrite, with the same message as every other command.
+    #[tokio::test]
+    async fn shell_add_path_entry_refuses_an_unmanaged_path_before_backup_or_write() {
+        let error = shell_add_path_entry("/opt/toolchain/bin".to_string(), "/etc/hosts".to_string())
+            .await
+            .expect_err("an unmanaged path must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+
+        let home = unique_dir("home");
+        let stranger = home.join(".profile2");
+        let error = shell_add_path_entry(
+            "/opt/toolchain/bin".to_string(),
+            stranger.to_str().unwrap().to_string(),
+        )
+        .await
+        .expect_err("an unmanaged home path must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+        assert!(!stranger.exists(), "nothing may be created for a refused path");
+    }
+
+    /// shell_remove_path_entry: unmanaged path refused with the same message.
+    #[tokio::test]
+    async fn shell_remove_path_entry_refuses_an_unmanaged_path_before_backup_or_write() {
+        let error = shell_remove_path_entry("/opt/toolchain/bin".to_string(), "/etc/hosts".to_string())
+            .await
+            .expect_err("an unmanaged path must be refused");
+        assert!(error.contains("not a profile file this panel manages"), "{error}");
+        assert!(
+            std::fs::read_to_string("/etc/hosts")
+                .unwrap()
+                .contains("localhost"),
+            "/etc/hosts must be untouched"
+        );
     }
 }
