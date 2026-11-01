@@ -21,9 +21,13 @@ mod root_policy;
 use root_policy::{
     ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
     ensure_safe_arguments, ensure_repo_file_content, ensure_repo_file_path, resolve_root_program,
-    restore_profile_sh_backup_shape, verify_trusted_binary, is_valid_account_name,
-    validate_profile_sh_content, validate_profile_sh_path, PROFILE_CONTENT_MAX, PROFILE_D_DIR,
-    POLKIT_RULE_FILE, POLKIT_RULE_TEXT, REPO_CONTENT_MAX,
+    restore_profile_sh_backup_shape, revision_sibling_shape, verify_trusted_binary,
+    is_valid_account_name, nginx_config_remove_path_valid, nginx_config_path_valid,
+    nginx_link_as_valid, nginx_site_unlink_path_valid, validate_nginx_config_content,
+    validate_profile_sh_content, validate_profile_sh_path, var_www_is_protected,
+    var_www_path_valid, NGINX_BACKUPS_DIR, NGINX_CONFIG_CONTENT_MAX, NGINX_SITES_AVAILABLE,
+    NGINX_SITES_ENABLED, NGINX_WWW_INSTALL_MAX, PROFILE_CONTENT_MAX, POLKIT_RULE_FILE,
+    POLKIT_RULE_TEXT, PROFILE_D_DIR, REPO_CONTENT_MAX, VAR_WWW_DIR,
 };
 
 use rustix::fs::{AtFlags, CWD, Gid, Mode, OFlags, Stat, Uid};
@@ -78,6 +82,9 @@ fn privileged_gid() -> u32 {
 const ROOT_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
     "write_profile_sh", "restore_profile_sh",
+    "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
+    "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
+    "nginx_www_fs", "nginx_www_install",
 ];
 
 /// Read everything the caller pipes into the helper (up to `limit + 1`
@@ -96,6 +103,24 @@ fn read_stdin_content(limit: u64, what: &str) -> Result<String, String> {
         }
         Ok(_) => Ok(content),
         Err(_) => Err(format!("lcp-admin: the {what} is not valid UTF-8 (or unreadable).")),
+    }
+}
+
+/// The byte-exact twin of `read_stdin_content` for the web-file install:
+/// binary content is legitimate there (images, archives, fonts), so no
+/// UTF-8 or NUL rule can apply — only the size limit.
+fn read_stdin_bytes(limit: u64, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut content = Vec::new();
+    match std::io::BufReader::new(std::io::stdin())
+        .take(limit + 1)
+        .read_to_end(&mut content)
+    {
+        Ok(_) if content.len() as u64 > limit => {
+            Err(format!("lcp-admin: the {what} is too large."))
+        }
+        Ok(_) => Ok(content),
+        Err(_) => Err(format!("lcp-admin: the {what} could not be read.")),
     }
 }
 
@@ -141,6 +166,70 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly one profile file path and one backup sibling path."
+                ))
+            }
+        } else if requested == "nginx_config_install" {
+            if args.len() == 2 {
+                nginx_config_install_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one nginx configuration path."
+                ))
+            }
+        } else if requested == "nginx_config_backup" {
+            if args.len() == 2 {
+                nginx_config_backup_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one existing nginx configuration path."
+                ))
+            }
+        } else if requested == "nginx_restore_backup" {
+            if args.len() == 3 {
+                nginx_restore_backup_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one nginx destination path and one backup sibling path."
+                ))
+            }
+        } else if requested == "nginx_link_site" {
+            if args.len() == 3 {
+                nginx_link_site_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one sites-available path and one sites-enabled path."
+                ))
+            }
+        } else if requested == "nginx_unlink_site" {
+            if args.len() == 2 {
+                nginx_unlink_site_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one sites-enabled symlink path to remove."
+                ))
+            }
+        } else if requested == "nginx_config_remove" {
+            if args.len() == 2 {
+                nginx_config_remove_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one nginx configuration path to remove."
+                ))
+            }
+        } else if requested == "nginx_www_fs" {
+            if args.len() >= 2 {
+                nginx_www_fs_action(&args[1..])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a sub-command: mkdir, remove or rename."
+                ))
+            }
+        } else if requested == "nginx_www_install" {
+            if args.len() == 2 {
+                nginx_www_install_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one web-root destination path."
                 ))
             }
         } else if args.len() == 2 {
@@ -286,6 +375,7 @@ fn passwd_entry(username: &str) -> Option<(u32, u32, String)> {
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
 
 fn open_dir_nofollow(dir: impl AsFd, name: &str, what: &str) -> Result<OwnedFd, String> {
     rustix::fs::openat(
@@ -672,6 +762,778 @@ fn restore_profile_sh_action(path: &str, backup_path: &str) -> Result<(), String
     if let Some(backup) = install_root_owned_file(path, &content, "profile file")? {
         println!("{backup}");
     }
+    Ok(())
+}
+
+/// `YYYYmmdd_HHMMSS` in UTC from the system clock — the nginx backup revision
+/// shape. `nginx_list_backups` parses `<name>.<stamp>.bak` by splitting on
+/// the last dot, so — unlike the profile write core's `pid.nanos` suffix —
+/// this stamp must not contain any dot of its own.
+fn utc_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let (hh, mm, ss) = ((secs % 86_400) / 3_600, (secs % 3_600) / 60, secs % 60);
+    // Howard Hinnant's civil_from_days: the days since 1970-01-01 to a
+    // y/m/d date, without any time-table dependency.
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!("{year:04}{month:02}{day:02}_{hh:02}{mm:02}{ss:02}")
+}
+
+/// The `nginx_config_install <path>` action: writes one file in the nginx
+/// configuration tree from stdin.
+///
+/// The shared halves: `nginx_config_path_valid` confines the destination
+/// (exact `nginx.conf`, `conf.d/*.conf`, plain children of the two sites
+/// directories), a structural content gate (size, NUL, control characters
+/// other than newlines/tabs) is the *only* content policy — nginx's own `-t`
+/// is the grammar gate. Publishing goes through `install_root_owned_file`,
+/// which forces root:root 0644 and keeps the previous content as a fresh
+/// revision backup before the atomic rename; that backup's path is the
+/// action's only stdout output.
+fn nginx_config_install_action(path: &str) -> Result<(), String> {
+    // both halves of the policy hold independently — the helper must not
+    // depend on the app having validated anything
+    nginx_config_path_valid(path)?;
+    let content = read_stdin_content(NGINX_CONFIG_CONTENT_MAX as u64, "nginx configuration")?;
+    validate_nginx_config_content(&content)?;
+    if let Some(backup) = install_root_owned_file(path, &content, "nginx configuration")? {
+        println!("{backup}");
+    }
+    Ok(())
+}
+
+/// The `nginx_config_backup <path>` action: copies one existing file in the
+/// nginx configuration tree into the panel's own backups directory as a
+/// `<basename>.<UTC stamp>.bak` sibling. The config side and the backups
+/// side are both opened through their pinned directory descriptors
+/// (`O_NOFOLLOW` — a symlinked "destination" is refused, not followed).
+///
+/// The backup path is the action's only stdout output and the one exact path
+/// a subsequent `nginx_restore_backup` must name.
+fn nginx_config_backup_action(path: &str) -> Result<(), String> {
+    nginx_config_path_valid(path)?;
+    let parent = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // pin the source directory: privileged-owned, never group/world
+    // writable, never a symlink
+    let src_dir = open_dir_nofollow(CWD, &parent, &parent)?;
+    let src_stat = stat_fd(&src_dir, &parent)?;
+    if src_stat.st_uid != privileged_uid()
+        || src_stat.st_gid != privileged_gid()
+        || src_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{parent}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    let stat = rustix::fs::statat(&src_dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(|_| {
+        format!("lcp-admin: '{path}' could not be inspected; refusing to back it up.")
+    })?;
+    if (stat.st_mode & S_IFMT) != S_IFREG {
+        return Err(format!(
+            "lcp-admin: '{path}' is not a regular file; refusing to back it up."
+        ));
+    }
+    let src_fd = rustix::fs::openat(
+        &src_dir,
+        name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| format!("lcp-admin: '{path}' could not be opened; refusing to back it up."))?;
+
+    // pin the backups directory the same way, then create the revision as a
+    // brand-new file (O_EXCL — an existing name is never overwritten)
+    let bak_dir = open_dir_nofollow(CWD, NGINX_BACKUPS_DIR, NGINX_BACKUPS_DIR)?;
+    let bak_stat = stat_fd(&bak_dir, NGINX_BACKUPS_DIR)?;
+    if bak_stat.st_uid != privileged_uid()
+        || bak_stat.st_gid != privileged_gid()
+        || bak_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{NGINX_BACKUPS_DIR}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    let backup_name = format!("{name}.{}.bak", utc_stamp());
+    let result: Result<String, String> = (|| {
+        let bak_fd = rustix::fs::openat(
+            &bak_dir,
+            backup_name.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )
+        .map_err(|_| format!("lcp-admin: could not create the nginx backup; refusing."))?;
+        let mut source = std::fs::File::from(src_fd);
+        let mut backup = std::fs::File::from(bak_fd);
+        std::io::copy(&mut source, &mut backup)
+            .and_then(|_| backup.sync_all())
+            .and_then(|_| source.sync_all())
+            .map_err(|_| format!("lcp-admin: could not write the nginx backup; refusing."))?;
+        Ok(format!("{NGINX_BACKUPS_DIR}/{backup_name}"))
+    })();
+
+    match result {
+        Ok(backup_path) => println!("{backup_path}"),
+        Err(message) => {
+            let _ = rustix::fs::unlinkat(&bak_dir, backup_name.as_str(), AtFlags::empty());
+            return Err(message);
+        }
+    }
+    Ok(())
+}
+
+/// The `nginx_restore_backup <dest> <backup>` action: replaces the nginx
+/// configuration file at `dest` with the content of one exact revision
+/// sibling in the panel's own backups directory — the path the backup action
+/// itself reported. An auto-picked or invented path can not even reach the
+/// read stage: the shape rule is checked first, inside the confined backups
+/// directory descriptor.
+///
+/// The backup's bytes never travel through the app: they are read through
+/// the confined descriptor (`O_NOFOLLOW`; a symlinked backup is refused, not
+/// followed), re-checked against the structural content policy, and
+/// published through `install_root_owned_file` — which keeps the current
+/// content as a fresh revision backup (so a restore is itself reversible and
+/// needs no separate pre-restore step).
+fn nginx_restore_backup_action(path: &str, backup_path: &str) -> Result<(), String> {
+    use std::io::Read;
+
+    // both halves of the policy hold independently — the helper must not
+    // depend on the app having validated anything
+    nginx_config_path_valid(path)?;
+    revision_sibling_shape(path, backup_path, NGINX_BACKUPS_DIR)?;
+
+    let backup_name = std::path::Path::new(backup_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let dir = open_dir_nofollow(CWD, NGINX_BACKUPS_DIR, NGINX_BACKUPS_DIR)?;
+    let stat = rustix::fs::statat(&dir, backup_name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(
+        |_| {
+            format!(
+                "lcp-admin: the backup '{backup_path}' could not be inspected; refusing to restore."
+            )
+        },
+    )?;
+    if (stat.st_mode & S_IFMT) != S_IFREG {
+        return Err(format!(
+            "lcp-admin: the backup '{backup_path}' is not a regular file; refusing to restore."
+        ));
+    }
+    if stat.st_uid != privileged_uid() {
+        return Err(format!(
+            "lcp-admin: the backup '{backup_path}' is not owned by the required account; refusing to restore."
+        ));
+    }
+    let fd = rustix::fs::openat(
+        &dir,
+        backup_name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| {
+        format!("lcp-admin: the backup '{backup_path}' could not be opened; refusing to restore.")
+    })?;
+    let file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    file.take((NGINX_CONFIG_CONTENT_MAX + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            format!(
+                "lcp-admin: the backup '{backup_path}' could not be read; refusing to restore."
+            )
+        })?;
+    if bytes.len() > NGINX_CONFIG_CONTENT_MAX {
+        return Err("lcp-admin: the backup is too large to be an nginx configuration.".to_string());
+    }
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => {
+            return Err(format!(
+                "lcp-admin: this backup predates the current content policy (it is not plain text); restore it manually."
+            ))
+        }
+    };
+    validate_nginx_config_content(&content).map_err(|reason| {
+        format!(
+            "lcp-admin: this backup predates the current content policy ({reason}); restore it manually."
+        )
+    })?;
+
+    if let Some(backup) = install_root_owned_file(path, &content, "nginx configuration")? {
+        println!("{backup}");
+    }
+    Ok(())
+}
+
+/// The `nginx_link_site <available> <enabled>` action: creates the one
+/// enabling symlink `<sites-enabled>/<same name>` that points at
+/// `<sites-available>/<same name>` — never a rename-in-disguise (the
+/// same-basename rule is structural, checked before anything is pinned).
+///
+/// Both directories are opened through their pinned descriptors; the source
+/// must be one regular, non-symlink file, and an already-existing enabled
+/// entry (a symlink included) is refused instead of replaced.
+fn nginx_link_site_action(available_path: &str, enabled_path: &str) -> Result<(), String> {
+    // both halves of the policy hold independently — the helper must not
+    // depend on the app having validated anything
+    nginx_link_as_valid(available_path, enabled_path)?;
+    let available_name = std::path::Path::new(available_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let enabled_name = std::path::Path::new(enabled_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // pin the source directory: privileged-owned, never group/world
+    // writable, never a symlink
+    let src_dir = open_dir_nofollow(CWD, NGINX_SITES_AVAILABLE, NGINX_SITES_AVAILABLE)?;
+    let src_stat = stat_fd(&src_dir, NGINX_SITES_AVAILABLE)?;
+    if src_stat.st_uid != privileged_uid()
+        || src_stat.st_gid != privileged_gid()
+        || src_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{NGINX_SITES_AVAILABLE}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    let src_entry = rustix::fs::statat(
+        &src_dir,
+        available_name.as_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(|_| {
+        format!(
+            "lcp-admin: the site '{available_path}' could not be inspected; refusing to link it."
+        )
+    })?;
+    if (src_entry.st_mode & S_IFMT) != S_IFREG {
+        return Err(format!(
+            "lcp-admin: the site '{available_path}' is not a regular file; refusing to link it."
+        ));
+    }
+
+    // pin the symlink directory the same way
+    let dst_dir = open_dir_nofollow(CWD, NGINX_SITES_ENABLED, NGINX_SITES_ENABLED)?;
+    let dst_stat = stat_fd(&dst_dir, NGINX_SITES_ENABLED)?;
+    if dst_stat.st_uid != privileged_uid()
+        || dst_stat.st_gid != privileged_gid()
+        || dst_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{NGINX_SITES_ENABLED}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    if rustix::fs::statat(&dst_dir, enabled_name.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+        return Err(format!(
+            "lcp-admin: '{enabled_path}' already exists; refusing to re-link over it."
+        ));
+    }
+    rustix::fs::symlinkat(available_path, &dst_dir, enabled_name.as_str()).map_err(|_| {
+        format!("lcp-admin: could not create the site link '{enabled_path}'; refusing.")
+    })?;
+    Ok(())
+}
+
+/// The `nginx_unlink_site <enabled>` action: removes exactly the one
+/// enabling symlink that disables a site — the inverse of
+/// `nginx_link_site`, and the successor of the old `rm -f` disable path.
+///
+/// The constraint is the *opposite* of `nginx_config_remove`: the target
+/// must *be* a symlink (a regular file, a directory, nothing at all is
+/// refused), it must live directly inside a pinned `sites-enabled`
+/// directory, and it must be one of this panel's own links — pointing
+/// exactly at `<sites-enabled>/<same name>`'s site in `sites-available`.
+/// A link to anywhere else is refused, never followed, and a regular file
+/// sitting there is never unlinked as if it were a site toggle.
+fn nginx_unlink_site_action(enabled_path: &str) -> Result<(), String> {
+    // both halves of the policy hold independently — the helper must not
+    // depend on the app having validated anything
+    nginx_site_unlink_path_valid(enabled_path)?;
+    let name = std::path::Path::new(enabled_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // pin the symlink directory: privileged-owned, never group/world
+    // writable, never a symlink
+    let dir = open_dir_nofollow(CWD, NGINX_SITES_ENABLED, NGINX_SITES_ENABLED)?;
+    let dir_stat = stat_fd(&dir, NGINX_SITES_ENABLED)?;
+    if dir_stat.st_uid != privileged_uid()
+        || dir_stat.st_gid != privileged_gid()
+        || dir_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{NGINX_SITES_ENABLED}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    let stat = rustix::fs::statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(|_| {
+        format!("lcp-admin: '{enabled_path}' does not exist; refusing to unlink.")
+    })?;
+    if (stat.st_mode & S_IFMT) != S_IFLNK {
+        return Err(format!(
+            "lcp-admin: '{enabled_path}' is not a symlink; a regular file or directory cannot be disabled by unlinking."
+        ));
+    }
+    let target = rustix::fs::readlinkat(&dir, name.as_str(), Vec::new()).map_err(|_| {
+        format!("lcp-admin: the link '{enabled_path}' could not be read; refusing to unlink.")
+    })?;
+    let expected = format!("{NGINX_SITES_AVAILABLE}/{name}");
+    if target.to_string_lossy() != expected {
+        return Err(format!(
+            "lcp-admin: '{enabled_path}' does not point at its own site ({expected}); refusing to unlink a foreign link."
+        ));
+    }
+    rustix::fs::unlinkat(&dir, name.as_str(), AtFlags::empty())
+        .map_err(|_| format!("lcp-admin: could not unlink '{enabled_path}'; refusing."))?;
+    Ok(())
+}
+
+/// The `nginx_config_remove <path>` action: removes exactly one regular
+/// file in the nginx configuration tree. There are no `-r` semantics (a
+/// directory target is refused) and no `rm -f` semantics (a missing file is
+/// a refusal, not a success); neither `nginx.conf` nor any symlinked entry
+/// can be removed — the exact main configuration file is the protected
+/// core, and a symlink is opened at, never followed.
+fn nginx_config_remove_action(path: &str) -> Result<(), String> {
+    nginx_config_remove_path_valid(path)?;
+    let parent = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // pin the parent directory: privileged-owned, never group/world
+    // writable, never a symlink
+    let dir = open_dir_nofollow(CWD, &parent, &parent)?;
+    let dir_stat = stat_fd(&dir, &parent)?;
+    if dir_stat.st_uid != privileged_uid()
+        || dir_stat.st_gid != privileged_gid()
+        || dir_stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{parent}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    let stat = rustix::fs::statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(
+        |_| {
+            format!(
+            "lcp-admin: '{path}' does not exist; refusing a missing-path removal."
+        )
+        },
+    )?;
+    if (stat.st_mode & S_IFMT) != S_IFREG {
+        return Err(format!(
+            "lcp-admin: '{path}' is not a regular file; refusing a non-file removal (no -r semantics)."
+        ));
+    }
+    rustix::fs::unlinkat(&dir, name.as_str(), AtFlags::empty())
+        .map_err(|_| format!("lcp-admin: could not remove '{path}'; refusing."))?;
+    Ok(())
+}
+
+// ─── web-root internals ──────────────────────────────────────────────────────
+
+/// The deepest a web-root operation's path may reach — a hard cap so no
+/// crafted path (or crafted filesystem, or a race between many levels) can
+/// make the panel loop forever or exhaust the descriptor budget.
+const WWW_TREE_DEPTH_MAX: usize = 16;
+
+/// Pin the web root itself: opened with per-component no-follow and verified
+/// privileged-owned with no group/world-writable bits — the same contract
+/// every other action asserts on its directory.
+fn pin_www_root() -> Result<OwnedFd, String> {
+    let root = open_dir_nofollow(CWD, VAR_WWW_DIR, VAR_WWW_DIR)?;
+    let stat = stat_fd(&root, VAR_WWW_DIR)?;
+    if stat.st_uid != privileged_uid()
+        || stat.st_gid != privileged_gid()
+        || stat.st_mode & 0o022 != 0
+    {
+        return Err(format!(
+            "lcp-admin: '{VAR_WWW_DIR}' is not a safe privileged-owned directory; refusing."
+        ));
+    }
+    Ok(root)
+}
+
+/// Walk the path *below* the pinned web root down to the parent of its final
+/// component. Every intermediate component is stat'ed without following
+/// (`O_NOFOLLOW`-equivalent at the descriptor level); a symlink anywhere
+/// along the walk is a refusal, never a traversal. Missing intermediates are
+/// refused (`require_all` is only false for the mkdir verb, which walks for
+/// itself). Returns the pinned parent descriptor and the final name.
+fn www_walk_parent(root: &OwnedFd, rest: &str, full: &str) -> Result<(OwnedFd, String), String> {
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() || parts.len() > WWW_TREE_DEPTH_MAX {
+        return Err(format!("lcp-admin: '{full}' exceeds the {WWW_TREE_DEPTH_MAX}-level depth cap; refusing."));
+    }
+    let name = parts.last().unwrap().to_string();
+    let mut chain: Vec<OwnedFd> = Vec::new();
+    let mut walked = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index + 1 == parts.len() {
+            break; // the final name is *not* entered — only its parent is
+        }
+        walked.push('/');
+        walked.push_str(part);
+        let entry =
+            rustix::fs::statat(
+            chain.last().unwrap_or(root).as_fd(),
+            *part,
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(|_| {
+            format!(
+                "lcp-admin: '{full}' could not be inspected at {walked:?}; refusing."
+            )
+        })?;
+        match entry.st_mode & S_IFMT {
+            S_IFLNK => {
+                return Err(format!(
+                    "lcp-admin: '{full}' contains a symlinked component {part:?}; refusing to walk through a link."
+                ))
+            }
+            S_IFDIR => {}
+            _ => {
+                return Err(format!(
+                    "lcp-admin: the intermediate component {walked:?} is not a directory; refusing."
+                ))
+            }
+        }
+        let fd = open_dir_nofollow(
+            chain.last().unwrap_or(root).as_fd(),
+            part,
+            walked.as_str(),
+        )?;
+        chain.push(fd);
+    }
+    let parent: OwnedFd = match chain.pop() {
+        Some(fd) => fd,
+        None => root
+            .try_clone()
+            .map_err(|_| format!("lcp-admin: the web root '{VAR_WWW_DIR}' could not be pinned."))?,
+    };
+    Ok((parent, name))
+}
+
+/// The `mkdir` verb's own walk: descend from the pinned web root, verifying
+/// every existing component the no-follow way, and create the first missing
+/// component (and everything below it) at 0755 through the pinned chain.
+fn www_mkdir_from(root: &OwnedFd, rest: &str, full: &str) -> Result<(), String> {
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() || parts.len() > WWW_TREE_DEPTH_MAX {
+        return Err(format!("lcp-admin: '{full}' exceeds the {WWW_TREE_DEPTH_MAX}-level depth cap; refusing."));
+    }
+    let mut chain: Vec<OwnedFd> = Vec::new();
+    let mut walked = String::new();
+    for part in parts {
+        walked.push('/');
+        walked.push_str(part);
+        match rustix::fs::statat(
+            chain.last().unwrap_or(root).as_fd(),
+            part,
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(entry) => match entry.st_mode & S_IFMT {
+                S_IFLNK => {
+                    return Err(format!(
+                        "lcp-admin: '{full}' contains a symlinked component {part:?}; refusing to walk through a link."
+                    ))
+                }
+                S_IFDIR => {}
+                _ => {
+                    return Err(format!(
+                        "lcp-admin: the path component {walked:?} exists and is not a directory; refusing."
+                    ))
+                }
+            },
+            Err(err) if err == rustix::io::Errno::NOENT => {
+                rustix::fs::mkdirat(
+                    chain.last().unwrap_or(root).as_fd(),
+                    part,
+                    Mode::from_raw_mode(0o755),
+                )
+                .map_err(|_| {
+                    format!("lcp-admin: could not create the directory {walked:?}; refusing.")
+                })?;
+            }
+            Err(_) => {
+                return Err(format!(
+                    "lcp-admin: '{full}' could not be inspected at {walked:?}; refusing."
+                ))
+            }
+        }
+        let fd = open_dir_nofollow(
+            chain.last().unwrap_or(root).as_fd(),
+            part,
+            walked.as_str(),
+        )?;
+        chain.push(fd);
+    }
+    Ok(())
+}
+
+/// Depth-first removal of exactly the target below an already-pinned parent:
+/// a regular file is unlinked, a directory is emptied (through its own
+/// pinned descriptor) and then removed. A symlink at any reachable spot —
+/// the target itself or a child of the subtree — is a refusal, never a
+/// follow, and nothing at all is modified when the action refuses.
+fn www_remove_tree(
+    parent: &OwnedFd,
+    name: &std::ffi::CStr,
+    depth: usize,
+    full: &str,
+) -> Result<(), String> {
+    if depth > WWW_TREE_DEPTH_MAX {
+        return Err(format!(
+            "lcp-admin: the subtree of '{full}' is deeper than {WWW_TREE_DEPTH_MAX} levels; refusing."
+        ));
+    }
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| {
+        format!("lcp-admin: '{full}' could not be inspected; refusing to remove it.")
+    })?;
+    if (stat.st_mode & S_IFMT) == S_IFLNK {
+        return Err(format!(
+            "lcp-admin: '{full}' is a symlink; refusing to remove a link in the web root."
+        ));
+    }
+    if (stat.st_mode & S_IFMT) != S_IFDIR {
+        rustix::fs::unlinkat(parent, name, AtFlags::empty())
+            .map_err(|_| format!("lcp-admin: could not remove '{full}'; refusing."))?;
+        return Ok(());
+    }
+    let dir_fd = open_dir_nofollow(parent, name.to_string_lossy().as_ref(), full)?;
+    let mut dir = rustix::fs::Dir::read_from(&dir_fd)
+        .map_err(|_| format!("lcp-admin: the subtree of '{full}' could not be read; refusing."))?;
+    let mut children: Vec<std::ffi::CString> = Vec::new();
+    while let Some(entry) = dir.read() {
+        let entry = entry.map_err(|_| {
+            format!("lcp-admin: the subtree of '{full}' could not be read; refusing.")
+        })?;
+        let child = entry.file_name().to_owned();
+        if child.as_bytes() == b"." || child.as_bytes() == b".." {
+            continue;
+        }
+        children.push(child);
+    }
+    drop(dir);
+    for child in children {
+        let child_full = format!("{full}/{}", child.to_string_lossy());
+        www_remove_tree(&dir_fd, child.as_c_str(), depth + 1, &child_full)?;
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|_| {
+        format!("lcp-admin: could not remove the directory '{full}'; refusing.")
+    })?;
+    Ok(())
+}
+
+/// Publish one web file through the pinned parent: the destination shape is
+/// verified without following (an existing symlink or non-regular file
+/// refuses), then a unique temp file is written (forced 0644, owner forced
+/// to the privileged identity — a rewritten web file must not keep
+/// group/world bits or a stale owner), synced, and atomically renamed over
+/// the destination. There is deliberately no backup-on-write here — a
+/// `<name>.*.bak` sibling *inside the web root* would become a publicly
+/// served copy of the previous content.
+fn www_install_binary_file(
+    dir: &OwnedFd,
+    name: &str,
+    content: &[u8],
+    full: &str,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    // verify the destination's agreed shape before anything is touched
+    match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if (stat.st_mode & S_IFMT) == S_IFLNK => {
+            return Err(format!(
+                "lcp-admin: '{full}' is a symlink; refusing to replace a link in the web root."
+            ));
+        }
+        Ok(stat) if (stat.st_mode & S_IFMT) != S_IFREG => {
+            return Err(format!(
+                "lcp-admin: '{full}' exists and is not a regular file; refusing to replace it."
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err == rustix::io::Errno::NOENT => {}
+        Err(_) => return Err(format!("lcp-admin: '{full}' could not be inspected; refusing.")),
+    }
+
+    let temp_name = std::ffi::CString::new(format!(".{name}.tmp.{}", unique_suffix()))
+        .map_err(|_| format!("lcp-admin: '{full}' is not a usable file name; refusing."))?;
+    let fd = rustix::fs::openat(
+        dir,
+        temp_name.as_c_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )
+    .map_err(|_| format!("lcp-admin: could not create the temporary web file; refusing."))?;
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::from(fd);
+        // the destination is always 0644 with the privileged owner — a new
+        // file must not keep group/world bits, and in the fixture build the
+        // privileged identity is the invoker's own (a self-chown, which
+        // succeeds); a failure here is never silently ignored
+        rustix::fs::fchmod(&file, Mode::from_raw_mode(0o644))
+            .map_err(|_| format!("lcp-admin: could not set the web file mode"))?;
+        rustix::fs::fchown(
+            &file,
+            Some(Uid::from_raw(privileged_uid())),
+            Some(Gid::from_raw(privileged_gid())),
+        )
+        .map_err(|_| format!("lcp-admin: could not set the web file owner"))?;
+        file.write_all(content)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("lcp-admin: could not write the web file content: {e}"))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {}
+        Err(message) => {
+            let _ = rustix::fs::unlinkat(dir, temp_name.as_c_str(), AtFlags::empty());
+            return Err(message);
+        }
+    }
+    rustix::fs::renameat(dir.as_fd(), temp_name.as_c_str(), dir.as_fd(), name).map_err(|_| {
+        let _ = rustix::fs::unlinkat(dir, temp_name.as_c_str(), AtFlags::empty());
+        format!("lcp-admin: could not publish '{full}'; refusing.")
+    })?;
+    Ok(())
+}
+
+/// The `nginx_www_fs <mkdir|remove|rename> …` action: the three web-root
+/// operations, each one re-validated independently (the helper must not
+/// trust the app), each one walking descriptors at its own no-follow pace.
+fn nginx_www_fs_action(rest: &[String]) -> Result<(), String> {
+    let mut args = rest.to_vec();
+    let op = args.remove(0);
+    match op.as_str() {
+        "mkdir" => {
+            let [path] = args.as_slice() else {
+                return Err("lcp-admin: the mkdir sub-command takes exactly one web-root path.".to_string());
+            };
+            var_www_path_valid(path)?;
+            let root = pin_www_root()?;
+            let stripped = path.strip_prefix(var_www_root_prefix()).unwrap_or_default();
+            www_mkdir_from(&root, stripped, path)?;
+            Ok(())
+        }
+        "remove" => {
+            let [path] = args.as_slice() else {
+                return Err("lcp-admin: the remove sub-command takes exactly one web-root path.".to_string());
+            };
+            var_www_path_valid(path)?;
+            if var_www_is_protected(path) {
+                return Err(format!(
+                    "lcp-admin: '{path}' is the web root or its distro-managed html tree; refusing to remove it."
+                ));
+            }
+            let root = pin_www_root()?;
+            let stripped = path.strip_prefix(var_www_root_prefix()).unwrap_or_default();
+            let (parent, name) = www_walk_parent(&root, stripped, path)?;
+            let name_c = std::ffi::CString::new(name.as_str())
+                .map_err(|_| format!("lcp-admin: '{path}' is not a usable file name; refusing."))?;
+            www_remove_tree(&parent, name_c.as_c_str(), 0, path)?;
+            Ok(())
+        }
+        "rename" => {
+            let [from, to] = args.as_slice() else {
+                return Err("lcp-admin: the rename sub-command takes exactly one source path and one destination path.".to_string());
+            };
+            var_www_path_valid(from)?;
+            var_www_path_valid(to)?;
+            if var_www_is_protected(from) || var_www_is_protected(to) {
+                return Err(format!(
+                    "lcp-admin: '{from}' → '{to}' touches the web root or its distro-managed html tree; refusing to rename."
+                ));
+            }
+            let root = pin_www_root()?;
+            let prefix = var_www_root_prefix();
+            let (from_parent, from_name) = www_walk_parent(&root, from.strip_prefix(prefix).unwrap_or_default(), from)?;
+            let source = rustix::fs::statat(&from_parent, from_name.as_bytes(), AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|_| format!("lcp-admin: '{from}' does not exist; refusing to rename."))?;
+            if (source.st_mode & S_IFMT) == S_IFLNK {
+                return Err(format!(
+                    "lcp-admin: '{from}' is a symlink; refusing to rename a link in the web root."
+                ));
+            }
+            let (to_parent, to_name) = www_walk_parent(&root, to.strip_prefix(prefix).unwrap_or_default(), to)?;
+            if rustix::fs::statat(&to_parent, to_name.as_bytes(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+                return Err(format!(
+                    "lcp-admin: '{to}' already exists; refusing to rename over it."
+                ));
+            }
+            rustix::fs::renameat(
+                from_parent.as_fd(),
+                from_name.as_str(),
+                to_parent.as_fd(),
+                to_name.as_str(),
+            )
+            .map_err(|_| format!("lcp-admin: could not rename '{from}' to '{to}'; refusing."))?;
+            Ok(())
+        }
+        _ => Err(format!(
+            "lcp-admin: '{}' is not a sub-command of nginx_www_fs (mkdir, remove or rename).",
+            op
+        )),
+    }
+}
+
+/// The prefix the web verbs strip: the fixture-twin-aware web root plus its
+/// trailing slash, exactly what `var_www_path_valid` guarantees about the
+/// accepted shape.
+fn var_www_root_prefix() -> &'static str {
+    #[cfg(not(feature = "test-fixture"))]
+    {
+        "/var/www/"
+    }
+    #[cfg(feature = "test-fixture")]
+    {
+        "/tmp/lcp-admin-test-fixture/var/www/"
+    }
+}
+
+/// The `nginx_www_install <dest>` action: writes one file in the web root
+/// from stdin. The category of content is binary-tolerant — no UTF-8, no
+/// NUL, no structural rule, only the size cap — so a dragged-in image or
+/// archive travels exactly as it is. The publishing core forces root:root
+/// 0644 through the pinned parent's temp-and-rename sequence; a symlinked
+/// or non-regular destination refuses, and no source path is ever accepted
+/// as an argument (the content travels stdin, nothing else does).
+fn nginx_www_install_action(dest: &str) -> Result<(), String> {
+    var_www_path_valid(dest)?;
+    let content = read_stdin_bytes(NGINX_WWW_INSTALL_MAX as u64, "web file")?;
+    let root = pin_www_root()?;
+    let stripped = dest.strip_prefix(var_www_root_prefix()).unwrap_or_default();
+    let (parent, name) = www_walk_parent(&root, stripped, dest)?;
+    www_install_binary_file(&parent, &name, &content, dest)?;
     Ok(())
 }
 

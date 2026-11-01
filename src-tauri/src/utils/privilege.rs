@@ -333,6 +333,18 @@ pub async fn run_privileged_with_stdin(
     auth: &RootAuth,
     input: &str,
 ) -> Result<std::process::Output, String> {
+    run_privileged_with_stdin_bytes(program, args, auth, input.as_bytes()).await
+}
+
+/// The byte-exact twin of `run_privileged_with_stdin`: content that is not
+/// UTF-8 text (a web file install carrying an image or an archive) travels
+/// the same route with no re-encoding anywhere in between.
+pub async fn run_privileged_with_stdin_bytes(
+    program: &str,
+    args: &[String],
+    auth: &RootAuth,
+    input: &[u8],
+) -> Result<std::process::Output, String> {
     use ::tokio::io::AsyncWriteExt;
 
     if auth.password().is_some() {
@@ -356,7 +368,7 @@ pub async fn run_privileged_with_stdin(
             let _ = stdin.write_all(password.as_bytes()).await;
             let _ = stdin.write_all(b"\n").await;
         }
-        let _ = stdin.write_all(input.as_bytes()).await;
+        let _ = stdin.write_all(input).await;
         let _ = stdin.shutdown().await;
     }
 

@@ -374,8 +374,198 @@ pub const PROFILE_D_DIR: &str = "/tmp/lcp-admin-test-fixture/etc/profile.d";
 #[cfg(feature = "test-fixture")]
 pub const FIXTURE_PASSWD_FILE: &str = "/tmp/lcp-admin-test-fixture/etc/passwd";
 
+// ─── nginx confines (shared app/helper) ─────────────────────────────────────
+//
+// The nginx writes the panel performs are transformed from raw
+// `pkexec <program>` calls into named helper actions. Their destinations are
+// a fixed set of places (nginx.conf itself, the site/system configuration
+// directories, the panel's own nginx backups, and the web root), and every
+// place has a constant here — with test-fixture twins compiler-swapped the
+// same way PROFILE_D_DIR is, so fixture dispatch tests never touch the host.
+
+/// The one exact main configuration file a write/backup/restore may address.
+#[cfg(not(feature = "test-fixture"))]
+pub const NGINX_NGINX_CONF: &str = "/etc/nginx/nginx.conf";
+#[cfg(feature = "test-fixture")]
+pub const NGINX_NGINX_CONF: &str = "/tmp/lcp-admin-test-fixture/etc/nginx/nginx.conf";
+
+/// `*.conf` server/configuration files loaded by the main file's include.
+#[cfg(not(feature = "test-fixture"))]
+pub const NGINX_CONF_D: &str = "/etc/nginx/conf.d";
+#[cfg(feature = "test-fixture")]
+pub const NGINX_CONF_D: &str = "/tmp/lcp-admin-test-fixture/etc/nginx/conf.d";
+
+/// Site definition files; `NGINX_SITES_ENABLED` holds symlinks to children
+/// of this directory.
+#[cfg(not(feature = "test-fixture"))]
+pub const NGINX_SITES_AVAILABLE: &str = "/etc/nginx/sites-available";
+#[cfg(feature = "test-fixture")]
+pub const NGINX_SITES_AVAILABLE: &str = "/tmp/lcp-admin-test-fixture/etc/nginx/sites-available";
+
+/// The symlink directory enabling a site. Only ever written by
+/// link/unlink actions whose two endpoints are both pinned here.
+#[cfg(not(feature = "test-fixture"))]
+pub const NGINX_SITES_ENABLED: &str = "/etc/nginx/sites-enabled";
+#[cfg(feature = "test-fixture")]
+pub const NGINX_SITES_ENABLED: &str = "/tmp/lcp-admin-test-fixture/etc/nginx/sites-enabled";
+
+/// The panel's own nginx config backups (`<basename>.<YYYYmmdd_HHMMSS>.bak`).
+#[cfg(not(feature = "test-fixture"))]
+pub const NGINX_BACKUPS_DIR: &str = "/etc/nginx/backups";
+#[cfg(feature = "test-fixture")]
+pub const NGINX_BACKUPS_DIR: &str = "/tmp/lcp-admin-test-fixture/etc/nginx/backups";
+
+/// The web root (directories that GET actually serves).
+#[cfg(not(feature = "test-fixture"))]
+pub const VAR_WWW_DIR: &str = "/var/www";
+#[cfg(feature = "test-fixture")]
+pub const VAR_WWW_DIR: &str = "/tmp/lcp-admin-test-fixture/var/www";
+
 /// Upper bound for a profile.d file's name (including the `.sh` extension).
 const PROFILE_NAME_MAX: usize = 64;
+
+/// A plain file name usable inside the nginx configuration tree — as a site
+/// definition name, a symlink name, or the trailing component of a
+/// configuration path: ASCII word characters only, never `/`, never a dot or
+/// dash file, never any traversal. Empty and oversized names are refused
+/// before they can even become a path fragment.
+pub fn nginx_site_name_valid(name: &str) -> Result<(), String> {
+    const NAME_MAX: usize = 255;
+    if name.is_empty() {
+        return Err("The site name must not be empty.".to_string());
+    }
+    if name.len() > NAME_MAX {
+        return Err(format!(
+            "The site name is too long ({} > {NAME_MAX}): {name:?}",
+            name.len()
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(format!("The site name must not contain control characters: {name:?}"));
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return Err(format!(
+            "The site name {name:?} must not start with a dot or dash."
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "The site name {name:?} may only contain letters, digits, dashes, dots and underscores."
+        ));
+    }
+    Ok(())
+}
+
+/// `path` must address exactly one file this panel may write in the nginx
+/// configuration tree: the exact `nginx.conf`, a plain `<name>.conf` child of
+/// `/etc/nginx/conf.d`, or a plain child of `/etc/nginx/sites-available` or
+/// `/etc/nginx/sites-enabled` — no traversal, no component escapes. The
+/// fs-level no-symlink rule is enforced helper-side via descriptor pinning;
+/// this validator is the pre-filter both halves (app and helper) share.
+pub fn nginx_config_path_valid(path: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    if path == NGINX_NGINX_CONF {
+        return Ok(());
+    }
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "The nginx configuration path must not contain control characters: {path:?}"
+        ));
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("The nginx configuration path must be absolute: {path}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!(
+            "The nginx configuration path must not contain relative parts: {path}"
+        ));
+    }
+    let parent = candidate
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = candidate
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let required_suffix = if parent == NGINX_CONF_D {
+        // the main file's include only ever loads `*.conf` here
+        Some(".conf")
+    } else if parent == NGINX_SITES_AVAILABLE || parent == NGINX_SITES_ENABLED {
+        None
+    } else {
+        return Err(format!(
+            "The nginx configuration path must be {NGINX_NGINX_CONF} or a plain child of {NGINX_CONF_D}, {NGINX_SITES_AVAILABLE} or {NGINX_SITES_ENABLED}, not {path}"
+        ));
+    };
+    if let Some(suffix) = required_suffix {
+        if !name.ends_with(suffix) {
+            return Err(format!(
+                "A file in {NGINX_CONF_D} must have a {suffix:?} extension: {name:?}"
+            ));
+        }
+    }
+    nginx_site_name_valid(&name).map_err(|reason| format!("{reason} (as {path:?})"))
+}
+
+/// `path` must describe a location inside the web root, strictly below it —
+/// the web root itself and every traversal out are refused. The component
+/// charset stays deliberately relaxed (user content directories legitimately
+/// carry spaces); the fs-level no-symlink rule is enforced helper-side via
+/// descriptor pinning.
+pub fn var_www_path_valid(path: &str) -> Result<(), String> {
+    // `Path::components` normalizes interior `.` components away, so the
+    // relative-part refusal has to look at the raw text here: no component
+    // may literally be `.` or `..`.
+    use std::path::Component;
+
+    if path.chars().any(char::is_control) {
+        return Err(format!("The path must not contain control characters: {path:?}"));
+    }
+    if path.split('/').any(|part| part == "." || part == "..") {
+        return Err(format!("The path must not contain relative parts: {path}"));
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("The path must be absolute: {path}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!("The path must not contain relative parts: {path}"));
+    }
+    let Some(rest) = path.strip_prefix(VAR_WWW_DIR_AS_ROOT) else {
+        return Err(format!("The path must be under {VAR_WWW_DIR}/, not {path:?}"));
+    };
+    if rest.is_empty() {
+        return Err(format!("{VAR_WWW_DIR} itself is not a valid target here."));
+    }
+    Ok(())
+}
+
+/// The prefix `var_www_path_valid` strips — fixture twin aware. Both variants
+/// end in `/`, so `strip_prefix` can only match a strictly-below location.
+#[cfg(not(feature = "test-fixture"))]
+const VAR_WWW_DIR_AS_ROOT: &str = "/var/www/";
+#[cfg(feature = "test-fixture")]
+const VAR_WWW_DIR_AS_ROOT: &str = "/tmp/lcp-admin-test-fixture/var/www/";
+
+/// The web root and its distro-managed `html` tree are install territory:
+/// remove operations refuse them outright, and `rename` refuses them on both
+/// endpoints — moving `html` away is protected exactly like deleting it.
+pub fn var_www_is_protected(path: &str) -> bool {
+    let clean = path.trim_end_matches('/');
+    clean == VAR_WWW_DIR || clean == format!("{VAR_WWW_DIR}/html")
+}
 
 /// `path` must address exactly one regular, non-symlink `<name>.sh` file
 /// directly inside `/etc/profile.d` — no traversal, no dot files, no second
@@ -2530,6 +2720,181 @@ fn check_certbot(args: &[String]) -> Result<(), String> {
             ));
         }
     }
+    // The two shapes the panel sends: the renewal page's
+    // `certbot renew --cert-name <name> …` and the domains page's
+    // `certbot --nginx -d <domain> … --email=… | --register-unsafely-without-email`.
+    // Everything else — mixed-shape garbage, unknown verbs, unknown flags —
+    // is refused by the shape matcher that answers for the invocation.
+    if args.iter().any(|arg| arg == "renew") || args.is_empty() {
+        check_certbot_renew(args)
+    } else {
+        check_certbot_request(args)
+    }
+}
+
+/// The request shape of the domains page, fixed flag set only:
+/// `--nginx`, `-d <domain>`, `--non-interactive`, `--agree-tos`, and then
+/// exactly one of `--email=<address>` or `--register-unsafely-without-email`.
+/// Each fixed flag is accepted exactly once, in any order among themselves;
+/// anything else — another flag, an unknown operand, mixed garbage — is
+/// refused before the program ever runs as root.
+fn check_certbot_request(args: &[String]) -> Result<(), String> {
+    const PROGRAM: &str = "certbot";
+
+    let mut saw_nginx = false;
+    let mut saw_domain: Option<String> = None;
+    let mut saw_non_interactive = false;
+    let mut saw_agree_tos = false;
+    let mut saw_expression: Option<&str> = None; // one e-mail choice, at most
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--nginx" if !saw_nginx => saw_nginx = true,
+            "--nginx" => return Err(duplicate_flag(PROGRAM, arg)),
+            "--non-interactive" if !saw_non_interactive => saw_non_interactive = true,
+            "--non-interactive" => return Err(duplicate_flag(PROGRAM, arg)),
+            "--agree-tos" if !saw_agree_tos => saw_agree_tos = true,
+            "--agree-tos" => return Err(duplicate_flag(PROGRAM, arg)),
+            "-d" => {
+                if saw_domain.is_some() {
+                    return Err(operand_not_allowed(
+                        PROGRAM,
+                        arg,
+                        "at most one request may be sent: -d takes exactly one domain name",
+                    ));
+                }
+                let value = flag_value(PROGRAM, arg, &mut index, args)?;
+                require(PROGRAM, &value, "a DNS domain name for -d", is_dns_domain)?;
+                saw_domain = Some(value);
+            }
+            value if value.starts_with("--email=") => {
+                if saw_expression.is_some() {
+                    return Err(operand_not_allowed(
+                        PROGRAM,
+                        arg,
+                        "at most one e-mail expression is allowed: the request is either registered with an address or without one",
+                    ));
+                }
+                let address = &value["--email=".len()..];
+                require(
+                    PROGRAM,
+                    address,
+                    "an e-mail address for --email= (an address must have a local part and a DNS domain)",
+                    is_email_address,
+                )?;
+                saw_expression = Some(arg);
+            }
+            "--register-unsafely-without-email" => {
+                if saw_expression.is_some() {
+                    return Err(operand_not_allowed(
+                        PROGRAM,
+                        arg,
+                        "at most one e-mail expression is allowed: the request is either registered with an address or without one",
+                    ));
+                }
+                saw_expression = Some(arg);
+            }
+            _ if arg.starts_with('-') => return Err(flag_not_allowed(PROGRAM, arg)),
+            _ => {
+                return Err(operand_not_allowed(
+                    PROGRAM,
+                    arg,
+                    "only the request shape 'certbot --nginx -d <domain> --non-interactive --agree-tos [--email=<address> | --register-unsafely-without-email]' is allowed",
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    if !saw_nginx {
+        return Err(flag_not_allowed_hint(
+            PROGRAM,
+            "the request must name the nginx installer: --nginx is required",
+        ));
+    }
+    if saw_domain.is_none() {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            "-d",
+            "the request must name exactly one domain: -d <domain> is required",
+        ));
+    }
+    if !saw_non_interactive {
+        return Err(flag_not_allowed_hint(
+            PROGRAM,
+            "the request must be non-interactive: --non-interactive is required",
+        ));
+    }
+    if !saw_agree_tos {
+        return Err(flag_not_allowed_hint(
+            PROGRAM,
+            "the terms must be agreed to upfront: --agree-tos is required",
+        ));
+    }
+    if saw_expression.is_none() {
+        return Err(flag_not_allowed_hint(
+            PROGRAM,
+            "either --email=<address> or --register-unsafely-without-email is required",
+        ));
+    }
+    Ok(())
+}
+
+/// One flag twice on the same request line — a guess at least, a mistake at
+/// worst; both are refused.
+fn duplicate_flag(program: &str, flag: &str) -> String {
+    format!("Refused to run {program} with administrator rights: the option '{flag}' may appear exactly once.")
+}
+
+fn flag_not_allowed_hint(program: &str, hint: &str) -> String {
+    format!("Refused to run {program} with administrator rights: {hint}.")
+}
+
+/// A DNS name: ASCII dot-separated labels of letters, digits and hyphens
+/// (1..63 each, no leading or trailing hyphen), the whole name at most 253
+/// characters — the shape we need to be sure the argument positions as a
+/// domain and never as a flag or a path.
+fn is_dns_domain(value: &str) -> bool {
+    !value.is_empty()
+        && value.is_ascii()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// An e-mail address for the certificate request: at most 254 characters,
+/// one `@`, an ASCII local part (letters, digits, `._%+-`) of at most 64
+/// characters, and a DNS-name domain part (see `is_dns_domain`).
+fn is_email_address(value: &str) -> bool {
+    if !value.is_ascii() || value.len() > 254 {
+        return false;
+    }
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    if domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+    !local.is_empty()
+        && local.len() <= 64
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+        && is_dns_domain(domain)
+}
+
+/// The renewal shape of the domains page, exactly as before: `renew`
+/// (required), the fixed non-interactive banner flags and `--cert-name <name>`.
+fn check_certbot_renew(args: &[String]) -> Result<(), String> {
+    const PROGRAM: &str = "certbot";
     let mut saw_renew = false;
     let mut index = 0;
     while index < args.len() {
@@ -2603,9 +2968,21 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 ///   panel's administrator authorisation (see `admin_mode_on`).
 /// * `read_user_ssh_keys <account>` / `write_user_ssh_keys <account>` — an
 ///   account's authorized_keys; for the write the content travels on stdin.
+/// * `nginx_config_install <path>` / `nginx_config_backup <path>` /
+///   `nginx_restore_backup <dest> <backup>` — the nginx configuration tree
+///   writes (see the action group constants below).
+/// * `nginx_link_site <available> <enabled>` / `nginx_unlink_site <enabled>` /
+///   `nginx_config_remove <path>` — the site enabling symlink, its inverse,
+///   and the one-regular-file removal (see the action group constants below).
+/// * `nginx_www_fs <mkdir|remove|rename> …` / `nginx_www_install <dest>` —
+///   the web-root operations and the web-file install (content always
+///   arrives on stdin; no source path is ever trusted to the helper).
 const HELPER_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
     "write_profile_sh", "restore_profile_sh",
+    "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
+    "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
+    "nginx_www_fs", "nginx_www_install",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -2621,12 +2998,152 @@ const HELPER_PATH_ACTIONS: &[&str] = &["write_profile_sh"];
 /// write core created — never an arbitrary path claiming to be a backup.
 const HELPER_RESTORE_ACTIONS: &[&str] = &["restore_profile_sh"];
 
+/// `nginx_config_install <path>` / `nginx_config_backup <path>` — one path in
+/// the nginx configuration tree (validated by `nginx_config_path_valid`; the
+/// install's content travels on stdin and passes the structural content
+/// gate; the backup needs the destination to exist).
+const HELPER_NGINX_CONFIG_ACTIONS: &[&str] = &["nginx_config_install", "nginx_config_backup"];
+
+/// `nginx_restore_backup <dest> <backup>` — an nginx configuration
+/// destination and one exact `<basename>.<digits>_<digits>.bak` sibling in
+/// the backup directory, exactly the shape the backup action itself created
+/// — never an arbitrary or auto-picked path.
+const HELPER_NGINX_RESTORE_ACTIONS: &[&str] = &["nginx_restore_backup"];
+
+/// `nginx_link_site <available> <enabled>` — a site definition in
+/// `sites-available` and the *same-named* entry `sites-enabled` gets as its
+/// symlink. structurally validated by `nginx_link_as_valid`.
+const HELPER_NGINX_LINK_ACTIONS: &[&str] = &["nginx_link_site"];
+
+/// `nginx_unlink_site <enabled>` — the one enabling symlink entry in
+/// `sites-enabled` whose removal disables a site; validated by
+/// `nginx_site_unlink_path_valid`.
+const HELPER_NGINX_UNLINK_ACTIONS: &[&str] = &["nginx_unlink_site"];
+
+/// `nginx_config_remove <path>` — one regular file in the nginx
+/// configuration tree, `nginx.conf` excluded (`nginx_config_remove_path_valid`).
+const HELPER_NGINX_REMOVE_ACTIONS: &[&str] = &["nginx_config_remove"];
+
+/// The two endpoints of `nginx_link_site`: the source must sit in
+/// `sites-available`, the destination in `sites-enabled`, and both must
+/// carry the same file name — a link that would enable *another* site than
+/// the one selected is refused before anything is created.
+pub fn nginx_link_as_valid(available: &str, enabled: &str) -> Result<(), String> {
+    use std::path::Path;
+
+    nginx_config_path_valid(available)?;
+    nginx_config_path_valid(enabled)?;
+    if Path::new(available).parent() != Some(Path::new(NGINX_SITES_AVAILABLE)) {
+        return Err(format!(
+            "The linked-on source must be a plain child of {NGINX_SITES_AVAILABLE}, not {available:?}"
+        ));
+    }
+    if Path::new(enabled).parent() != Some(Path::new(NGINX_SITES_ENABLED)) {
+        return Err(format!(
+            "The created link must be a plain child of {NGINX_SITES_ENABLED}, not {enabled:?}"
+        ));
+    }
+    let available_name = Path::new(available).file_name().map(|n| n.to_string_lossy().to_string());
+    let enabled_name = Path::new(enabled).file_name().map(|n| n.to_string_lossy().to_string());
+    if available_name.is_none()
+        || available_name != enabled_name
+    {
+        return Err(format!(
+            "The link {enabled:?} must enable the site it is named after: both endpoints must share the basename of {available:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// `path` may be removed: any file the configuration tree confinement
+/// allows, except the exact main configuration file — the protected core of
+/// the tree, which can be edited and backed up but is never a removal target
+/// (nginx's include layout falls apart without it).
+pub fn nginx_config_remove_path_valid(path: &str) -> Result<(), String> {
+    if path == NGINX_NGINX_CONF {
+        return Err(format!(
+            "The nginx main configuration {NGINX_NGINX_CONF} is the protected core; it may be edited, but not removed."
+        ));
+    }
+    nginx_config_path_valid(path)
+}
+
+/// `path` may be unlinked as one site's enabling symlink: exactly a plain
+/// child of `sites-enabled` under the shared configuration-tree policy.
+/// Everything else — files, foreign directories, the tree itself — is
+/// refused before the action looks at the filesystem.
+pub fn nginx_site_unlink_path_valid(path: &str) -> Result<(), String> {
+    use std::path::Path;
+
+    nginx_config_path_valid(path)?;
+    if Path::new(path).parent() != Some(Path::new(NGINX_SITES_ENABLED)) {
+        return Err(format!(
+            "The unlink target must be a plain child of {NGINX_SITES_ENABLED}, not {path:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// `nginx_www_fs <mkdir|remove|rename> …` — the web-root operations: the
+/// sub-command selects the operation, and everything after it is confined by
+/// `var_www_path_valid`. An additional protected-name rule on top: the web
+/// root itself and `/html` can never be the *source* of a remove, and never
+/// an endpoint of a rename.
+const HELPER_NGINX_WWW_FS_ACTIONS: &[&str] = &["nginx_www_fs"];
+
+/// `nginx_www_install <dest>` — one destination file in the web root, fully
+/// filled from stdin; no source path is ever sent to the helper.
+const HELPER_NGINX_WWW_INSTALL_ACTIONS: &[&str] = &["nginx_www_install"];
+
+/// Size cap for one `nginx_www_install` write. Web content is binary-
+/// tolerant (no gate beyond the size — the old echo-based flow could not
+/// carry a binary file at all), so this is the only content policy.
+pub const NGINX_WWW_INSTALL_MAX: usize = 10 * 1024 * 1024;
+
+/// The structural gate for nginx configuration content — size, NUL and
+/// control characters only. nginx's own `-t` is the grammar gate (the app
+/// runs it after every write and reverts on failure, which also rejects
+/// unreadable includes and certificates); a panel-side nginx grammar
+/// re-implementation was explicitly rejected in the batch design.
+pub const NGINX_CONFIG_CONTENT_MAX: usize = 256 * 1024;
+
+pub fn validate_nginx_config_content(content: &str) -> Result<(), String> {
+    if content.len() > NGINX_CONFIG_CONTENT_MAX {
+        return Err(format!(
+            "The nginx configuration is too large ({} > {NGINX_CONFIG_CONTENT_MAX} bytes).",
+            content.len()
+        ));
+    }
+    if content.contains('\0') {
+        return Err("The nginx configuration must not contain NUL bytes.".to_string());
+    }
+    if content
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err(
+            "The nginx configuration must not contain control characters other than newlines and tabs."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// A helper revision backup must be the exact shape `create_backup_sibling`
 /// produces for `dest`: the same confined parent directory, the name derived
 /// from the destination (`<dest>.<unix-seconds>_<pid>.<nanos>.bak`). This is
 /// enforced both by the app (before the privileged call exists) and again
 /// inside the helper — both halves hold independently.
-pub fn restore_profile_sh_backup_shape(dest: &str, backup: &str) -> Result<(), String> {
+/// The shared revision-sibling rule for a backup that a write core or backup
+/// step of this project itself created: the backup must be an absolute, plain
+/// child of `backups_dir`, and its name must be the destination's file name
+/// extended by one `<digits>_<digits[.digits…]>.bak` revision component. That
+/// single rule covers both revisionshemes the project writes — the helper's
+/// `<unix-seconds>_<pid>.<nanos>` (profile.d) and the app's
+/// `<YYYYmmdd_HHMMSS>` (nginx backups) — and refuses any free-form name
+/// that could let an unrelated file pose as "a backup". Digits per component
+/// are bounded at 20 so a crafted path can not smuggle a giant number either.
+pub fn revision_sibling_shape(dest: &str, backup: &str, backups_dir: &str) -> Result<(), String> {
     use std::path::Component;
 
     if backup.chars().any(char::is_control) {
@@ -2642,9 +3159,9 @@ pub fn restore_profile_sh_backup_shape(dest: &str, backup: &str) -> Result<(), S
     {
         return Err(format!("The backup path must not contain relative parts: {backup}"));
     }
-    if candidate.parent() != Some(Path::new(PROFILE_D_DIR)) {
+    if candidate.parent() != Some(Path::new(backups_dir)) {
         return Err(format!(
-            "The backup must be a revision sibling of the destination in {PROFILE_D_DIR}, not {backup}"
+            "The backup must be a revision sibling of the destination in {backups_dir}, not {backup}"
         ));
     }
     let dest_name = Path::new(dest)
@@ -2659,28 +3176,31 @@ pub fn restore_profile_sh_backup_shape(dest: &str, backup: &str) -> Result<(), S
         rest.strip_prefix('.').and_then(|rev| rev.strip_suffix(".bak"))
     }) else {
         return Err(format!(
-            "The backup file name {backup_name:?} must start with the destination name {:?} and carry a '.<timestamp>_<suffix>.bak' revision.",
+            "The backup file name {backup_name:?} must start with the destination name {:?} and carry a '.<timestamp>.bak' revision.",
             dest_name
         ));
     };
-    // <unix-seconds>_<pid>.<nanos> — the revision `create_backup_sibling`
-    // writes; a free-form name would let any file pose as "a backup".
-    let Some((secs, suffix)) = remainder.split_once('_') else {
+    let mut parts = remainder.split('_');
+    let leading = parts.next().unwrap_or("");
+    let suffix = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || !revision_digits(leading)
+        || suffix.is_empty()
+        || !suffix.split('.').all(revision_digits)
+    {
         return Err(format!(
-            "The backup revision {remainder:?} must be <unix-seconds>_<suffix>.bak."
-        ));
-    };
-    if secs.is_empty() || secs.len() > 20 || !secs.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(format!(
-            "The backup revision {remainder:?} must start with unix-seconds digits."
-        ));
-    }
-    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
-        return Err(format!(
-            "The backup revision suffix {suffix:?} may only contain letters, digits and dots."
+            "The backup revision {remainder:?} must be <digits>_<digits[.digits]>.bak: underline-separated digit runs, digits after dots."
         ));
     }
     Ok(())
+}
+
+fn revision_digits(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+pub fn restore_profile_sh_backup_shape(dest: &str, backup: &str) -> Result<(), String> {
+    revision_sibling_shape(dest, backup, PROFILE_D_DIR)
 }
 
 /// Check that a name may address a local account in panel commands. It exists
@@ -2755,6 +3275,156 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         })?;
         restore_profile_sh_backup_shape(path, backup).map_err(|reason| {
             operand_not_allowed("lcp-admin", backup, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_CONFIG_ACTIONS.contains(&action.as_str()) {
+        let [_, path] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one nginx configuration path",
+            ));
+        };
+        nginx_config_path_valid(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_RESTORE_ACTIONS.contains(&action.as_str()) {
+        let [_, path, backup] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one nginx destination path and one backup sibling path",
+            ));
+        };
+        nginx_config_path_valid(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        revision_sibling_shape(path, backup, NGINX_BACKUPS_DIR).map_err(|reason| {
+            operand_not_allowed("lcp-admin", backup, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_LINK_ACTIONS.contains(&action.as_str()) {
+        let [_, available, enabled] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one sites-available path and one sites-enabled path",
+            ));
+        };
+        nginx_link_as_valid(available, enabled).map_err(|reason| {
+            operand_not_allowed("lcp-admin", available, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_REMOVE_ACTIONS.contains(&action.as_str()) {
+        let [_, path] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one nginx configuration path to remove",
+            ));
+        };
+        nginx_config_remove_path_valid(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_UNLINK_ACTIONS.contains(&action.as_str()) {
+        let [_, path] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one sites-enabled symlink path to remove",
+            ));
+        };
+        nginx_site_unlink_path_valid(path).map_err(|reason| {
+            operand_not_allowed("lcp-admin", path, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NGINX_WWW_FS_ACTIONS.contains(&action.as_str()) {
+        let (op, operands) = match args.get(1) {
+            Some(op) => (
+                op.as_str(),
+                args
+                    .get(2..)
+                    .map(|slice| slice.to_vec())
+                    .unwrap_or_default(),
+            ),
+            None => {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes a sub-command: mkdir, remove or rename",
+                ))
+            }
+        };
+        let check_path =
+            |path: &String| {
+                var_www_path_valid(path).map_err(|reason| {
+                    operand_not_allowed("lcp-admin", path, &reason)
+                })
+            };
+        match op {
+            "mkdir" if operands.len() == 1 => {
+                check_path(&operands[0])?;
+            }
+            "remove" if operands.len() == 1 => {
+                check_path(&operands[0])?;
+                if var_www_is_protected(&operands[0]) {
+                    return Err(operand_not_allowed(
+                        "lcp-admin",
+                        &operands[0],
+                        "this protected path cannot be removed: it is the web root or its distro-managed html tree",
+                    ));
+                }
+            }
+            "rename" if operands.len() == 2 => {
+                for endpoint in &operands {
+                    check_path(endpoint)?;
+                    if var_www_is_protected(endpoint) {
+                        return Err(operand_not_allowed(
+                            "lcp-admin",
+                            endpoint,
+                            "this protected path cannot be renamed: it is the web root or its distro-managed html tree",
+                        ));
+                    }
+                }
+            }
+            "mkdir" | "remove" | "rename" => {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    match op {
+                        "rename" => "this sub-command takes exactly one source path and one destination path",
+                        _ => "this sub-command takes exactly one web-root path",
+                    },
+                ));
+            }
+            hostile => {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    hostile,
+                    "this sub-command must be mkdir, remove or rename",
+                ));
+            }
+        }
+        return Ok(());
+    }
+    if HELPER_NGINX_WWW_INSTALL_ACTIONS.contains(&action.as_str()) {
+        let [_, dest] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one web-root destination path",
+            ));
+        };
+        var_www_path_valid(dest).map_err(|reason| {
+            operand_not_allowed("lcp-admin", dest, &reason)
         })?;
         return Ok(());
     }
@@ -3832,5 +4502,694 @@ mod repo_content_policy_tests {
             "Types: deb\nURIs: https://host.example/debian\nOrigin: Exa[mple]\n",
             "brackets in a free-form field",
         );
+    }
+}
+
+// ─── nginx confinement policy ────────────────────────────────────────────────
+//
+// The validators this module adds for the nginx batch — site/file names, the
+// configuration tree, the web root, and the generalized revision-sibling
+// rule — each get their accept/refuse matrix here. The profile.d rule the
+// nginx one was generalized from is asserted unchanged in the same sweep.
+
+#[cfg(test)]
+mod nginx_policy_tests {
+    use super::*;
+
+    #[test]
+    fn site_names_reject_everything_but_plain_word_names() {
+        for name in ["example.com", "my-site", "10_group.conf", "a1.b_c-d"] {
+            nginx_site_name_valid(name)
+                .unwrap_or_else(|error| panic!("{name:?} must be accepted: {error}"));
+        }
+        for name in [
+            "",
+            ".hidden",
+            "..",
+            "-flaglike",
+            "a/b",
+            "a\\b",
+            "with space",
+            "semi;colon",
+            "quote'",
+            "nul\0",
+            "\x1f",
+        ] {
+            assert!(
+                nginx_site_name_valid(name).is_err(),
+                "{name:?} must be refused"
+            );
+        }
+        assert!(nginx_site_name_valid(&"a".repeat(256)).is_err());
+    }
+
+    #[test]
+    fn nginx_config_paths_are_confined_to_the_fixed_tree() {
+        fn ok(path: &str) {
+            nginx_config_path_valid(path)
+                .unwrap_or_else(|error| panic!("{path} must be accepted: {error}"));
+        }
+        fn refused(path: &str) {
+            assert!(
+                nginx_config_path_valid(path).is_err(),
+                "{path:?} must be refused"
+            );
+        }
+
+        ok(NGINX_NGINX_CONF);
+        ok(&format!("{NGINX_CONF_D}/10-virtual.conf"));
+        ok(&format!("{NGINX_SITES_AVAILABLE}/example.com"));
+        ok(&format!("{NGINX_SITES_AVAILABLE}/example.com.conf"));
+        ok(&format!("{NGINX_SITES_ENABLED}/example.com.conf"));
+
+        // outside the tree altogether
+        refused("/etc/nginx/other.conf");
+        refused(&format!("{NGINX_CONF_D}_copy/x.conf"));
+        refused("/etc/hosts");
+        refused("/etc/nginx/sites-available/../nginx.conf");
+        refused("relative/path.conf");
+        refused("");
+        refused(&format!("{NGINX_CONF_D}/no-suffix"));
+        refused(&format!("{NGINX_CONF_D}/.hidden.conf"));
+        refused(&format!("{NGINX_SITES_AVAILABLE}/-leading-dash"));
+        // the exact nginx.conf with any trailing decoration is not nginx.conf
+        refused(&format!("{NGINX_NGINX_CONF}/"));
+        refused(&format!("{NGINX_NGINX_CONF}.bak"));
+    }
+
+    #[test]
+    fn var_www_paths_must_lie_strictly_under_the_web_root() {
+        fn ok(path: &str) {
+            var_www_path_valid(path)
+                .unwrap_or_else(|error| panic!("{path} must be accepted: {error}"));
+        }
+        fn refused(path: &str) {
+            assert!(var_www_path_valid(path).is_err(), "{path:?} must be refused");
+        }
+
+        ok(&format!("{VAR_WWW_DIR}/html"));
+        ok(&format!("{VAR_WWW_DIR}/site-app"));
+        ok(&format!("{VAR_WWW_DIR}/my app/sub dir/file name.txt")); // spaces are legit
+        ok(&format!("{VAR_WWW_DIR}/a/.hidden-asset")); // no CurDir/ParentDir component
+
+        refused(VAR_WWW_DIR); // the root itself
+        refused(&format!("{VAR_WWW_DIR}/")); // the root with a trailing slash
+        refused("/var");
+        refused("/var/wwwhtml"); // prefix must break on the slash
+        refused(&format!("{VAR_WWW_DIR}/../etc/shadow")); // traversal
+        refused(&format!("{VAR_WWW_DIR}/./x")); // component escape
+        refused("relative/path");
+        refused(&format!("{VAR_WWW_DIR}/nul\0byte"));
+    }
+
+    #[test]
+    fn the_web_root_and_html_are_the_protected_names() {
+        for protected in [
+            VAR_WWW_DIR,
+            &format!("{VAR_WWW_DIR}/"),
+            &format!("{VAR_WWW_DIR}/html"),
+            &format!("{VAR_WWW_DIR}/html/"),
+        ] {
+            assert!(var_www_is_protected(protected), "{protected:?}");
+        }
+        for ordinary in [
+            &format!("{VAR_WWW_DIR}/html/index.html"),
+            &format!("{VAR_WWW_DIR}/site-app"),
+            "/var/wwwhtml",
+            "/var/www/site-app/html",
+        ] {
+            assert!(
+                !var_www_is_protected(ordinary),
+                "{ordinary:?} must not be protected"
+            );
+        }
+    }
+
+    /// The generalized sibling rule keeps the profile.d shape exactly as
+    /// before (the helper's `<unix-seconds>_<pid>.<nanos>`), accepts the
+    /// nginx backups' `<YYYYmmdd_HHMMSS>` shape, and still refuses
+    /// everything that is not its own revision sibling.
+    #[test]
+    fn the_revision_sibling_rule_covers_both_revision_schemes() {
+        fn ok(dest: &str, backup: &str, dir: &str) {
+            revision_sibling_shape(dest, backup, dir)
+                .unwrap_or_else(|error| panic!("{backup} must be accepted: {error}"));
+        }
+        fn refused(dest: &str, backup: &str, dir: &str) {
+            assert!(
+                revision_sibling_shape(dest, backup, dir).is_err(),
+                "{backup:?} must be refused"
+            );
+        }
+
+        // helper write-core shape (pid.nanos suffix) — the profile.d rule
+        let d = PROFILE_D_DIR;
+        ok(
+            &format!("{d}/10-lang.sh"),
+            &format!("{d}/10-lang.sh.1700000000_123.456.bak"),
+            d,
+        );
+        // nginx app-backup shape
+        ok(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.20240102_030405.bak"),
+            NGINX_BACKUPS_DIR,
+        );
+        // multi-dot member suffixes stay digits-based only
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.20240102_0304;05.bak"),
+            NGINX_BACKUPS_DIR,
+        );
+        // foreign dir, foreign name, shapeless, giant digit runs
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{d}/x.conf.20240102_030405.bak"),
+            NGINX_BACKUPS_DIR,
+        );
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{NGINX_BACKUPS_DIR}/other.conf.20240102_030405.bak"),
+            NGINX_BACKUPS_DIR,
+        );
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.bak"),
+            NGINX_BACKUPS_DIR,
+        );
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.{}_030405.bak", "1".repeat(30)),
+            NGINX_BACKUPS_DIR,
+        );
+        refused(
+            &format!("{NGINX_CONF_D}/x.conf"),
+            "/tmp/hostile/target.bak",
+            NGINX_BACKUPS_DIR,
+        );
+
+        // the profile.d wrapper is the same rule with PROFILE_D_DIR pinned
+        assert_eq!(
+            restore_profile_sh_backup_shape(&format!("{d}/x.sh"), &format!("{d}/x.sh.1700000000_1.2.bak")),
+            Ok(())
+        );
+        assert!(restore_profile_sh_backup_shape(&format!("{d}/x.sh"), "/tmp/x.bak").is_err());
+    }
+}
+
+// ─── nginx content gate + action arg policy (batch: nginx_config_install / ───
+// ─── nginx_config_backup / nginx_restore_backup) ────────────────────────────
+
+#[cfg(test)]
+mod nginx_config_action_tests {
+    use super::ensure_arguments_for_program as check;
+    use super::{
+        revision_sibling_shape, validate_nginx_config_content, NGINX_BACKUPS_DIR, NGINX_CONF_D,
+        NGINX_NGINX_CONF, NGINX_SITES_AVAILABLE,
+    };
+
+    /// The structural gate accepts everything the panel's config editor can
+    /// honestly feed it and refuses only the bytes no config file can carry
+    /// carry — NUL, stray control characters, oversized buffers. No grammar
+    /// checks live here (nginx -t is the grammar gate).
+    #[test]
+    fn the_nginx_content_gate_is_structural_only() {
+        for content in [
+            "", "# only a comment\n",
+            "server {\n    listen 80;\n\tserver_name x.y;\n    location / { return 200 \"ok\\n\"; }\n}\n",
+        ] {
+            validate_nginx_config_content(content)
+                .unwrap_or_else(|error| panic!("{content:?} must be accepted: {error}"));
+        }
+        assert!(validate_nginx_config_content("nul\0byte").is_err());
+        assert!(validate_nginx_config_content("bell\x07byte").is_err());
+        assert!(validate_nginx_config_content("\x1fdanger").is_err());
+        // newlines and tabs are the honest control characters of conf files
+        validate_nginx_config_content("a\nb\r\n\tc\t")
+            .expect("newlines and tabs must pass");
+        assert!(validate_nginx_config_content(&"x".repeat(256 * 1024 + 1)).is_err());
+    }
+
+    /// The three config actions' argument shapes: single (install/backup) or
+    /// dest+backup (restore), each confined to the fixed tree and the
+    /// revision-sibling backup rule.
+    #[test]
+    fn the_nginx_config_actions_take_only_pinned_paths() {
+        let dest = format!("{NGINX_CONF_D}/x.conf");
+        let backup = format!("{NGINX_BACKUPS_DIR}/x.conf.20240102_030405.bak");
+
+        /// `ensure_arguments_for_program` takes `&[String]`; build the argv.
+        fn args(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(|part| part.to_string()).collect()
+        }
+
+        assert!(check("lcp-admin", &args(&["nginx_config_install", &dest])).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_config_backup", &dest])).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_restore_backup", &dest, &backup])).is_ok());
+
+        // arity
+        assert!(check("lcp-admin", &args(&["nginx_config_install"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_config_backup", &dest, &backup])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_restore_backup", &dest])).is_err());
+
+        // destination confinement: outside the tree, non-conf in conf.d,
+        // traversal, control characters
+        for hostile_dest in [
+            "/etc/shadow",
+            "/etc/nginx/other/x.conf",
+            &format!("{NGINX_CONF_D}/x.txt"),
+            &format!("{NGINX_CONF_D}/../shadow"),
+            &format!("{NGINX_SITES_AVAILABLE}no/x.conf"),
+            &format!("{NGINX_NGINX_CONF}/../shadow"),
+        ] {
+            assert!(
+                check("lcp-admin", &args(&["nginx_config_install", hostile_dest])).is_err(),
+                "{hostile_dest} must be refused"
+            );
+            assert!(
+                check(
+                    "lcp-admin",
+                    &args(&["nginx_restore_backup", hostile_dest, &backup])
+                )
+                .is_err(),
+                "restore to {hostile_dest} must be refused"
+            );
+        }
+
+        // backup shape: foreign dir, foreign name, shapeless, hostile digits
+        for hostile_backup in [
+            "/tmp/hostile/target.bak",
+            &format!("{NGINX_BACKUPS_DIR}/other.conf.20240102_030405.bak"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.bak"),
+            &format!("{NGINX_BACKUPS_DIR}/x.conf.2024;0102_030405.bak"),
+        ] {
+            assert!(
+                revision_sibling_shape(&dest, hostile_backup, NGINX_BACKUPS_DIR).is_err(),
+                "{hostile_backup} must be refused"
+            );
+            assert!(
+                check(
+                    "lcp-admin",
+                    &args(&["nginx_restore_backup", &dest, hostile_backup])
+                )
+                .is_err(),
+                "restore from {hostile_backup} must be refused"
+            );
+        }
+        // nginx.conf is exactly one file; even its own backup shape check
+        // works (its basename is the backup prefix)
+        let conf_backup = format!("{NGINX_BACKUPS_DIR}/nginx.conf.20240102_030405.bak");
+        assert_eq!(
+            revision_sibling_shape(NGINX_NGINX_CONF, &conf_backup, NGINX_BACKUPS_DIR),
+            Ok(())
+        );
+    }
+}
+
+#[cfg(test)]
+mod nginx_link_remove_action_tests {
+    use super::ensure_arguments_for_program as check;
+    use super::{
+        nginx_config_remove_path_valid, nginx_link_as_valid, nginx_site_unlink_path_valid,
+        NGINX_CONF_D, NGINX_NGINX_CONF, NGINX_SITES_AVAILABLE, NGINX_SITES_ENABLED,
+    };
+
+    /// `ensure_arguments_for_program` takes `&[String]`; build the argv.
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    /// The link action's two endpoints: pinned one-per-directory and
+    /// same-named, everything else refused.
+    #[test]
+    fn nginx_link_site_only_links_a_namesake_from_available_into_enabled() {
+        let src = format!("{NGINX_SITES_AVAILABLE}/example.com");
+        let dst = format!("{NGINX_SITES_ENABLED}/example.com");
+        assert!(check("lcp-admin", &args(&["nginx_link_site", &src, &dst])).is_ok());
+        assert!(nginx_link_as_valid(&src, &dst).is_ok());
+
+        // arity
+        assert!(check("lcp-admin", &args(&["nginx_link_site", &src])).is_err());
+        assert!(
+            check("lcp-admin", &args(&["nginx_link_site", &src, &dst, "extra"])).is_err()
+        );
+
+        // basename mismatch: enabling a different name than the source is
+        // never a rename-in-disguise
+        let other = format!("{NGINX_SITES_ENABLED}/other-site");
+        assert!(nginx_link_as_valid(&src, &other).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_link_site", &src, &other])).is_err());
+
+        // endpoint confinement: any file outside its one directory is
+        // refused, on both sides
+        let compressed = format!("{NGINX_CONF_D}/example.com");
+        assert!(nginx_link_as_valid(&compressed, &dst).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_link_site", &compressed, &dst])).is_err());
+        let enabled_src = format!("{NGINX_SITES_ENABLED}/example.com");
+        assert!(nginx_link_as_valid(&enabled_src, &dst).is_err());
+
+        // general path policy still applies to both endpoints
+        let evil_dst = format!("{NGINX_SITES_ENABLED}/../nginx.conf");
+        assert!(nginx_link_as_valid(&src, &evil_dst).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_link_site", &src, &evil_dst])).is_err());
+    }
+
+    /// The remove action: the whole configuration tree minus the protected
+    /// core, exactly as the write conventions define it.
+    #[test]
+    fn nginx_config_remove_takes_one_removable_path() {
+        assert!(nginx_config_remove_path_valid(&format!("{NGINX_CONF_D}/10-x.conf")).is_ok());
+        assert!(
+            nginx_config_remove_path_valid(&format!("{NGINX_SITES_AVAILABLE}/example.com")).is_ok()
+        );
+        assert!(
+            nginx_config_remove_path_valid(&format!("{NGINX_SITES_ENABLED}/example.com")).is_ok()
+        );
+        assert!(check(
+            "lcp-admin",
+            &args(&["nginx_config_remove", &format!("{NGINX_SITES_AVAILABLE}/example.com")])
+        )
+        .is_ok());
+
+        // the protected core
+        assert!(nginx_config_remove_path_valid(NGINX_NGINX_CONF).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_config_remove", NGINX_NGINX_CONF])).is_err());
+
+        // arity + general confinement
+        assert!(check("lcp-admin", &args(&["nginx_config_remove"])).is_err());
+        assert!(check(
+            "lcp-admin",
+            &args(&["nginx_config_remove", &format!("{NGINX_CONF_D}/../shadow")])
+        )
+        .is_err());
+        assert!(check("lcp-admin", &args(&["nginx_config_remove", "/etc/shadow"])).is_err());
+    }
+
+    /// The unlink action takes exactly one plain child of sites-enabled
+    /// under the shared configuration-tree policy.
+    #[test]
+    fn nginx_unlink_site_takes_one_sites_enabled_symlink_path() {
+        let enabled = format!("{NGINX_SITES_ENABLED}/example.com");
+        assert!(nginx_site_unlink_path_valid(&enabled).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_unlink_site", &enabled])).is_ok());
+
+        // anything outside sites-enabled is refused, files included
+        assert!(
+            nginx_site_unlink_path_valid(&format!("{NGINX_SITES_AVAILABLE}/example.com")).is_err()
+        );
+        assert!(check(
+            "lcp-admin",
+            &args(&["nginx_unlink_site", &format!("{NGINX_SITES_AVAILABLE}/example.com")])
+        )
+        .is_err());
+        assert!(nginx_site_unlink_path_valid(NGINX_NGINX_CONF).is_err());
+        assert!(nginx_site_unlink_path_valid(&format!("{NGINX_SITES_ENABLED}/../shadow")).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_unlink_site", "/etc/shadow"])).is_err());
+
+        // arity
+        assert!(check("lcp-admin", &args(&["nginx_unlink_site"])).is_err());
+        assert!(
+            check("lcp-admin", &args(&["nginx_unlink_site", &enabled, "extra"])).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod nginx_www_fs_action_tests {
+    use super::ensure_arguments_for_program as check;
+    use super::{VAR_WWW_DIR, VAR_WWW_DIR_AS_ROOT, var_www_is_protected};
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    /// All four operation shapes accept exactly their operand count, and
+    /// every path must lie strictly below the web root.
+    #[test]
+    fn the_www_fs_verbs_take_only_paths_below_the_web_root() {
+        let file = format!("{VAR_WWW_DIR}/appx/index.html");
+        let other = format!("{VAR_WWW_DIR}/appz/index.html");
+
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "mkdir", &file])).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "remove", &file])).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "rename", &file, &other])).is_ok());
+        assert!(check("lcp-admin", &args(&["nginx_www_install", &file])).is_ok());
+
+        // arity: every verb refuses the wrong count
+        assert!(check("lcp-admin", &args(&["nginx_www_fs"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "mkdir"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "mkdir", &file, "extra"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "remove"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "remove", &file, "extra"])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "rename", &file])).is_err());
+        assert!(
+            check("lcp-admin", &args(&["nginx_www_fs", "rename", &file, &other, "extra"])).is_err()
+        );
+        assert!(check("lcp-admin", &args(&["nginx_www_install", &file, "extra"])).is_err());
+
+        // loneliness: unknown sub-commands are refused, too
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "touch", &file])).is_err());
+        assert!(check("lcp-admin", &args(&["nginx_www_fs", "RM", &file])).is_err());
+
+        // confinement: the web root itself, traversal, relative paths,
+        // control characters, prefix games — all refused on every verb
+        let hostile = [
+            VAR_WWW_DIR,
+            &format!("{VAR_WWW_DIR}/"),
+            &format!("{VAR_WWW_DIR}/../shadow"),
+            &format!("{VAR_WWW_DIR}/./x"),
+            "/var",
+            "/var/wwwhtml/x",
+            "relative/path",
+        ];
+        for bad in hostile {
+            assert!(check("lcp-admin", &args(&["nginx_www_fs", "mkdir", bad])).is_err(), "{bad:?}");
+            assert!(check("lcp-admin", &args(&["nginx_www_fs", "remove", bad])).is_err(), "{bad:?}");
+            assert!(
+                check("lcp-admin", &args(&["nginx_www_fs", "rename", bad, &file])).is_err(),
+                "{bad:?}"
+            );
+            assert!(check("lcp-admin", &args(&["nginx_www_install", bad])).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The protected names: remove refuses them outright, rename refuses
+    /// them on both endpoints, mkdir and install are not protected-name
+    /// operations (the fixture dispatch proves the fs-level refusals).
+    #[test]
+    fn the_protected_names_refuse_remove_and_rename() {
+        for protected in [
+            VAR_WWW_DIR,
+            VAR_WWW_DIR_AS_ROOT,
+            &format!("{VAR_WWW_DIR}/html"),
+            &format!("{VAR_WWW_DIR}/html/"),
+        ] {
+            assert!(var_www_is_protected(protected), "{protected:?} must be protected");
+            // valid-below still skips the root itself for non-remove ops
+            if protected != VAR_WWW_DIR && protected != VAR_WWW_DIR_AS_ROOT {
+                assert!(check(
+                    "lcp-admin",
+                    &args(&["nginx_www_fs", "remove", protected])
+                )
+                .is_err(), "remove of {protected:?} must be refused");
+                assert!(check(
+                    "lcp-admin",
+                    &args(&["nginx_www_fs", "rename", protected, &format!("{VAR_WWW_DIR}/x")])
+                )
+                .is_err(), "rename of {protected:?} must be refused");
+                assert!(check(
+                    "lcp-admin",
+                    &args(&["nginx_www_fs", "rename", &format!("{VAR_WWW_DIR}/x"), protected])
+                )
+                .is_err(), "rename to {protected:?} must be refused");
+            }
+        }
+        // inside the protected tree is ordinary territory
+        assert!(var_www_is_protected(&format!("{VAR_WWW_DIR}/html/index.html")) == false);
+        assert!(check(
+            "lcp-admin",
+            &args(&["nginx_www_fs", "remove", &format!("{VAR_WWW_DIR}/html/index.html")])
+        )
+        .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod certbot_request_shape_tests {
+    use super::ensure_arguments_for_program as check;
+
+    fn ok(args: &[&str]) {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        assert!(check("certbot", &argv).is_ok(), "must be allowed: certbot {args:?}");
+    }
+
+    fn refused(args: &[&str]) {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        assert!(check("certbot", &argv).is_err(), "must be refused: certbot {args:?}");
+    }
+
+    /// The exact shapes the domains page sends: with an e-mail address and
+    /// with the unsafe no-address expression, in the fixed order and in
+    /// another order (the matcher counts, it does not trust the order).
+    #[test]
+    fn the_request_shape_is_accepted_in_both_e_mail_variants() {
+        ok(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+             "--email=marvin@example.com"]);
+        ok(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+             "--register-unsafely-without-email"]);
+        // an order the app never sends, but the fixed set either way
+        ok(&["--agree-tos", "--register-unsafely-without-email",
+             "--nginx", "-d", "sub.deep.example.co.uk", "--non-interactive"]);
+        // hyphenated labels, digit labels, multi-level TLDs — all DNS-legal
+        ok(&["--nginx", "-d", "my-digit1-site.example-2nd.example.co.uk",
+             "--non-interactive", "--agree-tos", "--email=1a_b%c+d-dev@mx.example.org"]);
+
+        // the renewal shape answers for itself, untouched
+        ok(&["renew", "--cert-name", "example.com", "--non-interactive"]);
+    }
+
+    /// Every fixed flag is required exactly once; missing any one refuses,
+    /// as does sending both e-mail expressions or neither.
+    #[test]
+    fn incomplete_or_conflicting_requests_are_refused() {
+        // missing pieces
+        refused(&["-d", "example.com", "--non-interactive", "--agree-tos",
+                  "--email=a@b.co"]);
+        refused(&["--nginx", "--non-interactive", "--agree-tos",
+                  "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--agree-tos",
+                  "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--email=a@b.co"]);
+        // neither e-mail expression
+        refused(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos"]);
+        // both e-mail expressions: mutually exclusive
+        refused(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+                  "--email=a@b.co", "--register-unsafely-without-email"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+                  "--register-unsafely-without-email", "--email=a@b.co"]);
+        // duplicated fixed flags
+        refused(&["--nginx", "--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "-d", "other.example.com",
+                  "--non-interactive", "--agree-tos", "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--non-interactive", "--agree-tos", "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--agree-tos", "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+                  "--email=a@b.co", "--email=c@d.co"]);
+    }
+
+    /// Domains must be DNS names: labels of letters/digits/hyphens (no
+    /// leading or trailing hyphen, 1..63 long), ASCII only, at most 253
+    /// characters — never flags, paths, control characters or guesses.
+    #[test]
+    fn bad_domain_names_are_refused() {
+        let bad: Vec<String> = [
+            "",                               // empty label
+            ".example.com",                   // empty first label
+            "example.com.",                   // trailing empty label
+            "-example.com",                   // label starts with a hyphen
+            "example.com-",                   // label ends with a hyphen
+            "ex ample.com",                   // a space — two operands
+            "example..com",                   // empty label
+            "not-a-flag;rm -rf",              // never a command
+            "/etc/nginx/nginx.conf",          // never a path
+            "exämple.com",                    // not ASCII
+            "-d-flag",                        // a flag-shaped operand
+            &"a".repeat(64),                  // label over the 63 limit
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        for domain in &bad {
+            refused(&["--nginx", "-d", domain, "--non-interactive", "--agree-tos",
+                      "--email=a@b.co"]);
+        }
+        // a 63-character label in a legal name passes
+        ok(&["--nginx", "-d", &format!("{}.example.com", "a".repeat(63)),
+             "--non-interactive", "--agree-tos", "--email=a@b.co"]);
+        // 254 characters total is over the limit
+        refused(&["--nginx", "-d", &"a".repeat(254), "--non-interactive",
+                  "--agree-tos", "--email=a@b.co"]);
+        // a legal name that reaches exactly the 253-character limit passes
+        // (four labels: 63 + 63 + 62 + 62 = 250, plus three dots = 253)
+        let edge_name = [
+            "b".repeat(63),
+            "b".repeat(63),
+            "b".repeat(62),
+            "b".repeat(62),
+        ]
+        .join(".");
+        assert_eq!(edge_name.len(), 253);
+        ok(&["--nginx", "-d", edge_name.as_str(),
+             "--non-interactive", "--agree-tos", "--email=a@b.co"]);
+    }
+
+    /// E-mail addresses: one `@`, an ASCII local part of the fixed charset
+    /// at most 64 long, a DNS-legal domain, at most 254 characters.
+    #[test]
+    fn bad_e_mail_addresses_are_refused() {
+        let bad: Vec<String> = [
+            "",                        // empty
+            "no-at-sign.example.com",  // no @
+            "@example.com",            // empty local part
+            "a@",                      // empty domain
+            "a@b@c.co",                // two @
+            "a b@example.com",         // a space
+            "а@example.com",           // not ASCII (cyrillic а)
+            &format!("a{}", "b".repeat(65)), // > 64 local-part characters
+            "a@-bad.example.com",      // domain label starts with a hyphen
+            "a@example.com-",          // domain label ends with a hyphen
+            "a@example..com",          // empty domain label
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        for address in &bad {
+            refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                      "--agree-tos", &format!("--email={address}")]);
+        }
+        // exactly-64 local characters are legal
+        ok(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+             &format!("--email={}@example.com", "a".repeat(64))]);
+        // the charset: dots, underscores, percents, pluses, hyphens
+        ok(&["--nginx", "-d", "example.com", "--non-interactive", "--agree-tos",
+             "--email=first_last%tag+tag-x@example.com"]);
+    }
+
+    /// Only the fixed flag set: any other flag, any other operand, and any
+    /// 'hook'-carrying argument is refused — and mixed-shape garbage
+    /// (request flags and renewal operands together) answers to no shape.
+    #[test]
+    fn foreign_flags_operands_and_garbage_are_refused() {
+        // unknown flags and flag spellings
+        for flag in ["--force", "--nginx=-x", "-n", "--email", "--domain", "-x"] {
+            refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                      "--agree-tos", "--email=a@b.co", flag]);
+        }
+        // the domain flag is spelled `-d`, not `--domain` or `-D`
+        refused(&["-D", "example.com", "--nginx", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co"]);
+        // unknown operands
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co", "renew"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co", "junk"]);
+        // the hook blanket refusal wins before any shape analysis
+        refused(&["--nginx", "-d", "hook.example.com", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co"]);
+        refused(&["--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--email=monster-hook@example.com"]);
+        // mixed-shape garbage: no shape answers for this
+        refused(&["renew", "--nginx", "-d", "example.com", "--non-interactive",
+                  "--agree-tos", "--email=a@b.co"]);
+        refused(&["--cert-name", "example.com", "--nginx", "-d", "example.com",
+                  "--non-interactive", "--agree-tos", "--email=a@b.co"]);
+        // empty arguments and empty request
+        refused(&[]);
+        refused(&["--nginx", "-d", "", "--non-interactive", "--agree-tos",
+                  "--email=a@b.co"]);
     }
 }
