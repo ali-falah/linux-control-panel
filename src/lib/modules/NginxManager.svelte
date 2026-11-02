@@ -2486,7 +2486,7 @@
                                 </button>
                               {/if}
 
-                              {#if site.source === 'sites-available'}
+                              {#if site.source === 'sites-available' || site.source === 'conf.d'}
                                 <button 
                                   class="menu-item" 
                                   onclick={() => toggleSite(site)}
@@ -3721,7 +3721,7 @@
       </button>
     {/if}
 
-    {#if siteContextMenu.site.source === 'sites-available'}
+    {#if siteContextMenu.site.source === 'sites-available' || siteContextMenu.site.source === 'conf.d'}
       <button 
         class="context-menu-item" 
         onclick={() => { toggleSite(siteContextMenu.site!); closeSiteContextMenu(); }}
