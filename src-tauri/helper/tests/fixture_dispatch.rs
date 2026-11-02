@@ -825,11 +825,71 @@ mod nginx_config_dispatch {
         assert_eq!(read(&dest), honest, "a refused install leaves the destination untouched");
     }
 
-    /// 3: the backup action copies the current content into the backups
-    /// directory under one fresh `<basename>.<stamp>.bak` name, byte-exact,
-    /// and reports that path as its only output.
-    #[test]
-    fn nginx_config_backup_copies_into_the_backups_dir() {
+// GROUP 7: the conf.d toggle archive `<name>.conf.disabled` is an honest
+// conf.d child of the tree: the disable step installs content under it,
+// the enable step's cleanup removes it. Only the stem (the name without
+// either machinery suffix) is validated as a site name.
+#[test]
+fn nginx_config_install_accepts_the_conf_disabled_toggle_archive() {
+    let _guard = fixture();
+    let dest = format!("{NGINX_CONF_D}/example.com.conf.disabled");
+    let content = "server {\n    listen 80 default_server;\n    return 503;\n}\n";
+    let revision = install(&dest, content);
+    assert!(revision.is_empty(), "a first creation prints nothing");
+    assert_eq!(
+        read(&dest), content,
+        "the archive must hold exactly the installed content"
+    );
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(&dest).unwrap();
+    assert_eq!(meta.mode() & 0o777, 0o644, "the archive must be 0644");
+}
+
+#[test]
+fn nginx_config_install_refuses_a_broken_conf_disabled_shape() {
+    let _guard = fixture();
+    let dest = format!("{NGINX_CONF_D}/example.conf.disabledx");
+    refusing(
+        &["nginx_config_install", &dest],
+        "# not a conf.d site file\n",
+        "the suffix must be exactly .conf.disabled",
+    );
+    let empty_stem = format!("{NGINX_CONF_D}/.conf.disabled");
+    refusing(
+        &["nginx_config_install", &empty_stem],
+        "# no stem is not a site\n",
+        "an empty site name is refused",
+    );
+}
+
+#[test]
+fn nginx_config_remove_removes_the_conf_disabled_archive() {
+    let _guard = fixture();
+    let dest = format!("{NGINX_CONF_D}/example.com.conf.disabled");
+    let content = "server {\n    listen 80 default_server;\n    return 503;\n}\n";
+    install(&dest, content);
+    let run = run_helper(&["nginx_config_remove", &dest], "");
+    assert_eq!(run.code, 0, "the remove must succeed: {run:?}");
+    assert!(
+        !std::path::Path::new(&dest).exists(),
+        "the archive must be gone after removal"
+    );
+    // the live twin of a removed archive stays untouched
+    let live = format!("{NGINX_CONF_D}/example.com.conf");
+    std::fs::write(&live, "keep me\n").unwrap();
+    let run = run_helper(&["nginx_config_remove", &live], "");
+    assert_eq!(run.code, 0, "the live file must still be removable");
+    assert!(
+        !std::path::Path::new(&live).exists(),
+        "the live file must be gone after removal"
+    );
+}
+
+/// 3: the backup action copies the current content into the backups
+/// directory under one fresh `<basename>.<stamp>.bak` name, byte-exact,
+/// and reports that path as its only output.
+#[test]
+fn nginx_config_backup_copies_into_the_backups_dir() {
         let _guard = fixture();
         use std::os::unix::fs::MetadataExt;
 

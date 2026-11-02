@@ -496,24 +496,33 @@ pub fn nginx_config_path_valid(path: &str) -> Result<(), String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let required_suffix = if parent == NGINX_CONF_D {
-        // the main file's include only ever loads `*.conf` here
-        Some(".conf")
+    // The conf.d machinery suffix: `*.conf` is everything nginx's include
+    // glob loads; `*.conf.disabled` is the panel's conf.d toggle archive —
+    // the disable step must be able to *install* it and the enable step's
+    // cleanup must be able to *remove* it. In every conf.d case the
+    // validated site name is the stem with the machinery suffix stripped.
+    let conf_d_machinery = if parent == NGINX_CONF_D {
+        Some(true)
     } else if parent == NGINX_SITES_AVAILABLE || parent == NGINX_SITES_ENABLED {
-        None
+        Some(false)
     } else {
         return Err(format!(
             "The nginx configuration path must be {NGINX_NGINX_CONF} or a plain child of {NGINX_CONF_D}, {NGINX_SITES_AVAILABLE} or {NGINX_SITES_ENABLED}, not {path}"
         ));
     };
-    if let Some(suffix) = required_suffix {
-        if !name.ends_with(suffix) {
+    if let Some(true) = conf_d_machinery {
+        let Some(stem) = name
+            .strip_suffix(".conf.disabled")
+            .or_else(|| name.strip_suffix(".conf"))
+        else {
             return Err(format!(
-                "A file in {NGINX_CONF_D} must have a {suffix:?} extension: {name:?}"
+                "A file in {NGINX_CONF_D} must have a \".conf\" (or \".conf.disabled\") extension: {name:?}"
             ));
-        }
+        };
+        nginx_site_name_valid(stem).map_err(|reason| format!("{reason} (as {path:?})"))
+    } else {
+        nginx_site_name_valid(&name).map_err(|reason| format!("{reason} (as {path:?})"))
     }
-    nginx_site_name_valid(&name).map_err(|reason| format!("{reason} (as {path:?})"))
 }
 
 /// `path` must describe a location inside the web root, strictly below it —
@@ -4561,6 +4570,16 @@ mod nginx_policy_tests {
         ok(&format!("{NGINX_SITES_AVAILABLE}/example.com"));
         ok(&format!("{NGINX_SITES_AVAILABLE}/example.com.conf"));
         ok(&format!("{NGINX_SITES_ENABLED}/example.com.conf"));
+
+        // GROUP 7: the conf.d toggle archive `<name>.conf.disabled` is
+        // admitted — install creates it, the enable step's cleanup removes
+        // it; the validated name is the stem without the machinery suffix.
+        ok(&format!("{NGINX_CONF_D}/example.com.conf.disabled"));
+
+        // a damaged twin stays out: the machinery suffix must be the very
+        // end of the name, and a bare suffix (empty stem) is no site name
+        refused(&format!("{NGINX_CONF_D}/x.conf.disabledx"));
+        refused(&format!("{NGINX_CONF_D}/.conf.disabled"));
 
         // outside the tree altogether
         refused("/etc/nginx/other.conf");

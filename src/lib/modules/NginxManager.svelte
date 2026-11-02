@@ -791,7 +791,19 @@
             enable: !site.enabled,
           });
           uiStore.removeToast(toastId);
-          statusStore.setLastCommand(!site.enabled ? `ln -s /etc/nginx/sites-available/${site.name} /etc/nginx/sites-enabled/${site.name} && nginx -t` : `rm /etc/nginx/sites-enabled/${site.name} && nginx -t`, result.passed ? 0 : 1, result.passed);
+          statusStore.setLastCommand(
+            site.source === 'conf.d'
+              ? // conf.d layout: the toggle is the install+remove ladder that
+                // renames the file between `.conf` and `.conf.disabled`
+                !site.enabled
+                ? `mv /etc/nginx/conf.d/${site.name}.conf.disabled /etc/nginx/conf.d/${site.name}.conf && nginx -t`
+                : `mv /etc/nginx/conf.d/${site.name}.conf /etc/nginx/conf.d/${site.name}.conf.disabled && nginx -t`
+              : !site.enabled
+                ? `ln -s /etc/nginx/sites-available/${site.name} /etc/nginx/sites-enabled/${site.name} && nginx -t`
+                : `rm /etc/nginx/sites-enabled/${site.name} && nginx -t`,
+            result.passed ? 0 : 1,
+            result.passed,
+          );
 
           if (result.passed) {
             uiStore.addToast(`Site "${site.name}" ${action}d and nginx reloaded ✓`, 'success');
@@ -850,13 +862,25 @@
       async () => {
         try {
           await invoke('nginx_delete_site', { name: site.name, path: site.path });
-          statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 0, true);
+          statusStore.setLastCommand(
+            site.source === 'conf.d'
+              ? `rm /etc/nginx/conf.d/${site.name}.conf* && nginx -t`
+              : `rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`,
+            0,
+            true,
+          );
           uiStore.addToast(`Site "${site.name}" deleted`, 'success');
           await loadSites();
           await loadStats();
         } catch (e) {
           uiStore.addToast(`Delete failed: ${e}`, 'error');
-          statusStore.setLastCommand(`rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`, 1, false);
+          statusStore.setLastCommand(
+            site.source === 'conf.d'
+              ? `rm /etc/nginx/conf.d/${site.name}.conf* && nginx -t`
+              : `rm -f ${site.path} /etc/nginx/sites-enabled/${site.name}`,
+            1,
+            false,
+          );
         }
       },
       true,

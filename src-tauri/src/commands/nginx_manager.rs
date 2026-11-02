@@ -274,6 +274,117 @@ async fn nginx_reload_as_root() -> Result<(), String> {
     Ok(())
 }
 
+// ─── Layout detection (GROUP 7: native conf.d support) ────────────────────────
+//
+// The site lifecycle differs per nginx layout: Debian ships the
+// sites-available/sites-enabled pair (static configs + enable symlinks),
+// Fedora/RHEL ships only conf.d (every `*.conf` there is always active).
+// Detection must not guess from the distro family — the classifier asks the
+// two things that actually decide behavior:
+//   1. the sites-available directory exists, and
+//   2. nginx.conf really includes `…/sites-enabled/*`.
+// Both must hold for the Debian flow; a directory without an include loads
+// nothing, and an include without a directory keeps nginx from starting.
+
+use crate::utils::root_policy as rp;
+
+/// Which site lifecycle the code follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NginxLayout {
+    /// sites-available + sites-enabled (Debian convention, present on the
+    /// system and actually referenced by nginx.conf)
+    DebianSites,
+    /// everything active lives in conf.d (Fedora/RHEL default)
+    ConfD,
+}
+
+/// The pure half of the classifier; the fs-touching wrapper
+/// (`detect_nginx_layout`) only gathers the two inputs.
+fn nginx_layout_from(sites_dir_exists: bool, conf_refs_sites_enabled: bool) -> NginxLayout {
+    if sites_dir_exists && conf_refs_sites_enabled {
+        NginxLayout::DebianSites
+    } else {
+        NginxLayout::ConfD
+    }
+}
+
+/// Does a textual nginx.conf contain an `include` whose argument points at a
+/// `sites-enabled` directory glob? Match: some path segment is exactly
+/// `sites-enabled` and the argument ends in `*` or `*.conf` (the two shapes
+/// Debian's shipped nginx.conf uses). Commented-out lines never match — the
+/// line must start (after trimming) with the directive keyword.
+fn nginx_conf_includes_sites_enabled(conf_text: &str) -> bool {
+    for line in conf_text.lines() {
+        let line = line.trim();
+        let Some(arg) = line.strip_prefix("include ") else {
+            continue;
+        };
+        let arg = arg.trim().trim_end_matches(';').trim();
+        if arg.split('/').any(|segment| segment == "sites-enabled")
+            && (arg.ends_with('*') || arg.ends_with("*.conf"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-evaluated on every call, no cache — two cheap reads (`detect_distro`
+/// follows the same house style) and immune to an admin hand-editing the
+/// include structure mid-session.
+async fn detect_nginx_layout() -> NginxLayout {
+    let sites_dir_exists = tokio::fs::metadata(rp::NGINX_SITES_AVAILABLE)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let conf_text = tokio::fs::read_to_string(rp::NGINX_NGINX_CONF)
+        .await
+        .unwrap_or_default();
+    nginx_layout_from(sites_dir_exists, nginx_conf_includes_sites_enabled(&conf_text))
+}
+
+/// The two machinery paths of one conf.d site.
+struct ConfDPaths {
+    enabled: String,
+    disabled: String,
+}
+
+fn conf_d_paths(name: &str) -> ConfDPaths {
+    ConfDPaths {
+        enabled: format!("{}/{name}.conf", rp::NGINX_CONF_D),
+        disabled: format!("{}/{name}.conf.disabled", rp::NGINX_CONF_D),
+    }
+}
+
+/// What the pair of conf.d files admits (pure; unit-tested).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfDTogglePlan {
+    /// exactly `<name>.conf` exists — the site is live
+    SiteIsLive,
+    /// exactly `<name>.conf.disabled` exists — the site is toggled off
+    SiteIsDisabled,
+}
+
+fn conf_d_toggle_plan(
+    enabled_exists: bool,
+    disabled_exists: bool,
+    name: &str,
+) -> Result<ConfDTogglePlan, String> {
+    let paths = conf_d_paths(name);
+    match (enabled_exists, disabled_exists) {
+        (true, false) => Ok(ConfDTogglePlan::SiteIsLive),
+        (false, true) => Ok(ConfDTogglePlan::SiteIsDisabled),
+        (true, true) => Err(format!(
+            "Ambiguous state in {}: both {} and {} are present; remove one of them manually before toggling.",
+            rp::NGINX_CONF_D, paths.enabled, paths.disabled
+        )),
+        (false, false) => Err(format!(
+            "The site does not exist in {}: neither {} nor {} is present.",
+            rp::NGINX_CONF_D, paths.enabled, paths.disabled
+        )),
+    }
+}
+
 // ─── Commands: Install Check ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -503,6 +614,69 @@ fn parse_site_metadata(content: &str) -> (Vec<String>, Vec<String>, Vec<String>,
 }
 
 async fn nginx_list_sites_internal() -> Vec<NginxSite> {
+    if detect_nginx_layout().await == NginxLayout::ConfD {
+        // conf.d layout (Fedora/RHEL): group the two machinery suffixes of
+        // the same base name into one row — a live entry wins over a
+        // disabled twin, exactly the site the toggle will act on.
+        use std::collections::BTreeMap;
+        let mut sites = Vec::new();
+        let mut entries = match tokio::fs::read_dir(rp::NGINX_CONF_D).await {
+            Ok(e) => e,
+            Err(_) => return sites,
+        };
+
+        // base name → (live path, disabled path)
+        let mut grouped: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let path = path.to_string_lossy().to_string();
+            if let Some(stem) = name.strip_suffix(".conf") {
+                grouped
+                    .entry(stem.to_string())
+                    .or_default()
+                    .0 = Some(path);
+            } else if let Some(stem) = name.strip_suffix(".conf.disabled") {
+                grouped
+                    .entry(stem.to_string())
+                    .or_default()
+                    .1 = Some(path);
+            }
+            // anything else in conf.d (stray backups, editor leftovers) is
+            // not a site row
+        }
+
+        for (name, (live, disabled)) in grouped {
+            let (path, enabled) = match (live, disabled) {
+                (Some(live), _) => (live, true),
+                (None, Some(disabled)) => (disabled, false),
+                (None, None) => continue,
+            };
+            let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            let (domains, ports, proxies, has_ssl, access_log, error_log) =
+                parse_site_metadata(&content);
+
+            sites.push(NginxSite {
+                name,
+                path,
+                enabled,
+                source: String::from("conf.d"),
+                domains,
+                ports,
+                proxies,
+                has_ssl,
+                access_log,
+                error_log,
+            });
+        }
+        return sites;
+    }
+
+    // Debian-style layout: unchanged (conf.d plus sites-available with the
+    // sites-enabled symlink check).
     let mut sites = Vec::new();
 
     let dirs = [
@@ -573,6 +747,10 @@ pub async fn nginx_toggle_site(name: String, enable: bool) -> Result<NginxTestRe
         return Err("nginx not installed".to_string());
     }
 
+    if detect_nginx_layout().await == NginxLayout::ConfD {
+        return nginx_toggle_site_conf_d(name, enable).await;
+    }
+
     let source_path = format!("/etc/nginx/sites-available/{name}");
     let symlink_path = format!("/etc/nginx/sites-enabled/{name}");
 
@@ -627,6 +805,77 @@ pub async fn nginx_toggle_site(name: String, enable: bool) -> Result<NginxTestRe
     Ok(test)
 }
 
+/// The conf.d toggle: no symlinks exist, so "disabling" archives the file as
+/// `<name>.conf.disabled` (never matched by nginx's `include *.conf` glob)
+/// and "enabling" publishes it back. Both directions run as a two-step
+/// ladder over the existing named actions — install content, then remove —
+/// keeping the non-atomic worst case benign: at any intermediate moment both
+/// files may exist, but only the live one is ever loaded.
+async fn nginx_toggle_site_conf_d(name: String, enable: bool) -> Result<NginxTestResult, String> {
+    let paths = conf_d_paths(&name);
+    let enabled_exists = tokio::fs::symlink_metadata(&paths.enabled).await.is_ok();
+    let disabled_exists = tokio::fs::symlink_metadata(&paths.disabled).await.is_ok();
+    let plan = conf_d_toggle_plan(enabled_exists, disabled_exists, &name)?;
+
+    // The direction the pair actually supports: a live site can be disabled
+    // (the requested "enable" is then the same stale-view no-op the Debian
+    // flow already treats benign, and vice versa).
+    let ladder = match (enable, plan) {
+        // disable the live site
+        (false, ConfDTogglePlan::SiteIsLive) => {
+            let content = tokio::fs::read_to_string(&paths.enabled)
+                .await
+                .map_err(|e| format!("Failed to read {}: {e}", paths.enabled))?;
+            // install the archive twin, then remove the live file
+            Some((&paths.disabled, &paths.enabled, content, "disable"))
+        }
+        // enable the archived site
+        (true, ConfDTogglePlan::SiteIsDisabled) => {
+            let content = tokio::fs::read_to_string(&paths.disabled)
+                .await
+                .map_err(|e| format!("Failed to read {}: {e}", paths.disabled))?;
+            // publish the live file back, then remove the archive
+            Some((&paths.enabled, &paths.disabled, content, "enable"))
+        }
+        // no-op: the requested direction equals the current state (a stale
+        // view or a repeated click) — the Debian flow behaves the same
+        _ => None,
+    };
+
+    let mut test = run_nginx_test().await;
+    if let Some((install_path, remove_path, content, action)) = ladder {
+        nginx_config_install_as_root(install_path, &content).await?;
+        nginx_config_remove_as_root(remove_path).await?;
+
+        // Test nginx config; on failure reverse the ladder — best-effort,
+        // "already gone" tolerances, exactly like the Debian revert branch
+        test = run_nginx_test().await;
+        if !test.passed {
+            // publish the original state back, then clean the archive
+            let (restore_path, cleanup_path) = if action == "enable" {
+                (&paths.disabled, &paths.enabled)
+            } else {
+                (&paths.enabled, &paths.disabled)
+            };
+            let _ = nginx_config_install_as_root(restore_path, &content).await;
+            if tokio::fs::symlink_metadata(cleanup_path).await.is_ok() {
+                let _ = nginx_config_remove_as_root(cleanup_path).await;
+            }
+            return Ok(test);
+        }
+        log_to_file("INFO", &format!("nginx_toggle_site conf.d {action} {name}"));
+    }
+
+    // Reload only when the (possibly re-tested) config is valid — a no-op
+    // toggle (requested direction already matches state) with a broken
+    // ambient config must not reload nginx just because a stale view asked
+    // for it.
+    if test.passed {
+        let _ = nginx_reload_as_root().await;
+    }
+    Ok(test)
+}
+
 #[tauri::command]
 pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> {
     if !nginx_installed().await {
@@ -637,7 +886,12 @@ pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> 
         .server_name
         .replace(['/', ' ', '\0'], "_");
 
-    let path = format!("/etc/nginx/sites-available/{safe_name}.conf");
+    let confd_layout = detect_nginx_layout().await == NginxLayout::ConfD;
+    let path = if confd_layout {
+        format!("{}/{safe_name}.conf", rp::NGINX_CONF_D)
+    } else {
+        format!("/etc/nginx/sites-available/{safe_name}.conf")
+    };
 
     let content = if config.is_proxy {
         format!(
@@ -680,6 +934,36 @@ pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> 
             error_pages = build_error_pages(config.enable_404, config.enable_50x),
         )
     };
+
+    if confd_layout {
+        // conf.d has no symlink step and no separate enable entry to
+        // conflict with. But a disabled twin of the same name would leave
+        // the toggle in its ambiguous state — refuse it like the Debian
+        // conflict check below.
+        let disabled = format!("{}/{safe_name}.conf.disabled", rp::NGINX_CONF_D);
+        if tokio::fs::symlink_metadata(&disabled).await.is_ok() {
+            return Err(format!(
+                "A disabled copy already exists at {disabled}; refusing to create a live twin — enable or delete it first."
+            ));
+        }
+        // the install publishes directly (creating one revision of a
+        // previous live file of the same name, if any)
+        nginx_config_install_as_root(&path, &content).await?;
+
+        let test = run_nginx_test().await;
+        if !test.passed {
+            // Revert — best-effort, "already gone" is success at this layer
+            if tokio::fs::symlink_metadata(&path).await.is_ok() {
+                let _ = nginx_config_remove_as_root(&path).await;
+            }
+            return Err(format!("nginx -t failed after site creation:\n{}", test.output));
+        }
+
+        let _ = nginx_reload_as_root().await;
+
+        log_to_file("INFO", &format!("nginx_create_site {safe_name}"));
+        return Ok(path);
+    }
 
     // A conflicting enabled entry is refused before anything is written —
     // the old `ln -sf` would have silently replaced it
@@ -753,7 +1037,11 @@ pub async fn nginx_delete_site(name: String, path: String) -> Result<(), String>
     // app checks the state explicitly instead of matching a refusal
     // message); a conflicting entry (a regular file, a foreign link)
     // propagates the helper's refusal instead of being force-removed.
-    if tokio::fs::symlink_metadata(&symlink).await.is_ok() {
+    // On conf.d layouts (Fedora/RHEL) there is no symlink phase at all —
+    // the delete touches only the configuration file.
+    if tokio::fs::symlink_metadata(&symlink).await.is_ok()
+        && detect_nginx_layout().await == NginxLayout::DebianSites
+    {
         nginx_unlink_site_as_root(&symlink).await?;
     }
 
@@ -879,6 +1167,9 @@ pub async fn nginx_list_configs() -> Result<Vec<NginxConfigFile>, String> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
 
+            // `.conf.disabled` twins are deliberately excluded here: the
+            // disabled state of a conf.d site is owned by the site toggle,
+            // never by the config editor (see nginx_write_config).
             if !name.ends_with(".conf") {
                 continue;
             }
@@ -906,6 +1197,15 @@ pub async fn nginx_read_config(path: String) -> Result<String, String> {
 pub async fn nginx_write_config(path: String, content: String) -> Result<NginxTestResult, String> {
     if !nginx_installed().await {
         return Err("nginx not installed".to_string());
+    }
+
+    // The toggle-only gate: in conf.d layouts `.conf.disabled` is the
+    // machinery of the site toggle — installing over it from the config
+    // editor would bypass (and corrupt) the toggle's state pair.
+    if path.ends_with(".conf.disabled") {
+        return Err(format!(
+            "Disabled conf.d sites are managed by the site toggle, not the config editor — enable the site first, then edit {path}."
+        ));
     }
 
     // The install is reversible by construction: the helper creates exactly
@@ -2048,3 +2348,169 @@ async fn find_rotated_log_as_root(prefix: &str) -> Result<String, String> {
     Ok(files.first().cloned().unwrap_or_default())
 }
 
+
+#[cfg(test)]
+mod nginx_layout_tests {
+    use super::{
+        conf_d_paths, conf_d_toggle_plan, nginx_conf_includes_sites_enabled, nginx_layout_from,
+        ConfDTogglePlan, NginxLayout,
+    };
+    use crate::utils::root_policy::NGINX_CONF_D;
+
+    // ── the pure classifier: BOTH conditions decide the Debian flow ──
+
+    #[test]
+    fn debian_layout_requires_dir_and_include_together() {
+        assert_eq!(
+            nginx_layout_from(true, true),
+            NginxLayout::DebianSites,
+            "dir exists AND nginx.conf includes sites-enabled → Debian flow"
+        );
+    }
+
+    #[test]
+    fn dir_without_the_include_is_not_a_debian_layout() {
+        // a sites-available directory whose include was never wired into
+        // nginx.conf loads nothing — treat it as conf.d, not as Debian
+        assert_eq!(nginx_layout_from(true, false), NginxLayout::ConfD);
+    }
+
+    #[test]
+    fn include_without_the_dir_is_not_a_debian_layout() {
+        // an include of a missing directory keeps nginx from starting —
+        // the layout cannot honestly claim the Debian flow either
+        assert_eq!(nginx_layout_from(false, true), NginxLayout::ConfD);
+    }
+
+    #[test]
+    fn neither_condition_is_conf_d() {
+        assert_eq!(nginx_layout_from(false, false), NginxLayout::ConfD);
+    }
+
+    // ── the include scanner on textual nginx.conf shapes ──
+
+    #[test]
+    fn the_scanner_accepts_the_shipped_debian_include_shapes() {
+        for conf in [
+            "include /etc/nginx/sites-enabled/*;\n",
+            "http {\n  include /etc/nginx/sites-enabled/*;\n}\n",
+            "include /etc/nginx/sites-enabled/*.conf;\n",
+        ] {
+            assert!(
+                nginx_conf_includes_sites_enabled(conf),
+                "must match the shipped Debian include: {conf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scanner_ignores_comments_and_unrelated_paths() {
+        for conf in [
+            "", // no include at all (a plain Fedora nginx.conf shape)
+            "# include /etc/nginx/sites-enabled/*;\n",
+            "include /etc/nginx/conf.d/*.conf;\n",
+            "include /etc/nginx/mime.types;\n",
+            "access_log /var/log/nginx/sites-enabled/access.log;\n",
+            "include /etc/nginx/sites-enabled_extra/*;\n",
+        ] {
+            assert!(
+                !nginx_conf_includes_sites_enabled(conf),
+                "must NOT count as a sites-enabled include: {conf:?}"
+            );
+        }
+    }
+
+    // ── the conf.d toggle state machine ──
+
+    #[test]
+    fn conf_d_paths_use_the_fixed_machinery_suffixes() {
+        let paths = conf_d_paths("example.com");
+        assert_eq!(paths.enabled, format!("{NGINX_CONF_D}/example.com.conf"));
+        assert_eq!(
+            paths.disabled,
+            format!("{NGINX_CONF_D}/example.com.conf.disabled")
+        );
+    }
+
+    #[test]
+    fn conf_d_toggle_plans_the_unique_file_states() {
+        assert_eq!(
+            conf_d_toggle_plan(true, false, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsLive,
+            "exactly the live file present → the site is live"
+        );
+        assert_eq!(
+            conf_d_toggle_plan(false, true, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsDisabled,
+            "exactly the archive present → the site is toggled off"
+        );
+    }
+
+    #[test]
+    fn conf_d_noop_states_match_the_requested_direction() {
+        // A no-op toggle is taken when the requested direction already equals
+        // the current state. These are the two no-op states; the command's
+        // `if let Some(ladder)` skips the install/remove ladder for them, so
+        // the final reload guard applies to the ambient `nginx -t` result
+        // instead of re-testing a freshly published config.
+        assert_eq!(
+            conf_d_toggle_plan(true, false, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsLive,
+            "enable on an already-live site is a no-op"
+        );
+        assert_eq!(
+            conf_d_toggle_plan(false, true, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsDisabled,
+            "disable on an already-disabled site is a no-op"
+        );
+    }
+
+    #[test]
+    fn conf_d_toggle_refuses_the_ambiguous_state_with_both_names() {
+        let error = conf_d_toggle_plan(true, true, "example.com")
+            .err()
+            .expect("both files present must be refused");
+        assert!(error.starts_with("Ambiguous state in "), "{error}");
+        assert!(error.contains(NGINX_CONF_D), "{error}");
+        assert!(error.contains(".conf "), "{error}");
+        assert!(error.contains(".conf.disabled"), "{error}");
+    }
+
+    #[test]
+    fn conf_d_toggle_refuses_the_hollow_state_with_both_names() {
+        let error = conf_d_toggle_plan(false, false, "example.com")
+            .err()
+            .expect("neither file present must be refused");
+        assert!(
+            error.starts_with("The site does not exist in "),
+            "the Fedora UX must name the directory: {error}"
+        );
+        assert!(error.contains(NGINX_CONF_D), "{error}");
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf nor")),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf.disabled is")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_ambiguous_and_hollow_messages_name_the_concrete_paths() {
+        // the error strings embed the literal constants via format — walk one
+        // concrete instance in and assert the fully expanded paths show up
+        let both = format!(
+            "{}/example.com.conf",
+            NGINX_CONF_D
+        );
+        let error = conf_d_toggle_plan(true, true, "example.com")
+            .err()
+            .unwrap();
+        assert!(error.contains(&both), "expanded live path missing: {error}");
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf.disabled")),
+            "expanded archive path missing: {error}"
+        );
+    }
+}
