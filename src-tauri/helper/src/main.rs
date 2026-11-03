@@ -232,6 +232,40 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes exactly one web-root destination path."
                 ))
             }
+        } else if requested == "nmcli_connection_save" {
+            nmcli_connection_save_action(&args)
+        } else if requested == "nmcli_connection_delete" {
+            if args.len() == 2 {
+                nmcli_connection_delete_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one connection UUID."
+                ))
+            }
+        } else if requested == "nmcli_connection_up" {
+            if args.len() == 2 {
+                nmcli_connection_up_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one connection UUID."
+                ))
+            }
+        } else if requested == "nmcli_connection_down" {
+            if args.len() == 2 {
+                nmcli_connection_down_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one connection UUID."
+                ))
+            }
+        } else if requested == "nmcli_connection_import" {
+            if args.len() == 3 {
+                nmcli_connection_import_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly an import type and a file path."
+                ))
+            }
         } else if args.len() == 2 {
             let account = &args[1];
             is_valid_account_name(account).and_then(|_| {
@@ -1534,6 +1568,119 @@ fn nginx_www_install_action(dest: &str) -> Result<(), String> {
     let stripped = dest.strip_prefix(var_www_root_prefix()).unwrap_or_default();
     let (parent, name) = www_walk_parent(&root, stripped, dest)?;
     www_install_binary_file(&parent, &name, &content, dest)?;
+    Ok(())
+}
+
+/// The `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
+/// action: creates or modifies an nmcli connection profile. All operands are
+/// validated by `check_nmcli_connection_save` before this point runs.
+fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
+    // args[0] is the action name; args[1..] = [verb, connection, prop, value, ...]
+    let verb = args.get(1).ok_or_else(|| {
+        "lcp-admin: nmcli_connection_save requires a verb (add/modify).".to_string()
+    })?;
+    let connection = args.get(2).ok_or_else(|| {
+        "lcp-admin: nmcli_connection_save requires a connection name.".to_string()
+    })?;
+    let mut cmd = std::process::Command::new("nmcli");
+    cmd.arg("connection").arg(verb.as_str()).arg(connection.as_str());
+    for pair in args[3..].chunks(2) {
+        cmd.arg(pair[0].as_str()).arg(pair[1].as_str());
+    }
+    let output = cmd.output().map_err(|e| {
+        format!("lcp-admin: failed to spawn nmcli: {e}")
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: nmcli connection {verb} {connection} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `nmcli_connection_delete <uuid>` action: deletes exactly one
+/// connection profile by UUID.
+fn nmcli_connection_delete_action(uuid: &str) -> Result<(), String> {
+    let output = std::process::Command::new("nmcli")
+        .args(["connection", "delete", uuid])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: nmcli connection delete {uuid} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `nmcli_connection_up <uuid>` action: activates exactly one
+/// connection profile by UUID.
+fn nmcli_connection_up_action(uuid: &str) -> Result<(), String> {
+    let output = std::process::Command::new("nmcli")
+        .args(["connection", "up", uuid])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: nmcli connection up {uuid} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `nmcli_connection_down <uuid>` action: deactivates exactly one
+/// connection profile by UUID.
+fn nmcli_connection_down_action(uuid: &str) -> Result<(), String> {
+    let output = std::process::Command::new("nmcli")
+        .args(["connection", "down", uuid])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: nmcli connection down {uuid} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `nmcli_connection_import <openvpn|wireguard> <file_path>` action:
+/// imports a VPN profile from a user-readable file. The helper reads the
+/// file itself (never trusting app-passed content), so the path confinement
+/// in `check_nmcli_import` is the only gate on which file may be read.
+fn nmcli_connection_import_action(import_type: &str, file_path: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{
+        check_nmcli_import, ensure_safe_operand, nmcli_import_path_valid,
+    };
+    ensure_safe_operand(file_path, "import file path")?;
+    nmcli_import_path_valid(file_path)?;
+    check_nmcli_import(&[
+        import_type.to_string(),
+        file_path.to_string(),
+    ])?;
+
+    let output = std::process::Command::new("nmcli")
+        .args([
+            "connection",
+            "import",
+            "type",
+            import_type,
+            "file",
+            file_path,
+        ])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: nmcli connection import type {import_type} file {file_path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
     Ok(())
 }
 

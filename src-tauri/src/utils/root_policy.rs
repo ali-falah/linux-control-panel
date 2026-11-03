@@ -2017,6 +2017,241 @@ fn check_nmcli(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
+/// action: creates or modifies an nmcli connection profile by setting one or
+/// more properties. The verb and connection operand are confined; property
+/// names must follow nmcli's `setting.property` charset (no leading dash,
+/// no control characters); values are free-form by nmcli's design and are
+/// not grammar-checked here.
+fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
+    const PROGRAM: &str = "nmcli_connection_save";
+    if args.len() < 3 {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            "",
+            "<add|modify> <connection> <setting.prop> <value>...",
+        ));
+    }
+    let verb = args[0].as_str();
+    if verb != "add" && verb != "modify" {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            verb,
+            "the verb must be add or modify",
+        ));
+    }
+    ensure_safe_operand(&args[1], "connection name")?;
+    // setting.prop / value pairs from args[2] onward
+    let mut index = 2;
+    while index < args.len() {
+        let setting = args[index].as_str();
+        if setting.starts_with('-') {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "a property name must not start with a dash",
+            ));
+        }
+        if setting.contains('\n') || setting.contains('\r') || setting.contains('\0') {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "a property name must not contain control characters",
+            ));
+        }
+        let has_dot = setting.contains('.');
+        if !has_dot {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "a property must be in setting.property form",
+            ));
+        }
+        let (setting_part, prop_part) = setting.split_once('.').unwrap();
+        if setting_part.is_empty() || prop_part.is_empty() {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "both setting and property must be non-empty",
+            ));
+        }
+        for part in [setting_part, prop_part] {
+            if part
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | ':' | '+'))
+            {
+                return Err(operand_not_allowed(
+                    PROGRAM,
+                    setting,
+                    "property names may only contain alphanumeric characters, _, -, :, +",
+                ));
+            }
+        }
+        // values are free-form but must not be empty or contain control chars
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| {
+                operand_not_allowed(
+                    PROGRAM,
+                    setting,
+                    "every property must be followed by a value",
+                )
+            })?;
+        if value.is_empty() {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "a property value must not be empty",
+            ));
+        }
+        if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                setting,
+                "a property value must not contain control characters",
+            ));
+        }
+        index += 2;
+    }
+    Ok(())
+}
+
+/// The `nmcli_interface_state <iface> <up|down>` action: brings an interface
+/// up or down with `ip link set dev <iface> up|down`. The interface name is
+/// confined like an ip operand; `down` on `lo` or `loopback` is refused.
+fn check_nmcli_interface_state(args: &[String]) -> Result<(), String> {
+    const PROGRAM: &str = "nmcli_interface_state";
+    if args.len() != 2 {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            "",
+            "<iface> <up|down>",
+        ));
+    }
+    let direction = args[1].as_str();
+    if direction != "up" && direction != "down" {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            direction,
+            "the direction must be up or down",
+        ));
+    }
+    ensure_safe_operand(&args[0], "interface name")?;
+    if direction == "down" {
+        let lower = args[0].trim().to_lowercase();
+        if lower == "lo" || lower.starts_with("loopback") {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                &args[0],
+                "cannot bring down the loopback interface (lo): it is vital for inter-process communication",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `nmcli_connection_import <openvpn|wireguard> <file_path>` action:
+/// imports a VPN profile from a user-readable file. The file type must be
+/// declared and the path must be absolute, confinement-checked, and free of
+/// relative parts and symlinks — the helper reads the file itself, so the
+/// app must never be able to point it at an arbitrary file.
+pub fn check_nmcli_import(args: &[String]) -> Result<(), String> {
+    const PROGRAM: &str = "nmcli_connection_import";
+    if args.len() != 2 {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            "",
+            "<openvpn|wireguard> <file_path>",
+        ));
+    }
+    let import_type = args[0].as_str();
+    if import_type != "openvpn" && import_type != "wireguard" {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            import_type,
+            "the import type must be openvpn or wireguard",
+        ));
+    }
+    let path = &args[1];
+    ensure_safe_operand(path, "import file path")?;
+    nmcli_import_path_valid(path)?;
+    // extension check matches the importer's own branch: .ovpn for openvpn,
+    // .conf for wireguard
+    let expected_ext = if import_type == "openvpn" { "ovpn" } else { "conf" };
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if ext != expected_ext {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            path,
+            &format!(
+                "a {import_type} import file must have a .{expected_ext} extension"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A connection UUID must follow the 8-4-4-4-12 hexadecimal shape that
+/// NetworkManager assigns to every connection profile. Loose names like
+/// "Wired connection 1" are not UUIDs and are rejected here; callers that
+/// want to operate by name must use a different entry point.
+#[allow(dead_code)]
+fn is_uuid(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    let lens = [8, 4, 4, 4, 12];
+    parts.iter().zip(lens.iter()).all(|(part, &len)| {
+        part.len() == len
+            && part.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// Confinement roots for user-supplied import files: only directories a
+/// normal user can reasonably place a file in are allowed. System paths
+/// (/etc, /usr, /var, ...) are excluded so the importer cannot be pointed
+/// at host configuration or secret material.
+fn nmcli_import_allowed_dirs() -> &'static [&'static str] {
+    &["/home", "/tmp", "/var/tmp", "/run/media"]
+}
+
+/// Confinement check for a VPN import file path: absolute, no relative
+/// parts, no symlinks, confined to user-writable directories.
+pub fn nmcli_import_path_valid(path: &str) -> Result<(), String> {
+    if !Path::new(path).is_absolute() {
+        return Err(format!(
+            "The import file path must be absolute: {path}"
+        ));
+    }
+    // Reject any path segment that is "." or ".." — checking the raw
+    // segments is more reliable than Path::components() for this purpose.
+    for segment in path.split('/') {
+        if segment == "." || segment == ".." {
+            return Err(format!(
+                "The import file path must not contain relative parts: {path}"
+            ));
+        }
+    }
+    let parent = Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let in_allowed_dir = nmcli_import_allowed_dirs()
+        .iter()
+        .any(|d| parent == *d || parent.starts_with(*d));
+    if !in_allowed_dir {
+        return Err(format!(
+            "The import file path must be under one of {dirs:?}, not {path}",
+            dirs = nmcli_import_allowed_dirs()
+        ));
+    }
+    Ok(())
+}
+
 /// firewalld options are `--word` or `--word=value`; the value charset covers
 /// ports (`--add-port=8080/tcp`), services, sources and interface names. Zone
 /// operands must follow `--zone`.
@@ -2992,6 +3227,8 @@ const HELPER_ACTIONS: &[&str] = &[
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
+    "nmcli_connection_save", "nmcli_connection_delete", "nmcli_connection_import",
+    "nmcli_connection_up", "nmcli_connection_down",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3103,6 +3340,28 @@ const HELPER_NGINX_WWW_FS_ACTIONS: &[&str] = &["nginx_www_fs"];
 /// `nginx_www_install <dest>` — one destination file in the web root, fully
 /// filled from stdin; no source path is ever sent to the helper.
 const HELPER_NGINX_WWW_INSTALL_ACTIONS: &[&str] = &["nginx_www_install"];
+
+/// `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
+/// — creates or modifies an nmcli connection profile. Validated by
+/// `check_nmcli_connection_save`; no content travels on stdin.
+const HELPER_NMCLI_CONNECTION_SAVE_ACTIONS: &[&str] = &["nmcli_connection_save"];
+
+/// `nmcli_connection_delete <uuid>` — deletes one connection profile by UUID.
+/// Validated by `is_uuid`.
+const HELPER_NMCLI_CONNECTION_DELETE_ACTIONS: &[&str] = &["nmcli_connection_delete"];
+
+/// `nmcli_connection_up <uuid>` — activates one connection profile by UUID.
+/// Validated by `is_uuid`.
+const HELPER_NMCLI_CONNECTION_UP_ACTIONS: &[&str] = &["nmcli_connection_up"];
+
+/// `nmcli_connection_down <uuid>` — deactivates one connection profile by UUID.
+/// Validated by `is_uuid`.
+const HELPER_NMCLI_CONNECTION_DOWN_ACTIONS: &[&str] = &["nmcli_connection_down"];
+
+/// `nmcli_connection_import <type> <file_path>` — imports a VPN profile
+/// from a user-readable file (openvpn or wireguard). The file path must
+/// be in a permitted directory and match the expected extension.
+const HELPER_NMCLI_CONNECTION_IMPORT_ACTIONS: &[&str] = &["nmcli_connection_import"];
 
 /// Size cap for one `nginx_www_install` write. Web content is binary-
 /// tolerant (no gate beyond the size — the old echo-based flow could not
@@ -3437,6 +3696,68 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         })?;
         return Ok(());
     }
+    if HELPER_NMCLI_CONNECTION_SAVE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, verb, connection, setting.prop, value, ...]
+        check_nmcli_connection_save(&args[1..]).map_err(|reason| {
+            operand_not_allowed("lcp-admin", action, &reason)
+        })?;
+        return Ok(());
+    }
+    if HELPER_NMCLI_CONNECTION_DELETE_ACTIONS.contains(&action.as_str()) {
+        let [_, uuid] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one connection UUID",
+            ));
+        };
+        if !is_uuid(uuid) {
+            return Err(operand_not_allowed("lcp-admin", uuid, "not a valid connection UUID"));
+        }
+        return Ok(());
+    }
+    if HELPER_NMCLI_CONNECTION_UP_ACTIONS.contains(&action.as_str()) {
+        let [_, uuid] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one connection UUID",
+            ));
+        };
+        if !is_uuid(uuid) {
+            return Err(operand_not_allowed("lcp-admin", uuid, "not a valid connection UUID"));
+        }
+        return Ok(());
+    }
+    if HELPER_NMCLI_CONNECTION_DOWN_ACTIONS.contains(&action.as_str()) {
+        let [_, uuid] = args else {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one connection UUID",
+            ));
+        };
+        if !is_uuid(uuid) {
+            return Err(operand_not_allowed("lcp-admin", uuid, "not a valid connection UUID"));
+        }
+        return Ok(());
+    }
+    if HELPER_NMCLI_CONNECTION_IMPORT_ACTIONS.contains(&action.as_str()) {
+        // args: [action, import_type, file_path] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly an import type and a file path",
+            ));
+        }
+        let import_type = &args[1];
+        let file_path = &args[2];
+        ensure_safe_operand(file_path, "import file path")?;
+        nmcli_import_path_valid(file_path)?;
+        check_nmcli_import(&[import_type.to_string(), file_path.to_string()])?;
+        return Ok(());
+    }
     if args.len() != 1 {
         return Err(operand_not_allowed(
             "lcp-admin",
@@ -3477,6 +3798,9 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
         "ausearch" => check_ausearch(args),
         "firewall-cmd" => check_firewall_cmd(args),
         "nmcli" => check_nmcli(args),
+        "nmcli_connection_save" => check_nmcli_connection_save(args),
+        "nmcli_interface_state" => check_nmcli_interface_state(args),
+        "nmcli_connection_import" => check_nmcli_import(args),
         "renice" => check_renice(args),
         "nginx" => check_daemon_flags("nginx", args, &["-t", "-v", "-q"]),
         "sshd" => check_daemon_flags("sshd", args, &["-T", "-t"]),
@@ -3493,7 +3817,10 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
 
 #[cfg(test)]
 mod argument_policy_tests {
-    use super::ensure_arguments_for_program as check;
+    use super::{
+        ensure_arguments_for_program as check, is_uuid, nmcli_import_allowed_dirs,
+        nmcli_import_path_valid,
+    };
 
     fn ok(program: &str, args: &[&str]) {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -3853,6 +4180,125 @@ mod argument_policy_tests {
         refused("grep", &["-i"]);
     }
 
+    // ── nmcli_connection_save: verb + connection + setting.prop/value pairs ──
+    #[test]
+    fn nmcli_connection_save_validates_verb_connection_and_properties() {
+        ok(
+            "nmcli_connection_save",
+            &["add", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses", "192.168.1.10/24"],
+        );
+        ok(
+            "nmcli_connection_save",
+            &[
+                "modify",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.method",
+                "manual",
+                "ipv4.dns",
+                "8.8.8.8",
+                "connection.autoconnect",
+                "yes",
+            ],
+        );
+        refused(
+            "nmcli_connection_save",
+            &["delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses", "1.2.3.4/24"],
+        );
+        refused("nmcli_connection_save", &["add"]);
+        refused("nmcli_connection_save", &["add", "--evil-connection", "ipv4.addresses", "1.2.3.4/24"]);
+        refused(
+            "nmcli_connection_save",
+            &["add", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4"],
+        );
+        refused(
+            "nmcli_connection_save",
+            &["add", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses"],
+        );
+    }
+
+    // ── nmcli_interface_state: iface + up/down ──
+    #[test]
+    fn nmcli_interface_state_validates_iface_and_direction() {
+        ok("nmcli_interface_state", &["eth0", "up"]);
+        ok("nmcli_interface_state", &["wlan0", "down"]);
+        refused("nmcli_interface_state", &["lo", "down"]);
+        refused("nmcli_interface_state", &["loopback0", "down"]);
+        refused("nmcli_interface_state", &["eth0", "toggle"]);
+        refused("nmcli_interface_state", &["-eth0", "up"]);
+    }
+
+    // ── nmcli_connection_import: type + confined file path ──
+    #[test]
+    fn nmcli_connection_import_validates_type_and_path() {
+        ok("nmcli_connection_import", &["openvpn", "/home/user/myvpn.ovpn"]);
+        ok("nmcli_connection_import", &["wireguard", "/tmp/mypeer.conf"]);
+        refused("nmcli_connection_import", &["ipsec", "/home/user/myvpn.ovpn"]);
+        refused("nmcli_connection_import", &["openvpn", "/home/user/myvpn.conf"]);
+        refused("nmcli_connection_import", &["openvpn", "relative/path.ovpn"]);
+        refused("nmcli_connection_import", &["openvpn", "/etc/secret.ovpn"]);
+        refused("nmcli_connection_import", &["openvpn", "/home/user/../evil.ovpn"]);
+        refused(
+            "nmcli_connection_import",
+            &["openvpn", "/home/user/./evil.ovpn"],
+        );
+    }
+
+    // ── is_uuid: 8-4-4-4-12 hexadecimal shape ──
+    #[test]
+    fn connection_uuid_matches_8_4_4_4_12_shape() {
+        assert!(is_uuid("8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"));
+        assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
+        assert!(is_uuid("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"));
+        assert!(!is_uuid(""));
+        assert!(!is_uuid("not-a-uuid"));
+        assert!(!is_uuid("8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5")); // too short
+        assert!(!is_uuid("8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d-extra")); // too long
+        assert!(!is_uuid("8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5g")); // non-hex
+        assert!(!is_uuid("8a3b2c1d4e5f6a7b8c9d0e1f2a3b4c5d")); // no dashes
+    }
+
+    // ── nmcli_import_path_valid: confinement ──
+    #[test]
+    fn nmcli_import_path_confines_to_user_dirs() {
+        assert!(
+            nmcli_import_path_valid("/home/user/myvpn.ovpn").is_ok(),
+            "home directory import must be allowed"
+        );
+        assert!(
+            nmcli_import_path_valid("/tmp/mypeer.conf").is_ok(),
+            "tmp directory import must be allowed"
+        );
+        assert!(
+            nmcli_import_path_valid("/var/tmp/import.ovpn").is_ok(),
+            "var/tmp directory import must be allowed"
+        );
+        assert!(
+            nmcli_import_path_valid("/run/media/user/disk/file.conf").is_ok(),
+            "run/media directory import must be allowed"
+        );
+        assert!(
+            nmcli_import_path_valid("/etc/secret.ovpn").is_err(),
+            "system /etc path must be refused"
+        );
+        assert!(
+            nmcli_import_path_valid("/usr/share/file.conf").is_err(),
+            "system /usr path must be refused"
+        );
+        assert!(
+            nmcli_import_path_valid("relative/path.ovpn").is_err(),
+            "relative path must be refused"
+        );
+        assert!(
+            nmcli_import_path_valid("/home/user/../evil.ovpn").is_err(),
+            "parent-dir traversal must be refused"
+        );
+        assert!(
+            nmcli_import_path_valid("/home/user/./evil.conf").is_err(),
+            "current-dir component must be refused"
+        );
+        assert!(!nmcli_import_allowed_dirs().is_empty(), "allowed dirs must be non-empty");
+    }
+
     // ── the helper action ─────────────────────────────────────────────────────
 
     #[test]
@@ -3870,6 +4316,111 @@ mod argument_policy_tests {
         // explicitly enabled in a later step, both gates must keep it
         // fail-closed at dispatch.
         refused("lcp-admin", &["write_repo_file", "/etc/yum.repos.d/x.repo"]);
+    }
+
+    // ── nmcli helper action dispatch validation ──
+    #[test]
+    fn nmcli_connection_save_dispatch_validates_verb_and_connection() {
+        ok(
+            "lcp-admin",
+            &[
+                "nmcli_connection_save",
+                "add",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.addresses",
+                "192.168.1.10/24",
+            ],
+        );
+        ok(
+            "lcp-admin",
+            &[
+                "nmcli_connection_save",
+                "modify",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.method",
+                "manual",
+            ],
+        );
+        refused(
+            "lcp-admin",
+            &["nmcli_connection_save", "delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"],
+        ); // wrong verb
+        refused("lcp-admin", &["nmcli_connection_save", "add"]); // missing connection
+        refused(
+            "lcp-admin",
+            &[
+                "nmcli_connection_save",
+                "add",
+                "--evil-connection",
+                "ipv4.addresses",
+                "1.2.3.4/24",
+            ],
+        ); // connection starts with dash
+        refused(
+            "lcp-admin",
+            &[
+                "nmcli_connection_save",
+                "add",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4", // property without dot
+            ],
+        );
+        refused(
+            "lcp-admin",
+            &[
+                "nmcli_connection_save",
+                "add",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.addresses", // missing value
+            ],
+        );
+    }
+
+    #[test]
+    fn nmcli_connection_delete_dispatch_requires_uuid() {
+        ok(
+            "lcp-admin",
+            &["nmcli_connection_delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"],
+        );
+        refused("lcp-admin", &["nmcli_connection_delete", "not-a-uuid"]);
+        refused("lcp-admin", &["nmcli_connection_delete", ""]);
+        refused("lcp-admin", &["nmcli_connection_delete", "--evil"]);
+        refused("lcp-admin", &["nmcli_connection_delete"]);
+    }
+
+    #[test]
+    fn nmcli_connection_up_dispatch_requires_uuid() {
+        ok(
+            "lcp-admin",
+            &["nmcli_connection_up", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"],
+        );
+        refused("lcp-admin", &["nmcli_connection_up", "not-a-uuid"]);
+        refused("lcp-admin", &["nmcli_connection_up"]);
+    }
+
+    #[test]
+    fn nmcli_connection_import_dispatch_requires_type_and_file() {
+        ok(
+            "lcp-admin",
+            &["nmcli_connection_import", "openvpn", "/home/user/myvpn.ovpn"],
+        );
+        ok(
+            "lcp-admin",
+            &["nmcli_connection_import", "wireguard", "/home/user/mywg.conf"],
+        );
+        refused("lcp-admin", &["nmcli_connection_import", "openvpn"]);
+        refused("lcp-admin", &["nmcli_connection_import", "wireguard", "/tmp/bad.xyz"]);
+        refused("lcp-admin", &["nmcli_connection_import"]);
+    }
+
+    #[test]
+    fn nmcli_connection_down_dispatch_requires_uuid() {
+        ok(
+            "lcp-admin",
+            &["nmcli_connection_down", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"],
+        );
+        refused("lcp-admin", &["nmcli_connection_down", "not-a-uuid"]);
+        refused("lcp-admin", &["nmcli_connection_down"]);
     }
 
     #[test]

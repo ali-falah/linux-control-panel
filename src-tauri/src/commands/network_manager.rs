@@ -1,6 +1,7 @@
 use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege::Command;
 use crate::utils::privilege::Command as PrivCommand;
+use crate::utils::privilege::{run_privileged_with_stdin, RootAuth};
 
 #[tauri::command]
 pub fn network_get_interfaces() -> Result<String, String> {
@@ -310,24 +311,40 @@ fn parse_wireguard_conf(content: &str) -> Result<(String, String, Option<String>
 #[tauri::command]
 pub async fn network_import_vpn_profile(name: String, file_path: String) -> Result<String, String> {
     let is_openvpn = file_path.ends_with(".ovpn");
-    
-    if is_openvpn {
-        let output = Command::new("pkexec")
-            .args(["nmcli", "connection", "import", "type", "openvpn", "file", &file_path])
-            .output()
-            .map_err(|e| format!("Failed to run pkexec nmcli: {e}"))?;
-            
+
+    /// Dispatch a named `lcp-admin` nmcli action via PolicyKit privilege escalation.
+    /// The helper reads the file itself and enforces path confinement — the app
+    /// never passes file content on stdin or through the command line.
+    async fn run_nmcli_named_action(action: &str, params: &[String]) -> Result<(), String> {
+        let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+            "The administrator helper is not installed; the action was not executed.".to_string()
+        })?;
+        let mut args = Vec::with_capacity(params.len() + 1);
+        args.push(action.to_string());
+        args.extend_from_slice(params);
+        let output = run_privileged_with_stdin(helper, &args, &RootAuth::Polkit, "").await?;
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
-        
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(())
+    }
+
+    if is_openvpn {
+        // Use the nmcli_connection_import helper action instead of pkexec.
+        // The helper reads the file itself and confines paths to /home, /tmp, /var/tmp, /run_media.
+        run_nmcli_named_action(
+            "nmcli_connection_import",
+            &[String::from("openvpn"), file_path.clone()],
+        )
+        .await
+        .map_err(|e| format!("Failed to import VPN profile: {e}"))?;
+        Ok(String::new())
     } else {
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| format!("Failed to read file: {e}"))?;
-            
+
         let (private_key, address, dns, peers) = parse_wireguard_conf(&content)?;
-        
+
         let safe_name = if name.trim().is_empty() {
             std::path::Path::new(&file_path)
                 .file_stem()
@@ -337,53 +354,75 @@ pub async fn network_import_vpn_profile(name: String, file_path: String) -> Resu
         } else {
             name
         };
-        
+
         let ifname = format!("wg-{}", safe_name.to_lowercase().replace(' ', "-"));
-        
-        let add_out = Command::new("pkexec")
-            .args(["nmcli", "connection", "add", "type", "wireguard", "con-name", &safe_name, "ifname", &ifname])
-            .output()
-            .map_err(|e| format!("Failed to add wireguard connection: {e}"))?;
-            
-        if !add_out.status.success() {
-            return Err(String::from_utf8_lossy(&add_out.stderr).to_string());
-        }
-        
-        let mod_out = Command::new("pkexec")
-            .args([
-                "nmcli", "connection", "modify", &safe_name,
-                "wireguard.private-key", &private_key,
-                "ipv4.addresses", &address,
-                "ipv4.method", "manual",
-                "ipv6.method", "disabled"
-            ])
-            .output()
-            .map_err(|e| format!("Failed to configure wireguard: {e}"))?;
-            
-        if !mod_out.status.success() {
-            return Err(String::from_utf8_lossy(&mod_out.stderr).to_string());
-        }
-        
+
+        // Step 1: add the wireguard connection via nmcli_connection_save
+        run_nmcli_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("add"),
+                safe_name.clone(),
+                String::from("type"),
+                String::from("wireguard"),
+                String::from("con-name"),
+                safe_name.clone(),
+                String::from("ifname"),
+                ifname.clone(),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to add wireguard connection: {e}"))?;
+
+        // Step 2: configure wireguard settings
+        run_nmcli_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("modify"),
+                safe_name.clone(),
+                String::from("wireguard.private-key"),
+                private_key.clone(),
+                String::from("ipv4.addresses"),
+                address.clone(),
+                String::from("ipv4.method"),
+                String::from("manual"),
+                String::from("ipv6.method"),
+                String::from("disabled"),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to configure wireguard: {e}"))?;
+
+        // Step 3: optional DNS
         if let Some(dns_servers) = dns {
-            let dns_out = Command::new("pkexec")
-                .args(["nmcli", "connection", "modify", &safe_name, "ipv4.dns", &dns_servers])
-                .output()
-                .map_err(|e| format!("Failed to set wireguard DNS: {e}"))?;
-            if !dns_out.status.success() {
-                return Err(String::from_utf8_lossy(&dns_out.stderr).to_string());
-            }
+            run_nmcli_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    safe_name.clone(),
+                    String::from("ipv4.dns"),
+                    dns_servers.clone(),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to set wireguard DNS: {e}"))?;
         }
-        
+
+        // Step 4: peers
         for peer in peers {
-            let peer_out = Command::new("pkexec")
-                .args(["nmcli", "connection", "modify", &safe_name, "+wireguard.peers", &peer])
-                .output()
-                .map_err(|e| format!("Failed to add wireguard peer: {e}"))?;
-            if !peer_out.status.success() {
-                return Err(String::from_utf8_lossy(&peer_out.stderr).to_string());
-            }
+            run_nmcli_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    safe_name.clone(),
+                    String::from("+wireguard.peers"),
+                    peer.clone(),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to add wireguard peer: {e}"))?;
         }
-        
+
         Ok(format!("WireGuard connection '{}' successfully imported.", safe_name))
     }
 }
