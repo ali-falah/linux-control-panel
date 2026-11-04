@@ -1,8 +1,9 @@
 use crate::utils::privilege::{ensure_repo_file_path, ensure_safe_operand};
+use crate::utils::privilege::{run_privileged_with_stdin, RootAuth};
+use crate::utils::root_policy::{count_enabled_repos_in_content, repo_url_https_only};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::utils::privilege::tokio::Command;
 
 use crate::{binary_exists, log_to_file};
 
@@ -305,175 +306,268 @@ fn parse_apt_sources_file(path: &Path, entries: &mut Vec<RepoEntry>) {
     flush_stanza(entries, &uris, &suites, enabled, stanza_idx);
 }
 
-/// Enable or disable a specific repo in its file (.repo, .list, or .sources) via pkexec + sed
-#[tauri::command]
-pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String) -> Result<(), String> {
-    // The path comes from the frontend, so it is checked against the directories
-    // the package manager uses before the file is touched with root rights.
-    ensure_repo_file_path(&file_path)?;
-    if file_path.ends_with(".sources") {
-        let val = if enabled { "yes" } else { "no" };
-        let script = format!("s/^Enabled:\\s*.*/Enabled: {}/I", val);
-        let output = Command::new("pkexec")
-            .args(["sed", "-i", &script, &file_path])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Failed to toggle .sources repo: {err}"));
+/// Pure check: given all repo file contents as (path, content) pairs,
+/// determine if disabling `target_repo_id` in `target_file` would leave
+/// zero enabled repos system-wide.
+///
+/// Checks the **resulting state after the toggle would apply**: if the
+/// target repo is currently enabled=1, subtracting 1 from the total
+/// enabled count across all files gives the post-toggle count. If that
+/// is zero, confirmation is required.
+///
+/// Accounts for repos in ALL files, not just the one being toggled —
+/// "zero enabled repos system-wide" means checking across every repo file.
+pub fn would_disable_last_enabled_repo(
+    all_contents: &[(&str, &str)],
+    target_file: &str,
+    target_repo_id: &str,
+) -> bool {
+    let mut total_enabled = 0usize;
+    let mut target_enabled = false;
+
+    for (path, content) in all_contents {
+        total_enabled += count_enabled_repos_in_content(content);
+        if *path == target_file && is_repo_enabled_in_content(content, target_repo_id) {
+            target_enabled = true;
         }
-        log_to_file("INFO", &format!("Toggled .sources repo {repo_id} enabled={enabled}"));
-        return Ok(());
     }
 
-    if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
-        if enabled {
-            let output = Command::new("pkexec")
-                .args(["sed", "-i", "s/^#\\s*\\(deb\\s.*\\)/\\1/", &file_path])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-            if !output.status.success() {
-                let err = String::from_utf8_lossy(&output.stderr).to_string();
-                return Err(format!("Failed to enable .list repo: {err}"));
-            }
-        } else {
-            let output = Command::new("pkexec")
-                .args(["sed", "-i", "s/^\\(deb\\s.*\\)/# \\1/", &file_path])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-            if !output.status.success() {
-                let err = String::from_utf8_lossy(&output.stderr).to_string();
-                return Err(format!("Failed to disable .list repo: {err}"));
+    target_enabled && total_enabled.saturating_sub(1) == 0
+}
+
+/// Check if a specific repo section in `.repo` content has `enabled=1`.
+/// Tracks section boundaries so `enabled=1` in a different section
+/// is not attributed to the target repo.
+fn is_repo_enabled_in_content(content: &str, repo_id: &str) -> bool {
+    let target_header = format!("[{}]", repo_id);
+    let mut in_target = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_target = trimmed == target_header;
+            continue;
+        }
+        if in_target {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                if key.trim() == "enabled" && value.trim() == "1" {
+                    return true;
+                }
             }
         }
-        log_to_file("INFO", &format!("Toggled .list repo {repo_id} enabled={enabled}"));
-        return Ok(());
     }
+    false
+}
 
-    let enabled_str = if enabled { "1" } else { "0" };
-
-    // Use sed to update enabled= under the specific [repo_id] section
-    let script = format!(
-        r#"/^\[{}\]/,/^\[/ s/^enabled\s*=.*/enabled={}/;"#,
-        regex::escape(&repo_id),
-        enabled_str
-    );
-
-    let output = Command::new("pkexec")
-        .args(["sed", "-i", &script, &file_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
+/// Dispatch a named `lcp-admin` repo action via PolicyKit privilege escalation.
+/// The helper enforces path confinement and argument validation — the app
+/// never passes raw pkexec commands.
+async fn run_repo_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = run_privileged_with_stdin(helper, &args, &RootAuth::Polkit, "").await?;
     if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        log_to_file("ERROR", &format!("toggle_repo failed: {err}"));
-        return Err(format!("Failed to toggle repo: {err}"));
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-
-    log_to_file("INFO", &format!("Toggled repo {repo_id} enabled={enabled}"));
     Ok(())
 }
 
-/// Add a repo by URL using dnf config-manager or add-apt-repository
+/// Enable or disable a specific repo in its file (.repo, .list, or .sources).
+///
+/// Dispatches to `repo_toggle_enable` or `repo_toggle_disable` named actions
+/// instead of raw pkexec + sed. For disable operations, checks the
+/// zero-enabled-repos lockout: if disabling would leave zero enabled repos
+/// system-wide, requires explicit confirmation.
 #[tauri::command]
-pub async fn add_repo(url: String) -> Result<String, String> {
-    if url.trim().is_empty() {
+pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String, confirmed: bool) -> Result<String, String> {
+    // The path comes from the frontend, so it is checked against the directories
+    // the package manager uses before the file is touched with root rights.
+    ensure_repo_file_path(&file_path)?;
+
+    // Zero-enabled-repos lockout for disable operations: if disabling this repo
+    // would leave zero enabled repos system-wide, require confirmation.
+    if !enabled && !confirmed {
+        let all_contents = gather_all_repo_contents();
+        let all_contents_refs: Vec<(&str, &str)> = all_contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+        if would_disable_last_enabled_repo(&all_contents_refs, &file_path, &repo_id) {
+            return Ok(
+                "CONFIRMATION_REQUIRED: Disabling this repository would leave no enabled \
+                 repositories system-wide. Future package updates would be impossible. \
+                 Do you want to proceed?"
+                    .to_string(),
+            );
+        }
+    }
+
+    let action = if enabled { "repo_toggle_enable" } else { "repo_toggle_disable" };
+    run_repo_named_action(
+        action,
+        &[String::from(&file_path), String::from(&repo_id)],
+    )
+    .await
+    .map_err(|e| format!("Failed to toggle repo: {e}"))?;
+
+    log_to_file("INFO", &format!("Toggled repo {repo_id} enabled={enabled}"));
+    Ok(String::new())
+}
+
+/// Gather the contents of all repository files for lockout checks.
+/// Reads every .repo, .list, and .sources file under the package manager dirs.
+fn gather_all_repo_contents() -> Vec<(String, String)> {
+    let mut contents = Vec::new();
+    // Same locations the repo scanner reads (list_repos): /etc/yum.repos.d/,
+    // /etc/apt/sources.list.d/, plus the standalone classic
+    // /etc/apt/sources.list — otherwise the lockout check could miss enabled
+    // repos defined there.
+    let dirs = ["/etc/yum.repos.d", "/etc/apt/sources.list.d"];
+    for dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if matches!(ext, "repo" | "list" | "sources") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        contents.push((path.to_string_lossy().to_string(), content));
+                    }
+                }
+            }
+        }
+    }
+    // The classic standalone sources.list is not inside .list.d.
+    if let Ok(content) = std::fs::read_to_string("/etc/apt/sources.list") {
+        contents.push(("/etc/apt/sources.list".to_string(), content));
+    }
+    contents
+}
+
+/// Add a repo by URL using dnf config-manager or add-apt-repository.
+///
+/// https-only hard refusal: any scheme other than `https://` is rejected.
+/// `confirmed` gates the destructive trust decision: without it, a distinct
+/// warning result is returned (not a hard error) so the frontend can show a
+/// confirmation dialog. With `confirmed=true`, the repo is added and the
+/// resulting file is inspected for unsigned indicators (`gpgcheck=0`,
+/// `repo_gpgcheck=0`); an unsigned warning is surfaced but never blocks or
+/// rewrites the file.
+#[tauri::command]
+pub async fn add_repo(url: String, confirmed: bool) -> Result<String, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
         return Err("URL cannot be empty".to_string());
     }
-    // The URL is handed to dnf as an operand — a value that starts with a dash
-    // would be read as an option by dnf and could change its configuration.
-    ensure_safe_operand(url.trim(), "repository URL")?;
-    if !url.contains("://") && !url.starts_with('/') {
-        return Err("The repository URL must be a full URL or an absolute path.".to_string());
+    // https-only hard refusal: HTTP, FTP, file://, CDROM and any other scheme
+    // are refused — an unsigned or non-TLS source lets its maintainer run code
+    // as root on every future dnf/apt operation.
+    ensure_safe_operand(&url, "repository URL")?;
+    repo_url_https_only(&url)?;
+
+    // Confirmation gate: without it, return a distinct warning result so the
+    // frontend can show a blocking confirmation dialog.
+    if !confirmed {
+        return Ok(
+            "CONFIRMATION_REQUIRED: Adding a repository lets its maintainer run code as root \
+             on every future update — do you trust this source?"
+                .to_string(),
+        );
     }
 
     if binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "config-manager", "--add-repo", &url])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("add_repo failed: {stderr}"));
-            return Err(format!("Failed to add repo: {stderr}"));
-        }
+        run_repo_named_action(
+            "repo_add",
+            &[String::from(&url)],
+        )
+        .await
+        .map_err(|e| format!("Failed to add repo: {e}"))?;
 
         log_to_file("INFO", &format!("Added repo: {url}"));
-        return Ok(stdout);
+
+        // Post-add unsigned-repo detection: inspect repo files for disabled
+        // signature verification. Surface a warning but never block or rewrite.
+        let unsigned_warning = if detect_unsigned_repos() {
+            " WARNING: This repository does not use GPG signature verification. \
+             Future updates from this source may not be authenticated."
+        } else {
+            ""
+        };
+
+        return Ok(format!("{unsigned_warning}"));
     }
 
     if binary_exists("add-apt-repository").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/add-apt-repository", "-y", &url])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("add_repo failed: {stderr}"));
-            return Err(format!("Failed to add repo: {stderr}"));
-        }
+        run_repo_named_action(
+            "repo_add",
+            &[String::from(&url)],
+        )
+        .await
+        .map_err(|e| format!("Failed to add repo: {e}"))?;
 
         log_to_file("INFO", &format!("Added repo: {url}"));
-        return Ok(stdout);
+
+        let unsigned_warning = if detect_unsigned_repos() {
+            " WARNING: This repository does not use GPG signature verification. \
+             Future updates from this source may not be authenticated."
+        } else {
+            ""
+        };
+
+        return Ok(format!("{unsigned_warning}"));
     }
 
     Err("Neither dnf nor add-apt-repository is available on this system".to_string())
 }
 
+/// Scan repository files for unsigned indicators (`gpgcheck=0`,
+/// `repo_gpgcheck=0`). Returns `true` if any unsigned repo is found.
+///
+/// Checks /etc/yum.repos.d/*.repo files. Used after `add_repo` to surface a
+/// persistent unsigned-repository warning in the repo list — warning only,
+/// never blocking or rewriting.
+fn detect_unsigned_repos() -> bool {
+    if let Ok(dir) = std::fs::read_dir("/etc/yum.repos.d") {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("repo") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if repo_has_unsigned_indicators(&content) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check whether a single repo file's content contains unsigned indicators
+/// (`gpgcheck=0` or `repo_gpgcheck=0`). Pure function — unit-testable without
+/// touching the filesystem.
+fn repo_has_unsigned_indicators(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((key, value)) = trimmed.split_once('=') {
+            if (key.trim() == "gpgcheck" || key.trim() == "repo_gpgcheck")
+                && value.trim() == "0"
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Run dnf makecache or apt-get update to refresh metadata
 #[tauri::command]
 pub async fn run_makecache() -> Result<String, String> {
-    if binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "makecache"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    run_repo_named_action("repo_makecache", &[])
+        .await
+        .map_err(|e| format!("makecache failed: {e}"))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("makecache failed: {stderr}"));
-            return Err(format!("dnf makecache failed: {stderr}"));
-        }
-
-        log_to_file("INFO", "Ran dnf makecache");
-        return Ok(stdout);
-    }
-
-    if binary_exists("apt-get").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/apt-get", "update"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("apt update failed: {stderr}"));
-            return Err(format!("apt-get update failed: {stderr}"));
-        }
-
-        log_to_file("INFO", "Ran apt-get update");
-        return Ok(stdout);
-    }
-
-    Err("Neither dnf nor apt-get is available on this system".to_string())
+    log_to_file("INFO", "Ran dnf makecache / apt-get update");
+    Ok(String::new())
 }
 
 #[tauri::command]
@@ -1184,14 +1278,54 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
     Ok(diagnostics)
 }
 
+/// Pure check: given all repo file contents as (path, content) pairs,
+/// determine if deleting `target_file` would leave zero enabled repos
+/// system-wide.
+///
+/// Counts all enabled repos across all files, subtracts any enabled repos
+/// that exist only in `target_file`. If the result is zero, confirmation is
+/// required before deleting.
+pub fn would_delete_last_enabled_repo(
+    all_contents: &[(&str, &str)],
+    target_file: &str,
+) -> bool {
+    let mut total_enabled = 0usize;
+    let mut target_enabled = 0usize;
+
+    for (path, content) in all_contents {
+        let file_enabled = count_enabled_repos_in_content(content);
+        total_enabled += file_enabled;
+        if *path == target_file {
+            target_enabled = file_enabled;
+        }
+    }
+
+    total_enabled.saturating_sub(target_enabled) == 0 && total_enabled > 0
+}
+
 #[tauri::command]
-pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), String> {
+pub async fn delete_repo(repo_id: String, file_path: String, confirmed: bool) -> Result<String, String> {
     // The path comes from the frontend, so it is checked against the directories
     // the package manager uses before the file is deleted with root rights.
     ensure_repo_file_path(&file_path)?;
     let path = std::path::Path::new(&file_path);
     if !path.exists() {
-        return Ok(());
+        return Ok(String::new());
+    }
+
+    // Zero-enabled-repos lockout for delete: if deleting this file would leave
+    // zero enabled repos system-wide, require confirmation.
+    if !confirmed {
+        let all_contents = gather_all_repo_contents();
+        let all_contents_refs: Vec<(&str, &str)> = all_contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+        if would_delete_last_enabled_repo(&all_contents_refs, &file_path) {
+            return Ok(
+                "CONFIRMATION_REQUIRED: Deleting this repository would leave no enabled \
+                 repositories system-wide. Future package updates would be impossible. \
+                 Do you want to proceed?"
+                    .to_string(),
+            );
+        }
     }
 
     let content = fs::read_to_string(path).unwrap_or_default();
@@ -1202,18 +1336,15 @@ pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), Strin
         .collect();
 
     if sections.is_empty() || sections.len() <= 1 {
-        let output = Command::new("pkexec")
-            .args(["rm", "-f", &file_path])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to delete repo file: {e}"))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Failed to delete repo file: {err}"));
-        }
+        // Whole-file deletion: dispatch to repo_delete named action.
+        run_repo_named_action(
+            "repo_delete",
+            &[String::from(&file_path)],
+        )
+        .await
+        .map_err(|e| format!("Failed to delete repo file: {e}"))?;
         log_to_file("INFO", &format!("Deleted repo file: {}", file_path));
-        return Ok(());
+        return Ok(String::new());
     }
 
     let mut new_lines = Vec::new();
@@ -1242,55 +1373,251 @@ pub async fn delete_repo(repo_id: String, file_path: String) -> Result<(), Strin
     crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
     crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
     log_to_file("INFO", &format!("Deleted repo section [{}] from {}", repo_id, file_path));
-    Ok(())
+    Ok(String::new())
 }
 
 #[tauri::command]
 pub async fn clean_repo_cache(repo_id: String) -> Result<String, String> {
-    if binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "clean", "expire-cache", "--repo", &repo_id])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+    // The repo id is handed to dnf as an operand — a value that starts with a
+    // dash would be read as an option by dnf.
+    ensure_safe_operand(&repo_id, "repository id")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    run_repo_named_action(
+        "repo_clean_cache",
+        &[String::from(&repo_id)],
+    )
+    .await
+    .map_err(|e| format!("dnf clean failed: {e}"))?;
 
-        if !output.status.success() {
-            return Err(format!("dnf clean failed: {stderr}"));
-        }
-
-        return Ok(stdout);
-    }
-
-    if binary_exists("apt-get").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/apt-get", "clean"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            return Err(format!("apt-get clean failed: {stderr}"));
-        }
-
-        return Ok(stdout);
-    }
-
-    Err("Neither dnf nor apt-get is available on this system".to_string())
+    Ok(String::new())
 }
 
 #[tauri::command]
 pub async fn bulk_disable_repos(repo_targets: Vec<(String, String)>) -> Result<usize, String> {
     let mut count = 0;
     for (repo_id, file_path) in repo_targets {
-        if toggle_repo(repo_id, false, file_path).await.is_ok() {
+        if toggle_repo(repo_id, false, file_path, false).await.is_ok() {
             count += 1;
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod repo_lockout_tests {
+    use super::{
+        add_repo, detect_unsigned_repos, is_repo_enabled_in_content,
+        repo_has_unsigned_indicators, would_delete_last_enabled_repo,
+        would_disable_last_enabled_repo,
+    };
+
+    #[test]
+    fn would_disable_last_enabled_repo_returns_false_when_multiple_enabled() {
+        let contents = [
+            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
+            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
+            "disabling one of two enabled repos must not require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_disable_last_enabled_repo_returns_true_when_single_enabled() {
+        let contents = [("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n")];
+        assert!(
+            would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
+            "disabling the only enabled repo must require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_disable_last_enabled_repo_returns_false_when_target_not_enabled() {
+        let contents = [
+            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=0\n"),
+            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
+            "disabling an already-disabled repo must not require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_disable_last_enabled_repo_checks_across_files() {
+        // Target file's repo is enabled, but another file also has an enabled repo
+        let contents = [
+            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
+            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
+            "system-wide check across all repo files must find the second enabled repo"
+        );
+    }
+
+    #[test]
+    fn would_disable_last_enabled_repo_empty_content() {
+        let contents = [("/etc/yum.repos.d/empty.repo", "")];
+        assert!(
+            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/empty.repo", "fedora"),
+            "empty file: no enabled repos, no confirmation needed"
+        );
+    }
+
+    #[test]
+    fn is_repo_enabled_in_content_detects_enabled() {
+        assert!(
+            is_repo_enabled_in_content("[fedora]\nenabled=1\n", "fedora"),
+            "enabled=1 in target section must be detected"
+        );
+        assert!(
+            !is_repo_enabled_in_content("[fedora]\nenabled=0\n", "fedora"),
+            "enabled=0 must not be detected as enabled"
+        );
+        assert!(
+            !is_repo_enabled_in_content("[fedora]\nname=Fedora\n", "fedora"),
+            "no enabled key must not be detected as enabled"
+        );
+    }
+
+    #[test]
+    fn is_repo_enabled_in_content_respects_section_boundaries() {
+        let contents = "[other]\nenabled=1\n[fedora]\nenabled=0\n";
+        assert!(
+            !is_repo_enabled_in_content(contents, "fedora"),
+            "enabled=1 in a different section must not count for fedora"
+        );
+    }
+
+    #[test]
+    fn repo_has_unsigned_indicators_detects_gpgcheck_zero() {
+        assert!(
+            repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\ngpgcheck=0\n"),
+            "gpgcheck=0 must be detected"
+        );
+        assert!(
+            repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\nrepo_gpgcheck=0\n"),
+            "repo_gpgcheck=0 must be detected"
+        );
+    }
+
+    #[test]
+    fn repo_has_unsigned_indicators_refuses_signed_repos() {
+        assert!(
+            !repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\ngpgcheck=1\n"),
+            "gpgcheck=1 must not be detected as unsigned"
+        );
+        assert!(
+            !repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\n"),
+            "no gpgcheck key must not be detected as unsigned"
+        );
+        assert!(
+            !repo_has_unsigned_indicators(""),
+            "empty content must not be detected as unsigned"
+        );
+        assert!(
+            !repo_has_unsigned_indicators("[repo]\nenabled=0\nname=Test\n"),
+            "disabled repo without gpgcheck=0 must not be detected"
+        );
+    }
+
+    #[test]
+    fn detect_unsigned_repos_reads_system_dir() {
+        // detect_unsigned_repos reads /etc/yum.repos.d; it may return true or
+        // false depending on the system state. The important thing is that it
+        // doesn't panic.
+        let _ = detect_unsigned_repos();
+    }
+
+    #[tokio::test]
+    async fn add_repo_returns_confirmation_required_when_not_confirmed() {
+        let result = add_repo(
+            "https://download.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/"
+                .to_string(),
+            false,
+        )
+        .await;
+        assert!(result.is_ok(), "not confirmed must return Ok, not Err");
+        let msg = result.unwrap();
+        assert!(
+            msg.starts_with("CONFIRMATION_REQUIRED"),
+            "not confirmed must return CONFIRMATION_REQUIRED warning: {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_repo_refuses_non_https_url() {
+        let result = add_repo("http://download.fedoraproject.org/pub/".to_string(), true).await;
+        assert!(
+            result.is_err(),
+            "http URL must be refused: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_repo_refuses_empty_url() {
+        let result = add_repo("".to_string(), true).await;
+        assert!(
+            result.is_err(),
+            "empty URL must be refused: {result:?}"
+        );
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_true_when_file_has_only_enabled_repo() {
+        let contents = [("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n")];
+        assert!(
+            would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
+            "deleting the only enabled repo must require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_false_when_other_files_have_enabled_repos() {
+        let contents = [
+            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
+            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
+            "deleting one of two files with enabled repos must not require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_false_when_target_has_no_enabled_repos() {
+        let contents = [
+            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=0\n"),
+            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
+            "deleting a file with no enabled repos must not require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_false_when_no_enabled_repos() {
+        let contents = [("/etc/yum.repos.d/empty.repo", "")];
+        assert!(
+            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/empty.repo"),
+            "no enabled repos at all must not require confirmation"
+        );
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_subtracts_target_file_repos() {
+        // Target file has 2 enabled repos, another file has 1 enabled repo.
+        // Deleting target leaves 1 enabled repo → no confirmation needed.
+        let contents = [
+            ("/etc/yum.repos.d/multi.repo", "[r1]\nenabled=1\n[r2]\nenabled=1\n"),
+            ("/etc/yum.repos.d/single.repo", "[s1]\nenabled=1\n"),
+        ];
+        assert!(
+            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/multi.repo"),
+            "deleting multi-enabled file leaves other enabled repos → no confirmation"
+        );
+    }
 }

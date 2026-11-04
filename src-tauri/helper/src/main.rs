@@ -266,6 +266,54 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes exactly an import type and a file path."
                 ))
             }
+        } else if requested == "repo_toggle_enable" {
+            if args.len() == 3 {
+                repo_toggle_enable_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repo file path and a repo id."
+                ))
+            }
+        } else if requested == "repo_toggle_disable" {
+            if args.len() == 3 {
+                repo_toggle_disable_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repo file path and a repo id."
+                ))
+            }
+        } else if requested == "repo_add" {
+            if args.len() == 2 {
+                repo_add_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repository URL."
+                ))
+            }
+        } else if requested == "repo_delete" {
+            if args.len() == 2 {
+                repo_delete_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one repository file path."
+                ))
+            }
+        } else if requested == "repo_makecache" {
+            if args.len() == 1 {
+                repo_makecache_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no further arguments."
+                ))
+            }
+        } else if requested == "repo_clean_cache" {
+            if args.len() == 2 {
+                repo_clean_cache_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one repository id."
+                ))
+            }
         } else if args.len() == 2 {
             let account = &args[1];
             is_valid_account_name(account).and_then(|_| {
@@ -1684,6 +1732,245 @@ fn nmcli_connection_import_action(import_type: &str, file_path: &str) -> Result<
     Ok(())
 }
 
+/// Escape a string for safe use in a sed basic regular expression.
+/// Escapes sed metacharacters (`\ . [ ] * ^ $ / &`) so a repo id validated
+/// by `ensure_safe_operand` can be interpolated into a sed script without
+/// changing its meaning.
+fn sed_basic_re_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '\\' | '.' | '[' | ']' | '*' | '^' | '$' | '/' | '&' => {
+                format!("\\{c}").into_bytes()
+            }
+            _ => vec![c as u8],
+        })
+        .map(|b| b as char)
+        .collect()
+}
+
+/// The `repo_toggle_enable <file_path> <repo_id>` action: enables one repo
+/// section in a repository file. Handles .sources, .list, and .repo file types.
+fn repo_toggle_enable_action(file_path: &str, repo_id: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{ensure_repo_file_path, ensure_safe_operand};
+    ensure_repo_file_path(file_path)?;
+    ensure_safe_operand(repo_id, "repo id")?;
+
+    if file_path.ends_with(".sources") {
+        let output = std::process::Command::new("sed")
+            .args(["-i", "s/^Enabled:\\s*.*/Enabled: yes/I", file_path])
+            .output()
+            .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "lcp-admin: sed enable .sources repo in {file_path} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        return Ok(());
+    }
+
+    if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
+        let output = std::process::Command::new("sed")
+            .args(["-i", "s/^#\\s*\\(deb\\s.*\\)/\\1/", file_path])
+            .output()
+            .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "lcp-admin: sed enable .list repo in {file_path} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        return Ok(());
+    }
+
+    // .repo files: escape repo_id for sed basic regex
+    let escaped = sed_basic_re_escape(repo_id);
+    let script = format!(
+        "/^\\[{}\\]/,/^\\[/ s/^enabled\\s*=.*/enabled=1;/",
+        escaped
+    );
+    let output = std::process::Command::new("sed")
+        .args(["-i", &script, file_path])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: sed enable repo {repo_id} in {file_path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `repo_toggle_disable <file_path> <repo_id>` action: disables one repo
+/// section in a repository file. Handles .sources, .list, and .repo file types.
+fn repo_toggle_disable_action(file_path: &str, repo_id: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{ensure_repo_file_path, ensure_safe_operand};
+    ensure_repo_file_path(file_path)?;
+    ensure_safe_operand(repo_id, "repo id")?;
+
+    if file_path.ends_with(".sources") {
+        let output = std::process::Command::new("sed")
+            .args(["-i", "s/^Enabled:\\s*.*/Enabled: no/I", file_path])
+            .output()
+            .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "lcp-admin: sed disable .sources repo in {file_path} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        return Ok(());
+    }
+
+    if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
+        let output = std::process::Command::new("sed")
+            .args(["-i", "s/^\\(deb\\s.*\\)/# \\1/", file_path])
+            .output()
+            .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "lcp-admin: sed disable .list repo in {file_path} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        return Ok(());
+    }
+
+    // .repo files: escape repo_id for sed basic regex
+    let escaped = sed_basic_re_escape(repo_id);
+    let script = format!(
+        "/^\\[{}\\]/,/^\\[/ s/^enabled\\s*=.*/enabled=0;/",
+        escaped
+    );
+    let output = std::process::Command::new("sed")
+        .args(["-i", &script, file_path])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: sed disable repo {repo_id} in {file_path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `repo_add <url>` action: adds a new repository source via dnf or apt.
+/// The URL has already been https-only validated by the app and by
+/// `check_helper_action`; this is the last gate before the program runs.
+fn repo_add_action(url: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{ensure_safe_operand, repo_url_https_only};
+    ensure_safe_operand(url, "repository URL")?;
+    repo_url_https_only(url)?;
+
+    if std::process::Command::new("dnf")
+        .args(["config-manager", "--add-repo", url])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    if std::process::Command::new("add-apt-repository")
+        .args(["-y", url])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn add-apt-repository: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    Err("lcp-admin: neither dnf nor add-apt-repository succeeded adding the repo".to_string())
+}
+
+/// The `repo_delete <file_path>` action: deletes a repository file with root
+/// rights. Used when a repo file has at most one section; multi-section files
+/// are handled by rewriting (write_file_as_root) from the app side.
+fn repo_delete_action(file_path: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::ensure_repo_file_path;
+    ensure_repo_file_path(file_path)?;
+
+    let output = std::process::Command::new("rm")
+        .args(["-f", file_path])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn rm: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: rm -f {file_path} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// The `repo_makecache` action: refreshes package metadata via dnf or apt.
+/// Takes no further arguments.
+fn repo_makecache_action() -> Result<(), String> {
+    if std::process::Command::new("dnf")
+        .args(["makecache"])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    if std::process::Command::new("apt-get")
+        .args(["update"])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn apt-get: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    Err("lcp-admin: neither dnf nor apt-get succeeded refreshing metadata".to_string())
+}
+
+/// The `repo_clean_cache <repo_id>` action: clears package metadata cache for
+/// one repo via dnf or apt.
+fn repo_clean_cache_action(repo_id: &str) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::ensure_safe_operand;
+    ensure_safe_operand(repo_id, "repository id")?;
+
+    if std::process::Command::new("dnf")
+        .args(["clean", "expire-cache", "--repo", repo_id])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    if std::process::Command::new("apt-get")
+        .args(["clean"])
+        .output()
+        .map_err(|e| format!("lcp-admin: failed to spawn apt-get: {e}"))?
+        .status
+        .success()
+    {
+        return Ok(());
+    }
+
+    Err("lcp-admin: neither dnf nor apt-get succeeded cleaning cache".to_string())
+}
 /// The `write_repo_file <path>` action: writes the repository-manager's one
 /// allowed root-owned file kind — a `.repo`/`.list`/`.sources` file in one of
 /// the package manager's own repository directories.

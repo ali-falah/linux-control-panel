@@ -850,6 +850,18 @@ fn is_safe_repo_url_token(token: &str) -> bool {
     scheme_ok
 }
 
+/// A repository URL must use `https://` only. HTTP, FTP, file://, CDROM and
+/// any other scheme are refused — an unsigned or non-TLS source lets its
+/// maintainer run code as root on every future dnf/apt operation.
+pub fn repo_url_https_only(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "The repository URL must use https:// (got: {url})"
+        ));
+    }
+    Ok(())
+}
+
 fn is_on_off_flag_value(value: &str) -> bool {
     matches!(value, "0" | "1")
 }
@@ -931,6 +943,26 @@ fn validate_repo_key(key: &str, value: &str, line_no: usize) -> Result<(), Strin
         }
         _ => reject("directive is not on the repository allowlist"),
     }
+}
+
+/// Counts how many repos in a `.repo` file's content have `enabled=1`.
+/// Used by the zero-enabled-repos lockout check: disabling or deleting
+/// the last enabled repo system-wide requires explicit confirmation.
+pub fn count_enabled_repos_in_content(content: &str) -> usize {
+    let mut count = 0usize;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            if key.trim() == "enabled" && value.trim() == "1" {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// A deb822 `.sources` stanza key.
@@ -3229,6 +3261,9 @@ const HELPER_ACTIONS: &[&str] = &[
     "nginx_www_fs", "nginx_www_install",
     "nmcli_connection_save", "nmcli_connection_delete", "nmcli_connection_import",
     "nmcli_connection_up", "nmcli_connection_down",
+    "repo_toggle_enable", "repo_toggle_disable",
+    "repo_add",
+    "repo_delete", "repo_makecache", "repo_clean_cache",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3362,6 +3397,31 @@ const HELPER_NMCLI_CONNECTION_DOWN_ACTIONS: &[&str] = &["nmcli_connection_down"]
 /// from a user-readable file (openvpn or wireguard). The file path must
 /// be in a permitted directory and match the expected extension.
 const HELPER_NMCLI_CONNECTION_IMPORT_ACTIONS: &[&str] = &["nmcli_connection_import"];
+
+/// `repo_toggle_enable <file_path> <repo_id>` — enables one repo section in a
+/// repository file. Validated by `ensure_repo_file_path` and `ensure_safe_operand`.
+const HELPER_REPO_TOGGLE_ENABLE_ACTIONS: &[&str] = &["repo_toggle_enable"];
+
+/// `repo_toggle_disable <file_path> <repo_id>` — disables one repo section in a
+/// repository file. Validated by `ensure_repo_file_path` and `ensure_safe_operand`.
+const HELPER_REPO_TOGGLE_DISABLE_ACTIONS: &[&str] = &["repo_toggle_disable"];
+
+/// `repo_add <url>` — adds a new repository source. Validated by
+/// `ensure_safe_operand` and `repo_url_https_only` (https-only).
+const HELPER_REPO_ADD_ACTIONS: &[&str] = &["repo_add"];
+
+/// `repo_delete <file_path>` — deletes a repository file (whole file) or a
+/// single section from it. Validated by `ensure_repo_file_path`.
+const HELPER_REPO_DELETE_ACTIONS: &[&str] = &["repo_delete"];
+
+/// `repo_makecache` — refreshes package metadata (dnf makecache or apt-get
+/// update). Takes no further arguments.
+const HELPER_REPO_MAKECACHE_ACTIONS: &[&str] = &["repo_makecache"];
+
+/// `repo_clean_cache <repo_id>` — clears package metadata cache for one repo
+/// (dnf clean expire-cache --repo <repo_id> or apt-get clean).
+/// Validated by `ensure_safe_operand`.
+const HELPER_REPO_CLEAN_CACHE_ACTIONS: &[&str] = &["repo_clean_cache"];
 
 /// Size cap for one `nginx_www_install` write. Web content is binary-
 /// tolerant (no gate beyond the size — the old echo-based flow could not
@@ -3758,6 +3818,87 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         check_nmcli_import(&[import_type.to_string(), file_path.to_string()])?;
         return Ok(());
     }
+    if HELPER_REPO_TOGGLE_ENABLE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, file_path, repo_id] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repo file path and a repo id",
+            ));
+        }
+        let file_path = &args[1];
+        let repo_id = &args[2];
+        ensure_repo_file_path(file_path)?;
+        ensure_safe_operand(repo_id, "repo id")?;
+        return Ok(());
+    }
+    if HELPER_REPO_TOGGLE_DISABLE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, file_path, repo_id] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repo file path and a repo id",
+            ));
+        }
+        let file_path = &args[1];
+        let repo_id = &args[2];
+        ensure_repo_file_path(file_path)?;
+        ensure_safe_operand(repo_id, "repo id")?;
+        return Ok(());
+    }
+    if HELPER_REPO_ADD_ACTIONS.contains(&action.as_str()) {
+        // args: [action, url] — two items total
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repository URL",
+            ));
+        }
+        let url = &args[1];
+        ensure_safe_operand(url, "repository URL")?;
+        repo_url_https_only(url)?;
+        return Ok(());
+    }
+    if HELPER_REPO_DELETE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, file_path] — two items total
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one repository file path",
+            ));
+        }
+        let file_path = &args[1];
+        ensure_repo_file_path(file_path)?;
+        return Ok(());
+    }
+    if HELPER_REPO_MAKECACHE_ACTIONS.contains(&action.as_str()) {
+        // args: [action] — one item total, no further arguments
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no further arguments",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_REPO_CLEAN_CACHE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, repo_id] — two items total
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one repository id",
+            ));
+        }
+        let repo_id = &args[1];
+        ensure_safe_operand(repo_id, "repository id")?;
+        return Ok(());
+    }
     if args.len() != 1 {
         return Err(operand_not_allowed(
             "lcp-admin",
@@ -3831,6 +3972,19 @@ mod argument_policy_tests {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         assert!(check(program, &argv).is_err(), "must be refused: {program} {args:?}");
     }
+
+    // Repo file paths that are valid under both plain and test-fixture builds.
+    // The allowed dirs differ between the two configurations (REPO_ALLOWED_DIRS
+    // is cfg-gated), so the path must match the active configuration.
+    #[cfg(feature = "test-fixture")]
+    const REPO_FILE_YUM: &str = "/tmp/lcp-admin-test-fixture/etc/yum.repos.d/fedora.repo";
+    #[cfg(not(feature = "test-fixture"))]
+    const REPO_FILE_YUM: &str = "/etc/yum.repos.d/fedora.repo";
+
+    #[cfg(feature = "test-fixture")]
+    const REPO_FILE_APT: &str = "/tmp/lcp-admin-test-fixture/etc/apt/sources.list.d/debian.list";
+    #[cfg(not(feature = "test-fixture"))]
+    const REPO_FILE_APT: &str = "/etc/apt/sources.list.d/debian.list";
 
     // ── requirement 1: no low ids or duplicate ids for user/group tools ──────
 
@@ -4424,6 +4578,77 @@ mod argument_policy_tests {
     }
 
     #[test]
+    fn repo_toggle_enable_dispatch_validates_file_and_repo_id() {
+        ok(
+            "lcp-admin",
+            &["repo_toggle_enable", REPO_FILE_YUM, "fedora"],
+        );
+        ok(
+            "lcp-admin",
+            &["repo_toggle_enable", REPO_FILE_APT, "debian"],
+        );
+        refused("lcp-admin", &["repo_toggle_enable", REPO_FILE_YUM]);
+        refused("lcp-admin", &["repo_toggle_enable", REPO_FILE_YUM, "--evil"]);
+        refused("lcp-admin", &["repo_toggle_enable", REPO_FILE_YUM, ""]);
+        refused("lcp-admin", &["repo_toggle_enable"]);
+    }
+
+    #[test]
+    fn repo_toggle_disable_dispatch_validates_file_and_repo_id() {
+        ok(
+            "lcp-admin",
+            &["repo_toggle_disable", REPO_FILE_YUM, "fedora"],
+        );
+        ok(
+            "lcp-admin",
+            &["repo_toggle_disable", REPO_FILE_APT, "debian"],
+        );
+        refused("lcp-admin", &["repo_toggle_disable", REPO_FILE_YUM]);
+        refused("lcp-admin", &["repo_toggle_disable", REPO_FILE_YUM, "--evil"]);
+        refused("lcp-admin", &["repo_toggle_disable", REPO_FILE_YUM, ""]);
+        refused("lcp-admin", &["repo_toggle_disable"]);
+    }
+
+    #[test]
+    fn repo_add_dispatch_validates_url() {
+        ok(
+            "lcp-admin",
+            &["repo_add", "https://download.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/"],
+        );
+        ok("lcp-admin", &["repo_add", "https://deb.debian.org/debian"]);
+        refused("lcp-admin", &["repo_add", "http://download.fedoraproject.org/pub/"]);
+        refused("lcp-admin", &["repo_add", "ftp://host/repo"]);
+        refused("lcp-admin", &["repo_add", "file:///srv/repo"]);
+        refused("lcp-admin", &["repo_add", "--evil"]);
+        refused("lcp-admin", &["repo_add", ""]);
+        refused("lcp-admin", &["repo_add"]);
+    }
+
+    #[test]
+    fn repo_delete_dispatch_validates_file_path() {
+        ok("lcp-admin", &["repo_delete", REPO_FILE_YUM]);
+        ok("lcp-admin", &["repo_delete", REPO_FILE_APT]);
+        refused("lcp-admin", &["repo_delete"]);
+        refused("lcp-admin", &["repo_delete", "--evil"]);
+        refused("lcp-admin", &["repo_delete", ""]);
+    }
+
+    #[test]
+    fn repo_makecache_dispatch_takes_no_args() {
+        ok("lcp-admin", &["repo_makecache"]);
+        refused("lcp-admin", &["repo_makecache", "extra"]);
+    }
+
+    #[test]
+    fn repo_clean_cache_dispatch_validates_repo_id() {
+        ok("lcp-admin", &["repo_clean_cache", "fedora"]);
+        ok("lcp-admin", &["repo_clean_cache", "updates"]);
+        refused("lcp-admin", &["repo_clean_cache"]);
+        refused("lcp-admin", &["repo_clean_cache", "--evil"]);
+        refused("lcp-admin", &["repo_clean_cache", ""]);
+    }
+
+    #[test]
     fn ssh_key_actions_take_one_valid_account_name_only() {
         ok("lcp-admin", &["read_user_ssh_keys", "marvin"]);
         ok("lcp-admin", &["write_user_ssh_keys", "root"]);
@@ -4689,7 +4914,7 @@ mod profile_sh_policy_tests {
 
 #[cfg(test)]
 mod repo_content_policy_tests {
-    use super::ensure_repo_file_content;
+    use super::{count_enabled_repos_in_content, ensure_repo_file_content, repo_url_https_only};
 
     fn ok_file(path: &str, content: &str) {
         if let Err(reason) = ensure_repo_file_content(path, content) {
@@ -5061,6 +5286,84 @@ mod repo_content_policy_tests {
             "/etc/apt/sources.list.d/strict.sources",
             "Types: deb\nURIs: https://host.example/debian\nOrigin: Exa[mple]\n",
             "brackets in a free-form field",
+        );
+    }
+
+    // ── repo_url_https_only and count_enabled_repos_in_content ──────────────
+
+    #[test]
+    fn repo_url_https_only_accepts_https() {
+        assert!(
+            repo_url_https_only("https://download.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/").is_ok(),
+            "https URL must be accepted"
+        );
+        assert!(
+            repo_url_https_only("https://deb.debian.org/debian").is_ok(),
+            "plain https URL must be accepted"
+        );
+    }
+
+    #[test]
+    fn repo_url_https_only_refuses_non_https() {
+        assert!(
+            repo_url_https_only("http://download.fedoraproject.org/pub/").is_err(),
+            "http must be refused"
+        );
+        assert!(
+            repo_url_https_only("ftp://host/repo").is_err(),
+            "ftp must be refused"
+        );
+        assert!(
+            repo_url_https_only("file:///srv/repo").is_err(),
+            "file:// must be refused"
+        );
+        assert!(
+            repo_url_https_only("cdrom://deb.debian.org").is_err(),
+            "cdrom must be refused"
+        );
+        assert!(
+            repo_url_https_only("not-a-url").is_err(),
+            "scheme-less must be refused"
+        );
+        assert!(
+            repo_url_https_only("").is_err(),
+            "empty must be refused"
+        );
+    }
+
+    #[test]
+    fn count_enabled_repos_in_content_counts_correctly() {
+        // no repos
+        assert_eq!(
+            count_enabled_repos_in_content(""),
+            0,
+            "empty content has zero enabled repos"
+        );
+        // one enabled repo
+        assert_eq!(
+            count_enabled_repos_in_content("[repo1]\nname=A\nbaseurl=https://example.com\nenabled=1\n"),
+            1,
+            "one enabled=1 counts as one"
+        );
+        // one disabled repo
+        assert_eq!(
+            count_enabled_repos_in_content("[repo1]\nname=A\nbaseurl=https://example.com\nenabled=0\n"),
+            0,
+            "enabled=0 does not count"
+        );
+        // two enabled, one disabled
+        assert_eq!(
+            count_enabled_repos_in_content(
+                "[repo1]\nenabled=1\n[repo2]\nenabled=0\n[repo3]\nenabled=1\n"
+            ),
+            2,
+            "two enabled count as two"
+        );
+        // enabled with spaces
+        assert_eq!(
+            count_enabled_repos_in_content("[repo1]\n enabled = 1 \n"),
+            1,
+            "whitespace around '=' is tolerated"
         );
     }
 }
