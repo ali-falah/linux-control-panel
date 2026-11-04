@@ -1396,7 +1396,13 @@ pub async fn clean_repo_cache(repo_id: String) -> Result<String, String> {
 pub async fn bulk_disable_repos(repo_targets: Vec<(String, String)>) -> Result<usize, String> {
     let mut count = 0;
     for (repo_id, file_path) in repo_targets {
-        if toggle_repo(repo_id, false, file_path, false).await.is_ok() {
+        // confirmed: false so the zero-enabled-repos lockout still applies.
+        // toggle_repo returns Ok("CONFIRMATION_REQUIRED: …") without disabling
+        // when the lockout triggers — only count a real disable (empty Ok).
+        if matches!(
+            toggle_repo(repo_id, false, file_path, false).await,
+            Ok(ref r) if r.is_empty()
+        ) {
             count += 1;
         }
     }

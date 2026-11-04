@@ -181,11 +181,24 @@
     togglingId = repo.id;
     const newEnabled = !repo.enabled;
     try {
-      await invoke('toggle_repo', {
+      // The disable direction returns a CONFIRMATION_REQUIRED advisory (not an
+      // error) when disabling would leave zero enabled repos system-wide.
+      const result: string = await invoke('toggle_repo', {
         repoId: repo.id,
         enabled: newEnabled,
         filePath: repo.file_path,
+        confirmed: false,
       });
+      if (result.startsWith('CONFIRMATION_REQUIRED:')) {
+        togglingId = null;
+        uiStore.confirm(
+          newEnabled ? 'Enable Repository' : 'Disable Last Enabled Repository',
+          result.slice('CONFIRMATION_REQUIRED:'.length).trim(),
+          () => toggleRepoConfirmed(repo),
+          true
+        );
+        return;
+      }
       repo.enabled = newEnabled;
       repos = [...repos]; // trigger reactivity
       uiStore.addToast(
@@ -201,6 +214,38 @@
     }
   }
 
+  async function toggleRepoConfirmed(repo: RepoEntry) {
+    statusStore.setBusy(`Toggling repository ${repo.name || repo.id}…`);
+    try {
+      await invoke('toggle_repo', {
+        repoId: repo.id,
+        enabled: !repo.enabled,
+        filePath: repo.file_path,
+        confirmed: true,
+      });
+      repo.enabled = !repo.enabled;
+      repos = [...repos]; // trigger reactivity
+      uiStore.addToast(
+        `Repo "${repo.name}" ${!repo.enabled ? 'enabled' : 'disabled'}`,
+        'success'
+      );
+      statusStore.setLastCommand(
+        `dnf config-manager --${!repo.enabled ? 'enable' : 'disable'} ${repo.id}`,
+        0,
+        true
+      );
+    } catch (e) {
+      uiStore.addToast(`Failed to toggle repo: ${e}`, 'error');
+      statusStore.setLastCommand(
+        `dnf config-manager --${!repo.enabled ? 'enable' : 'disable'} ${repo.id}`,
+        1,
+        false
+      );
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
   function confirmDeleteRepo(repo: { id: string; file_path: string; name?: string }) {
     const displayName = repo.name || repo.id;
     uiStore.confirm(
@@ -209,10 +254,24 @@
       async () => {
         statusStore.setBusy(`Deleting repository ${displayName}...`);
         try {
-          await invoke('delete_repo', {
+          // The backend returns a CONFIRMATION_REQUIRED advisory (not an
+          // error) when deleting this file would leave zero enabled repos
+          // system-wide.
+          const result: string = await invoke('delete_repo', {
             repoId: repo.id,
             filePath: repo.file_path,
+            confirmed: false,
           });
+          if (result.startsWith('CONFIRMATION_REQUIRED:')) {
+            statusStore.clearBusy();
+            uiStore.confirm(
+              'Delete Last Enabled Repository?',
+              result.slice('CONFIRMATION_REQUIRED:'.length).trim(),
+              () => deleteRepoConfirmed(repo),
+              true
+            );
+            return;
+          }
           uiStore.addToast(`Repository "${displayName}" deleted successfully`, 'success');
           await loadRepos();
           if (diagnostics.length > 0) {
@@ -229,6 +288,27 @@
       },
       true
     );
+  }
+
+  async function deleteRepoConfirmed(repo: { id: string; file_path: string; name?: string }) {
+    const displayName = repo.name || repo.id;
+    statusStore.setBusy(`Deleting repository ${displayName}...`);
+    try {
+      await invoke('delete_repo', {
+        repoId: repo.id,
+        filePath: repo.file_path,
+        confirmed: true,
+      });
+      uiStore.addToast(`Repository "${displayName}" deleted successfully`, 'success');
+      await loadRepos();
+      if (diagnostics.length > 0) {
+        diagnostics = diagnostics.filter(d => !(d.repo_id === repo.id && d.file_path === repo.file_path));
+      }
+    } catch (e) {
+      uiStore.addToast(`Failed to delete repo: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
   }
 
   async function disableAllDeadRepos() {
@@ -274,19 +354,63 @@
   async function addRepo() {
     if (!addUrl.trim()) return;
     addLoading = true;
+    // Adding a repository lets its maintainer run code as root on every
+    // future update. The backend gates the add on `confirmed` and returns a
+    // CONFIRMATION_REQUIRED advisory (not an error) when it is absent.
     try {
-      await invoke('add_repo', { url: addUrl.trim() });
-      uiStore.addToast('Repository added successfully', 'success');
-      showAddDialog = false;
-      addUrl = '';
-      await loadRepos();
-      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 0, true);
+      const result: string = await invoke('add_repo', {
+        url: addUrl.trim(),
+        confirmed: false,
+      });
+      if (result.startsWith('CONFIRMATION_REQUIRED:')) {
+        addLoading = false;
+        uiStore.confirm(
+          'Add This Repository?',
+          result.slice('CONFIRMATION_REQUIRED:'.length).trim(),
+          () => addRepoConfirmed(),
+          true
+        );
+        return;
+      }
+      finishAddRepo(result);
     } catch (e) {
       uiStore.addToast(`Failed to add repo: ${e}`, 'error');
       statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 1, false);
     } finally {
       addLoading = false;
     }
+  }
+
+  async function addRepoConfirmed() {
+    statusStore.setBusy('Adding repository…');
+    try {
+      const result: string = await invoke('add_repo', {
+        url: addUrl.trim(),
+        confirmed: true,
+      });
+      finishAddRepo(result);
+    } catch (e) {
+      uiStore.addToast(`Failed to add repo: ${e}`, 'error');
+      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 1, false);
+    } finally {
+      statusStore.clearBusy();
+    }
+  }
+
+  // Treats a successful add_repo result: refreshes the list and surfaces the
+  /// unsigned-repo warning (appended by the backend when gpgcheck=0 is found)
+  /// inline instead of hiding it in a success toast.
+  function finishAddRepo(result: string) {
+    if (result.includes('WARNING: This repository does not use GPG signature verification')) {
+      uiStore.addToast('Repository added, but its GPG check is disabled — updates from this source will not be authenticated', 'warning');
+    } else {
+      uiStore.addToast('Repository added successfully', 'success');
+    }
+    showAddDialog = false;
+    const addedUrl = addUrl;
+    addUrl = '';
+    loadRepos();
+    statusStore.setLastCommand(`dnf config-manager --add-repo ${addedUrl}`, 0, true);
   }
 
   async function makecache() {
