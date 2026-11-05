@@ -853,13 +853,79 @@ fn is_safe_repo_url_token(token: &str) -> bool {
 /// A repository URL must use `https://` only. HTTP, FTP, file://, CDROM and
 /// any other scheme are refused — an unsigned or non-TLS source lets its
 /// maintainer run code as root on every future dnf/apt operation.
+///
+/// Beyond the scheme the URL must also be structurally sane before the app
+/// ever hands it to a privileged command: no whitespace or control
+/// characters (the operand may still be split or mangled downstream), no
+/// quote/backslash/backtick (shell metacharacters are never acceptable in a
+/// repo URL), a non-empty authority (a host must be named), no embedded
+/// credentials (`user:pass@host` is never supported — a repo URL must not
+/// carry a secret; keyrings or configured mirrors are the supported
+/// mechanism), and a numeric 1–5-digit port after `:` if one is given.
+/// Query strings and fragments are passed through untouched — dnf/apt are
+/// responsible for interpreting them. A single-label host (e.g.
+/// `https://localhost/…`) is syntactically valid here; whether it resolves
+/// is the package manager's verdict, not the validator's.
 pub fn repo_url_https_only(url: &str) -> Result<(), String> {
+    let reject = |what: &str| Err(format!("The repository URL must {what} (got: {url})"));
+    if url.is_empty() {
+        return reject("not be empty");
+    }
     if !url.starts_with("https://") {
-        return Err(format!(
-            "The repository URL must use https:// (got: {url})"
-        ));
+        return reject("use https://");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return reject("contain no whitespace or control characters");
+    }
+    if url.chars().any(|c| matches!(c, '"' | '\'' | '\\' | '`')) {
+        return reject("contain no quote, backslash or backtick characters");
+    }
+    let rest = &url["https://".len()..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    // embedded credentials are rejected before any empty check so the error
+    // names the real problem — any '@' inside the authority means userinfo
+    if authority.contains('@') {
+        return reject(
+            "not embed credentials (user:pass@host) — use a keyring or a configured mirror",
+        );
+    }
+    if authority.is_empty() {
+        return reject("name a host (e.g. https://host/path)");
+    }
+    if authority.starts_with('[') {
+        // IPv6 literal: [host] optionally followed by :port
+        match authority.find(']') {
+            None => return reject("close the bracketed IPv6 host"),
+            Some(end) => {
+                let after = &authority[end + 1..];
+                if !after.is_empty()
+                    && (!after.starts_with(':')
+                        || !port_is_digits(&after[1..]))
+                {
+                    return reject("carry only a numeric port after the IPv6 host");
+                }
+            }
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() {
+            return reject("name a host before the port");
+        }
+        // a non-IPv6 authority may not contain a nested colon (a [host]:port
+        // shape has already been handled above) — host:8443:9 is malformed
+        // whatever the rsplit port looks like
+        if host.contains(':') {
+            return reject("carry at most one colon (host:port) in a non-bracketed authority");
+        }
+        if !port_is_digits(port) {
+            return reject("use a numeric port of 1 to 5 digits");
+        }
     }
     Ok(())
+}
+
+fn port_is_digits(port: &str) -> bool {
+    !port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit())
 }
 
 fn is_on_off_flag_value(value: &str) -> bool {
@@ -3253,7 +3319,9 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 /// * `nginx_www_fs <mkdir|remove|rename> …` / `nginx_www_install <dest>` —
 ///   the web-root operations and the web-file install (content always
 ///   arrives on stdin; no source path is ever trusted to the helper).
-const HELPER_ACTIONS: &[&str] = &[
+// `pub(crate)` so helper/src/main.rs (which includes this file by path) can
+// assert its ROOT_ACTIONS gate list never drifts from this validation list.
+pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
     "write_profile_sh", "restore_profile_sh",
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
@@ -5329,6 +5397,114 @@ mod repo_content_policy_tests {
             repo_url_https_only("").is_err(),
             "empty must be refused"
         );
+    }
+
+    /// Phase-2 hardening tests: the validator must refuse structurally broken
+    /// https URLs of every shape an operator might paste, not just foreign
+    /// schemes — and the tests run against the *real* validator function the
+    /// privileged path uses, not the classifier.
+    #[test]
+    fn repo_url_https_only_refuses_broken_hosts_empties_and_credentials() {
+        // https:// with nothing at all after it
+        assert!(repo_url_https_only("https://").is_err(), "scheme-only must be refused");
+        // empty authority, path only
+        assert!(
+            repo_url_https_only("https:///repository").is_err(),
+            "missing host must be refused"
+        );
+        // embedded credentials are never supported in a repo URL
+        assert!(
+            repo_url_https_only("https://user:secret@example.com/repo").is_err(),
+            "user:pass must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://token@example.com/repo").is_err(),
+            "bare userinfo must be refused"
+        );
+        // whitespace and control characters
+        assert!(
+            repo_url_https_only(" https://example.com/repo").is_err(),
+            "leading space must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://example.com/repo ").is_err(),
+            "trailing space must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://exa mple.com/repo").is_err(),
+            "embedded space must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://example.com/re\tpo").is_err(),
+            "tab must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://example.com/re\u{0}po").is_err(),
+            "NUL must be refused"
+        );
+        // shell metacharacters — a repo URL is a privileged argv element; the
+        // helper never passes URLs through a shell, so ';' and '|' cannot gate
+        // a second command (they are literal), while quotes/backslashes/
+        // backticks are refused outright because no legitimate URL carries
+        // them unescaped and they are the classic bypass shapes
+        assert!(
+            repo_url_https_only("https://example.com/repo`whoami`").is_err(),
+            "backtick must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://user'@example.com").is_err(),
+            "quote must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://a\\b@example.com").is_err(),
+            "backslash must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://\"example.com").is_err(),
+            "double quote must be refused"
+        );
+        // malformed ports
+        assert!(repo_url_https_only("https://host:").is_err(), "empty port must be refused");
+        assert!(repo_url_https_only("https://host:x/").is_err(), "letters in port must be refused");
+        assert!(repo_url_https_only("https://host:999999/").is_err(), "6-digit port must be refused");
+        assert!(repo_url_https_only("https://host:8443:9/").is_err(), "two colons must be refused");
+        // broken IPv6 shapes
+        assert!(
+            repo_url_https_only("https://[::1/repo").is_err(),
+            "unterminated bracket must be refused"
+        );
+        assert!(
+            repo_url_https_only("https://[::1]:x/repo").is_err(),
+            "letters in IPv6 port must be refused"
+        );
+    }
+
+    #[test]
+    fn repo_url_https_only_accepts_valid_shapes() {
+        // the shapes the app legitimately produces must keep working
+        assert!(repo_url_https_only("https://host/path/").is_ok(), "plain host");
+        assert!(repo_url_https_only("https://host:443/path").is_ok(), "numeric port");
+        assert!(repo_url_https_only("https://host:65535/p/x.repo").is_ok(), "max port");
+        assert!(repo_url_https_only("https://example.com/repository.repo").is_ok(), ".repo URL");
+        assert!(
+            repo_url_https_only("https://example.com/x.repo?f=/g&mirror=list#top").is_ok(),
+            "query and fragment pass through untouched"
+        );
+        assert!(
+            repo_url_https_only("https://example.com/$releasever/$basearch/os/").is_ok(),
+            "dnf URL variables stay accepted"
+        );
+        assert!(repo_url_https_only("https://localhost/repo").is_ok(), "single-label host");
+        assert!(repo_url_https_only("https://[::1]/repo").is_ok(), "IPv6 literal");
+        assert!(repo_url_https_only("https://[fe80::1]:8443/x").is_ok(), "IPv6 with port");
+        assert!(
+            repo_url_https_only("https://invalid.example/repo").is_ok(),
+            "hyphenated host label"
+        );
+        // https://invalid is a syntactically valid single-label host — the
+        // validator accepts it and the package manager delivers the real
+        // verdict; this documents that choice explicitly
+        assert!(repo_url_https_only("https://invalid").is_ok(), "single-label host");
     }
 
     #[test]

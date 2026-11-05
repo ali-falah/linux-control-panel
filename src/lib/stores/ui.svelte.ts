@@ -230,7 +230,7 @@ class UIStore {
   }
 
   serviceFilter = $state<string | null>(null);
-  serviceSearchQuery = $state<string>('');
+  serviceSearchQuery = $state<string | null>(null);
   processSearchQuery = $state<string>('');
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);

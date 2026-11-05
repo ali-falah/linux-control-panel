@@ -375,7 +375,7 @@
       finishAddRepo(result);
     } catch (e) {
       uiStore.addToast(`Failed to add repo: ${e}`, 'error');
-      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 1, false);
+      statusStore.setLastCommand(`dnf config-manager addrepo --from-repofile=${addUrl}`, 1, false);
     } finally {
       addLoading = false;
     }
@@ -391,7 +391,7 @@
       finishAddRepo(result);
     } catch (e) {
       uiStore.addToast(`Failed to add repo: ${e}`, 'error');
-      statusStore.setLastCommand(`dnf config-manager --add-repo ${addUrl}`, 1, false);
+      statusStore.setLastCommand(`dnf config-manager addrepo --from-repofile=${addUrl}`, 1, false);
     } finally {
       statusStore.clearBusy();
     }
@@ -402,15 +402,19 @@
   /// inline instead of hiding it in a success toast.
   function finishAddRepo(result: string) {
     if (result.includes('WARNING: This repository does not use GPG signature verification')) {
-      uiStore.addToast('Repository added, but its GPG check is disabled — updates from this source will not be authenticated', 'warning');
+      uiStore.addToast('Repository configuration added, but its GPG check is disabled — updates from this source will not be authenticated', 'warning');
     } else {
-      uiStore.addToast('Repository added successfully', 'success');
+      // Configuration success is not metadata success: at this point only a
+      // .repo/.sources file exists. Reachability (mirror up, metadata
+      // downloadable) is not verified until the user runs "Validate" — the
+      // toast must not claim a healthy, usable repository.
+      uiStore.addToast('Repository configuration added — its metadata was not verified yet. Use "Validate" to confirm the repo is reachable.', 'info');
     }
     showAddDialog = false;
     const addedUrl = addUrl;
     addUrl = '';
     loadRepos();
-    statusStore.setLastCommand(`dnf config-manager --add-repo ${addedUrl}`, 0, true);
+    statusStore.setLastCommand(`dnf config-manager addrepo --from-repofile=${addedUrl}`, 0, true);
   }
 
   async function makecache() {
@@ -494,6 +498,7 @@
   <PageHeader title="Repo Manager" icon={Package}>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap: wrap;">
       <TabGroup
+        size="sm"
         tabs={[
           { id: 'repos', label: 'System Repos' },
           { id: 'copr', label: 'Community (COPR / PPA)' }
@@ -514,7 +519,7 @@
           <span>{validating ? 'Validating Mirrors...' : 'Validate & Diagnose Repos'}</span>
         </button>
 
-        <Button variant="primary" onclick={() => showAddDialog = true}>
+        <Button variant="primary" size="sm" onclick={() => showAddDialog = true}>
           <Plus size={14} /> Add Repo
         </Button>
 

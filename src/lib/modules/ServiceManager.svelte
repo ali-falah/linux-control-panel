@@ -275,29 +275,29 @@
   );
 
   $effect(() => {
-    if (uiStore.targetSubTab && (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services')) {
-      if (mainTab !== uiStore.targetSubTab) {
-        mainTab = uiStore.targetSubTab;
-      }
+    // Service Manager deep links are one-shot: apply the pending navigation
+    // state, then consume it. Leaving it in the store makes the effect
+    // override the user's own tab/filter/search choices on every change.
+    const pendingSubTab = uiStore.targetSubTab;
+    if (pendingSubTab === 'services' || pendingSubTab === 'autostart' || pendingSubTab === 'boot_analyzer') {
+      mainTab = pendingSubTab;
+      uiStore.targetSubTab = null;
     }
-    if (uiStore.serviceSearchQuery !== undefined && uiStore.serviceSearchQuery !== null) {
-      if (filter !== uiStore.serviceSearchQuery) {
-        filter = uiStore.serviceSearchQuery;
-      }
-      if (uiStore.serviceSearchQuery !== '' && mainTab !== 'services') {
-        mainTab = 'services';
-      }
+
+    const pendingSearch = uiStore.serviceSearchQuery;
+    if (pendingSearch !== null) {
+      filter = pendingSearch;
+      mainTab = 'services';
+      uiStore.serviceSearchQuery = null;
     }
-    if (uiStore.serviceFilter) {
-      const targetStatus: 'active' | 'failed' | 'all' = 
-        uiStore.serviceFilter === 'failed' ? 'failed' : 
-        (uiStore.serviceFilter === 'active' ? 'active' : 'all');
-      if (statusFilter !== targetStatus) {
-        statusFilter = targetStatus;
-      }
-      if (mainTab !== 'services') {
-        mainTab = 'services';
-      }
+
+    const pendingFilter = uiStore.serviceFilter;
+    if (pendingFilter) {
+      statusFilter =
+        pendingFilter === 'failed' ? 'failed' :
+        pendingFilter === 'active' ? 'active' : 'all';
+      mainTab = 'services';
+      uiStore.serviceFilter = null;
     }
   });
 
@@ -2747,29 +2747,26 @@
     color: var(--color-text-primary);
   }.header-tab-btn.active {
     background: var(--color-accent);
-    color: #FFFFFF;
+    color: var(--color-text-on-accent);
     font-weight: 600;
   }.header-tab-count {
     font-size: 10px;
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.15);
+    background: color-mix(in srgb, currentColor 18%, transparent);
     color: inherit;
   }.header-tab-btn.active .header-tab-count {
-    background: rgba(255, 255, 255, 0.25);
-    color: #FFFFFF;
+    background: color-mix(in srgb, currentColor 22%, transparent);
+    color: inherit;
   }.filter-pills {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--color-tab-bar-bg);
     border: 1px solid var(--color-border);
     padding: 3px;
     border-radius: 8px;
-  }:global(html.light-mode) .filter-pills {
-    background: #F1F5F9;
-    border-color: #E2E8F0;
   }.pill-btn {
     border: none;
     background: transparent;
@@ -2784,11 +2781,8 @@
     color: var(--color-text-primary);
   }.pill-btn.active {
     background: var(--color-accent);
-    color: #000000;
+    color: var(--color-text-on-accent);
     font-weight: 700;
-  }:global(html.light-mode) .pill-btn.active {
-    background: #2563EB;
-    color: #FFFFFF;
   }/* ── Custom Context Menu ────────────────────────────────────────── */ .custom-context-menu {
     background: var(--color-bg-card, #131b26);
     border: 1px solid var(--color-border);

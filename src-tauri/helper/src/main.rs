@@ -69,6 +69,12 @@ fn privileged_gid() -> u32 {
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
 /// allow-listed calls.
 ///
+/// This gate list must contain exactly the same action names as
+/// `HELPER_ACTIONS` in root_policy.rs — a name missing here is never
+/// dispatched and falls through to program resolution ("program X was not
+/// found"). Unit tests in this file assert the two lists are equal; a
+/// compile-time assertion below keeps them identical at build time too.
+///
 /// `write_repo_file` (STEP 3B scope C) is fully implemented below — validator
 /// reuse from the shared root_policy, a descriptor-pinned write core, unit
 /// tests against fixtures — but it is deliberately **not registered yet**:
@@ -85,7 +91,48 @@ const ROOT_ACTIONS: &[&str] = &[
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
+    "nmcli_connection_save", "nmcli_connection_delete", "nmcli_connection_import",
+    "nmcli_connection_up", "nmcli_connection_down",
+    "repo_toggle_enable", "repo_toggle_disable",
+    "repo_add",
+    "repo_delete", "repo_makecache", "repo_clean_cache",
 ];
+
+const fn const_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+// Compile-time gate for the shared action list: the helper may only
+// dispatch names present in both lists, so a name added on one side
+// cannot silently become unreachable on the other.
+const _: () = {
+    let dispatch = ROOT_ACTIONS;
+    let validated = root_policy::HELPER_ACTIONS;
+    assert!(
+        dispatch.len() == validated.len(),
+        "ROOT_ACTIONS and HELPER_ACTIONS must contain the same actions"
+    );
+    let mut index = 0;
+    while index < dispatch.len() {
+        assert!(
+            const_str_eq(dispatch[index], validated[index]),
+            "ROOT_ACTIONS and HELPER_ACTIONS differ at the same position"
+        );
+        index += 1;
+    }
+};
 
 /// Read everything the caller pipes into the helper (up to `limit + 1`
 /// bytes); larger input is refused. Every named action's content channel is
@@ -1860,37 +1907,243 @@ fn repo_toggle_disable_action(file_path: &str, repo_id: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Why a package-manager program failed. The kind decides whether any
+/// fallback may run at all:
+///
+/// * `NotAvailable` — the program could not be started; nothing was executed
+///   and no configuration was touched. Falling back is safe and correct.
+/// * `Unsupported` — the program ran but refused the command/option surface
+///   *at parsing time* (e.g. dnf5's "Unknown argument --add-repo"), so it
+///   demonstrably could not have acted. Falling back is justified because
+///   the interface, not the operation, failed.
+/// * `Failed` — the program started and failed mid-operation. The
+///   repository configuration may already have partially changed; a network
+///   error or invalid configuration is equally a problem for the next
+///   package manager. **No fallback may run for this kind** — stop and
+///   surface the reason.
+#[derive(Debug, PartialEq)]
+enum RepoProgramFailure {
+    NotAvailable(String),
+    Unsupported(String),
+    Failed(String),
+}
+
+impl RepoProgramFailure {
+    /// The human-readable reason only.
+    fn reason(&self) -> &str {
+        match self {
+            RepoProgramFailure::NotAvailable(reason)
+            | RepoProgramFailure::Unsupported(reason)
+            | RepoProgramFailure::Failed(reason) => reason,
+        }
+    }
+}
+
+/// Exit-text markers that mean the program rejected the *command shape*
+/// before doing anything — recorded from real observations (dnf5's
+/// "Unknown argument --add-repo", dnf's "Missing value for named argument")
+/// plus the usual upstream shapes. Anything not matched is `Failed`.
+fn exit_text_is_unsupported(detail: &str) -> bool {
+    detail.contains("Unknown argument")
+        || detail.contains("Unknown command")
+        || detail.contains("unknown command")
+        || detail.contains("Unrecognized option")
+        || detail.contains("unknown option")
+        || detail.contains("Missing value for")
+        || detail.contains("No such command")
+}
+
+/// Runs one package-manager program for a repo action and normalises its
+/// failure into a *kind* (`RepoProgramFailure`) — stderr when present,
+/// stdout otherwise, the spawn error when the program could not be started.
+/// Returns `Ok(())` only for exit 0. Tests inject a replacement for this
+/// function — real package managers are never spawned from unit tests.
+fn run_repo_program(
+    program: &str,
+    args: &[&str],
+    label: &str,
+) -> Result<(), RepoProgramFailure> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| RepoProgramFailure::NotAvailable(format!(
+            "{label} could not be started ({e})"
+        )))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        Err(RepoProgramFailure::Failed(format!(
+            "{label} failed with exit status {}",
+            output.status
+        )))
+    } else if exit_text_is_unsupported(&detail) {
+        Err(RepoProgramFailure::Unsupported(format!(
+            "{label} refused the command: {detail}"
+        )))
+    } else {
+        Err(RepoProgramFailure::Failed(format!("{label} failed: {detail}")))
+    }
+}
+
+/// How dnf's `config-manager addrepo` must be invoked for a URL. dnf5 has
+/// two shapes: the URL points at a downloadable repository configuration
+/// file, or it is the repository's base URL and the repo is defined from
+/// options (`--set=baseurl=…`).
+#[derive(Debug, PartialEq)]
+enum RepoAddShape {
+    RepofileUrl,
+    BaseUrl,
+}
+
+/// Chooses dnf5's `config-manager addrepo` shape for `url`.
+///
+/// Chosen behaviour: the classification looks only at the *path* component —
+/// everything after `://`, with any query string (`?…`) or fragment (`#…`)
+/// stripped — and classifies `.repo`-suffixed paths as `--from-repofile`
+/// download URLs, everything else as base URLs. The scheme is deliberately
+/// not considered here: https-only is enforced independently by
+/// `repo_url_https_only`, and classification of an https URL must not depend
+/// on the validator. A URL nobody would call well-formed (e.g. `https://`)
+/// still classifies instead of panicking, and dnf delivers the final verdict
+/// on whether it is usable.
+fn classify_repo_add_url(url: &str) -> RepoAddShape {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let path = &rest[..path_end];
+    if path.ends_with(".repo") {
+        RepoAddShape::RepofileUrl
+    } else {
+        RepoAddShape::BaseUrl
+    }
+}
+
 /// The `repo_add <url>` action: adds a new repository source via dnf or apt.
+///
 /// The URL has already been https-only validated by the app and by
-/// `check_helper_action`; this is the last gate before the program runs.
-fn repo_add_action(url: &str) -> Result<(), String> {
-    // Both halves of the policy hold independently — re-validate here even
-    // though the app already validated.
+/// `check_helper_action`; the two validators below re-establish that policy
+/// internally — this is the last gate before any program runs.
+///
+/// The command shape choice lives in `classify_repo_add_url`. `run` is the
+/// command runner, injected so tests can record arguments and simulate
+/// outcomes without spawning real package managers; production always calls
+/// `repo_add_action`, which injects `run_repo_program`.
+///
+/// Fallback policy (conservative):
+///   1. the dnf5 shape chosen for the URL — success short-circuits
+///      everything;
+///   2. on `Failed` (dnf started, failed mid-operation): STOP. The config
+///      may have partially changed; another package manager cannot judge
+///      that. The reason is returned alone.
+///   3. on `Unsupported` (dnf refused the command at parsing time, e.g. the
+///      dnf5 flag surface): only then the dnf4 legacy flag may run — same
+///      conservative rules for it.
+///   4. apt never runs while dnf has *executed something*. apt runs only
+///      when dnf was demonstrably unavailable (spawn failure, i.e. not a
+///      dnf system) — or, at the very end, when dnf exists but refused both
+///      command shapes (interface incompatible, no operation was possible).
+/// A wrong-shape attempt fails at argument parsing with no side effects,
+/// and every kept reason is reported in order so the primary package
+/// manager's reason is never masked.
+fn repo_add_action_with(
+    run: impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+    url: &str,
+) -> Result<(), String> {
     use root_policy::{ensure_safe_operand, repo_url_https_only};
     ensure_safe_operand(url, "repository URL")?;
     repo_url_https_only(url)?;
 
-    if std::process::Command::new("dnf")
-        .args(["config-manager", "--add-repo", url])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
+    // Duplicate-handling policy, pinned in tests: the helper never passes
+    // --overwrite or --add-or-replace, so an existing repository file is
+    // only ever modified if the package manager refuses or reports anyway.
+    // Reliable cross-manager duplicate detection is not implemented: dnf5
+    // derives the repository id itself, dnf4 and apt use their own rules,
+    // and probing for it would need more privileged introspection than this
+    // design allows. If the package manager reports a duplicate, that
+    // message passes through unchanged (fail-safe: refuse, never overwrite).
+    let mut reasons: Vec<String> = Vec::new();
+    let from_repofile = format!("--from-repofile={url}");
+    let set_baseurl = format!("--set=baseurl={url}");
+    match classify_repo_add_url(url) {
+        RepoAddShape::RepofileUrl => {
+            match run(
+                "dnf",
+                &["config-manager", "addrepo", &from_repofile],
+                "dnf config-manager addrepo --from-repofile",
+            ) {
+                Ok(()) => return Ok(()),
+                Err(RepoProgramFailure::Failed(reason)) => {
+                    return Err(format!("lcp-admin: {reason}"))
+                }
+                Err(RepoProgramFailure::NotAvailable(reason)) => {
+                    // dnf does not exist on this box: respawning it for the
+                    // dnf4 shape is pointless. The only other supported
+                    // manager is apt — try it, report the chain on failure.
+                    reasons.push(reason);
+                    match run("add-apt-repository", &["-y", url], "add-apt-repository") {
+                        Ok(()) => return Ok(()),
+                        Err(other) => reasons.push(other.reason().to_string()),
+                    }
+                    return Err(format!("lcp-admin: {}", reasons.join("; ")));
+                }
+                Err(RepoProgramFailure::Unsupported(reason)) => reasons.push(reason),
+            }
+        }
+        RepoAddShape::BaseUrl => {
+            match run(
+                "dnf",
+                &["config-manager", "addrepo", &set_baseurl],
+                "dnf config-manager addrepo --set=baseurl",
+            ) {
+                Ok(()) => return Ok(()),
+                Err(RepoProgramFailure::Failed(reason)) => {
+                    return Err(format!("lcp-admin: {reason}"))
+                }
+                Err(RepoProgramFailure::NotAvailable(reason)) => {
+                    reasons.push(reason);
+                    match run("add-apt-repository", &["-y", url], "add-apt-repository") {
+                        Ok(()) => return Ok(()),
+                        Err(other) => reasons.push(other.reason().to_string()),
+                    }
+                    return Err(format!("lcp-admin: {}", reasons.join("; ")));
+                }
+                Err(RepoProgramFailure::Unsupported(reason)) => reasons.push(reason),
+            }
+        }
     }
-
-    if std::process::Command::new("add-apt-repository")
-        .args(["-y", url])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn add-apt-repository: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
+    // Reaching here means the dnf5 shape was refused at parsing time
+    // (`Unsupported`) — dnf demonstrably ran and could not have acted. Only
+    // now may the dnf4 legacy flag be attempted; its own mid-flight failure
+    // stops the chain like any other execution attempt.
+    match run(
+        "dnf",
+        &["config-manager", "--add-repo", url],
+        "dnf config-manager --add-repo (dnf4)",
+    ) {
+        Ok(()) => return Ok(()),
+        Err(RepoProgramFailure::Failed(reason)) => return Err(format!("lcp-admin: {reason}")),
+        Err(other) => reasons.push(other.reason().to_string()),
     }
+    // Both dnf shapes were refused at parsing time — no repository operation
+    // was possible through dnf, so apt gets its one chance.
+    match run("add-apt-repository", &["-y", url], "add-apt-repository") {
+        Ok(()) => return Ok(()),
+        Err(other) => reasons.push(other.reason().to_string()),
+    }
+    // Every attempt ended without an operation being possible: report the
+    // chain so the primary package manager's reason is never masked.
+    Err(format!("lcp-admin: {}", reasons.join("; ")))
+}
 
-    Err("lcp-admin: neither dnf nor add-apt-repository succeeded adding the repo".to_string())
+/// Production entry point — see `repo_add_action_with`.
+fn repo_add_action(url: &str) -> Result<(), String> {
+    repo_add_action_with(run_repo_program, url)
 }
 
 /// The `repo_delete <file_path>` action: deletes a repository file with root
@@ -1917,59 +2170,60 @@ fn repo_delete_action(file_path: &str) -> Result<(), String> {
 
 /// The `repo_makecache` action: refreshes package metadata via dnf or apt.
 /// Takes no further arguments.
+///
+/// Fallback policy matches `repo_add_action_with`: apt runs only when dnf
+/// was demonstrably unavailable (could not be started). A `Failed` (dnf ran
+/// and failed — network, configured-repo or permission trouble) stops
+/// immediately: apt would hit the same world and its output would only
+/// mask dnf's reason. `Unsupported` cannot occur for a bare `makecache`
+/// (no flags); it is treated conservatively — also stop, return the reason.
 fn repo_makecache_action() -> Result<(), String> {
-    if std::process::Command::new("dnf")
-        .args(["makecache"])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
+    match run_repo_program("dnf", &["makecache"], "dnf") {
+        Ok(()) => return Ok(()),
+        Err(RepoProgramFailure::NotAvailable(reason)) => {
+            match run_repo_program("apt-get", &["update"], "apt-get") {
+                Ok(()) => return Ok(()),
+                Err(other) => Err(format!(
+                    "lcp-admin: {reason}; fallback: {}",
+                    other.reason()
+                )),
+            }
+        }
+        Err(failure) => Err(format!("lcp-admin: {}", failure.reason())),
     }
-
-    if std::process::Command::new("apt-get")
-        .args(["update"])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn apt-get: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
-    }
-
-    Err("lcp-admin: neither dnf nor apt-get succeeded refreshing metadata".to_string())
 }
 
 /// The `repo_clean_cache <repo_id>` action: clears package metadata cache for
 /// one repo via dnf or apt.
+///
+/// Fallback policy matches `repo_add_action_with`: apt runs only when dnf
+/// was demonstrably unavailable. A mid-operation failure (repo id unknown,
+/// permission trouble) stops immediately — `dnf clean --repo X` and
+/// `apt-get clean` do not even address the same cache, so an apt fallback
+/// would silently change the meaning of the operation.
 fn repo_clean_cache_action(repo_id: &str) -> Result<(), String> {
     // Both halves of the policy hold independently — re-validate here even
     // though the app already validated.
     use root_policy::ensure_safe_operand;
     ensure_safe_operand(repo_id, "repository id")?;
 
-    if std::process::Command::new("dnf")
-        .args(["clean", "expire-cache", "--repo", repo_id])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn dnf: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
+    match run_repo_program(
+        "dnf",
+        &["clean", "expire-cache", "--repo", repo_id],
+        "dnf",
+    ) {
+        Ok(()) => return Ok(()),
+        Err(RepoProgramFailure::NotAvailable(reason)) => {
+            match run_repo_program("apt-get", &["clean"], "apt-get") {
+                Ok(()) => return Ok(()),
+                Err(other) => Err(format!(
+                    "lcp-admin: {reason}; fallback: {}",
+                    other.reason()
+                )),
+            }
+        }
+        Err(failure) => Err(format!("lcp-admin: {}", failure.reason())),
     }
-
-    if std::process::Command::new("apt-get")
-        .args(["clean"])
-        .output()
-        .map_err(|e| format!("lcp-admin: failed to spawn apt-get: {e}"))?
-        .status
-        .success()
-    {
-        return Ok(());
-    }
-
-    Err("lcp-admin: neither dnf nor apt-get succeeded cleaning cache".to_string())
 }
 /// The `write_repo_file <path>` action: writes the repository-manager's one
 /// allowed root-owned file kind — a `.repo`/`.list`/`.sources` file in one of
@@ -2547,5 +2801,412 @@ mod repo_fs_tests {
         assert!(ensure_repo_file_path("/etc/yum.repos.d/real.repo").is_err());
         assert!(ensure_repo_file_path("/etc/apt/sources.list.d/real.list").is_err());
         assert!(ensure_repo_file_path("/etc/shadow").is_err());
+    }
+}
+
+/// The dispatch gate and the validation list must agree: an action known to
+/// `check_helper_action` but missing from `ROOT_ACTIONS` never reaches its
+/// dispatch branch — the name falls through to program resolution and the
+/// caller sees "the program 'X' was not found" while every argv validator
+/// test still passes. This is exactly the drift the network and repo
+/// migrations introduced; these tests pin the two lists together so it
+/// cannot recur silently.
+#[cfg(test)]
+mod root_actions_gate_tests {
+    use crate::root_policy::HELPER_ACTIONS;
+    use crate::ROOT_ACTIONS;
+
+    #[test]
+    fn every_registered_helper_action_is_in_root_actions() {
+        for action in HELPER_ACTIONS {
+            assert!(
+                ROOT_ACTIONS.contains(action),
+                "action '{action}' is validated by check_helper_action but \
+                 missing from ROOT_ACTIONS — it would fall through to \
+                 program resolution instead of being dispatched"
+            );
+        }
+    }
+
+    #[test]
+    fn root_actions_has_no_gate_only_names() {
+        for action in ROOT_ACTIONS {
+            assert!(
+                HELPER_ACTIONS.contains(action),
+                "ROOT_ACTIONS contains '{action}' but HELPER_ACTIONS does \
+                 not validate it — the name would be dispatched to a \
+                 non-existent branch"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_is_not_stale_nginx_edition() {
+        // regression pin: the exact 11 names the two migrations added
+        // without updating the gate
+        for action in [
+            "nmcli_connection_save",
+            "nmcli_connection_delete",
+            "nmcli_connection_up",
+            "nmcli_connection_down",
+            "nmcli_connection_import",
+            "repo_toggle_enable",
+            "repo_toggle_disable",
+            "repo_add",
+            "repo_delete",
+            "repo_makecache",
+            "repo_clean_cache",
+        ] {
+            assert!(ROOT_ACTIONS.contains(&action), "gate lost '{action}'");
+        }
+    }
+}
+
+/// Targeted behaviour tests for `repo_add_action_with`, using an *injected
+/// command runner*: the recorded (program, args, label) calls and simulated
+/// outcomes stand in for dnf/apt, so no real package manager is ever
+/// spawned and no repository configuration is ever touched by a test.
+/// These are therefore argument-shape/ordering/error-preservation tests —
+/// they do NOT verify real dnf4/apt runtime behaviour, real duplicate-ID
+/// handling, or that dnf accepts the shapes (that was verified live by an
+/// operator on dnf5 5.4.6 and must be re-verified per platform).
+#[cfg(test)]
+mod repo_add_action_tests {
+    use super::classify_repo_add_url;
+    use super::repo_add_action_with;
+    use super::{RepoAddShape, RepoProgramFailure};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Call = (String, Vec<String>, String);
+    type Recorder = Rc<RefCell<Vec<Call>>>;
+
+    /// Simulated runner outcome per call.
+    enum Sim {
+        /// fail with a mid-operation error — the *ambiguous* kind
+        Failed(String),
+        /// fail with an argument-parse refusal — non-acting kind
+        Unsupported(String),
+        /// fail with a spawn error — nothing ran
+        NotAvailable(String),
+        /// succeed
+        Ok,
+    }
+
+    fn sim_kind(label: &str, kind: &Sim) -> Result<(), RepoProgramFailure> {
+        match kind {
+            Sim::Ok => Ok(()),
+            Sim::Failed(detail) => Err(RepoProgramFailure::Failed(format!(
+                "{label} {detail}"
+            ))),
+            Sim::Unsupported(detail) => Err(RepoProgramFailure::Unsupported(format!(
+                "{label} {detail}"
+            ))),
+            Sim::NotAvailable(detail) => Err(RepoProgramFailure::NotAvailable(format!(
+                "{label} {detail}"
+            ))),
+        }
+    }
+
+    /// A runner that records every call and replays `script` in order
+    /// (repeating the last entry thereafter).
+    fn scripted(script: Vec<Sim>) -> (impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>, Recorder) {
+        let calls: Recorder = Rc::new(RefCell::new(Vec::new()));
+        let sink = calls.clone();
+        let run = move |program: &str, args: &[&str], label: &str| {
+            let visited = sink.borrow().len();
+            sink.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                label.to_string(),
+            ));
+            let kind = script.get(visited).unwrap_or(script.last().unwrap());
+            sim_kind(label, kind)
+        };
+        (run, calls)
+    }
+
+    #[test]
+    fn https_base_url_runs_dnf5_set_baseurl() {
+        let (run, calls) = scripted(vec![Sim::Ok]);
+        repo_add_action_with(run, "https://example.com/path/").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1, "success must short-circuit every fallback");
+        assert_eq!(calls[0].0, "dnf");
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "config-manager",
+                "addrepo",
+                "--set=baseurl=https://example.com/path/"
+            ]
+        );
+    }
+
+    #[test]
+    fn https_repofile_url_runs_dnf5_from_repofile() {
+        let (run, calls) = scripted(vec![Sim::Ok]);
+        let _ = repo_add_action_with(run, "https://example.com/path/nitrux.repo").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls[0].0, "dnf");
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "config-manager",
+                "addrepo",
+                "--from-repofile=https://example.com/path/nitrux.repo"
+            ]
+        );
+    }
+
+    #[test]
+    fn repofile_classification_ignores_query_and_fragment() {
+        assert_eq!(
+            classify_repo_add_url("https://example.com/x.repo?download=1"),
+            RepoAddShape::RepofileUrl
+        );
+        assert_eq!(
+            classify_repo_add_url("https://example.com/x.repo#anchor"),
+            RepoAddShape::RepofileUrl
+        );
+        assert_eq!(
+            classify_repo_add_url("https://example.com/x.repo?f=/x.repo"),
+            RepoAddShape::RepofileUrl
+        );
+        // the query is present in the *argument*, only stripped for the shape
+        let (run, calls) = scripted(vec![Sim::Ok]);
+        repo_add_action_with(run, "https://example.com/x.repo?download=1").unwrap();
+        assert_eq!(
+            calls.borrow()[0].1,
+            vec!["config-manager", "addrepo", "--from-repofile=https://example.com/x.repo?download=1"]
+        );
+    }
+
+    #[test]
+    fn base_url_with_query_string_stays_a_base_url() {
+        assert_eq!(
+            classify_repo_add_url("https://example.com/x?mirror=list"),
+            RepoAddShape::BaseUrl
+        );
+        assert_eq!(
+            classify_repo_add_url("https://example.com/x#section"),
+            RepoAddShape::BaseUrl
+        );
+    }
+
+    #[test]
+    fn non_https_url_is_refused_before_any_program_runs() {
+        for url in ["http://example.com/x.repo", "file:///etc/passwd"] {
+            let (run, calls) = scripted(vec![]);
+            let err = repo_add_action_with(run, url).unwrap_err();
+            assert!(calls.borrow().is_empty(), "nothing may run before validation");
+            assert!(
+                !err.contains("simulated"),
+                "the error is the validator's, not a simulated one: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_url_still_classifies_and_reaches_the_base_url_shape() {
+        // chosen behaviour: classification is mechanical, the validator is
+        // the authority on accepting the URL. "https://" is well-formed
+        // enough for the validators (https, no control chars) and classifies
+        // as a base URL — dnf reports the real verdict.
+        assert_eq!(classify_repo_add_url("https://"), RepoAddShape::BaseUrl);
+        assert_eq!(classify_repo_add_url("not a url at all"), RepoAddShape::BaseUrl);
+    }
+
+    /// The heart of the conservative policy: a *failed execution* stops the
+    /// chain. dnf ran and something went wrong mid-flight (network, config
+    /// validity, partial write) — no other package manager may be tried for
+    /// it, and the error is dnf's reason alone, not a chain.
+    #[test]
+    fn ambiguous_dnf_failure_stops_the_chain_and_names_only_dnf() {
+        for fail in ["the metadata download failed", "Error in configuration file"] {
+            let (run, calls) = scripted(vec![Sim::Failed(fail.to_string())]);
+            let err = repo_add_action_with(run, "https://example.com/x").unwrap_err();
+            let borrowed = calls.borrow();
+            assert_eq!(borrowed.len(), 1, "no fallback may run after an execution attempt");
+            assert_eq!(borrowed[0].0, "dnf");
+            assert!(
+                err.contains("dnf config-manager addrepo") && err.ends_with(fail),
+                "the error is dnf's alone: {err}"
+            );
+            assert!(!err.contains("add-apt-repository"), "apt must not be mentioned as tried: {err}");
+        }
+    }
+
+    /// A parsing-time refusal ("Unknown argument …") demonstrates the option
+    /// surface is incompatible without any operation having run — only then
+    /// may the dnf4 legacy flag be attempted.
+    #[test]
+    fn unsupported_dnf_shape_falls_back_to_the_dnf4_flag() {
+        let (run, calls) = scripted(vec![
+            Sim::Unsupported("Unknown argument \"--set=baseurl\"".to_string()),
+            Sim::Ok,
+        ]);
+        repo_add_action_with(run, "https://example.com/x").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].2.contains("addrepo --set=baseurl"));
+        assert!(calls[1].2.contains("--add-repo (dnf4)"), "second attempt is the dnf4 flag");
+    }
+
+    /// When even the dnf4 shape is refused at parsing time (no operation
+    /// possible through dnf), apt gets exactly one chance.
+    #[test]
+    fn both_dnf_shapes_unsupported_falls_back_to_apt() {
+        let (run, calls) = scripted(vec![
+            Sim::Unsupported("Unknown argument".to_string()),
+            Sim::Unsupported("Unknown argument".to_string()),
+            Sim::Ok,
+        ]);
+        repo_add_action_with(run, "https://example.com/x").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2].0, "add-apt-repository");
+    }
+
+    /// A missing dnf binary spawns nothing and never configures anything —
+    /// only then apt is the primary manager (Debian-shaped system).
+    #[test]
+    fn missing_dnf_falls_back_to_apt() {
+        let (run, calls) = scripted(vec![
+            Sim::NotAvailable("could not be started".to_string()),
+            Sim::Ok,
+        ]);
+        repo_add_action_with(run, "https://deb.example.org/debian").unwrap();
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "dnf");
+        assert_eq!(calls[1].0, "add-apt-repository", "apt runs once dnf is demonstrably absent");
+        // only one dnf call happened — after NotAvailable there is no point
+        // respawning the same missing binary for the dnf4 legacy shape
+        assert_eq!(
+            calls.iter().filter(|(p, _, _)| p == "dnf").count(),
+            1,
+            "the missing dnf must not be respawned for the dnf4 shape"
+        );
+    }
+
+    /// Every simulated path that keeps running records its reasons in order
+    /// in the final error (no masks, no invented text).
+    #[test]
+    fn kept_reasons_appear_in_order_in_the_final_error() {
+        let (run, calls) = scripted(vec![
+            Sim::Unsupported("Unsupported one".to_string()),
+            Sim::Unsupported("Unsupported two".to_string()),
+            Sim::NotAvailable("Fallback three".to_string()),
+        ]);
+        let err = repo_add_action_with(run, "https://example.com/x").unwrap_err();
+        let _ = calls;
+        let first = err.find("Unsupported one").unwrap();
+        let second = err.find("Unsupported two").unwrap();
+        let third = err.find("Fallback three").unwrap();
+        assert!(first < second && second < third, "reason order preserved: {err}");
+    }
+
+    #[test]
+    fn repo_add_never_passes_overwrite_or_replace_options() {
+        // safety pin for duplicate/exists handling: the helper never adds
+        // --overwrite / --add-or-replace, so an existing repository file is
+        // only ever replaced if the package manager does it on its own
+        // initiative. Real duplicate-handling behaviour of each package
+        // manager is out of unit-test scope by design.
+        let (run, calls) = scripted(vec![Sim::Failed("unknown repo already exists here".to_string())]);
+        let _ = repo_add_action_with(run, "https://example.com/dupe.repo").unwrap_err();
+        for (_, args, _) in calls.borrow().iter() {
+            assert!(
+                !args.iter().any(|a| a == "--overwrite" || a == "--add-or-replace"),
+                "repo_add must not silently overwrite: {args:?}"
+            );
+        }
+    }
+}
+
+/// Real-process integration for `run_repo_program` itself — the one place
+/// raw processes are spawned. These tests use only the fixed absolute
+/// binaries below (always present on the fixture hosts, never package
+/// managers), need no root privileges and touch no system configuration.
+/// They verify the failure-kind classification, stderr/stdout capture
+/// ordering, and that argument contents (potential secrets) never leak
+/// into failure messages.
+#[cfg(test)]
+mod run_repo_program_tests {
+    use super::{run_repo_program, RepoProgramFailure};
+
+    const TRUE_BIN: &str = "/usr/bin/true";
+    const FALSE_BIN: &str = "/usr/bin/false";
+    const SH_BIN: &str = "/bin/sh";
+    const MISSING_BIN: &str = "/nonexistent-lcp-test-binary-xyz";
+
+    #[test]
+    fn successful_process_is_ok() {
+        assert!(run_repo_program(TRUE_BIN, &[], "/bin/true").is_ok());
+    }
+
+    #[test]
+    fn nonzero_exit_without_any_output_is_a_plain_failure() {
+        let err = run_repo_program(FALSE_BIN, &[], "/bin/false").unwrap_err();
+        match err {
+            RepoProgramFailure::Failed(detail) => {
+                assert!(detail.contains("exit status") && detail.contains('1'), "{detail}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stderr_wins_over_stdout() {
+        // sh writes to stdout and completes with an error — both available
+        let err = run_repo_program(SH_BIN, &["-c", "echo stdout-line; echo stderr-line 1>&2; exit 3"], "sh").unwrap_err();
+        let RepoProgramFailure::Failed(detail) = err else { panic!("expected Failed") };
+        assert!(detail.contains("stderr-line"), "stderr must be captured: {detail}");
+        assert!(!detail.contains("stdout-line"), "stderr must win when present: {detail}");
+    }
+
+    #[test]
+    fn stdout_is_used_when_stderr_is_silent() {
+        let err = run_repo_program(
+            SH_BIN,
+            &["-c", "echo only-stdout; exit 4"],
+            "sh",
+        ).unwrap_err();
+        let RepoProgramFailure::Failed(detail) = err else { panic!("expected Failed") };
+        assert!(detail.contains("only-stdout"), "stdout must back the error when stderr is empty: {detail}");
+    }
+
+    #[test]
+    fn parse_refusal_text_is_classified_unsupported() {
+        let err = run_repo_program(
+            SH_BIN,
+            &["-c", "echo 'Unknown argument \"--add-repo\" for command \"config-manager\"' 1>&2; exit 2"],
+            "dnf",
+        ).unwrap_err();
+        let RepoProgramFailure::Unsupported(detail) = err else { panic!("expected Unsupported, got {err:?}") };
+        assert!(detail.contains("Unknown argument"), "{detail}");
+    }
+
+    #[test]
+    fn missing_binary_is_not_available() {
+        let err = run_repo_program(MISSING_BIN, &["arg"], "missing-test").unwrap_err();
+        let RepoProgramFailure::NotAvailable(detail) = err else { panic!("expected NotAvailable") };
+        assert!(detail.contains("could not be started"), "{detail}");
+    }
+
+    #[test]
+    fn arguments_are_never_reproduced_into_failure_reasons() {
+        // a "secret" operand must not appear in the spawn-failure message
+        let err = run_repo_program(
+            MISSING_BIN,
+            &["secret-operand-do-not-repeat"],
+            "missing-test",
+        ).unwrap_err();
+        let RepoProgramFailure::NotAvailable(detail) = err else { panic!("expected NotAvailable") };
+        assert!(
+            !detail.contains("secret-operand-do-not-repeat"),
+            "failure messages must not echo operands: {detail}"
+        );
     }
 }
