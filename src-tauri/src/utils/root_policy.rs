@@ -1544,6 +1544,97 @@ fn is_group_name(value: &str) -> bool {
     is_account_name(value)
 }
 
+/// Public account-name contract shared by the app and the privileged helper.
+pub fn user_account_name_valid(value: &str) -> Result<(), String> {
+    if is_user_name(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The account name must be 1-32 lowercase letters, digits, '_', '-' or '.', starting with a lowercase letter or '_': {value}"
+        ))
+    }
+}
+
+/// Public group-name contract (same grammar as account names).
+pub fn group_name_valid(value: &str) -> Result<(), String> {
+    if is_group_name(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The group name must be 1-32 lowercase letters, digits, '_', '-' or '.', starting with a lowercase letter or '_': {value}"
+        ))
+    }
+}
+
+/// GECOS/full-name contract for `useradd -c`: printable ASCII, spaces allowed,
+/// no leading dash, bounded length.
+pub fn user_fullname_valid(value: &str) -> Result<(), String> {
+    if is_safe_comment(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The full name must be 1-64 printable characters, not start with a dash: {value}"
+        ))
+    }
+}
+
+/// A password sent on the helper's stdin: non-empty, bounded, and free of the
+/// line/control characters that could inject a second chpasswd entry.
+pub fn user_password_valid(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("The password must not be empty.".to_string());
+    }
+    if value.len() > 1024 {
+        return Err("The password must be at most 1024 bytes.".to_string());
+    }
+    if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+        return Err("The password must not contain newline, carriage return or NUL characters.".to_string());
+    }
+    Ok(())
+}
+
+/// Login session ids accepted by the session-kill action.
+pub fn login_session_id_valid(value: &str) -> Result<(), String> {
+    if is_digits(value) && value.len() <= 20 && value.parse::<u64>().is_ok_and(|id| id > 0) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The session id must be a positive decimal number, got: {value}"
+        ))
+    }
+}
+
+/// System accounts that must never be deleted or locked through the panel.
+pub const PROTECTED_SYSTEM_USERS: &[&str] = &[
+    "root", "nobody", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
+    "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "systemd-network",
+    "systemd-resolve", "systemd-timesync", "systemd-coredump", "systemd-oom", "systemd-journal",
+    "dbus", "polkitd", "sshd", "chrony", "rpc", "avahi", "colord", "geoclue", "flatpak"
+];
+
+pub fn is_protected_system_user(username: &str) -> bool {
+    let lower = username.trim().to_lowercase();
+    if lower.starts_with("systemd-") {
+        return true;
+    }
+    PROTECTED_SYSTEM_USERS.contains(&lower.as_str())
+}
+
+/// Groups whose removal can break system administration, privilege escalation
+/// or log access. Deletion is blocked in the helper before any command runs.
+pub const PROTECTED_ADMIN_GROUPS: &[&str] = &[
+    "root", "wheel", "sudo", "admin", "adm", "policykit", "polkitd",
+    "systemd-journal", "docker", "libvirt",
+];
+
+pub fn is_protected_admin_group(groupname: &str) -> bool {
+    let lower = groupname.trim().to_lowercase();
+    if lower.starts_with("systemd-") {
+        return true;
+    }
+    PROTECTED_ADMIN_GROUPS.contains(&lower.as_str())
+}
+
 /// Kernel module (`modprobe 8021q`, `rmmod floppy`).
 fn is_module_name(value: &str) -> bool {
     !value.is_empty()
@@ -2491,6 +2582,8 @@ fn check_userdel(args: &[String]) -> Result<(), String> {
             match arg.as_str() {
                 // --force: delete even if the account is still logged in
                 "--force" => {}
+                // --remove: also remove the home directory (the UI option)
+                "--remove" => {}
                 _ => return Err(flag_not_allowed(PROGRAM, arg)),
             }
         } else {
@@ -3228,6 +3321,14 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "firewall_enable_hardened",
     "pkg_maintenance",
     "dnf_history_undo",
+    "user_add",
+    "user_delete",
+    "user_set_password",
+    "user_toggle_sudo",
+    "user_modify_group",
+    "group_manage",
+    "user_lock",
+    "session_kill",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3417,6 +3518,19 @@ const HELPER_PKG_MAINTENANCE_ACTIONS: &[&str] = &["pkg_maintenance"];
 /// protected package or the running kernel in the affected set.
 const HELPER_DNF_HISTORY_UNDO_ACTIONS: &[&str] = &["dnf_history_undo"];
 
+/// Named account/group/session actions. Every operand is validated here and
+/// again inside the action; the helper never constructs a shell command.
+const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
+    "user_add",
+    "user_delete",
+    "user_set_password",
+    "user_toggle_sudo",
+    "user_modify_group",
+    "group_manage",
+    "user_lock",
+    "session_kill",
+];
+
 /// `firewall_zone_rule <add|remove> <zone> <service|port> <value>` — modifies
 /// one service or port in a firewall zone. firewalld and ufw are supported.
 const HELPER_FIREWALL_ZONE_RULE_ACTIONS: &[&str] = &["firewall_zone_rule"];
@@ -3549,6 +3663,145 @@ pub fn is_valid_account_name(name: &str) -> Result<(), String> {
     } else {
         Err(format!("'{name}' is not a valid account name for this panel"))
     }
+}
+
+/// Validation for the account/group/session action family.
+fn check_user_management_action(action: &str, args: &[String]) -> Result<(), String> {
+    let arg = |index: usize| -> Result<&str, String> {
+        args.get(index)
+            .map(String::as_str)
+            .ok_or_else(|| operand_not_allowed("lcp-admin", action, "a required operand is missing"))
+    };
+    match action {
+        "user_add" => {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes an account name and an optional full name",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+            if args.len() == 3 {
+                user_fullname_valid(&args[2])?;
+            }
+        }
+        "user_delete" => {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes an account name and the optional literal 'remove-home'",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+            if args.len() == 3 && args[2] != "remove-home" {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    &args[2],
+                    "the optional argument may only be the exact literal 'remove-home'",
+                ));
+            }
+        }
+        "user_set_password" => {
+            if args.len() != 2 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes exactly one account name",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+        }
+        "user_toggle_sudo" => {
+            if args.len() != 3 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes an account name and grant|revoke",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+            if args[2] != "grant" && args[2] != "revoke" {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    &args[2],
+                    "the verb must be grant or revoke",
+                ));
+            }
+        }
+        "user_modify_group" => {
+            if args.len() != 4 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes an account name, a group name and add|remove",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+            group_name_valid(&args[2])?;
+            if args[3] != "add" && args[3] != "remove" {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    &args[3],
+                    "the verb must be add or remove",
+                ));
+            }
+        }
+        "group_manage" => {
+            if args.len() != 3 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes add|delete and a group name",
+                ));
+            }
+            if args[1] != "add" && args[1] != "delete" {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    &args[1],
+                    "the verb must be add or delete",
+                ));
+            }
+            group_name_valid(&args[2])?;
+        }
+        "user_lock" => {
+            if args.len() != 3 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes an account name and lock|unlock",
+                ));
+            }
+            user_account_name_valid(&args[1])?;
+            if args[2] != "lock" && args[2] != "unlock" {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    &args[2],
+                    "the verb must be lock or unlock",
+                ));
+            }
+        }
+        "session_kill" => {
+            if args.len() != 2 {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    action,
+                    "this action takes exactly one session id",
+                ));
+            }
+            login_session_id_valid(&args[1])?;
+        }
+        other => {
+            let _ = arg(1);
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                other,
+                "unknown account-management action",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_helper_action(args: &[String]) -> Result<(), String> {
@@ -3973,6 +4226,9 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             ));
         }
         return Ok(());
+    }
+    if HELPER_USER_MANAGEMENT_ACTIONS.contains(&action.as_str()) {
+        return check_user_management_action(action, args);
     }
     if HELPER_DNF_HISTORY_UNDO_ACTIONS.contains(&action.as_str()) {
         // args: [action, transaction-id, confirm?]
@@ -7332,5 +7588,124 @@ mod dnf_history_validator_tests {
             "  kernel-core-6.8.5-301.fc40.x86_64  ",
             "  6.8.5-301.fc40.x86_64  "
         ));
+    }
+}
+
+#[cfg(test)]
+mod user_management_validator_tests {
+    use super::{
+        ensure_arguments_for_program, group_name_valid, is_protected_admin_group,
+        is_protected_system_user, login_session_id_valid, user_account_name_valid,
+        user_fullname_valid, user_password_valid,
+    };
+
+    fn check_lcp(args: &[&str]) -> Result<(), String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        ensure_arguments_for_program("lcp-admin", &argv)
+    }
+
+    #[test]
+    fn protected_admin_groups_cover_privilege_and_log_access() {
+        for group in [
+            "root", "wheel", "sudo", "admin", "adm", "polkitd", "systemd-journal",
+            "docker", "libvirt", "SYSTEMD-JOURNAL",
+        ] {
+            assert!(is_protected_admin_group(group), "{group:?} must be protected");
+        }
+        for group in ["developers", "users", "docker-users", "wheelz"] {
+            assert!(!is_protected_admin_group(group), "{group:?} must stay deletable");
+        }
+    }
+
+    #[test]
+    fn account_group_fullname_and_password_grammars() {
+        for valid in ["alice", "a1", "_svc", "dev.user", "dev-user"] {
+            user_account_name_valid(valid).unwrap_or_else(|e| panic!("{valid:?}: {e}"));
+            group_name_valid(valid).unwrap_or_else(|e| panic!("{valid:?}: {e}"));
+        }
+        for invalid in ["", "Alice", "1alice", "-alice", "a b", "a/b", "a:b", "é"] {
+            assert!(user_account_name_valid(invalid).is_err(), "{invalid:?}");
+            assert!(group_name_valid(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(user_account_name_valid(&"a".repeat(33)).is_err());
+
+        for valid in ["Alice Example", "A. Sorensen (test)", "x"] {
+            user_fullname_valid(valid).unwrap_or_else(|e| panic!("{valid:?}: {e}"));
+        }
+        for invalid in ["", "-dash", "line\nbreak", "tab\there", &"a".repeat(65)] {
+            assert!(user_fullname_valid(invalid).is_err(), "{invalid:?}");
+        }
+
+        for valid in ["x", "correct horse battery staple", "cölon:allowed"] {
+            user_password_valid(valid).unwrap_or_else(|e| panic!("{valid:?}: {e}"));
+        }
+        for invalid in ["", "a\nb", "a\rb", "a\0b", &"a".repeat(1025)] {
+            assert!(user_password_valid(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn session_ids_and_protected_accounts() {
+        for valid in ["1", "42", "4294967296"] {
+            login_session_id_valid(valid).unwrap_or_else(|e| panic!("{valid:?}: {e}"));
+        }
+        for invalid in ["", "0", "-1", "0x1", "c1", "1 2", "１２"] {
+            assert!(login_session_id_valid(invalid).is_err(), "{invalid:?}");
+        }
+        for protected in ["root", "sshd", "systemd-network", "SYSTEMD-RESOLVE", "polkitd"] {
+            assert!(is_protected_system_user(protected), "{protected:?}");
+        }
+        for allowed in ["alice", "bob", "systemdadmin"] {
+            assert!(!is_protected_system_user(allowed), "{allowed:?}");
+        }
+    }
+
+    #[test]
+    fn user_action_gate_validates_shapes_and_verbs() {
+        for args in [
+            vec!["user_add", "alice"],
+            vec!["user_add", "alice", "Alice Example"],
+            vec!["user_delete", "alice"],
+            vec!["user_delete", "alice", "remove-home"],
+            vec!["user_set_password", "alice"],
+            vec!["user_toggle_sudo", "alice", "grant"],
+            vec!["user_toggle_sudo", "alice", "revoke"],
+            vec!["user_modify_group", "alice", "dev", "add"],
+            vec!["user_modify_group", "alice", "dev", "remove"],
+            vec!["group_manage", "add", "dev"],
+            vec!["group_manage", "delete", "dev"],
+            vec!["user_lock", "alice", "lock"],
+            vec!["user_lock", "alice", "unlock"],
+            vec!["session_kill", "42"],
+        ] {
+            check_lcp(&args).unwrap_or_else(|e| panic!("{args:?} must be valid: {e}"));
+        }
+        for args in [
+            vec!["user_add"],
+            vec!["user_add", "-bad"],
+            vec!["user_add", "alice", "-bad"],
+            vec!["user_delete", "alice", "force"],
+            vec!["user_set_password"],
+            vec!["user_toggle_sudo", "alice", "yes"],
+            vec!["user_modify_group", "alice", "dev", "grant"],
+            vec!["group_manage", "remove", "dev"],
+            vec!["user_lock", "alice", "disable"],
+            vec!["session_kill", "c1"],
+            vec!["session_kill", "42", "extra"],
+            vec!["user_set_password", "alice", "extra"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn userdel_accepts_remove_but_still_refuses_the_short_form() {
+        let helper = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            ensure_arguments_for_program("userdel", &argv)
+        };
+        helper(&["--force", "--remove", "alice"]).expect("long remove option must be allowed");
+        assert!(helper(&["-r", "alice"]).is_err(), "short -r stays refused");
+        assert!(helper(&["--force", "root"]).is_ok(), "account policy is action-level");
     }
 }

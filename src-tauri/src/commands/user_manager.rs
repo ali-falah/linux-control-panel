@@ -1,8 +1,47 @@
-use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use crate::utils::privilege::tokio::Command;
+
+/// Forward one validated account/group/session action to the installed helper.
+/// The helper re-validates every operand and owns the privileged execution.
+async fn run_user_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = privileged::run_privileged_with_stdin(
+        helper,
+        &args,
+        &privileged::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+async fn run_user_password_action(username: &str, password: &str) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let args = vec![String::from("user_set_password"), username.to_string()];
+    let output = privileged::run_privileged_with_stdin(
+        helper,
+        &args,
+        &privileged::RootAuth::Polkit,
+        password,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -109,123 +148,59 @@ pub async fn list_users() -> Result<Vec<UserInfo>, String> {
 
 #[tauri::command]
 pub async fn add_user(username: String, fullname: String) -> Result<String, String> {
-    ensure_safe_operand(&username, "user name")?;
-    let mut args = vec!["/usr/sbin/useradd".to_string(), "-m".to_string()]; // -m creates home dir
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    let mut params = vec![username.clone()];
     if !fullname.is_empty() {
-        args.push("-c".to_string());
-        args.push(fullname);
+        crate::utils::root_policy::user_fullname_valid(&fullname)?;
+        params.push(fullname);
     }
-    args.push(username);
-
-    let output = Command::new("pkexec")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec useradd: {e}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
+    run_user_named_action("user_add", &params).await?;
     Ok("User added successfully".to_string())
-}
-
-const PROTECTED_SYSTEM_USERS: &[&str] = &[
-    "root", "nobody", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
-    "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "systemd-network",
-    "systemd-resolve", "systemd-timesync", "systemd-coredump", "systemd-oom", "systemd-journal",
-    "dbus", "polkitd", "sshd", "chrony", "rpc", "avahi", "colord", "geoclue", "flatpak"
-];
-
-fn is_protected_system_user(username: &str) -> bool {
-    let lower = username.trim().to_lowercase();
-    if lower.starts_with("systemd-") {
-        return true;
-    }
-    PROTECTED_SYSTEM_USERS.contains(&lower.as_str())
 }
 
 #[tauri::command]
 pub async fn delete_user(username: String, remove_home: bool) -> Result<String, String> {
-    if is_protected_system_user(&username) {
-        return Err(format!("Action blocked: '{}' is a vital system account and cannot be deleted.", username));
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    if crate::utils::root_policy::is_protected_system_user(&username) {
+        return Err(format!(
+            "Action blocked: '{}' is a vital system account and cannot be deleted.",
+            username
+        ));
     }
-
-    let mut args = vec!["/usr/sbin/userdel".to_string(), "--force".to_string()];
+    let mut params = vec![username.clone()];
     if remove_home {
-        args.push("--remove".to_string());
+        params.push("remove-home".to_string());
     }
-    args.push(username);
-
-    let output = Command::new("pkexec")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec userdel: {e}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
+    run_user_named_action("user_delete", &params).await?;
     Ok("User deleted successfully".to_string())
 }
 
 #[tauri::command]
 pub async fn change_password(username: String, password: String) -> Result<String, String> {
-    // The password is handed to chpasswd through its standard input. It never
-    // appears in the argument list of a command and therefore never in the
-    // process list, where every other user could read it.
-    let input = format!("{username}:{password}\n");
-    let output = privileged::run_privileged_with_stdin(
-        "/usr/sbin/chpasswd",
-        &[],
-        &privileged::RootAuth::Polkit,
-        &input,
-    )
-    .await
-    .map_err(|e| format!("Failed to run chpasswd: {e}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    if crate::utils::root_policy::is_protected_system_user(&username) {
+        return Err(format!(
+            "Action blocked: '{}' is a vital system account; changing its password is blocked.",
+            username
+        ));
     }
-
+    crate::utils::root_policy::user_password_valid(&password)?;
+    // The password travels on stdin only; it never appears in argv or the
+    // process list. The helper validates it again and builds the chpasswd
+    // record itself, so a newline cannot inject a second account.
+    run_user_password_action(&username, &password).await?;
     Ok("Password changed successfully".to_string())
-}
-
-fn get_admin_group() -> &'static str {
-    if let Ok(group_content) = std::fs::read_to_string("/etc/group") {
-        for line in group_content.lines() {
-            if line.starts_with("sudo:") {
-                return "sudo";
-            }
-            if line.starts_with("wheel:") {
-                return "wheel";
-            }
-        }
-    }
-    "wheel"
 }
 
 #[tauri::command]
 pub async fn toggle_sudo(username: String, grant: bool) -> Result<String, String> {
-    let admin_group = get_admin_group();
-    let (cmd, args) = if grant {
-        ("/usr/sbin/usermod", vec!["-aG", admin_group, &username])
-    } else {
-        ("/usr/bin/gpasswd", vec!["-d", &username, admin_group])
-    };
-
-    let output = Command::new("pkexec")
-        .arg(cmd)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec {}: {}", cmd, e))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    let verb = if grant { "grant" } else { "revoke" };
+    run_user_named_action(
+        "user_toggle_sudo",
+        &[username.clone(), verb.to_string()],
+    )
+    .await?;
     Ok(format!(
         "Sudo access {} for {}",
         if grant { "granted" } else { "revoked" },
@@ -259,27 +234,29 @@ pub async fn list_groups() -> Result<Vec<GroupInfo>, String> {
 
 #[tauri::command]
 pub async fn add_group(groupname: String) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["/usr/sbin/groupadd", &groupname])
-        .output()
-        .await
-        .map_err(|e| format!("pkexec groupadd failed: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    crate::utils::root_policy::group_name_valid(&groupname)?;
+    run_user_named_action(
+        "group_manage",
+        &[String::from("add"), groupname.clone()],
+    )
+    .await?;
     Ok(format!("Group {} added", groupname))
 }
 
 #[tauri::command]
 pub async fn delete_group(groupname: String) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["/usr/sbin/groupdel", &groupname])
-        .output()
-        .await
-        .map_err(|e| format!("pkexec groupdel failed: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    crate::utils::root_policy::group_name_valid(&groupname)?;
+    if crate::utils::root_policy::is_protected_admin_group(&groupname) {
+        return Err(format!(
+            "Action blocked: '{}' is an essential system-administration group and cannot be deleted.",
+            groupname
+        ));
     }
+    run_user_named_action(
+        "group_manage",
+        &[String::from("delete"), groupname.clone()],
+    )
+    .await?;
     Ok(format!("Group {} deleted", groupname))
 }
 
@@ -289,21 +266,14 @@ pub async fn modify_user_group(
     groupname: String,
     add: bool,
 ) -> Result<String, String> {
-    let output = if add {
-        Command::new("pkexec")
-            .args(["/usr/sbin/usermod", "-aG", &groupname, &username])
-            .output()
-            .await
-    } else {
-        Command::new("pkexec")
-            .args(["/usr/bin/gpasswd", "-d", &username, &groupname])
-            .output()
-            .await
-    };
-    let output = output.map_err(|e| format!("pkexec failed: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    crate::utils::root_policy::group_name_valid(&groupname)?;
+    let verb = if add { "add" } else { "remove" };
+    run_user_named_action(
+        "user_modify_group",
+        &[username, groupname, verb.to_string()],
+    )
+    .await?;
     Ok("Membership updated".to_string())
 }
 
@@ -411,16 +381,8 @@ pub async fn user_get_active_sessions() -> Result<Vec<ActiveSession>, String> {
 
 #[tauri::command]
 pub async fn user_kill_session(session_id: String) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["loginctl", "kill-session", &session_id])
-        .output()
-        .await
-        .map_err(|e| format!("loginctl kill-session failed: {}", e))?;
-    
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    
+    crate::utils::root_policy::login_session_id_valid(&session_id)?;
+    run_user_named_action("session_kill", &[session_id.clone()]).await?;
     Ok(format!("Session {} terminated.", session_id))
 }
 
@@ -484,21 +446,15 @@ pub async fn user_save_ssh_keys(username: String, keys: String) -> Result<String
 
 #[tauri::command]
 pub async fn toggle_lock_user(username: String, lock: bool) -> Result<String, String> {
-    if is_protected_system_user(&username) {
-        return Err(format!("Action blocked: '{}' is a vital system account and cannot be locked/unlocked.", username));
+    crate::utils::root_policy::user_account_name_valid(&username)?;
+    if crate::utils::root_policy::is_protected_system_user(&username) {
+        return Err(format!(
+            "Action blocked: '{}' is a vital system account and cannot be locked/unlocked.",
+            username
+        ));
     }
-
-    let flag = if lock { "-l" } else { "-u" };
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/passwd", flag, &username])
-        .output()
-        .await
-        .map_err(|e| format!("pkexec passwd failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
+    let verb = if lock { "lock" } else { "unlock" };
+    run_user_named_action("user_lock", &[username.clone(), verb.to_string()]).await?;
     Ok(format!(
         "User '{}' account successfully {}.",
         username,

@@ -121,6 +121,46 @@ const DF_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/df"];
 const UNAME_CANDIDATES: [&str; 2] = ["/usr/bin/uname", "/bin/uname"];
 #[cfg(feature = "test-fixture")]
 const UNAME_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/uname"];
+
+/// User/group tools, addressed by absolute candidate paths. The fixture build
+/// swaps every one for a logging stub so no account or session is touched.
+#[cfg(not(feature = "test-fixture"))]
+const USER_TOOL_CANDIDATES: &[&[&str]] = &[
+    &["/usr/sbin/useradd", "/usr/bin/useradd"],
+    &["/usr/sbin/userdel", "/usr/bin/userdel"],
+    &["/usr/sbin/usermod", "/usr/bin/usermod"],
+    &["/usr/bin/gpasswd", "/usr/bin/gpasswd"],
+    &["/usr/bin/passwd", "/usr/bin/passwd"],
+    &["/usr/sbin/chpasswd", "/usr/bin/chpasswd"],
+    &["/usr/sbin/groupadd", "/usr/bin/groupadd"],
+    &["/usr/sbin/groupdel", "/usr/bin/groupdel"],
+    &["/usr/bin/loginctl", "/bin/loginctl"],
+];
+#[cfg(feature = "test-fixture")]
+const USER_TOOL_CANDIDATES: &[&[&str]] = &[
+    &["/tmp/lcp-admin-test-fixture/bin/useradd"],
+    &["/tmp/lcp-admin-test-fixture/bin/userdel"],
+    &["/tmp/lcp-admin-test-fixture/bin/usermod"],
+    &["/tmp/lcp-admin-test-fixture/bin/gpasswd"],
+    &["/tmp/lcp-admin-test-fixture/bin/passwd"],
+    &["/tmp/lcp-admin-test-fixture/bin/chpasswd"],
+    &["/tmp/lcp-admin-test-fixture/bin/groupadd"],
+    &["/tmp/lcp-admin-test-fixture/bin/groupdel"],
+    &["/tmp/lcp-admin-test-fixture/bin/loginctl"],
+];
+
+fn user_tool(index: usize) -> Option<&'static str> {
+    USER_TOOL_CANDIDATES
+        .get(index)?
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+fn require_user_tool(index: usize, label: &str) -> Result<&'static str, String> {
+    user_tool(index)
+        .ok_or_else(|| format!("lcp-admin: {label} is not available on this system"))
+}
 #[cfg(not(feature = "test-fixture"))]
 const PACKAGE_LOCK_PATHS: &[&str] = &[
     "/run/dnf.pid",
@@ -1272,6 +1312,259 @@ fn dnf_history_undo_action(id: &str, confirmed: bool) -> Result<(), String> {
     run_package_program(dnf, &["history", "undo", id, "-y"], "dnf")
 }
 
+/// Run a user/group tool and format a consistent error. All arguments were
+/// validated before this point; the exact argv is passed without a shell.
+fn run_user_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        Err(format!("lcp-admin: {label} failed with exit status {}", output.status))
+    } else {
+        Err(format!("lcp-admin: {label} failed: {detail}"))
+    }
+}
+
+/// Validate a constructed argv against the shared per-program policy.
+fn ensure_user_argv(program: &str, argv: &[String]) -> Result<(), String> {
+    root_policy::ensure_arguments_for_program(program, argv)
+}
+
+fn admin_group_name() -> &'static str {
+    if let Ok(content) = std::fs::read_to_string("/etc/group") {
+        for line in content.lines() {
+            if line.starts_with("sudo:") || line.starts_with("wheel:") {
+                return if line.starts_with("sudo:") { "sudo" } else { "wheel" };
+            }
+        }
+    }
+    "wheel"
+}
+
+/// `user_add <username> [fullname]`.
+fn user_add_action(username: &str, fullname: Option<&str>) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    let program = require_user_tool(0, "useradd")?;
+    let mut argv: Vec<String> = vec!["-m".to_string()];
+    if let Some(fullname) = fullname {
+        root_policy::user_fullname_valid(fullname)?;
+        argv.push("-c".to_string());
+        argv.push(fullname.to_string());
+    }
+    argv.push(username.to_string());
+    ensure_user_argv(program, &argv)?;
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_user_program(program, &refs, "useradd")
+}
+
+/// `user_delete <username> [remove-home]`.
+fn user_delete_action(username: &str, remove_home: bool) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    if root_policy::is_protected_system_user(username) {
+        return Err(format!(
+            "lcp-admin: '{username}' is a vital system account and cannot be deleted"
+        ));
+    }
+    let program = require_user_tool(1, "userdel")?;
+    let mut argv: Vec<String> = vec!["--force".to_string()];
+    if remove_home {
+        argv.push("--remove".to_string());
+    }
+    argv.push(username.to_string());
+    ensure_user_argv(program, &argv)?;
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_user_program(program, &refs, "userdel")
+}
+
+/// `user_set_password <username>` with the password supplied on stdin.
+fn user_set_password_action(username: &str) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    if root_policy::is_protected_system_user(username) {
+        return Err(format!(
+            "lcp-admin: '{username}' is a vital system account; changing its password is blocked"
+        ));
+    }
+    let password = read_stdin_content(4096, "password")?;
+    root_policy::user_password_valid(&password)?;
+    let program = require_user_tool(5, "chpasswd")?;
+    let input = format!("{username}:{password}\n");
+    use std::io::Write;
+    let mut child = std::process::Command::new(program)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("lcp-admin: chpasswd could not be started ({e})"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| format!("lcp-admin: chpasswd input could not be written ({e})"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("lcp-admin: chpasswd did not complete ({e})"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: chpasswd failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// `user_toggle_sudo <username> <grant|revoke>`.
+fn user_toggle_sudo_action(username: &str, grant: bool) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    let group = admin_group_name();
+    if grant {
+        let program = require_user_tool(2, "usermod")?;
+        let argv: Vec<String> = vec![
+            "-aG".to_string(),
+            group.to_string(),
+            username.to_string(),
+        ];
+        ensure_user_argv(program, &argv)?;
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_user_program(program, &refs, "usermod")
+    } else {
+        let program = require_user_tool(3, "gpasswd")?;
+        let argv: Vec<String> = vec![
+            "-d".to_string(),
+            username.to_string(),
+            group.to_string(),
+        ];
+        run_user_program(program, &argv.iter().map(String::as_str).collect::<Vec<_>>(), "gpasswd")
+    }
+}
+
+/// `user_modify_group <username> <groupname> <add|remove>`.
+fn user_modify_group_action(username: &str, groupname: &str, add: bool) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    root_policy::group_name_valid(groupname)?;
+    if add {
+        let program = require_user_tool(2, "usermod")?;
+        let argv: Vec<String> = vec![
+            "-aG".to_string(),
+            groupname.to_string(),
+            username.to_string(),
+        ];
+        ensure_user_argv(program, &argv)?;
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        run_user_program(program, &refs, "usermod")
+    } else {
+        let program = require_user_tool(3, "gpasswd")?;
+        let argv: Vec<String> = vec![
+            "-d".to_string(),
+            username.to_string(),
+            groupname.to_string(),
+        ];
+        run_user_program(program, &argv.iter().map(String::as_str).collect::<Vec<_>>(), "gpasswd")
+    }
+}
+
+/// `group_manage <add|delete> <groupname>`.
+fn group_manage_action(verb: &str, groupname: &str) -> Result<(), String> {
+    root_policy::group_name_valid(groupname)?;
+    if verb == "delete" && root_policy::is_protected_admin_group(groupname) {
+        return Err(format!(
+            "lcp-admin: '{groupname}' is an essential system-administration group and cannot be deleted"
+        ));
+    }
+    let (index, program_name) = match verb {
+        "add" => (6, "groupadd"),
+        "delete" => (7, "groupdel"),
+        other => {
+            return Err(format!(
+                "lcp-admin: the group verb must be add or delete, got: {other}"
+            ))
+        }
+    };
+    let program = require_user_tool(index, program_name)?;
+    let argv: Vec<String> = vec![groupname.to_string()];
+    ensure_user_argv(program, &argv)?;
+    run_user_program(program, &[groupname], program_name)
+}
+
+/// `user_lock <username> <lock|unlock>`.
+fn user_lock_action(username: &str, lock: bool) -> Result<(), String> {
+    root_policy::user_account_name_valid(username)?;
+    if root_policy::is_protected_system_user(username) {
+        return Err(format!(
+            "lcp-admin: '{username}' is a vital system account and cannot be locked or unlocked"
+        ));
+    }
+    let program = require_user_tool(4, "passwd")?;
+    run_user_program(
+        program,
+        &[if lock { "-l" } else { "-u" }, username],
+        "passwd",
+    )
+}
+
+/// UID of the process that invoked the helper. `pkexec` sets PKEXEC_UID; a
+/// sudo invocation sets SUDO_UID. This value never comes from the action's
+/// argv, so a direct helper caller cannot claim to be someone else.
+fn invoking_uid() -> Option<u32> {
+    for name in ["PKEXEC_UID", "SUDO_UID"] {
+        if let Ok(value) = std::env::var(name) {
+            if let Ok(uid) = value.trim().parse::<u32>() {
+                return Some(uid);
+            }
+        }
+    }
+    None
+}
+
+/// Owner UID of a login session, resolved by loginctl (authoritative).
+fn session_owner_uid(program: &str, session_id: &str) -> Result<u32, String> {
+    let output = std::process::Command::new(program)
+        .args(["show-session", session_id, "-p", "User", "--value"])
+        .output()
+        .map_err(|e| format!("lcp-admin: loginctl could not be started ({e})"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: the owner of session {session_id} could not be determined: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| {
+            format!(
+                "lcp-admin: the owner of session {session_id} could not be determined (unexpected loginctl output)"
+            )
+        })
+}
+
+/// `session_kill <session-id>`. The invoking user's own session is never
+/// terminated; the owner is read from loginctl, not from the caller.
+fn session_kill_action(session_id: &str) -> Result<(), String> {
+    root_policy::login_session_id_valid(session_id)?;
+    let program = require_user_tool(8, "loginctl")?;
+    let caller = invoking_uid().ok_or_else(|| {
+        "lcp-admin: the invoking user could not be determined; refusing to terminate a session"
+            .to_string()
+    })?;
+    let owner = session_owner_uid(program, session_id)?;
+    if owner == caller {
+        return Err(format!(
+            "lcp-admin: session {session_id} belongs to the invoking user; refusing to terminate your own session"
+        ));
+    }
+    let argv: Vec<String> = vec!["kill-session".to_string(), session_id.to_string()];
+    ensure_user_argv(program, &argv)?;
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_user_program(program, &refs, "loginctl")
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -1310,6 +1603,14 @@ const ROOT_ACTIONS: &[&str] = &[
     "firewall_enable_hardened",
     "pkg_maintenance",
     "dnf_history_undo",
+    "user_add",
+    "user_delete",
+    "user_set_password",
+    "user_toggle_sudo",
+    "user_modify_group",
+    "group_manage",
+    "user_lock",
+    "session_kill",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -1580,6 +1881,76 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "user_add" {
+            if args.len() == 2 {
+                user_add_action(&args[1], None)
+            } else if args.len() == 3 {
+                user_add_action(&args[1], Some(&args[2]))
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes an account name and an optional full name."
+                ))
+            }
+        } else if requested == "user_delete" {
+            match args.as_slice() {
+                [_, username] => user_delete_action(username, false),
+                [_, username, flag] if flag == "remove-home" => user_delete_action(username, true),
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes an account name and the optional literal 'remove-home'."
+                )),
+            }
+        } else if requested == "user_set_password" {
+            if args.len() == 2 {
+                user_set_password_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one account name."
+                ))
+            }
+        } else if requested == "user_toggle_sudo" {
+            match args.as_slice() {
+                [_, username, verb] if verb == "grant" => user_toggle_sudo_action(username, true),
+                [_, username, verb] if verb == "revoke" => user_toggle_sudo_action(username, false),
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes an account name and grant|revoke."
+                )),
+            }
+        } else if requested == "user_modify_group" {
+            match args.as_slice() {
+                [_, username, group, verb] if verb == "add" => {
+                    user_modify_group_action(username, group, true)
+                }
+                [_, username, group, verb] if verb == "remove" => {
+                    user_modify_group_action(username, group, false)
+                }
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes an account name, a group name and add|remove."
+                )),
+            }
+        } else if requested == "group_manage" {
+            if args.len() == 3 {
+                group_manage_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes add|delete and a group name."
+                ))
+            }
+        } else if requested == "user_lock" {
+            match args.as_slice() {
+                [_, username, verb] if verb == "lock" => user_lock_action(username, true),
+                [_, username, verb] if verb == "unlock" => user_lock_action(username, false),
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes an account name and lock|unlock."
+                )),
+            }
+        } else if requested == "session_kill" {
+            if args.len() == 2 {
+                session_kill_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one session id."
+                ))
             }
         } else if requested == "dnf_history_undo" {
             // Optional trailing confirmation: [id, confirm?]. Only the exact
