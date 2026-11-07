@@ -29,6 +29,29 @@ async fn check_sysctl_tampered() -> bool {
     false
 }
 
+
+/// Forward one closed security action to the installed helper. The helper
+/// re-validates the action's operands and owns the privileged execution.
+async fn run_security_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = privileged::run_privileged_with_stdin(
+        helper,
+        &args,
+        &privileged::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
 // ─── Data Structures ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1573,63 +1596,13 @@ pub async fn security_fix_root_ssh(enable: bool) -> Result<String, String> {
 #[tauri::command]
 pub async fn security_fix_ssh_param(param: String, value: String, revert_value: String, enable: bool) -> Result<String, String> {
     let target_value = if enable { &value } else { &revert_value };
-
-    // Sanitise: only allow safe characters in param and value
-    if !param.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-        return Err("Invalid SSH parameter name.".to_string());
-    }
-    if !target_value.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ' ') {
-        return Err("Invalid SSH parameter value.".to_string());
-    }
-
-    let config_file = "/etc/ssh/sshd_config";
-    // If the key exists (commented or not), replace it. Otherwise append.
-    let script = String::from(
-        r#"set -eu
-cfg="$1"
-backup="${{cfg}}.control-panel.bak"
-test -f "$cfg"
-cp -p "$cfg" "$backup"
-if grep -qiE "^#?$2[[:space:]]" "$cfg"; then
-    sed -i "s|^#\\?$2.*|$2 $3|gI" "$cfg"
-else
-    printf '%s %s\n' "$2" "$3" >> "$cfg"
-fi
-if ! sshd -t -f "$cfg"; then
-    cp -p "$backup" "$cfg"
-    exit 1
-fi
-effective=$(sshd -T | grep -i -m1 "^$2[[:space:]]" | sed -E 's/^[^[:space:]]+[[:space:]]+//' || true)
-if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "$3s" ]; then effective="$3"; fi
-if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "1m" ] && [ "$3" = "60" ]; then effective=60; fi
-if [ "$2" = "LoginGraceTime" ] && [ "$effective" = "2m" ] && [ "$3" = "120" ]; then effective=120; fi
-if [ "$effective" != "$3" ]; then
-    cp -p "$backup" "$cfg"
-    echo 'The requested SSH setting is overridden by another configuration file; no change was kept.' >&2
-    exit 1
-fi
-if systemctl is-active --quiet sshd; then
-    if ! systemctl reload sshd; then cp -p "$backup" "$cfg"; exit 1; fi
-elif systemctl is-active --quiet ssh; then
-    if ! systemctl reload ssh; then cp -p "$backup" "$cfg"; exit 1; fi
-fi
-"#,
-    );
-
-    // The parameter, the value and the file are passed as positional
-    // parameters — they are never interpolated into the script.
-    let out = privileged::run_privileged_script_with_args(
-        &script,
-        &[config_file.to_string(), param.to_string(), target_value.to_string()],
+    crate::utils::root_policy::security_ssh_param_valid(&param, target_value)?;
+    run_security_named_action(
+        "security_ssh_param",
+        &[param.clone(), target_value.clone()],
     )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        Ok(format!("SSH {} set to '{}'.", param, target_value))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    .await?;
+    Ok(format!("SSH {} set to '{}'.", param, target_value))
 }
 
 /// Apply/revert a kernel sysctl parameter persistently.
@@ -1640,61 +1613,19 @@ fi
 #[tauri::command]
 pub async fn security_fix_kernel_param(key: String, value: String, revert_value: String, enable: bool) -> Result<String, String> {
     let target = if enable { &value } else { &revert_value };
-
-    // Input validation — only allow safe sysctl key/value characters
-    if !key.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_') {
-        return Err("Invalid sysctl key.".to_string());
-    }
-    if !target.trim().chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ') {
-        return Err("Invalid sysctl value (only digits and dash allowed).".to_string());
-    }
-
-    // Single consistent filename — matches the countermeasure descriptions shown in the UI.
-    let conf_file = "/etc/sysctl.d/99-hardening.conf";
-
-    // Robust script that:
-    //   1. Uses `set -e` so ANY step failure aborts the whole script (no silent partial success).
-    //   2. Builds the new file content in a temp file in /tmp (always writable, no SELinux issue).
-    //   3. Uses `install` to atomically copy to destination with correct ownership/mode.
-    //   4. Writes the file BEFORE running sysctl -w, so on any failure the live value
-    //      is not changed either.
-    //   5. Verifies the write with `sysctl -p` (reloads from the file).
-    let script = String::from(
-        "set -e\n\
-         mkdir -p /etc/sysctl.d\n\
-         TMP=$(mktemp /tmp/sysctl_harden_XXXXXX)\n\
-         trap 'rm -f \"$TMP\"' EXIT\n\
-         if [ -f \"$1\" ]; then grep -v \"^$2\" \"$1\" > \"$TMP\" 2>/dev/null || true; fi\n\
-         printf '%s = %s\\n' \"$2\" \"$3\" >> \"$TMP\"\n\
-         install -m 0644 -o root -g root \"$TMP\" \"$1\"\n\
-         sysctl -w \"$2=$3\"\n\
-         sysctl -p \"$1\"",
-    );
-
-    // The file, the key and the value are passed as positional parameters.
-    let out = privileged::run_privileged_script_with_args(
-        &script,
-        &[conf_file.to_string(), key.to_string(), target.to_string()],
+    crate::utils::root_policy::security_kernel_param_valid(&key, target)?;
+    run_security_named_action(
+        "security_kernel_param",
+        &[key.clone(), target.clone()],
     )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
-            *guard = Some(SystemTime::now());
-        }
-        Ok(format!(
-            "{} = {} — written to {} and applied immediately",
-            key, target, conf_file
-        ))
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        Err(if stderr.is_empty() {
-            format!("Failed to apply {} — script exited with error (check system logs)", key)
-        } else {
-            stderr
-        })
+    .await?;
+    if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
+        *guard = Some(SystemTime::now());
     }
+    Ok(format!(
+        "{} = {} — written to /etc/sysctl.d/99-hardening.conf and applied immediately",
+        key, target
+    ))
 }
 
 /// Choose the firewall backend to harden. The caller names one backend
@@ -1776,65 +1707,44 @@ pub async fn security_fix_firewall(
 /// Fix password aging policy.
 #[tauri::command]
 pub async fn security_fix_password_policy() -> Result<String, String> {
-    let script = r#"set -eu
-cfg=/etc/login.defs
-test -f "$cfg"
-backup="${cfg}.control-panel.bak"
-cp -p "$cfg" "$backup"
-tmp=$(mktemp /etc/login.defs.XXXXXX)
-trap 'rm -f "$tmp"' EXIT
-awk '!/^[[:space:]]*#/ && $1 == "PASS_MAX_DAYS" {next} !/^[[:space:]]*#/ && $1 == "PASS_MIN_LEN" {next} {print} END {print "PASS_MAX_DAYS 90"; print "PASS_MIN_LEN 12"}' "$cfg" > "$tmp"
-chown --reference="$cfg" "$tmp"
-chmod --reference="$cfg" "$tmp"
-mv -f "$tmp" "$cfg"
-grep -Eq '^[[:space:]]*PASS_MAX_DAYS[[:space:]]+90([[:space:]]|$)' "$cfg"
-grep -Eq '^[[:space:]]*PASS_MIN_LEN[[:space:]]+12([[:space:]]|$)' "$cfg"
-trap - EXIT"#;
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("Password policy: PASS_MAX_DAYS=90, PASS_MIN_LEN=12 applied.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_apply",
+        &[String::from("password_policy")],
+    )
+    .await?;
+    Ok("Password policy: PASS_MAX_DAYS=90, PASS_MIN_LEN=12 applied.".to_string())
 }
 
 /// Enable/disable auditd.
 #[tauri::command]
 pub async fn security_fix_auditd(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "auditd"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("auditd {}d successfully.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_service_toggle",
+        &[String::from("auditd"), action.to_string()],
+    )
+    .await?;
+    Ok(format!("auditd {}d successfully.", action))
 }
 
 /// Enable time synchronization (chronyd preferred, fallback to systemd-timesyncd).
 #[tauri::command]
 pub async fn security_fix_time_sync(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-
-    if crate::binary_exists("chronyd").await || crate::binary_exists("chronyc").await {
-        let out = Command::new("pkexec")
-            .args(["systemctl", action, "--now", "chronyd"])
-            .output().await.map_err(|e| e.to_string())?;
-        if out.status.success() {
-            return Ok(format!("chronyd {}d successfully.", action));
-        }
-    }
-
-    // fallback: systemd-timesyncd
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "systemd-timesyncd"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("systemd-timesyncd {}d successfully.", action))
+    // Backend choice is a UX preference; the helper still restricts the unit
+    // to its closed allow-list. A failed primary unit is an error (no silent
+    // fallback to a different time daemon).
+    let unit = if crate::binary_exists("chronyd").await || crate::binary_exists("chronyc").await {
+        "chronyd"
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+        "systemd-timesyncd"
+    };
+    run_security_named_action(
+        "security_service_toggle",
+        &[unit.to_string(), action.to_string()],
+    )
+    .await?;
+    Ok(format!("{unit} {}d successfully.", action))
 }
 
 /// Fix /tmp sticky bit — with tmpfiles.d persistence.
@@ -1844,30 +1754,12 @@ pub async fn security_fix_time_sync(enable: bool) -> Result<String, String> {
 /// resets the correct permissions at every boot.
 #[tauri::command]
 pub async fn security_fix_tmp_sticky(enable: bool) -> Result<String, String> {
-    // The `D` type in tmpfiles.d: create or adjust directory permissions at boot.
-    let script = if enable {
-        // Set sticky bit now AND persist via tmpfiles.d
-        "set -e\n\
-         chmod 1777 /tmp\n\
-         mkdir -p /etc/tmpfiles.d\n\
-         printf 'D /tmp 1777 root root -\\n' > /etc/tmpfiles.d/tmp-sticky.conf"
+    let op = if enable { "tmp_sticky_on" } else { "tmp_sticky_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    if enable {
+        Ok("/tmp permissions set to 1777 (sticky). Persisted via /etc/tmpfiles.d/tmp-sticky.conf — survives reboots.".to_string())
     } else {
-        // Remove sticky bit and clean up the tmpfiles.d entry
-        "set -e\n\
-         chmod 777 /tmp\n\
-         rm -f /etc/tmpfiles.d/tmp-sticky.conf"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if enable {
-            Ok("/tmp permissions set to 1777 (sticky). Persisted via /etc/tmpfiles.d/tmp-sticky.conf — survives reboots.".to_string())
-        } else {
-            Ok("/tmp sticky bit removed. /etc/tmpfiles.d/tmp-sticky.conf deleted.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("/tmp sticky bit removed. /etc/tmpfiles.d/tmp-sticky.conf deleted.".to_string())
     }
 }
 
@@ -1942,172 +1834,93 @@ pub async fn security_log_fix(
 /// Fix /etc/passwd permissions.
 #[tauri::command]
 pub async fn security_fix_passwd_perms() -> Result<String, String> {
-    let out = privileged::run_privileged_script("chmod 644 /etc/passwd && chown root:root /etc/passwd").await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("/etc/passwd permissions set to 644, owner root:root.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_apply", &[String::from("passwd_perms")]).await?;
+    Ok("/etc/passwd permissions set to 644, owner root:root.".to_string())
 }
 
 /// Fix /etc/shadow permissions.
 #[tauri::command]
 pub async fn security_fix_shadow_perms() -> Result<String, String> {
-    let out = privileged::run_privileged_script("chmod 000 /etc/shadow && chown root:root /etc/shadow").await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("/etc/shadow permissions set to 000, owner root:root.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_apply", &[String::from("shadow_perms")]).await?;
+    Ok("/etc/shadow permissions set to 000, owner root:root.".to_string())
 }
 
 /// Enable/disable USBGuard.
 #[tauri::command]
 pub async fn security_fix_usbguard(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "usbguard"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("USBGuard {}d.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_service_toggle",
+        &[String::from("usbguard"), action.to_string()],
+    )
+    .await?;
+    Ok(format!("USBGuard {}d.", action))
 }
 
 /// Lock user account with empty password (passwd -l <user>).
 #[tauri::command]
 pub async fn security_fix_lock_account(user: Option<String>) -> Result<String, String> {
     let username = user.filter(|name| !name.trim().is_empty()).unwrap_or_default();
-    if !username.is_empty()
-        && (!username.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-            || !username.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-    {
-        return Err("Invalid username".to_string());
+    let mut params = Vec::new();
+    if !username.is_empty() {
+        crate::utils::root_policy::user_account_name_valid(&username)?;
+        params.push(username.clone());
     }
-
-    let script = r#"set -e
-if [ -n "${1:-}" ]; then
-    users=("$1")
-else
-    mapfile -t users < <(awk -F: '$2 == "" { print $1 }' /etc/shadow)
-fi
-if [ "${#users[@]}" -eq 0 ]; then
-    echo 'No accounts with empty passwords found.' >&2
-    exit 1
-fi
-for username in "${users[@]}"; do passwd -l -- "$username"; done"#;
-
-    let out = privileged::run_privileged_script_with_args(script, &[username.clone()]).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        let detail = if username.is_empty() { "all accounts with empty passwords" } else { "the selected account" };
-        Ok(format!("Locked {detail}.") )
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_lock_account", &params).await?;
+    invalidate_audit_cache();
+    let detail = if username.is_empty() { "all accounts with empty passwords" } else { "the selected account" };
+    Ok(format!("Locked {detail}."))
 }
 
 /// Configure PAM faillock lockout policy (deny = 5, unlock_time = 900).
 #[tauri::command]
 pub async fn security_fix_pam_faillock(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/security/faillock.conf.d\n\
-         printf 'deny = 5\\nunlock_time = 900\\nfail_interval = 900\\n' > /etc/security/faillock.conf.d/50-hardening.conf\n\
-         if command -v authselect >/dev/null 2>&1; then authselect enable-feature with-faillock 2>/dev/null || true; fi"
+    let op = if enable { "pam_faillock_on" } else { "pam_faillock_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("PAM faillock configured: deny = 5, unlock_time = 900s via /etc/security/faillock.conf.d/50-hardening.conf.".to_string())
     } else {
-        "rm -f /etc/security/faillock.conf.d/50-hardening.conf"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("PAM faillock configured: deny = 5, unlock_time = 900s via /etc/security/faillock.conf.d/50-hardening.conf.".to_string())
-        } else {
-            Ok("PAM faillock hardening configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("PAM faillock hardening configuration removed.".to_string())
     }
 }
 
 /// Set default system umask 027 in /etc/login.defs.
 #[tauri::command]
 pub async fn security_fix_umask(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "if grep -qE '^\\s*UMASK' /etc/login.defs; then sed -i 's/^\\s*UMASK.*/UMASK 027/g' /etc/login.defs; else echo 'UMASK 027' >> /etc/login.defs; fi"
+    let op = if enable { "umask_on" } else { "umask_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Default system UMASK set to 027 in /etc/login.defs.".to_string())
     } else {
-        "sed -i 's/^\\s*UMASK.*/UMASK 022/g' /etc/login.defs"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Default system UMASK set to 027 in /etc/login.defs.".to_string())
-        } else {
-            Ok("Default system UMASK set to 022 in /etc/login.defs.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("Default system UMASK set to 022 in /etc/login.defs.".to_string())
     }
 }
 
 /// Set SSH idle timeout parameters (ClientAliveInterval 300, ClientAliveCountMax 3).
 #[tauri::command]
 pub async fn security_fix_ssh_idle_timeout(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/ssh/sshd_config.d\n\
-         printf 'ClientAliveInterval 300\\nClientAliveCountMax 3\\n' > /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    let op = if enable { "ssh_idle_on" } else { "ssh_idle_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("SSH idle timeout set: ClientAliveInterval=300, ClientAliveCountMax=3.".to_string())
     } else {
-        "set -e\n\
-         rm -f /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("SSH idle timeout set: ClientAliveInterval=300, ClientAliveCountMax=3.".to_string())
-        } else {
-            Ok("SSH idle timeout configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("SSH idle timeout configuration removed.".to_string())
     }
 }
 
 /// Blacklist legacy unused filesystem kernel modules via modprobe.d.
 #[tauri::command]
 pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/modprobe.d\n\
-         printf 'install cramfs /bin/true\\ninstall freevxfs /bin/true\\ninstall hfs /bin/true\\ninstall hfsplus /bin/true\\ninstall jffs2 /bin/true\\ninstall udf /bin/true\\n' > /etc/modprobe.d/disable-unused-fs.conf"
+    let op = if enable { "blacklist_fs_on" } else { "blacklist_fs_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Unused filesystem kernel modules (cramfs, hfs, udf, etc.) disabled via /etc/modprobe.d/disable-unused-fs.conf.".to_string())
     } else {
-        "rm -f /etc/modprobe.d/disable-unused-fs.conf"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Unused filesystem kernel modules (cramfs, hfs, udf, etc.) disabled via /etc/modprobe.d/disable-unused-fs.conf.".to_string())
-        } else {
-            Ok("Modprobe blacklist for unused filesystem modules removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("Modprobe blacklist for unused filesystem modules removed.".to_string())
     }
 }
 
@@ -2115,49 +1928,23 @@ pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, S
 #[tauri::command]
 pub async fn security_fix_mask_ctrl_alt_del(enable: bool) -> Result<String, String> {
     let action = if enable { "mask" } else { "unmask" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "ctrl-alt-del.target"])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        Ok(format!("ctrl-alt-del.target {}ed successfully.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_ctrl_alt_del", &[action.to_string()]).await?;
+    invalidate_audit_cache();
+    Ok(format!("ctrl-alt-del.target {}ed successfully.", action))
 }
 
 /// Configure legal access warning banner (/etc/issue, /etc/issue.net, sshd Banner).
 #[tauri::command]
 pub async fn security_fix_legal_banner(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         BANNER='Authorized uses only. All activity may be monitored and reported.'\n\
-         printf \"$BANNER\\n\" > /etc/issue\n\
-         printf \"$BANNER\\n\" > /etc/issue.net\n\
-         mkdir -p /etc/ssh/sshd_config.d\n\
-         printf 'Banner /etc/issue.net\\n' > /etc/ssh/sshd_config.d/50-banner.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    let op = if enable { "legal_banner_on" } else { "legal_banner_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Legal access warning banner configured in /etc/issue and /etc/ssh/sshd_config.".to_string())
     } else {
-        "set -e\n\
-         rm -f /etc/ssh/sshd_config.d/50-banner.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Legal access warning banner configured in /etc/issue and /etc/ssh/sshd_config.".to_string())
-        } else {
-            Ok("SSH legal warning banner configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("SSH legal warning banner configuration removed.".to_string())
     }
 }
-
 
 #[cfg(test)]
 mod security_fix_firewall_tests {

@@ -1593,6 +1593,112 @@ pub fn user_password_valid(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Units the security-auditor service action may enable/disable. The list is
+/// deliberately closed: this is not a generic systemctl channel.
+pub fn security_service_unit_valid(unit: &str) -> Result<(), String> {
+    match unit {
+        "auditd" | "usbguard" | "chronyd" | "systemd-timesyncd" => Ok(()),
+        other => Err(format!(
+            "The security service must be auditd, usbguard, chronyd or systemd-timesyncd, got: {other}"
+        )),
+    }
+}
+
+pub fn security_service_verb_valid(verb: &str) -> Result<(), String> {
+    match verb {
+        "enable" | "disable" => Ok(()),
+        other => Err(format!(
+            "The service verb must be enable or disable, got: {other}"
+        )),
+    }
+}
+
+pub fn ctrl_alt_del_verb_valid(verb: &str) -> Result<(), String> {
+    match verb {
+        "mask" | "unmask" => Ok(()),
+        other => Err(format!(
+            "The ctrl-alt-del verb must be mask or unmask, got: {other}"
+        )),
+    }
+}
+
+/// Closed parameter/value pairs for the SSH hardening action. The app's
+/// scanner fix buttons map exactly to this set.
+pub fn security_ssh_param_valid(param: &str, value: &str) -> Result<(), String> {
+    let allowed: &[&str] = match param {
+        "PermitRootLogin" => &["prohibit-password", "yes"],
+        "PasswordAuthentication" => &["no", "yes"],
+        "MaxAuthTries" => &["4", "6"],
+        "LoginGraceTime" => &["60", "120"],
+        _ => {
+            return Err(format!(
+                "The SSH parameter must be PermitRootLogin, PasswordAuthentication, MaxAuthTries or LoginGraceTime, got: {param}"
+            ))
+        }
+    };
+    if allowed.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The value '{value}' is not allowed for SSH parameter {param}"
+        ))
+    }
+}
+
+/// Closed sysctl keys the hardening page can persist, with numeric values.
+pub fn security_kernel_param_valid(key: &str, value: &str) -> Result<(), String> {
+    const KEYS: &[&str] = &[
+        "kernel.randomize_va_space",
+        "net.ipv4.tcp_syncookies",
+        "net.ipv4.ip_forward",
+        "kernel.kptr_restrict",
+        "kernel.dmesg_restrict",
+        "net.ipv4.conf.all.accept_redirects",
+        "net.ipv4.conf.all.log_martians",
+    ];
+    if !KEYS.contains(&key) {
+        return Err(format!(
+            "The sysctl key is not one of the hardening keys: {key}"
+        ));
+    }
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || value.len() > 10 {
+        return Err(format!(
+            "The sysctl value must be a small decimal number, got: {value}"
+        ));
+    }
+    Ok(())
+}
+
+/// Operations handled by the security-apply action. Every operation is a
+/// fixed, hard-coded routine; the name only selects which one.
+pub fn security_apply_op_valid(op: &str) -> Result<(), String> {
+    const OPS: &[&str] = &[
+        "password_policy",
+        "tmp_sticky_on",
+        "tmp_sticky_off",
+        "passwd_perms",
+        "shadow_perms",
+        "pam_faillock_on",
+        "pam_faillock_off",
+        "umask_on",
+        "umask_off",
+        "ssh_idle_on",
+        "ssh_idle_off",
+        "blacklist_fs_on",
+        "blacklist_fs_off",
+        "legal_banner_on",
+        "legal_banner_off",
+    ];
+    if OPS.contains(&op) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The security operation must be one of {OPS:?}, got: {op}"
+        ))
+    }
+}
+
 /// Login session ids accepted by the session-kill action.
 pub fn login_session_id_valid(value: &str) -> Result<(), String> {
     if is_digits(value) && value.len() <= 20 && value.parse::<u64>().is_ok_and(|id| id > 0) {
@@ -3329,6 +3435,12 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "group_manage",
     "user_lock",
     "session_kill",
+    "security_service_toggle",
+    "security_ctrl_alt_del",
+    "security_apply",
+    "security_ssh_param",
+    "security_kernel_param",
+    "security_lock_account",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3520,6 +3632,15 @@ const HELPER_DNF_HISTORY_UNDO_ACTIONS: &[&str] = &["dnf_history_undo"];
 
 /// Named account/group/session actions. Every operand is validated here and
 /// again inside the action; the helper never constructs a shell command.
+/// Closed security-auditor operations: only the four named units and the
+/// single ctrl-alt-del target can be reached through these actions.
+const HELPER_SECURITY_SERVICE_ACTIONS: &[&str] = &["security_service_toggle"];
+const HELPER_SECURITY_APPLY_ACTIONS: &[&str] = &["security_apply"];
+const HELPER_SECURITY_SSH_PARAM_ACTIONS: &[&str] = &["security_ssh_param"];
+const HELPER_SECURITY_KERNEL_PARAM_ACTIONS: &[&str] = &["security_kernel_param"];
+const HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS: &[&str] = &["security_lock_account"];
+const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
+
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
     "user_add",
     "user_delete",
@@ -4225,6 +4346,75 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "the backend must be firewalld or ufw",
             ));
         }
+        return Ok(());
+    }
+    if HELPER_SECURITY_APPLY_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one security operation",
+            ));
+        }
+        security_apply_op_valid(&args[1])?;
+        return Ok(());
+    }
+    if HELPER_SECURITY_SSH_PARAM_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes an SSH parameter and its value",
+            ));
+        }
+        security_ssh_param_valid(&args[1], &args[2])?;
+        return Ok(());
+    }
+    if HELPER_SECURITY_KERNEL_PARAM_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a sysctl key and its value",
+            ));
+        }
+        security_kernel_param_valid(&args[1], &args[2])?;
+        return Ok(());
+    }
+    if HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS.contains(&action.as_str()) {
+        if args.len() > 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes an optional account name",
+            ));
+        }
+        if let Some(user) = args.get(1) {
+            user_account_name_valid(user)?;
+        }
+        return Ok(());
+    }
+    if HELPER_SECURITY_SERVICE_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a service name and enable|disable",
+            ));
+        }
+        security_service_unit_valid(&args[1])?;
+        security_service_verb_valid(&args[2])?;
+        return Ok(());
+    }
+    if HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes mask|unmask",
+            ));
+        }
+        ctrl_alt_del_verb_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_USER_MANAGEMENT_ACTIONS.contains(&action.as_str()) {
@@ -7707,5 +7897,142 @@ mod user_management_validator_tests {
         helper(&["--force", "--remove", "alice"]).expect("long remove option must be allowed");
         assert!(helper(&["-r", "alice"]).is_err(), "short -r stays refused");
         assert!(helper(&["--force", "root"]).is_ok(), "account policy is action-level");
+    }
+}
+
+#[cfg(test)]
+mod security_action_validator_tests {
+    use super::{
+        ctrl_alt_del_verb_valid, ensure_arguments_for_program, security_apply_op_valid,
+        security_kernel_param_valid, security_service_unit_valid, security_service_verb_valid,
+        security_ssh_param_valid,
+    };
+
+    fn check_lcp(args: &[&str]) -> Result<(), String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        ensure_arguments_for_program("lcp-admin", &argv)
+    }
+
+    #[test]
+    fn security_actions_are_closed_allow_lists() {
+        for unit in ["auditd", "usbguard", "chronyd", "systemd-timesyncd"] {
+            security_service_unit_valid(unit).unwrap_or_else(|e| panic!("{unit:?}: {e}"));
+        }
+        for unit in ["sshd", "firewalld", "dbus", "auditd.service", ""] {
+            assert!(security_service_unit_valid(unit).is_err(), "{unit:?}");
+        }
+        for verb in ["enable", "disable"] {
+            security_service_verb_valid(verb).unwrap_or_else(|e| panic!("{verb:?}: {e}"));
+        }
+        for verb in ["restart", "start", "stop", "mask", ""] {
+            assert!(security_service_verb_valid(verb).is_err(), "{verb:?}");
+        }
+        for verb in ["mask", "unmask"] {
+            ctrl_alt_del_verb_valid(verb).unwrap_or_else(|e| panic!("{verb:?}: {e}"));
+        }
+        for verb in ["enable", "disable", "start", ""] {
+            assert!(ctrl_alt_del_verb_valid(verb).is_err(), "{verb:?}");
+        }
+    }
+
+    #[test]
+    fn security_file_operations_are_closed_and_validated() {
+        for (param, value) in [
+            ("PermitRootLogin", "prohibit-password"),
+            ("PermitRootLogin", "yes"),
+            ("PasswordAuthentication", "no"),
+            ("PasswordAuthentication", "yes"),
+            ("MaxAuthTries", "4"),
+            ("MaxAuthTries", "6"),
+            ("LoginGraceTime", "60"),
+            ("LoginGraceTime", "120"),
+        ] {
+            security_ssh_param_valid(param, value)
+                .unwrap_or_else(|e| panic!("{param}={value}: {e}"));
+        }
+        for (param, value) in [
+            ("PermitRootLogin", "no"),
+            ("PasswordAuthentication", "maybe"),
+            ("MaxAuthTries", "9"),
+            ("Banner", "none"),
+            ("LoginGraceTime", "30"),
+        ] {
+            assert!(
+                security_ssh_param_valid(param, value).is_err(),
+                "{param}={value} must be refused"
+            );
+        }
+
+        for key in [
+            "kernel.randomize_va_space",
+            "net.ipv4.tcp_syncookies",
+            "net.ipv4.ip_forward",
+            "kernel.kptr_restrict",
+            "kernel.dmesg_restrict",
+            "net.ipv4.conf.all.accept_redirects",
+            "net.ipv4.conf.all.log_martians",
+        ] {
+            security_kernel_param_valid(key, "1").unwrap_or_else(|e| panic!("{key}: {e}"));
+        }
+        for (key, value) in [
+            ("kernel.panic", "1"),
+            ("net.ipv4.ip_forward", "yes"),
+            ("kernel.dmesg_restrict", "1
+"),
+            ("kernel.dmesg_restrict", ""),
+        ] {
+            assert!(
+                security_kernel_param_valid(key, value).is_err(),
+                "{key}={value:?} must be refused"
+            );
+        }
+
+        for op in [
+            "password_policy", "tmp_sticky_on", "tmp_sticky_off", "passwd_perms",
+            "shadow_perms", "pam_faillock_on", "pam_faillock_off", "umask_on",
+            "umask_off", "ssh_idle_on", "ssh_idle_off", "blacklist_fs_on",
+            "blacklist_fs_off", "legal_banner_on", "legal_banner_off",
+        ] {
+            security_apply_op_valid(op).unwrap_or_else(|e| panic!("{op}: {e}"));
+        }
+        for op in ["", "reboot", "password_policy_extra"] {
+            assert!(security_apply_op_valid(op).is_err(), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn security_file_action_gate_enforces_shapes() {
+        check_lcp(&["security_apply", "password_policy"]).expect("valid apply");
+        check_lcp(&["security_ssh_param", "MaxAuthTries", "4"]).expect("valid ssh pair");
+        check_lcp(&["security_kernel_param", "kernel.kptr_restrict", "2"]).expect("valid sysctl");
+        check_lcp(&["security_lock_account"]).expect("lock all");
+        check_lcp(&["security_lock_account", "alice"]).expect("lock one");
+        for args in [
+            vec!["security_apply", "reboot"],
+            vec!["security_apply"],
+            vec!["security_ssh_param", "MaxAuthTries", "9"],
+            vec!["security_kernel_param", "kernel.panic", "1"],
+            vec!["security_lock_account", "Alice"],
+            vec!["security_lock_account", "alice", "extra"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn security_action_gate_enforces_shapes() {
+        check_lcp(&["security_service_toggle", "auditd", "enable"]).expect("valid auditd action");
+        check_lcp(&["security_service_toggle", "chronyd", "disable"]).expect("valid chronyd action");
+        check_lcp(&["security_ctrl_alt_del", "mask"]).expect("valid mask action");
+        for args in [
+            vec!["security_service_toggle", "auditd"],
+            vec!["security_service_toggle", "sshd", "enable"],
+            vec!["security_service_toggle", "auditd", "restart"],
+            vec!["security_service_toggle", "auditd", "enable", "extra"],
+            vec!["security_ctrl_alt_del", "start"],
+            vec!["security_ctrl_alt_del", "mask", "extra"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
     }
 }

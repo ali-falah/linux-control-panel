@@ -122,6 +122,219 @@ const UNAME_CANDIDATES: [&str; 2] = ["/usr/bin/uname", "/bin/uname"];
 #[cfg(feature = "test-fixture")]
 const UNAME_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/uname"];
 
+/// Security-auditor files all live under this root; the fixture build swaps it
+/// below /tmp so tests never touch /etc or /tmp permissions.
+#[cfg(not(feature = "test-fixture"))]
+const SECURITY_ETC_ROOT: &str = "/etc";
+#[cfg(feature = "test-fixture")]
+const SECURITY_ETC_ROOT: &str = "/tmp/lcp-admin-test-fixture/etc";
+#[cfg(not(feature = "test-fixture"))]
+const SECURITY_TMP_DIR: &str = "/tmp";
+#[cfg(feature = "test-fixture")]
+const SECURITY_TMP_DIR: &str = "/tmp/lcp-admin-test-fixture/tmp";
+#[cfg(not(feature = "test-fixture"))]
+const SSHD_CANDIDATES: [&str; 2] = ["/usr/sbin/sshd", "/usr/bin/sshd"];
+#[cfg(feature = "test-fixture")]
+const SSHD_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/sshd"];
+#[cfg(not(feature = "test-fixture"))]
+const SYSCTL_CANDIDATES: [&str; 2] = ["/usr/sbin/sysctl", "/usr/bin/sysctl", ];
+#[cfg(feature = "test-fixture")]
+const SYSCTL_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/sysctl"];
+#[cfg(not(feature = "test-fixture"))]
+const AUTHSELECT_CANDIDATES: [&str; 2] = ["/usr/bin/authselect", "/bin/authselect"];
+#[cfg(feature = "test-fixture")]
+const AUTHSELECT_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/authselect"];
+
+fn security_path(rel: &str) -> String {
+    format!("{SECURITY_ETC_ROOT}/{rel}")
+}
+
+fn sshd_bin() -> Option<&'static str> {
+    SSHD_CANDIDATES.iter().find(|p| std::path::Path::new(p).is_file()).copied()
+}
+fn sysctl_bin() -> Option<&'static str> {
+    SYSCTL_CANDIDATES.iter().find(|p| std::path::Path::new(p).is_file()).copied()
+}
+fn authselect_bin() -> Option<&'static str> {
+    AUTHSELECT_CANDIDATES.iter().find(|p| std::path::Path::new(p).is_file()).copied()
+}
+
+/// Write one fixed security file atomically: reject symlinks, back up an
+/// existing file, write a sibling temp file and rename it into place.
+/// Every file the security actions may read, write or remove. No operation
+/// accepts a path from the caller; this list is the second line of defence
+/// against an accidental future path construction bug.
+const SECURITY_MANAGED_FILES: &[&str] = &[
+    "ssh/sshd_config",
+    "ssh/sshd_config.d/50-idle-timeout.conf",
+    "ssh/sshd_config.d/50-banner.conf",
+    "sysctl.d/99-hardening.conf",
+    "login.defs",
+    "tmpfiles.d/tmp-sticky.conf",
+    "security/faillock.conf.d/50-hardening.conf",
+    "modprobe.d/disable-unused-fs.conf",
+    "issue",
+    "issue.net",
+    "passwd",
+    "shadow",
+];
+
+/// Resolve one managed relative file, refusing any path outside the list or
+/// whose base/parent components are symbolic links (so /etc/ssh symlinked
+/// elsewhere cannot redirect a root write).
+fn security_checked_path(rel: &str) -> Result<std::path::PathBuf, String> {
+    if !SECURITY_MANAGED_FILES.contains(&rel) {
+        return Err(format!("lcp-admin: unmanaged security file: {rel}"));
+    }
+    let base = std::path::Path::new(SECURITY_ETC_ROOT);
+    if base
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(format!("lcp-admin: refusing a symlinked managed root: {SECURITY_ETC_ROOT}"));
+    }
+    let mut current = base.to_path_buf();
+    for component in rel.split('/') {
+        current.push(component);
+        if let Ok(metadata) = current.symlink_metadata() {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "lcp-admin: refusing a managed path containing a symbolic link: {}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn security_write_file_impl(rel: &str, content: &str, backup: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let checked = security_checked_path(rel)?;
+    let path = checked.to_string_lossy().to_string();
+    let existing_mode = std::fs::metadata(&path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode());
+    if std::path::Path::new(&path).symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("lcp-admin: refusing to write through a symbolic link: {path}"));
+    }
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("lcp-admin: could not create {} ({e})", parent.display()))?;
+    }
+    if backup && std::path::Path::new(&path).is_file() {
+        let backup = format!("{path}.control-panel.bak");
+        let _ = std::fs::copy(&path, &backup);
+    }
+    let tmp = format!("{path}.tmp.{}", std::process::id());
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("lcp-admin: could not write {tmp} ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = existing_mode.unwrap_or(0o644) & 0o7777;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+    }
+    security_ensure_root_owner(&tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("lcp-admin: could not replace {path} ({e})"));
+    }
+    Ok(())
+}
+
+fn security_write_file(rel: &str, content: &str) -> Result<(), String> {
+    security_write_file_impl(rel, content, true)
+}
+
+fn security_read_file(rel: &str) -> Result<String, String> {
+    let path = security_checked_path(rel)?;
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("lcp-admin: could not read {} ({e})", path.display()))
+}
+
+fn security_remove_file(rel: &str) -> Result<(), String> {
+    let path_buf = security_checked_path(rel)?;
+    let path = path_buf.to_string_lossy().to_string();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("lcp-admin: could not remove {path} ({e})")),
+    }
+}
+
+/// Restore the pre-edit content without overwriting the preserved backup.
+fn security_restore_file(rel: &str, content: &str) -> Result<(), String> {
+    security_write_file_impl(rel, content, false)
+}
+
+fn security_ensure_root_owner(path: &str) -> Result<(), String> {
+    #[cfg(feature = "test-fixture")]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(feature = "test-fixture"))]
+    {
+        std::os::unix::fs::chown(path, Some(0), Some(0))
+            .map_err(|e| format!("lcp-admin: could not set root ownership on {path} ({e})"))
+    }
+}
+
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn reload_ssh(required: bool) -> Result<(), String> {
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return if required {
+            Err("lcp-admin: systemctl is not available".to_string())
+        } else {
+            Ok(())
+        };
+    }
+    for unit in ["sshd", "ssh"] {
+        if command_succeeds(SYSTEMCTL_BIN, &["is-active", "--quiet", unit]) {
+            return run_firewall_program(SYSTEMCTL_BIN, &["reload", unit], "systemctl");
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite a line-oriented config: drop lines whose first token (ignoring a
+/// leading '#') matches one of `keys`, then append the supplied settings.
+fn rewrite_settings(
+    rel: &str,
+    keys: &[&str],
+    append: &[(&str, &str)],
+) -> Result<(), String> {
+    let checked = security_checked_path(rel)?;
+    let original = match std::fs::read_to_string(&checked) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("lcp-admin: could not read {} ({e})", checked.display())),
+    };
+    let mut kept: Vec<String> = Vec::new();
+    for line in original.lines() {
+        let trimmed = line.trim_start();
+        let without_comment = trimmed.trim_start_matches('#').trim_start();
+        let first = without_comment.split_whitespace().next().unwrap_or("");
+        if keys.iter().any(|key| first.eq_ignore_ascii_case(key)) {
+            continue;
+        }
+        kept.push(line.to_string());
+    }
+    for (key, value) in append {
+        kept.push(format!("{key} {value}"));
+    }
+    let mut content = kept.join("\n");
+    content.push('\n');
+    security_write_file(rel, &content)
+}
+
 /// User/group tools, addressed by absolute candidate paths. The fixture build
 /// swaps every one for a logging stub so no account or session is touched.
 #[cfg(not(feature = "test-fixture"))]
@@ -1565,6 +1778,258 @@ fn session_kill_action(session_id: &str) -> Result<(), String> {
     run_user_program(program, &refs, "loginctl")
 }
 
+/// `security_service_toggle <auditd|usbguard|chronyd|systemd-timesyncd>
+/// <enable|disable>`: the closed allow-list behind the Security Auditor's
+/// service fixes. No arbitrary unit or systemctl verb is reachable.
+fn security_service_toggle_action(unit: &str, verb: &str) -> Result<(), String> {
+    root_policy::security_service_unit_valid(unit)?;
+    root_policy::security_service_verb_valid(verb)?;
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    run_firewall_program(SYSTEMCTL_BIN, &[verb, "--now", unit], "systemctl")
+}
+
+/// `security_ctrl_alt_del <mask|unmask>`: only the fixed reboot target.
+fn security_ctrl_alt_del_action(verb: &str) -> Result<(), String> {
+    root_policy::ctrl_alt_del_verb_valid(verb)?;
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    run_firewall_program(SYSTEMCTL_BIN, &[verb, "ctrl-alt-del.target"], "systemctl")
+}
+
+/// `security_ssh_param <param> <value>`: edit the one SSH hardening parameter
+/// with a backup, validate the resulting sshd config, then reload.
+fn security_ssh_param_action(param: &str, value: &str) -> Result<(), String> {
+    root_policy::security_ssh_param_valid(param, value)?;
+    let rel = "ssh/sshd_config";
+    let original = security_read_file(rel)?;
+    rewrite_settings(rel, &[param], &[(param, value)])?;
+    let Some(sshd) = sshd_bin() else {
+        security_restore_file(rel, &original)?;
+        return Err("lcp-admin: sshd is not available".to_string());
+    };
+    let cfg = security_path(rel);
+    if !command_succeeds(sshd, &["-t", "-f", &cfg]) {
+        security_restore_file(rel, &original)?;
+        return Err("lcp-admin: the edited SSH configuration did not pass sshd -t; it was restored".to_string());
+    }
+    // Verify the effective value, like the previous flow: another included
+    // config can override the edited line, and success must not be claimed.
+    let effective = match std::process::Command::new(sshd)
+        .args(["-T", "-f", &cfg])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            security_restore_file(rel, &original)?;
+            return Err(format!(
+                "lcp-admin: sshd -T could not be started ({e}); the edit was restored"
+            ));
+        }
+    };
+    let text = String::from_utf8_lossy(&effective.stdout);
+    let matched = text.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else { return false };
+        if !name.eq_ignore_ascii_case(param) {
+            return false;
+        }
+        let actual = parts.next().unwrap_or("");
+        let equivalent_grace = param == "LoginGraceTime"
+            && ((value == "60" && (actual == "1m" || actual == "60"))
+                || (value == "120" && (actual == "2m" || actual == "120")));
+        actual == value || equivalent_grace
+    });
+    if !effective.status.success() || !matched {
+        security_restore_file(rel, &original)?;
+        return Err(
+            "lcp-admin: the requested SSH setting is overridden by another configuration file; no change was kept".to_string(),
+        );
+    }
+    reload_ssh(false)
+}
+
+/// `security_kernel_param <key> <value>`: persist one allow-listed sysctl key
+/// and apply it live; the file is written before the live change, like the
+/// previous flow.
+fn security_kernel_param_action(key: &str, value: &str) -> Result<(), String> {
+    root_policy::security_kernel_param_valid(key, value)?;
+    let Some(sysctl) = sysctl_bin() else {
+        return Err("lcp-admin: sysctl is not available".to_string());
+    };
+    let assignment = format!("{key}={value}");
+    // Apply the runtime value FIRST: if the kernel rejects it, no persistent
+    // file is left behind claiming a setting that was never accepted.
+    run_firewall_program(sysctl, &["-w", &assignment], "sysctl")?;
+    let rel = "sysctl.d/99-hardening.conf";
+    let persisted_value = format!("= {value}");
+    if let Err(error) = rewrite_settings(rel, &[key], &[(key, persisted_value.as_str())]) {
+        return Err(format!(
+            "{error}; the runtime value was applied but the persistent configuration was not updated"
+        ));
+    }
+    let file = security_path(rel);
+    run_firewall_program(sysctl, &["-p", &file], "sysctl")
+}
+
+/// `security_lock_account [username]`: lock the named account, or every account
+/// whose shadow password field is empty.
+fn security_lock_account_action(username: Option<&str>) -> Result<(), String> {
+    if let Some(user) = username {
+        root_policy::user_account_name_valid(user)?;
+        if root_policy::is_protected_system_user(user) {
+            return Err(format!(
+                "lcp-admin: '{user}' is a vital system or administrative account and cannot be locked"
+            ));
+        }
+    }
+    let passwd = require_user_tool(4, "passwd")?;
+    let users: Vec<String> = match username {
+        Some(user) => vec![user.to_string()],
+        None => {
+            let shadow = security_read_file("shadow")?;
+            shadow
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split(':');
+                    let name = parts.next().unwrap_or("");
+                    let password = parts.next().unwrap_or("");
+                    (password.is_empty()
+                        && !name.is_empty()
+                        && root_policy::user_account_name_valid(name).is_ok()
+                        && !root_policy::is_protected_system_user(name))
+                        .then(|| name.to_string())
+                })
+                .collect()
+        }
+    };
+    if users.is_empty() {
+        return Err("lcp-admin: no accounts with empty passwords were found".to_string());
+    }
+    for user in &users {
+        run_user_program(passwd, &["-l", "--", user], "passwd")?;
+    }
+    Ok(())
+}
+
+/// `security_apply <operation>`: the closed set of file/service hardening
+/// operations from the Security Auditor. No path, unit or content is supplied
+/// by the caller.
+fn security_apply_action(op: &str) -> Result<(), String> {
+    root_policy::security_apply_op_valid(op)?;
+    match op {
+        "password_policy" => {
+            rewrite_settings(
+                "login.defs",
+                &["PASS_MAX_DAYS", "PASS_MIN_LEN"],
+                &[("PASS_MAX_DAYS", "90"), ("PASS_MIN_LEN", "12")],
+            )
+        }
+        "tmp_sticky_on" | "tmp_sticky_off" => {
+            let enable = op == "tmp_sticky_on";
+            let mode = if enable { 0o1777 } else { 0o777 };
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                SECURITY_TMP_DIR,
+                std::fs::Permissions::from_mode(mode),
+            )
+            .map_err(|e| format!("lcp-admin: could not change {SECURITY_TMP_DIR} permissions ({e})"))?;
+            if enable {
+                security_write_file("tmpfiles.d/tmp-sticky.conf", "D /tmp 1777 root root -\n")
+            } else {
+                security_remove_file("tmpfiles.d/tmp-sticky.conf")
+            }
+        }
+        "passwd_perms" => {
+            let path = security_path("passwd");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .map_err(|e| format!("lcp-admin: could not chmod {path} ({e})"))?;
+            security_ensure_root_owner(&path)
+        }
+        "shadow_perms" => {
+            let path = security_path("shadow");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+                .map_err(|e| format!("lcp-admin: could not chmod {path} ({e})"))?;
+            security_ensure_root_owner(&path)
+        }
+        "pam_faillock_on" => {
+            security_write_file(
+                "security/faillock.conf.d/50-hardening.conf",
+                "deny = 5\nunlock_time = 900\nfail_interval = 900\n",
+            )?;
+            if let Some(authselect) = authselect_bin() {
+                let status = std::process::Command::new(authselect)
+                    .args(["enable-feature", "with-faillock"])
+                    .status()
+                    .map_err(|e| format!("lcp-admin: authselect could not be started ({e})"))?;
+                if !status.success() {
+                    return Err(
+                        "lcp-admin: the faillock policy file was written but authselect could not enable the feature"
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
+        "pam_faillock_off" => {
+            security_remove_file("security/faillock.conf.d/50-hardening.conf")?;
+            if let Some(authselect) = authselect_bin() {
+                let status = std::process::Command::new(authselect)
+                    .args(["disable-feature", "with-faillock"])
+                    .status()
+                    .map_err(|e| format!("lcp-admin: authselect could not be started ({e})"))?;
+                if !status.success() {
+                    return Err(
+                        "lcp-admin: the faillock policy file was removed but authselect could not disable the feature"
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
+        "umask_on" | "umask_off" => {
+            let value = if op == "umask_on" { "027" } else { "022" };
+            rewrite_settings("login.defs", &["UMASK"], &[("UMASK", value)])
+        }
+        "ssh_idle_on" => {
+            security_write_file(
+                "ssh/sshd_config.d/50-idle-timeout.conf",
+                "ClientAliveInterval 300\nClientAliveCountMax 3\n",
+            )?;
+            let _ = reload_ssh(false);
+            Ok(())
+        }
+        "ssh_idle_off" => {
+            security_remove_file("ssh/sshd_config.d/50-idle-timeout.conf")?;
+            let _ = reload_ssh(false);
+            Ok(())
+        }
+        "blacklist_fs_on" => security_write_file(
+            "modprobe.d/disable-unused-fs.conf",
+            "install cramfs /bin/true\ninstall freevxfs /bin/true\ninstall hfs /bin/true\ninstall hfsplus /bin/true\ninstall jffs2 /bin/true\ninstall udf /bin/true\n",
+        ),
+        "blacklist_fs_off" => security_remove_file("modprobe.d/disable-unused-fs.conf"),
+        "legal_banner_on" => {
+            let banner = "Authorized uses only. All activity may be monitored and reported.\n";
+            security_write_file("issue", banner)?;
+            security_write_file("issue.net", banner)?;
+            security_write_file("ssh/sshd_config.d/50-banner.conf", "Banner /etc/issue.net\n")?;
+            let _ = reload_ssh(false);
+            Ok(())
+        }
+        "legal_banner_off" => {
+            security_remove_file("ssh/sshd_config.d/50-banner.conf")?;
+            let _ = reload_ssh(false);
+            Ok(())
+        }
+        other => Err(format!("lcp-admin: unsupported security operation: {other}")),
+    }
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -1611,6 +2076,12 @@ const ROOT_ACTIONS: &[&str] = &[
     "group_manage",
     "user_lock",
     "session_kill",
+    "security_service_toggle",
+    "security_ctrl_alt_del",
+    "security_apply",
+    "security_ssh_param",
+    "security_kernel_param",
+    "security_lock_account",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -1881,6 +2352,56 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "security_apply" {
+            if args.len() == 2 {
+                security_apply_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one security operation."
+                ))
+            }
+        } else if requested == "security_ssh_param" {
+            if args.len() == 3 {
+                security_ssh_param_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes an SSH parameter and its value."
+                ))
+            }
+        } else if requested == "security_kernel_param" {
+            if args.len() == 3 {
+                security_kernel_param_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a sysctl key and its value."
+                ))
+            }
+        } else if requested == "security_lock_account" {
+            if args.len() == 1 {
+                security_lock_account_action(None)
+            } else if args.len() == 2 {
+                security_lock_account_action(Some(&args[1]))
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes an optional account name."
+                ))
+            }
+        } else if requested == "security_service_toggle" {
+            if args.len() == 3 {
+                security_service_toggle_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a service name and enable|disable."
+                ))
+            }
+        } else if requested == "security_ctrl_alt_del" {
+            if args.len() == 2 {
+                security_ctrl_alt_del_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes mask|unmask."
+                ))
             }
         } else if requested == "user_add" {
             if args.len() == 2 {
