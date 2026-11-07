@@ -25,6 +25,9 @@ use root_policy::{
     is_valid_account_name, nginx_config_remove_path_valid, nginx_config_path_valid,
     nginx_link_as_valid, nginx_site_unlink_path_valid, validate_nginx_config_content,
     validate_profile_sh_content, validate_profile_sh_path, var_www_is_protected,
+    firewall_rich_rule_valid, firewall_port_value_valid, firewall_service_name_valid,
+    firewall_zone_name_valid, firewall_interface_name_valid, FirewallRichRule,
+    FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
     var_www_path_valid, NGINX_BACKUPS_DIR, NGINX_CONFIG_CONTENT_MAX, NGINX_SITES_AVAILABLE,
     NGINX_SITES_ENABLED, NGINX_WWW_INSTALL_MAX, PROFILE_CONTENT_MAX, POLKIT_RULE_FILE,
     POLKIT_RULE_TEXT, PROFILE_D_DIR, REPO_CONTENT_MAX, VAR_WWW_DIR,
@@ -64,6 +67,770 @@ fn privileged_gid() -> u32 {
     rustix::process::getgid().as_raw()
 }
 
+/// The firewall tooling is addressed by absolute path, never by PATH. The
+/// fixture build swaps in a stub recording the argv it receives and exits
+/// without touching any real firewall.
+#[cfg(not(feature = "test-fixture"))]
+const FIREWALL_CMD_BIN: &str = "/usr/bin/firewall-cmd";
+#[cfg(feature = "test-fixture")]
+const FIREWALL_CMD_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/firewall-cmd";
+#[cfg(not(feature = "test-fixture"))]
+const UFW_CANDIDATES: [&str; 2] = ["/usr/sbin/ufw", "/usr/bin/ufw"];
+#[cfg(feature = "test-fixture")]
+const UFW_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/ufw"];
+
+/// The service manager for enabling the firewalld unit. Addressed by
+/// absolute path; the fixture build swaps in a stub so tests never touch the
+/// host's init system.
+#[cfg(not(feature = "test-fixture"))]
+const SYSTEMCTL_BIN: &str = "/usr/bin/systemctl";
+#[cfg(feature = "test-fixture")]
+const SYSTEMCTL_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/systemctl";
+
+/// `ss` is used for best-effort SSH session detection only. The fixture
+/// build swaps in a stub so tests can pin the guard behavior without ever
+/// touching the real socket table.
+#[cfg(not(feature = "test-fixture"))]
+const SS_CANDIDATES: [&str; 2] = ["/usr/bin/ss", "/bin/ss"];
+#[cfg(feature = "test-fixture")]
+const SS_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/ss"];
+
+fn ss_bin() -> Option<&'static str> {
+    SS_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+/// One change that can interrupt the administrator's SSH session. The
+/// variants map to the cases approved for GROUP 2 of the firewall
+/// migration. The guard runs in the helper, before any firewall command —
+/// the app-side guard alone cannot protect against a direct helper call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirewallSshGuard {
+    RemoveServiceSsh,
+    RemovePort22,
+    RichDropSsh,
+    RichRejectSsh,
+    MoveSshInterface,
+}
+
+impl FirewallSshGuard {
+    fn message(self) -> &'static str {
+        match self {
+            Self::RemoveServiceSsh => "removing the ssh firewall service",
+            Self::RemovePort22 => "removing port 22 from the firewall",
+            Self::RichDropSsh => "adding a firewall drop rule for ssh",
+            Self::RichRejectSsh => "adding a firewall reject rule for ssh",
+            Self::MoveSshInterface => "moving the interface carrying the active SSH session \
+                 into a zone that does not permit ssh",
+        }
+    }
+}
+
+/// The confirmation trailing argument: only this exact literal authorizes a
+/// protected operation. Its absence is never confirmation.
+const FIREWALL_CONFIRM_ARG: &str = "confirm";
+
+/// True when a firewalld port string (`22/tcp`) covers port 22. Unparseable
+/// input cannot reach this point (the validators run first), but a malformed
+/// value is still treated as covering 22: the guard must fail closed.
+fn firewall_port_covers_22(value: &str) -> bool {
+    let Some((ports, _protocol)) = value.split_once('/') else {
+        return true;
+    };
+    const SSH_PORT: u16 = 22;
+    let (start, end) = ports.split_once('-').map_or((ports, ports), |(s, e)| (s, e));
+    let start: u16 = start.parse().unwrap_or(SSH_PORT);
+    let end: u16 = end.parse().unwrap_or(SSH_PORT);
+    start <= SSH_PORT && SSH_PORT <= end
+}
+
+/// The GROUP 2 SSH lockout guard for a zone rule. Removes only; adds never
+/// lock the administrator out.
+fn firewall_zone_rule_guard(kind: &str, value: &str, add: bool) -> Option<FirewallSshGuard> {
+    if add {
+        return None;
+    }
+    match kind {
+        "service" if value == "ssh" => Some(FirewallSshGuard::RemoveServiceSsh),
+        "port" if firewall_port_covers_22(value) => Some(FirewallSshGuard::RemovePort22),
+        _ => None,
+    }
+}
+
+/// The GROUP 2 SSH lockout guard for a rich rule: an added drop or reject
+/// targeting the ssh service or a port range covering 22.
+fn firewall_rich_rule_guard(
+    add: bool,
+    parsed: &root_policy::FirewallRichRule,
+) -> Option<FirewallSshGuard> {
+    use root_policy::{FirewallRichRuleAction, FirewallRichRuleElement};
+    if !add {
+        return None;
+    }
+    let targets_ssh = match &parsed.element {
+        FirewallRichRuleElement::Service(name) => name == "ssh",
+        FirewallRichRuleElement::Port { port, .. } => {
+            firewall_port_covers_22(&format!("{port}/tcp"))
+        }
+        FirewallRichRuleElement::Protocol(_) => false,
+    };
+    if !targets_ssh {
+        return None;
+    }
+    match parsed.action {
+        FirewallRichRuleAction::Drop => Some(FirewallSshGuard::RichDropSsh),
+        FirewallRichRuleAction::Reject => Some(FirewallSshGuard::RichRejectSsh),
+        FirewallRichRuleAction::Accept => None,
+    }
+}
+
+/// Best-effort SSH session detection inside the helper. `None` means the
+/// probe failed — an inconclusive, not a negative, answer.
+fn detect_ssh_sessions() -> Option<Vec<String>> {
+    let ss = ss_bin()?;
+    let output = std::process::Command::new(ss)
+        .args(["-tnp", "state", "established", "( sport = :22 )"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(parse_ss_sessions(&stdout))
+}
+
+/// Parse `ss` output into session rows. Every header shape `ss` produces is
+/// filtered: "Netid …" (narrow output), "Recv-Q …" (flagless `ss`) and
+/// "State Recv-Q …" (`ss state established`). An established row itself
+/// never starts with those headers, so this filter cannot hide a session.
+fn parse_ss_sessions(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("Netid"))
+        .filter(|line| !line.starts_with("Recv-Q"))
+        .filter(|line| !line.starts_with("State"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Enforce the SSH confirmation gate *before* any firewall command runs.
+///
+/// The confirmation contract: the caller must pass the exact trailing
+/// argument `confirm` to authorize a protected operation. A missing
+/// argument and any other text are both "not confirmed" — there is no false
+/// value to misuse, and nothing else can be smuggled through validation.
+///
+/// Detection stays best-effort per the approved GROUP 2 policy: an empty
+/// session list is a negative answer, an inconclusive probe fails open with
+/// a warning on stderr.
+fn enforce_ssh_guard(guard: Option<FirewallSshGuard>, confirmed: bool) -> Result<(), String> {
+    let Some(guard) = guard else {
+        return Ok(());
+    };
+    match detect_ssh_sessions() {
+        Some(sessions) if sessions.is_empty() => Ok(()),
+        Some(_) if confirmed => Ok(()),
+        Some(_) => Err(ssh_guard_confirmation_error(guard)),
+        None => {
+            eprintln!(
+                "lcp-admin: warning: SSH session detection was inconclusive; \
+                 proceeding with {} without confirmation",
+                guard.message()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The interface-zone variant of the SSH guard: unlike the service/port
+/// cases, the gate re-checks that the detected session is plausibly carried
+/// by the interface being moved. `sessions` is the single, action-wide
+/// probe result shared with the guard computation — probing again could
+/// disagree and silently clear a detected session. The inconclusive policy
+/// and the confirmation message are the approved GROUP 2 ones.
+fn enforce_ssh_guard_for_interface(
+    guard: Option<FirewallSshGuard>,
+    sessions: Option<&[String]>,
+    interface: &str,
+    confirmed: bool,
+) -> Result<(), String> {
+    let Some(guard) = guard else {
+        return Ok(());
+    };
+    match sessions {
+        Some(_) if confirmed => Ok(()),
+        Some(sessions)
+            if !sessions.is_empty() && ssh_sessions_touch_interface(sessions, interface) =>
+        {
+            Err(ssh_guard_confirmation_error(guard))
+        }
+        Some(_) => Ok(()),
+        None => {
+            eprintln!(
+                "lcp-admin: warning: SSH session detection was inconclusive; \
+                 proceeding with {} without confirmation",
+                guard.message()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The confirmation error a GROUP 2/4 SSH guard produces when it fires
+/// unconfirmed. One constructor so the message stays byte-identical
+/// everywhere it is issued.
+fn ssh_guard_confirmation_error(guard: FirewallSshGuard) -> String {
+    format!(
+        "CONFIRMATION_REQUIRED: This change can interrupt an active SSH session ({}) \
+         detected by lcp-admin. It may make the firewall impossible to administer \
+         remotely. Retry the same action with the explicit 'confirm' argument to proceed.",
+        guard.message()
+    )
+}
+
+fn ufw_bin() -> Option<&'static str> {
+    UFW_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+fn firewalld_available() -> bool {
+    std::path::Path::new(FIREWALL_CMD_BIN).is_file()
+}
+
+fn firewall_program_detail(output: std::process::Output, label: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}; stdout: {stdout}"),
+        (false, true) => stderr,
+        (true, false) => stdout,
+        (true, true) => format!("exit status {}", output.status),
+    };
+    format!("{label} failed: {detail}")
+}
+
+fn run_firewall_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{label} could not be started ({e})"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(firewall_program_detail(output, label))
+}
+
+/// Apply the runtime rule first, then the permanent one. The permanent rule
+/// is never attempted if the runtime rule already failed. If permanent fails,
+/// the caller is told exactly what remains changed at runtime.
+fn run_firewall_two_phase(
+    program: &str,
+    runtime_args: &[&str],
+    permanent_args: &[&str],
+    label: &str,
+    add: bool,
+) -> Result<(), String> {
+    run_firewall_program(program, runtime_args, label)?;
+    if let Err(permanent_error) = run_firewall_program(program, permanent_args, label) {
+        let operation = if add { "added" } else { "removed" };
+        return Err(format!(
+            "{permanent_error}; the runtime rule was {operation}, but the permanent rule was not"
+        ));
+    }
+    Ok(())
+}
+
+fn firewall_rule_flag(add: bool, kind: &str, value: &str) -> String {
+    match kind {
+        "service" => format!("--{}-service={}", if add { "add" } else { "remove" }, value),
+        "port" => format!("--{}-port={}", if add { "add" } else { "remove" }, value),
+        _ => unreachable!("validated firewall rule kind"),
+    }
+}
+
+fn firewall_rich_address_text(address: root_policy::FirewallRichAddress) -> String {
+    match address.prefix {
+        Some(prefix) => format!("{}/{prefix}", address.address),
+        None => address.address.to_string(),
+    }
+}
+
+fn firewall_rich_rule_text(rule: &FirewallRichRule) -> String {
+    let family = match rule.family {
+        FirewallRichRuleFamily::Ipv4 => "ipv4",
+        FirewallRichRuleFamily::Ipv6 => "ipv6",
+    };
+    let mut text = format!("rule family=\"{family}\"");
+    if let Some(address) = rule.source {
+        text.push_str(&format!(" source address=\"{}\"", firewall_rich_address_text(address)));
+    }
+    if let Some(address) = rule.destination {
+        text.push_str(&format!(" destination address=\"{}\"", firewall_rich_address_text(address)));
+    }
+    match &rule.element {
+        FirewallRichRuleElement::Service(name) => {
+            text.push_str(&format!(" service name=\"{name}\""));
+        }
+        FirewallRichRuleElement::Port { port, protocol } => {
+            text.push_str(&format!(" port port=\"{port}\" protocol=\"{protocol}\""));
+        }
+        FirewallRichRuleElement::Protocol(value) => {
+            text.push_str(&format!(" protocol value=\"{value}\""));
+        }
+    }
+    match rule.action {
+        FirewallRichRuleAction::Accept => text.push_str(" accept"),
+        FirewallRichRuleAction::Reject => text.push_str(" reject"),
+        FirewallRichRuleAction::Drop => text.push_str(" drop"),
+    }
+    text
+}
+
+fn firewall_action_add(verb: &str, action: &str) -> Result<bool, String> {
+    match verb {
+        "add" => Ok(true),
+        "remove" => Ok(false),
+        other => Err(format!("lcp-admin: the {action} verb must be add or remove, got: {other}")),
+    }
+}
+
+/// Split the optional trailing `confirm` argument off a firewall action's
+/// argv. The extension argument is only ever the exact literal `confirm` —
+/// a missing trailing argument and any other text both mean "not
+/// confirmed", so neither a missing field nor a stray value can authorize.
+fn firewall_confirm_split(
+    args: &[String],
+    min_len: usize,
+    max_len: usize,
+) -> Result<(&[String], bool), String> {
+    if args.len() == min_len {
+        return Ok((args, false));
+    }
+    if args.len() == max_len && args[min_len] == FIREWALL_CONFIRM_ARG {
+        return Ok((&args[..min_len], true));
+    }
+    if args.len() == max_len {
+        return Err(format!(
+            "lcp-admin: the trailing argument '{}' is not a valid confirmation \
+             (only '{FIREWALL_CONFIRM_ARG}' confirms); without it the action is unconfirmed.",
+            args[min_len]
+        ));
+    }
+    Err(format!(
+        "lcp-admin: this action takes {min_len} arguments, optionally followed by \
+         '{FIREWALL_CONFIRM_ARG}'."
+    ))
+}
+
+/// `firewall_zone_rule <add|remove> <zone> <service|port> <value>`.
+/// firewalld runs runtime and permanent rules separately; ufw writes its
+/// persistent rule directly. The SSH confirmation contract is enforced here,
+/// inside the privileged boundary, before any tool runs.
+fn firewall_zone_rule_action(
+    add: bool,
+    zone: &str,
+    kind: &str,
+    value: &str,
+    confirmed: bool,
+) -> Result<(), String> {
+    // The zone is empty only on the documented ufw path: ufw has no zone
+    // concept. firewalld always needs a real zone.
+    if firewalld_available() && zone.is_empty() {
+        return Err("lcp-admin: a zone is required for a firewalld zone rule".to_string());
+    }
+    if !zone.is_empty() {
+        firewall_zone_name_valid(zone)?;
+    }
+    match kind {
+        "service" => firewall_service_name_valid(value)?,
+        "port" => firewall_port_value_valid(value)?,
+        other => return Err(format!("lcp-admin: the firewall rule kind must be service or port, got: {other}")),
+    }
+
+    // The guard runs after validation and before any command executes: a
+    // refused operation must leave the tooling untouched.
+    let guard = firewall_zone_rule_guard(kind, value, add);
+    enforce_ssh_guard(guard, confirmed)?;
+
+    if firewalld_available() {
+        let flag = firewall_rule_flag(add, kind, value);
+        let zone_flag = format!("--zone={zone}");
+        let permanent_flag = "--permanent";
+        return run_firewall_two_phase(
+            FIREWALL_CMD_BIN,
+            &[zone_flag.as_str(), flag.as_str()],
+            &[zone_flag.as_str(), flag.as_str(), permanent_flag],
+            "firewall-cmd",
+            add,
+        );
+    }
+
+    if let Some(ufw) = ufw_bin() {
+        // Never discard the zone silently: ufw has no zone concept, so a
+        // requested firewalld-style zone cannot be honored. Refuse with an
+        // explicit explanation instead of implying the zone was modified.
+        if !zone.is_empty() {
+            return Err(format!(
+                "lcp-admin: ufw has no firewalld-style zones; the requested zone '{zone}' \
+                 cannot be honored — the rule '{value}' would apply globally. \
+                 No rule was changed: submit a zone-less request or use a firewalld backend."
+            ));
+        }
+        let mut args = Vec::with_capacity(3);
+        if !add {
+            args.push("delete");
+        }
+        args.push("allow");
+        args.push(value);
+        return run_firewall_program(ufw, &args, "ufw");
+    }
+
+    Err("lcp-admin: neither firewalld nor ufw is available".to_string())
+}
+
+/// `firewall_rich_rule <add|remove> <zone> <rule>`. firewalld only; ufw has
+/// no rich-language equivalent and is refused explicitly. The rule string is
+/// rebuilt from the parsed structure before the SSH guard evaluates it.
+fn firewall_rich_rule_action(
+    add: bool,
+    zone: &str,
+    rule: &str,
+    confirmed: bool,
+) -> Result<(), String> {
+    // firewall_rich_rule is firewalld only: a zone is always required.
+    if zone.is_empty() {
+        return Err("lcp-admin: a zone is required for a firewalld rich rule".to_string());
+    }
+    firewall_zone_name_valid(zone)?;
+    let parsed = firewall_rich_rule_valid(rule)?;
+
+    let guard = firewall_rich_rule_guard(add, &parsed);
+    enforce_ssh_guard(guard, confirmed)?;
+
+    let rule = firewall_rich_rule_text(&parsed);
+    if firewalld_available() {
+        let flag = format!("--{}-rich-rule={rule}", if add { "add" } else { "remove" });
+        let zone_flag = format!("--zone={zone}");
+        let permanent_flag = "--permanent";
+        return run_firewall_two_phase(
+            FIREWALL_CMD_BIN,
+            &[zone_flag.as_str(), flag.as_str()],
+            &[zone_flag.as_str(), flag.as_str(), permanent_flag],
+            "firewall-cmd",
+            add,
+        );
+    }
+
+    if ufw_bin().is_some() {
+        return Err("lcp-admin: firewall_rich_rule is supported by firewalld only; ufw does not manage rich rules".to_string());
+    }
+
+    Err("lcp-admin: neither firewalld nor ufw is available".to_string())
+}
+
+/// Does this `ss` session line bind to the given local interface? The local
+/// endpoint of session lines may carry the scope marker
+/// `192.168.0.103%wlp1s0:22`. `None` means the line does not name an
+/// interface at all — the caller treats that as "possibly this interface",
+/// never as "provably elsewhere": the lockout risk must not be waved away
+/// because a marker is missing.
+fn ssh_session_binds_interface(line: &str, interface: &str) -> Option<bool> {
+    if line.is_empty() || interface.is_empty() {
+        return None;
+    }
+    let local = line.split_whitespace().nth(3)?;
+    local.split_once('%').map(|(_, tail)| {
+        tail.split(':').next() == Some(interface)
+    })
+}
+
+/// True when any detected session could plausibly be carried by
+/// `interface`. A session is provably elsewhere only when its scope marker
+/// names a different interface.
+fn ssh_sessions_touch_interface(sessions: &[String], interface: &str) -> bool {
+    sessions
+        .iter()
+        .any(|line| ssh_session_binds_interface(line, interface) != Some(false))
+}
+
+/// Read-only probe: does the firewalld zone permit the ssh service? A probe
+/// that cannot run or an explicit "no" both count as not permitting: the
+/// guard then applies and, if it fires, explicit confirmation still allows
+/// the operator to proceed — never a silent application.
+fn firewall_zone_permits_ssh(zone: &str) -> bool {
+    if let Ok(output) = std::process::Command::new(FIREWALL_CMD_BIN)
+        .args(["--zone", zone, "--query-service=ssh"])
+        .output()
+    {
+        output.status.success()
+    } else {
+        false
+    }
+}
+
+/// The GROUP 4 SSH guard for interface-zone moves. The guard fires only
+/// when the destination zone does not permit ssh AND the detected session
+/// could plausibly be carried by the interface being moved. An inconclusive
+/// session probe is handed down unchanged to the GROUP 2 warning/fail-open
+/// path. `sessions` is computed exactly once per action by the caller and
+/// reused by the enforcement: two probes could disagree and let a detected
+/// session disappear between decisions.
+///
+/// The zone's ssh permission is probed only when a session was actually
+/// seen: no session, no probe.
+fn firewall_interface_zone_guard(
+    zone: &str,
+    interface: &str,
+    sessions: Option<&[String]>,
+) -> Option<FirewallSshGuard> {
+    match sessions {
+        Some(sessions) if sessions.is_empty() => None,
+        Some(sessions) => {
+            if firewall_zone_permits_ssh(zone)
+                || !ssh_sessions_touch_interface(sessions, interface)
+            {
+                None
+            } else {
+                Some(FirewallSshGuard::MoveSshInterface)
+            }
+        }
+        // Inconclusive: the guard variant still applies; enforcement warns
+        // on stderr and proceeds per the approved GROUP 2 policy.
+        None if firewall_zone_permits_ssh(zone) => None,
+        None => Some(FirewallSshGuard::MoveSshInterface),
+    }
+}
+
+/// `firewall_interface_zone <zone> <interface> [confirm]`. firewalld only:
+/// ufw binds all interfaces globally and is refused explicitly before
+/// anything runs. Runtime first, then permanent; a permanent failure after
+/// runtime success reports the partial state and promises no rollback.
+fn firewall_interface_zone_action(
+    zone: &str,
+    interface: &str,
+    confirmed: bool,
+) -> Result<(), String> {
+    if zone.is_empty() {
+        return Err("lcp-admin: a zone is required for an interface-zone binding".to_string());
+    }
+    firewall_zone_name_valid(zone)?;
+    firewall_interface_name_valid(interface)?;
+
+    if !firewalld_available() {
+        if ufw_bin().is_some() {
+            return Err(
+                "lcp-admin: firewall_interface_zone is supported by firewalld only; ufw \
+                 has no firewalld-style zones and binds interfaces globally"
+                    .to_string(),
+            );
+        }
+        return Err("lcp-admin: neither firewalld nor ufw is available".to_string());
+    }
+
+    // The SSH probe runs exactly once per action: guard computation and
+    // enforcement share this single result, so a hypothetical second probe
+    // can never disagree with the decision.
+    let sessions = detect_ssh_sessions();
+    let guard = firewall_interface_zone_guard(zone, interface, sessions.as_deref());
+    enforce_ssh_guard_for_interface(guard, sessions.as_deref(), interface, confirmed)?;
+
+    let zone_flag = format!("--zone={zone}");
+    let change_flag = format!("--change-interface={interface}");
+    run_firewall_program(
+        FIREWALL_CMD_BIN,
+        &[zone_flag.as_str(), change_flag.as_str()],
+        "firewall-cmd",
+    )?;
+    if let Err(permanent_error) = run_firewall_program(
+        FIREWALL_CMD_BIN,
+        &[zone_flag.as_str(), change_flag.as_str(), "--permanent"],
+        "firewall-cmd",
+    ) {
+        return Err(format!(
+            "{permanent_error}; the interface {interface} was bound to zone {zone} at \
+             runtime, but the persistent configuration was not"
+        ));
+    }
+    Ok(())
+}
+
+/// `firewall_enable_hardened <firewalld|ufw> [confirm]`. Enables the chosen
+/// backend with a deny-by-default posture. Confirmation is mandatory: both
+/// backends can cut the administrator's network access. The backend is named
+/// explicitly by the caller — there is no silent fallback, so an ambiguous or
+/// unsupported host is refused instead of guessing.
+fn firewall_enable_hardened_action(backend: &str, confirmed: bool) -> Result<(), String> {
+    const FIREWALLD: &str = "firewalld";
+    const UFW: &str = "ufw";
+    if backend != FIREWALLD && backend != UFW {
+        return Err(format!(
+            "lcp-admin: the firewall backend must be firewalld or ufw, got: {backend}"
+        ));
+    }
+
+    let firewalld = firewalld_available();
+    let ufw = ufw_bin();
+    match backend {
+        FIREWALLD if !firewalld => {
+            return Err(match ufw {
+                Some(_) => "lcp-admin: firewalld is not installed on this host; \
+                           ufw is the available firewall backend"
+                    .to_string(),
+                None => "lcp-admin: firewalld is not installed on this host".to_string(),
+            })
+        }
+        UFW if ufw.is_none() => {
+            return Err(if firewalld {
+                "lcp-admin: ufw is not installed on this host; \
+                 firewalld is the available firewall backend"
+                    .to_string()
+            } else {
+                "lcp-admin: ufw is not installed on this host".to_string()
+            })
+        }
+        FIREWALLD if !std::path::Path::new(SYSTEMCTL_BIN).is_file() => {
+            return Err("lcp-admin: systemctl is not available; firewalld cannot be enabled".to_string())
+        }
+        _ => {}
+    }
+
+    // GROUP 3 safety policy: probe exactly once and fail closed. An
+    // inconclusive probe is a hard stop even with explicit confirmation: the
+    // operation applies a deny-by-default policy and could cut off an
+    // undetected SSH session.
+    let sessions = match detect_ssh_sessions() {
+        Some(sessions) => sessions,
+        None => {
+            return Err(
+                "lcp-admin: SSH session detection failed; hardening the firewall is blocked \
+                 (fail closed) because it would restrict an undetected SSH session"
+                    .to_string(),
+            )
+        }
+    };
+
+    // Confirmation is mandatory for both backends and both definite probe
+    // results: an affirmative session list and a clean negative can both be
+    // followed by a network-restricting change.
+    if !confirmed {
+        let detail = if sessions.is_empty() {
+            " No active SSH session was visible, but the new policy still restricts network \
+             access."
+                .to_string()
+        } else {
+            format!(
+                " Active SSH session(s) detected: {}.",
+                sessions.join("; ")
+            )
+        };
+        return Err(format!(
+            "CONFIRMATION_REQUIRED: Enabling {backend} with a deny-by-default policy can \
+             interrupt network access, including the SSH session used to administer this \
+             host.{detail} Retry the same action with the explicit 'confirm' argument to \
+             proceed."
+        ));
+    }
+
+    match backend {
+        FIREWALLD => {
+            run_firewall_program(SYSTEMCTL_BIN, &["enable", "--now", "firewalld"], "systemctl")?;
+            if let Err(runtime_error) = run_firewall_program(
+                FIREWALL_CMD_BIN,
+                &["--set-default-zone=drop"],
+                "firewall-cmd",
+            ) {
+                return Err(format!(
+                    "{runtime_error}; firewalld was enabled and is running, but its default \
+                     zone was not changed to drop and the permanent configuration was not \
+                     updated"
+                ));
+            }
+            if let Err(permanent_error) = run_firewall_program(
+                FIREWALL_CMD_BIN,
+                &["--set-default-zone=drop", "--permanent"],
+                "firewall-cmd",
+            ) {
+                return Err(format!(
+                    "{permanent_error}; the default zone was set to drop at runtime, but the \
+                     persistent configuration was not"
+                ));
+            }
+        }
+        _ => {
+            let ufw = ufw_bin().expect("ufw availability checked above");
+            run_firewall_program(ufw, &["default", "deny", "incoming"], "ufw")?;
+            if let Err(enable_error) = run_firewall_program(ufw, &["--force", "enable"], "ufw") {
+                return Err(format!(
+                    "{enable_error}; the default incoming policy was set to deny, but ufw was \
+                     not enabled"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `firewall_panic <enable|disable> [confirm]`. firewalld only: ufw has no
+/// panic mode and is refused explicitly before anything runs. Enabling runs
+/// the GROUP 3 fail-closed SSH guard inside the helper; disabling needs no
+/// confirmation. Panic applies globally: there is no zone argument.
+fn firewall_panic_action(enable: bool, confirmed: bool) -> Result<(), String> {
+    if !firewalld_available() {
+        if ufw_bin().is_some() {
+            return Err(
+                "lcp-admin: firewall_panic is supported by firewalld only; ufw has no panic mode"
+                    .to_string(),
+            );
+        }
+        return Err("lcp-admin: neither firewalld nor ufw is available".to_string());
+    }
+
+    // GROUP 3 SSH guard for enabling: unlike GROUP 2's guards this one
+    // fails CLOSED — an inconclusive probe blocks panic enablement even
+    // with explicit confirmation, because panic mode severs every
+    // connection.
+    if enable {
+        match detect_ssh_sessions() {
+            Some(sessions) if !sessions.is_empty() && !confirmed => {
+                return Err(format!(
+                    "CONFIRMATION_REQUIRED: Enabling firewalld panic mode with an active SSH \
+                     session ({}) detected by lcp-admin will sever every connection, including \
+                     the session you are working from. Retry the same action with the explicit \
+                     'confirm' argument to proceed.",
+                    sessions.join("; ")
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return Err(
+                    "lcp-admin: SSH session detection failed; enabling panic mode is blocked \
+                     (fail closed) because it would cut off an undetected SSH session"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let arg = if enable { "--panic-on" } else { "--panic-off" };
+    run_firewall_program(FIREWALL_CMD_BIN, &[arg], "firewall-cmd")?;
+    if let Err(permanent_error) =
+        run_firewall_program(FIREWALL_CMD_BIN, &[arg, "--permanent"], "firewall-cmd")
+    {
+        let state = if enable { "enabled" } else { "disabled" };
+        return Err(format!(
+            "{permanent_error}; panic mode was {state} at runtime, but the persistent \
+             configuration was not"
+        ));
+    }
+    Ok(())
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -96,6 +863,10 @@ const ROOT_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "firewall_zone_rule", "firewall_rich_rule",
+    "firewall_panic",
+    "firewall_interface_zone",
+    "firewall_enable_hardened",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -329,6 +1100,58 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes exactly a repo file path and a repo id."
                 ))
             }
+        } else if requested == "firewall_zone_rule" {
+            // Optional trailing confirmation: [verb, zone, kind, value,
+            // confirm?]. Only the exact literal authorizes.
+            match firewall_confirm_split(&args, 5, 6) {
+                Ok((args, confirmed)) => match firewall_action_add(&args[1], requested) {
+                    Ok(add) => {
+                        firewall_zone_rule_action(add, &args[2], &args[3], &args[4], confirmed)
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
+        } else if requested == "firewall_rich_rule" {
+            // Optional trailing confirmation: [verb, zone, rule, confirm?].
+            match firewall_confirm_split(&args, 4, 5) {
+                Ok((args, confirmed)) => match firewall_action_add(&args[1], requested) {
+                    Ok(add) => firewall_rich_rule_action(add, &args[2], &args[3], confirmed),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
+        } else if requested == "firewall_interface_zone" {
+            // Optional trailing confirmation: [zone, interface, confirm?].
+            // There is no add/remove verb: the change op moves the binding.
+            match firewall_confirm_split(&args, 3, 4) {
+                Ok((args, confirmed)) => {
+                    firewall_interface_zone_action(&args[1], &args[2], confirmed)
+                }
+                Err(error) => Err(error),
+            }
+        } else if requested == "firewall_enable_hardened" {
+            // Optional trailing confirmation: [firewalld|ufw, confirm?].
+            match firewall_confirm_split(&args, 2, 3) {
+                Ok((args, confirmed)) => {
+                    firewall_enable_hardened_action(&args[1], confirmed)
+                }
+                Err(error) => Err(error),
+            }
+        } else if requested == "firewall_panic" {
+        // Optional trailing confirmation: [verb, confirm?]. No zone
+        // argument: panic mode applies globally.
+        match firewall_confirm_split(&args, 2, 3) {
+            Ok((args, confirmed)) => match args[1].as_str() {
+                "enable" | "disable" => {
+                    firewall_panic_action(args[1] == "enable", confirmed)
+                }
+                other => Err(format!(
+                    "lcp-admin: the firewall_panic verb must be enable or disable, got: {other}"
+                )),
+            },
+            Err(error) => Err(error),
+        }
         } else if requested == "repo_add" {
             if args.len() == 2 {
                 repo_add_action(&args[1])
@@ -382,11 +1205,16 @@ fn main() {
                 std::process::exit(0);
             }
             Err(message) => {
-                // policy errors arrive without the helper's own prefix
-                let line = message
-                    .strip_prefix("lcp-admin: ")
-                    .map(|rest| format!("lcp-admin: {rest}"))
-                    .unwrap_or_else(|| format!("lcp-admin: {message}"));
+                // policy errors arrive without the helper's own prefix;
+                // CONFIRMATION_REQUIRED must reach the app with its exact
+                // prefix intact — the caller retries on that literal.
+                let line = if message.starts_with("CONFIRMATION_REQUIRED:") {
+                    message.clone()
+                } else if let Some(rest) = message.strip_prefix("lcp-admin: ") {
+                    format!("lcp-admin: {rest}")
+                } else {
+                    format!("lcp-admin: {message}")
+                };
                 eprintln!("{line}");
                 std::process::exit(2);
             }
@@ -3208,5 +4036,186 @@ mod run_repo_program_tests {
             !detail.contains("secret-operand-do-not-repeat"),
             "failure messages must not echo operands: {detail}"
         );
+    }
+}
+
+#[cfg(test)]
+mod firewall_ssh_guard_tests {
+    use super::{
+        firewall_confirm_split, firewall_port_covers_22, firewall_rich_rule_guard,
+        firewall_zone_rule_guard, parse_ss_sessions, ssh_session_binds_interface,
+        ssh_sessions_touch_interface, FirewallSshGuard,
+    };
+    use crate::root_policy::{firewall_rich_rule_valid, FirewallRichRuleAction};
+
+    fn parse(rule: &str) -> crate::root_policy::FirewallRichRule {
+        firewall_rich_rule_valid(rule)
+            .unwrap_or_else(|err| panic!("test rule must be valid: {rule} — {err}"))
+    }
+
+    #[test]
+    fn port_covers_22_for_single_ports_and_ranges() {
+        assert!(firewall_port_covers_22("22/tcp"));
+        assert!(firewall_port_covers_22("20-25/tcp"));
+        assert!(firewall_port_covers_22("1-1024/udp"));
+        assert!(!firewall_port_covers_22("23/tcp"));
+        assert!(!firewall_port_covers_22("1025-65535/udp"));
+        // fail closed on malformed shapes (cannot occur post-validation)
+        assert!(firewall_port_covers_22("garbage"));
+    }
+
+    #[test]
+    fn zone_rule_guard_covers_only_ssh_removals() {
+        assert_eq!(
+            firewall_zone_rule_guard("service", "ssh", false),
+            Some(FirewallSshGuard::RemoveServiceSsh)
+        );
+        assert_eq!(
+            firewall_zone_rule_guard("port", "22/tcp", false),
+            Some(FirewallSshGuard::RemovePort22)
+        );
+        assert_eq!(firewall_zone_rule_guard("service", "ssh", true), None);
+        assert_eq!(firewall_zone_rule_guard("service", "https", false), None);
+        assert_eq!(firewall_zone_rule_guard("port", "1025-65535/udp", false), None);
+    }
+
+    #[test]
+    fn rich_rule_guard_covers_only_added_drop_and_reject_targeting_ssh() {
+        assert_eq!(
+            firewall_rich_rule_guard(true, &parse(r#"rule family="ipv4" service name="ssh" drop"#)),
+            Some(FirewallSshGuard::RichDropSsh)
+        );
+        assert_eq!(
+            firewall_rich_rule_guard(true, &parse(r#"rule family="ipv4" port port="22" protocol="tcp" reject"#)),
+            Some(FirewallSshGuard::RichRejectSsh)
+        );
+        assert_eq!(
+            firewall_rich_rule_guard(false, &parse(r#"rule family="ipv4" service name="ssh" drop"#)),
+            None,
+            "removals are never a lockout"
+        );
+        assert_eq!(
+            firewall_rich_rule_guard(true, &parse(r#"rule family="ipv4" service name="ssh" accept"#)),
+            None,
+            "accept never locks out"
+        );
+        assert_eq!(
+            firewall_rich_rule_guard(true, &parse(r#"rule family="ipv4" service name="https" drop"#)),
+            None
+        );
+        assert_eq!(
+            firewall_rich_rule_guard(true, &parse(r#"rule family="ipv4" port port="1025-65535" protocol="udp" drop"#)),
+            None
+        );
+        assert_eq!(FirewallRichRuleAction::Drop, FirewallRichRuleAction::Drop);
+    }
+
+    #[test]
+    fn session_scope_marker_binds_only_the_named_interface() {
+        let line = "ESTAB 0 0 192.168.0.103%wlp1s0:22 10.0.0.5:53342";
+        assert_eq!(ssh_session_binds_interface(line, "wlp1s0"), Some(true));
+        assert_eq!(ssh_session_binds_interface(line, "eth0"), Some(false));
+        // an IPv6 scope works the same way
+        let line = "ESTAB 0 0 fe80::1%enp3s0:22 fe80::2:51532";
+        assert_eq!(ssh_session_binds_interface(line, "enp3s0"), Some(true));
+        assert_eq!(ssh_session_binds_interface(line, "eth0"), Some(false));
+    }
+
+    #[test]
+    fn session_without_scope_marker_is_never_provably_elsewhere() {
+        let line = "ESTAB 0 0 192.168.0.103:22 10.0.0.5:53342";
+        assert_eq!(ssh_session_binds_interface(line, "eth0"), None);
+        // and a session without a local endpoint at all stays unknown
+        assert_eq!(ssh_session_binds_interface("ESTAB 0 0", "eth0"), None);
+        assert_eq!(ssh_session_binds_interface("", "eth0"), None);
+    }
+
+    #[test]
+    fn interface_touch_is_true_for_any_unprovable_or_matching_session() {
+        let marked = "ESTAB 0 0 192.168.0.103%wlp1s0:22 10.0.0.5:53342".to_string();
+        let unmarked = "ESTAB 0 0 192.168.0.103:22 10.0.0.5:53342".to_string();
+        // session provably elsewhere: no touch
+        assert!(!ssh_sessions_touch_interface(&[marked.clone()], "eth0"));
+        // matching or unmarked sessions: touch
+        assert!(ssh_sessions_touch_interface(&[marked.clone()], "wlp1s0"));
+        assert!(ssh_sessions_touch_interface(&[unmarked.clone()], "eth0"));
+        // mixed: one provably elsewhere, one unmarked → still touches
+        assert!(ssh_sessions_touch_interface(&[marked.clone(), unmarked.clone()], "eth0"));
+        assert!(!ssh_sessions_touch_interface(&[], "eth0"));
+    }
+
+    #[test]
+    fn confirm_split_treats_absence_as_unconfirmed() {        let args: Vec<String> = ["firewall_zone_rule", "add", "public", "service", "ssh"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (rest, confirmed) = firewall_confirm_split(&args, 5, 6).unwrap();
+        assert!(!confirmed, "a missing confirmation field is never confirmation");
+        assert_eq!(rest.len(), 5);
+    }
+
+    #[test]
+    fn confirm_split_accepts_only_the_exact_literal() {
+        let args: Vec<String> = ["firewall_rich_rule", "add", "public", "rule family=\"ipv4\" protocol value=\"1\" drop", "confirm"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (_, confirmed) = firewall_confirm_split(&args, 4, 5).unwrap();
+        assert!(confirmed);
+
+        for bogus in ["yes", "confirmed", "false", "confirm " ] {
+            let args: Vec<String> = ["firewall_rich_rule", "add", "public", "rule", bogus]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert!(
+                firewall_confirm_split(&args, 4, 5).is_err(),
+                "'{bogus}' must not count as confirmation"
+            );
+        }
+    }
+
+    #[test]
+    fn confirm_split_rejects_wrong_argument_counts() {
+        let args: Vec<String> = ["firewall_zone_rule", "add", "public", "service"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(firewall_confirm_split(&args, 5, 6).is_err());
+        let args: Vec<String> = ["firewall_zone_rule", "add", "public", "service", "ssh", "confirm", "extra"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(firewall_confirm_split(&args, 5, 6).is_err());
+    }
+
+    #[test]
+    fn ss_header_only_output_means_no_sessions() {
+        let headers = [
+            "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n",
+            "Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n",
+            "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n",
+        ];
+        for header in headers {
+            assert!(
+                parse_ss_sessions(header).is_empty(),
+                "a header line is never a session: {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ss_header_plus_one_established_row_means_one_session() {
+        let output = "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n\
+                      ESTAB 0 0 192.168.0.103:22 10.0.0.5:53342 users:((\"sshd\",pid=1,fd=3))\n";
+        let sessions = parse_ss_sessions(output);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert!(sessions[0].starts_with("ESTAB"), "{sessions:?}");
+    }
+
+    #[test]
+    fn ss_empty_output_means_no_sessions() {
+        assert!(parse_ss_sessions("").is_empty());
+        assert!(parse_ss_sessions("\n\n").is_empty());
     }
 }

@@ -217,7 +217,7 @@ const SECURITY_FIX_LOOKUP: Record<string, HardcodedFix> = {
     current_label: 'firewalld / ufw — inactive / disabled',
     proposed_label: 'firewalld — enabled + active (systemctl enable --now firewalld)',
     tauri_command: 'security_fix_firewall',
-    tauri_args: {},
+    tauri_args: { confirmed: false },
   },
   empty_passwords: {
     label: 'Lock Accounts with Empty Passwords',

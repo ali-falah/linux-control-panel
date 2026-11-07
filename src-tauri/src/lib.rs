@@ -83,7 +83,7 @@ use commands::{
     security_auditor::{
         security_run_audit,
         security_fix_root_ssh, security_fix_ssh_param,
-        security_fix_password_policy, security_fix_firewall, security_fix_selinux,
+        security_fix_password_policy, security_fix_firewall, security_firewall_backend, security_fix_selinux,
         security_fix_kernel_param, security_fix_auditd, security_fix_time_sync,
         security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
         security_fix_usbguard, security_fix_lock_account, security_fix_pam_faillock,
@@ -425,6 +425,7 @@ pub fn run() {
             security_fix_ssh_param,
             security_fix_password_policy,
             security_fix_firewall,
+            security_firewall_backend,
             security_fix_selinux,
             security_fix_kernel_param,
             security_fix_auditd,

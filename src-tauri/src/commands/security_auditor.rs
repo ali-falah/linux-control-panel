@@ -1538,28 +1538,80 @@ pub async fn security_fix_kernel_param(key: String, value: String, revert_value:
     }
 }
 
-/// Enable/disable firewall.
+/// Choose the firewall backend to harden. The caller names one backend
+/// explicitly; "both installed" prefers firewalld (documented), "none"
+/// is refused rather than guessed.
+fn hardening_backend_from(firewalld: bool, ufw: bool) -> Result<&'static str, String> {
+    if firewalld {
+        Ok("firewalld")
+    } else if ufw {
+        Ok("ufw")
+    } else {
+        Err("Neither firewalld nor ufw is installed on this system.".to_string())
+    }
+}
+
+/// Resolve the backend for one hardening operation. A pinned backend is only
+/// ever one of the two literals; availability is still enforced by the
+/// helper, so a pinned-but-removed backend is refused there. With no pin the
+/// backend is derived from the installed tools.
+fn hardening_backend_selected(
+    selected: Option<&str>,
+    firewalld: bool,
+    ufw: bool,
+) -> Result<&'static str, String> {
+    match selected {
+        Some("firewalld") => Ok("firewalld"),
+        Some("ufw") => Ok("ufw"),
+        Some(other) => Err(format!(
+            "The firewall backend must be firewalld or ufw, got: {other}"
+        )),
+        None => hardening_backend_from(firewalld, ufw),
+    }
+}
+
+/// The firewall backend the hardening action would target on this host. The
+/// Security Auditor pins this value across the confirmation retry so the
+/// retried operation always targets the backend the user was shown.
 #[tauri::command]
-pub async fn security_fix_firewall() -> Result<String, String> {
-    let has_firewalld = crate::binary_exists("firewall-cmd").await;
-    if has_firewalld {
-        let out = privileged::run_privileged_script(
-            "set -e; systemctl enable --now firewalld; firewall-cmd --state; firewall-cmd --set-default-zone=drop; firewall-cmd --state",
+pub async fn security_firewall_backend() -> Result<String, String> {
+    hardening_backend_from(
+        crate::binary_exists("firewall-cmd").await,
+        crate::binary_exists("ufw").await,
+    )
+    .map(|backend| backend.to_string())
+}
+
+/// Enable the firewall backend with a deny-by-default posture. The privileged
+/// helper owns the actual operations; confirmation is mandatory there and the
+/// frontend retries with `confirmed: true` after showing the backend's
+/// `CONFIRMATION_REQUIRED:` message verbatim. When `backend` is present it is
+/// the value pinned before the confirmation dialog.
+#[tauri::command]
+pub async fn security_fix_firewall(
+    backend: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<String, String> {
+    let backend = hardening_backend_selected(
+        backend.as_deref(),
+        crate::binary_exists("firewall-cmd").await,
+        crate::binary_exists("ufw").await,
+    )?;
+    crate::commands::firewall_manager::run_firewall_named_action(
+        "firewall_enable_hardened",
+        &[backend.to_string()],
+        confirmed.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        crate::commands::firewall_manager::firewall_helper_error_context(
+            "Failed to enable the firewall: ",
+            e,
         )
-        .await
-        .map_err(|e| e.to_string())?;
-        if out.status.success() { return Ok("Firewalld enabled with default drop zone.".to_string()); }
-    }
-    let has_ufw = crate::binary_exists("ufw").await;
-    if has_ufw {
-        let out = privileged::run_privileged_script(
-            "set -e; ufw --force enable; ufw default deny incoming; ufw status | grep -q 'Status: active'",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        if out.status.success() { return Ok("UFW enabled with default deny incoming.".to_string()); }
-    }
-    Err("Neither firewalld nor ufw could be configured.".to_string())
+    })?;
+    Ok(format!(
+        "{backend} is enabled with a deny-by-default policy."
+    ))
 }
 
 /// Fix password aging policy.
@@ -1969,3 +2021,48 @@ pub async fn security_fix_legal_banner(enable: bool) -> Result<String, String> {
     }
 }
 
+
+#[cfg(test)]
+mod security_fix_firewall_tests {
+    use super::{hardening_backend_from, hardening_backend_selected};
+
+    #[test]
+    fn hardening_backend_prefers_firewalld_when_installed() {
+        assert_eq!(hardening_backend_from(true, false).unwrap(), "firewalld");
+        assert_eq!(hardening_backend_from(true, true).unwrap(), "firewalld");
+    }
+
+    #[test]
+    fn hardening_backend_uses_ufw_when_only_ufw_is_installed() {
+        assert_eq!(hardening_backend_from(false, true).unwrap(), "ufw");
+    }
+
+    #[test]
+    fn hardening_backend_refuses_an_ambiguous_or_empty_host() {
+        let err = hardening_backend_from(false, false).unwrap_err();
+        assert!(err.contains("Neither firewalld nor ufw"), "{err}");
+    }
+
+    #[test]
+    fn a_pinned_backend_is_used_verbatim_and_never_replaced() {
+        // the pin wins even when derivation would prefer firewalld
+        assert_eq!(
+            hardening_backend_selected(Some("ufw"), true, true).unwrap(),
+            "ufw"
+        );
+        assert_eq!(
+            hardening_backend_selected(Some("firewalld"), false, true).unwrap(),
+            "firewalld"
+        );
+    }
+
+    #[test]
+    fn an_unknown_pinned_backend_is_refused() {
+        for bogus in ["nftables", "Firewalld", "", "auto"] {
+            assert!(
+                hardening_backend_selected(Some(bogus), true, true).is_err(),
+                "{bogus:?} must be refused"
+            );
+        }
+    }
+}

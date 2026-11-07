@@ -290,6 +290,23 @@
 
   // ── Fix handlers ───────────────────────────────────────────────────────────
 
+  /** Apply firewall hardening (named helper action) and refresh the audit.
+   *  The backend is pinned before the first attempt so the confirmation
+   *  retry targets exactly the backend the user was shown. */
+  async function applyFirewallHardening(backend: string, confirmed: boolean) {
+    const message = await invoke<string>('security_fix_firewall', { backend, confirmed });
+    invoke('security_log_fix', {
+      findingId: 'firewall',
+      findingTitle: 'System Firewall Service',
+      action: 'apply',
+      outcome: message,
+    }).catch(() => {});
+    const freshReport = await runAudit(true);
+    const verified = freshReport?.findings.find(item => item.id === 'firewall')?.is_resolved;
+    if (verified) uiStore.addToast(`Fix verified: ${message}`, 'success');
+    else uiStore.addToast('The command completed, but the rescan still reports this finding. It may need a reboot or manual review.', 'warning');
+  }
+
   /** Generic kernel param fix/revert helper */
   async function fixKernelParam(finding: SecurityFinding, key: string, secureValue: string, defaultValue: string) {
     const enable = !finding.is_resolved;
@@ -405,6 +422,51 @@
             finally { fixingId = null; }
           }, !enable
         );
+        break;
+      }
+
+      // ── Network & Firewall ───────────────────────────────────────────────
+      case 'firewall': {
+        const runFix = async (backend: string, confirmed: boolean) => {
+          fixingId = finding.id;
+          try {
+            await applyFirewallHardening(backend, confirmed);
+          } finally {
+            fixingId = null;
+          }
+        };
+        let backend: string;
+        try {
+          backend = await invoke<string>('security_firewall_backend');
+        } catch (e) {
+          uiStore.addToast(`Failed: ${e}`, 'error');
+          break;
+        }
+        try {
+          await runFix(backend, false);
+        } catch (e) {
+          const message = String(e);
+          if (message.startsWith('CONFIRMATION_REQUIRED:')) {
+            // The backend requires an explicit acknowledgement because the
+            // change can cut network access. Show its message verbatim and
+            // retry the same operation with the pinned backend and the
+            // confirmation value.
+            uiStore.confirm(
+              'Enable Firewall Hardening',
+              message,
+              async () => {
+                try {
+                  await runFix(backend, true);
+                } catch (err) {
+                  uiStore.addToast(`Failed: ${err}`, 'error');
+                }
+              },
+              true
+            );
+          } else {
+            uiStore.addToast(`Failed: ${e}`, 'error');
+          }
+        }
         break;
       }
 

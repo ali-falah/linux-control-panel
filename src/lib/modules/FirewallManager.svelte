@@ -26,6 +26,61 @@
     aiPromptInput = '';
   }
 
+  // ── GROUP 5 confirmation plumbing ───────────────────────────────────────
+  //
+  // Mirrors the helper's fail-closed coverage check (`firewall_port_covers_22`):
+  // an unparseable port string is treated as covering 22, never silently
+  // cleared. Only the exact single/range shapes the helper parses can be a
+  // negative answer; everything else fails closed.
+  function portNumber(value: string): number | null {
+    return /^\d+$/.test(value) ? Number(value) : null;
+  }
+
+  function portStringCovers22(port: string): boolean {
+    const parts = port.split('/')[0].split('-');
+    // More than one separator is not a shape the helper can parse.
+    if (parts.length > 2) return true;
+    const start = portNumber(parts[0]);
+    const end = portNumber(parts[parts.length - 1]);
+    // Empty, non-numeric or out-of-range values fail closed like the helper.
+    if (
+      start === null ||
+      end === null ||
+      start > 65535 ||
+      end > 65535
+    ) {
+      return true;
+    }
+    return start <= 22 && 22 <= end;
+  }
+
+  function ruleRemovalCutsSsh(type: 'port' | 'service', val: string): boolean {
+    return (type === 'service' && val === 'ssh') || (type === 'port' && portStringCovers22(val));
+  }
+
+  /// True when the rich rule the user is building drops or rejects SSH.
+  /// Protocol elements cannot target ports, so they are never SSH-blocking.
+  function richRuleBlocksSsh(): boolean {
+    return (
+      (ruleBuilder.action === 'drop' || ruleBuilder.action === 'reject') &&
+      ((ruleBuilder.elemType === 'service' && ruleBuilder.elemVal.trim() === 'ssh') ||
+        (ruleBuilder.elemType === 'port' && portStringCovers22(ruleBuilder.elemVal.trim())))
+    );
+  }
+
+  /// Backend `CONFIRMATION_REQUIRED:` errors are retry contracts: the error
+  /// is shown verbatim (never swallowed or rewritten) in a danger dialog,
+  /// and accepting it retries the same operation with the explicit
+  /// confirmation value. Everything else is an ordinary failure toast.
+  function handleSshConfirmation(error: unknown, context: string, retry: () => Promise<void>) {
+    const message = String(error);
+    if (message.startsWith('CONFIRMATION_REQUIRED:')) {
+      uiStore.confirm('SSH Session At Risk', message, retry, true);
+    } else {
+      uiStore.addToast(`${context}: ${message}`, 'error');
+    }
+  }
+
   interface FirewallState {
     is_running: boolean;
     is_panic: boolean;
@@ -172,26 +227,32 @@
 
   function confirmTogglePanic() {
     const enable = !state?.is_panic;
+    if (!enable) {
+      // Disabling restores normal firewall rules: not a destructive change,
+      // so no dialog; the backend requires no confirmation either.
+      doTogglePanic(false, false);
+      return;
+    }
     uiStore.confirm(
-      enable ? 'Enable Panic Mode' : 'Disable Panic Mode',
-      enable 
-        ? 'WARNING: Enabling Panic Mode will immediately drop all incoming and outgoing network connections! You will lose all connectivity.'
-        : 'Are you sure you want to disable Panic Mode and restore normal firewall rules?',
-      () => doTogglePanic(enable),
+      'Enable Panic Mode',
+      'WARNING: Enabling Panic Mode will immediately drop all incoming and outgoing network connections! You will lose all connectivity.',
+      () => doTogglePanic(enable, true),
       true
     );
   }
 
-  async function doTogglePanic(enable: boolean) {
+  async function doTogglePanic(enable: boolean, confirmed = false) {
     statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} panic mode…`);
     try {
-      await invoke('toggle_panic_mode', { enable });
+      await invoke('toggle_panic_mode', { enable, confirmed });
       statusStore.setLastCommand(`firewall-cmd --panic-${enable ? 'on' : 'off'}`, 0, true);
       uiStore.addToast(`Panic mode ${enable ? 'enabled' : 'disabled'}`, 'success');
       await loadState();
     } catch (e) {
-      uiStore.addToast(`Failed to toggle panic mode: ${e}`, 'error');
       statusStore.setLastCommand(`firewall-cmd --panic-${enable ? 'on' : 'off'}`, 1, false);
+      handleSshConfirmation(e, 'Failed to toggle panic mode', () =>
+        doTogglePanic(enable, true)
+      );
     } finally {
       statusStore.clearBusy();
     }
@@ -223,30 +284,41 @@
   }
 
   function confirmRemoveRule(type: 'port' | 'service', val: string) {
+    // Capture the zone at initiation: a confirmation retry must target the
+    // exact zone the user acted on, not whichever zone is selected later.
+    const zone = activeZone;
+    const message = ruleRemovalCutsSsh(type, val)
+      ? `WARNING: ${val} is what your active SSH session is connected through. Removing it can cut off your session and permanently lock you out of the firewall.`
+      : `Are you sure you want to block ${type} ${val} by removing it from the firewall?`;
     uiStore.confirm(
       `Remove ${type === 'port' ? 'Port' : 'Service'}`,
-      `Are you sure you want to block ${type} ${val} by removing it from the firewall?`,
-      () => doRemoveRule(type, val),
+      message,
+      () => doRemoveRule(zone, type, val, true),
       true
     );
   }
 
-  async function doRemoveRule(type: 'port' | 'service', val: string) {
+  async function doRemoveRule(zone: string, type: 'port' | 'service', val: string, confirmed = false) {
     statusStore.setBusy(`Removing ${type} ${val}…`);
     try {
-      await invoke('modify_firewall_rule', { zone: activeZone, ruleType: type, value: val, add: false });
-      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --remove-${type}=${val}`, 0, true);
+      await invoke('modify_firewall_rule', { zone, ruleType: type, value: val, add: false, confirmed });
+      statusStore.setLastCommand(`firewall-cmd --zone=${zone} --remove-${type}=${val}`, 0, true);
       uiStore.addToast(`Removed ${type} ${val} successfully`, 'success');
-      await loadRules(activeZone);
+      await loadRules(zone);
     } catch (e) {
-      uiStore.addToast(`Failed to remove ${type}: ${e}`, 'error');
-      statusStore.setLastCommand(`firewall-cmd --zone=${activeZone} --remove-${type}=${val}`, 1, false);
+      statusStore.setLastCommand(`firewall-cmd --zone=${zone} --remove-${type}=${val}`, 1, false);
+      handleSshConfirmation(e, `Failed to remove ${type} ${val}`, () =>
+        doRemoveRule(zone, type, val, true)
+      );
     } finally {
       statusStore.clearBusy();
     }
   }
 
   async function addRichRule() {
+    // Capture the zone at initiation: the confirmation dialog and any retry
+    // must target the exact zone this rule was built for.
+    const zone = activeZone;
     let rule = `rule family="${ruleBuilder.family}"`;
     if (ruleBuilder.source.trim()) {
       rule += ` source address="${ruleBuilder.source.trim()}"`;
@@ -283,43 +355,61 @@
     }
     
     rule += ` ${ruleBuilder.action}`;
-    
-    statusStore.setBusy('Adding rich rule…');
-    try {
-      await invoke('firewall_modify_rich_rule', { zone: activeZone, rule, add: true });
-      uiStore.addToast('Rich rule added successfully', 'success');
-      ruleBuilder.elemVal = '';
-      ruleBuilder.source = '';
-      ruleBuilder.dest = '';
-      await loadRichRules(activeZone);
-    } catch(e) {
-      uiStore.addToast(`Failed to add rich rule: ${e}`, 'error');
-    } finally {
-      statusStore.clearBusy();
+
+    const submitAdd = async (confirmed: boolean) => {
+      statusStore.setBusy('Adding rich rule…');
+      try {
+        await invoke('firewall_modify_rich_rule', { zone, rule, add: true, confirmed });
+        uiStore.addToast('Rich rule added successfully', 'success');
+        ruleBuilder.elemVal = '';
+        ruleBuilder.source = '';
+        ruleBuilder.dest = '';
+        await loadRichRules(zone);
+      } catch (e) {
+        handleSshConfirmation(e, 'Failed to add rich rule', () => submitAdd(true));
+      } finally {
+        statusStore.clearBusy();
+      }
+    };
+
+    // A drop/reject rule for SSH would sever the active session: explicit
+    // danger dialog before sending it. Everything else needs no dialog; the
+    // backend remains the authoritative boundary either way.
+    if (richRuleBlocksSsh()) {
+      uiStore.confirm(
+        'SSH Rule May Cut Your Connection',
+        `WARNING: this ${ruleBuilder.action} rule targets ssh and can interrupt your active SSH session, possibly locking you out of the firewall.`,
+        () => submitAdd(true),
+        true
+      );
+    } else {
+      await submitAdd(false);
     }
   }
 
   async function removeRichRule(rule: string) {
     statusStore.setBusy('Removing rich rule…');
     try {
-      await invoke('firewall_modify_rich_rule', { zone: activeZone, rule, add: false });
+      await invoke('firewall_modify_rich_rule', { zone: activeZone, rule, add: false, confirmed: false });
       uiStore.addToast('Rich rule removed successfully', 'success');
       await loadRichRules(activeZone);
-    } catch(e) {
+    } catch (e) {
       uiStore.addToast(`Failed to remove rich rule: ${e}`, 'error');
     } finally {
       statusStore.clearBusy();
     }
   }
 
-  async function bindInterface(iface: string) {
+  async function bindInterface(zone: string, iface: string, confirmed = false) {
     statusStore.setBusy(`Binding interface ${iface}…`);
     try {
-      await invoke('firewall_change_interface_zone', { zone: activeZone, interface: iface });
-      uiStore.addToast(`Interface ${iface} bound to ${activeZone}`, 'success');
-      await loadInterfaces(activeZone);
-    } catch(e) {
-      uiStore.addToast(`Failed to bind interface: ${e}`, 'error');
+      await invoke('firewall_change_interface_zone', { zone, interface: iface, confirmed });
+      uiStore.addToast(`Interface ${iface} bound to ${zone}`, 'success');
+      await loadInterfaces(zone);
+    } catch (e) {
+      handleSshConfirmation(e, `Failed to bind interface ${iface}`, () =>
+        bindInterface(zone, iface, true)
+      );
     } finally {
       statusStore.clearBusy();
     }
@@ -615,7 +705,7 @@
                 <Button variant="primary" style="flex-shrink:0;" onclick={() => {
                   const sel = document.getElementById('select-bind-iface') as HTMLSelectElement;
                   if (sel && sel.value) {
-                    bindInterface(sel.value);
+                    bindInterface(activeZone, sel.value);
                   }
                 }}>
                   Bind Interface

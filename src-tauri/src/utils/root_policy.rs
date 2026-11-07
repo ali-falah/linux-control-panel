@@ -42,7 +42,7 @@ pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
     // through named actions instead)
     "useradd", "userdel", "groupadd", "groupmod", "groupdel", "id", "getent", "renice",
     // firewall and network
-    "firewall-cmd", "ufw", "nmcli", "route", "resurrect", "connection", "smartctl",
+    "nmcli", "route", "resurrect", "connection", "smartctl",
     // files and text (pure readers and filters only — anything that can create,
     // overwrite, replace or relabel a file belongs to a named action)
     "cat", "ls", "stat", "grep", "tail", "head", "zcat", "cut", "sort", "wc", "tr",
@@ -2350,78 +2350,6 @@ pub fn nmcli_import_path_valid(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// firewalld options are `--word` or `--word=value`; the value charset covers
-/// ports (`--add-port=8080/tcp`), services, sources and interface names. Zone
-/// operands must follow `--zone`.
-fn is_firewall_flag(arg: &str) -> bool {
-    let Some(rest) = arg.strip_prefix("--") else {
-        return false;
-    };
-    let (word, value) = match rest.split_once('=') {
-        Some((word, value)) => (word, Some(value)),
-        None => (rest, None),
-    };
-    if word.is_empty()
-        || word.ends_with('-')
-        || !word.chars().all(|c| c.is_ascii_lowercase() || c == '-')
-    {
-        return false;
-    }
-    if let Some(value) = value {
-        if value.is_empty()
-            || value.len() > 128
-            || !value.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(c, '-' | '.' | ',' | '_' | '@' | ':' | '/' | '=' | '+' | '*')
-            })
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn check_firewall_cmd(args: &[String]) -> Result<(), String> {
-    const PROGRAM: &str = "firewall-cmd";
-    let mut has_zone_flag = false;
-    let mut has_zone_operand = false;
-    for arg in args {
-        if arg.starts_with('-') {
-            if !is_firewall_flag(arg) {
-                return Err(flag_not_allowed(PROGRAM, arg));
-            }
-            if arg == "--zone" {
-                has_zone_flag = true;
-            }
-        } else {
-            require(PROGRAM, arg, "a zone name", |value| {
-                value.len() <= 64
-                    && value.chars().all(|c| {
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-')
-                    })
-            })?;
-            has_zone_operand = true;
-        }
-    }
-    if has_zone_operand && !has_zone_flag {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            "",
-            "a zone operand must be preceded by --zone",
-        ));
-    }
-    // something has to happen: an option (the flag may vary), not just a zone
-    let has_option = args.iter().any(|a| a.starts_with('-') && a != "--zone");
-    if !has_option {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            "",
-            "at least one firewall option (e.g. --add-port=…, --panic-on) is required",
-        ));
-    }
-    Ok(())
-}
-
 // ─── users and groups ────────────────────────────────────────────────────────
 
 /// User creation. `-o`/`--non-unique` would allow duplicate ids and any
@@ -3286,7 +3214,7 @@ fn check_certbot_renew(args: &[String]) -> Result<(), String> {
 
 /// Programs without a specific rule: no flag at all may be passed. They are
 /// only ever called with argument shapes of pure words today (`journalctl`,
-/// `ss`, `ping`, `dig`, `host`, `ufw`, `update-alternatives`, `grub2-mkconfig`,
+/// `ss`, `ping`, `dig`, `host`, `update-alternatives`, `grub2-mkconfig`,
 /// `dpkg`, `date`, `wc`, `tr`, `cut`, `sort`, `getent`, `id`, `restorecon`,
 /// `semanage`, `augenrules`, `dirname`, `basename`, `head`, `hostname` …).
 fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
@@ -3332,6 +3260,10 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "firewall_zone_rule", "firewall_rich_rule",
+    "firewall_panic",
+    "firewall_interface_zone",
+    "firewall_enable_hardened",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3490,6 +3422,32 @@ const HELPER_REPO_MAKECACHE_ACTIONS: &[&str] = &["repo_makecache"];
 /// (dnf clean expire-cache --repo <repo_id> or apt-get clean).
 /// Validated by `ensure_safe_operand`.
 const HELPER_REPO_CLEAN_CACHE_ACTIONS: &[&str] = &["repo_clean_cache"];
+
+/// `firewall_panic <enable|disable>` — firewalld panic mode. ufw is
+/// refused by the helper before any command. The trailing `confirm` is the
+/// GROUP 3 SSH-guard confirmation.
+const HELPER_FIREWALL_PANIC_ACTIONS: &[&str] = &["firewall_panic"];
+
+/// `firewall_interface_zone <zone> <interface> [confirm]` — binds one
+/// network interface to a firewalld zone. ufw is refused by the helper
+/// before any command. The trailing `confirm` is the GROUP 4 SSH-guard
+/// confirmation for moving the SSH-carrying interface into a zone without
+/// ssh.
+const HELPER_FIREWALL_INTERFACE_ZONE_ACTIONS: &[&str] = &["firewall_interface_zone"];
+
+/// `firewall_enable_hardened <firewalld|ufw> [confirm]` — enables the chosen
+/// firewall backend with a deny-by-default posture. The confirmation is
+/// mandatory (the change can cut network access); the backend is named
+/// explicitly so an ambiguous host is refused rather than guessed.
+const HELPER_FIREWALL_ENABLE_HARDENED_ACTIONS: &[&str] = &["firewall_enable_hardened"];
+
+/// `firewall_zone_rule <add|remove> <zone> <service|port> <value>` — modifies
+/// one service or port in a firewall zone. firewalld and ufw are supported.
+const HELPER_FIREWALL_ZONE_RULE_ACTIONS: &[&str] = &["firewall_zone_rule"];
+
+/// `firewall_rich_rule <add|remove> <zone> <rule>` — modifies one firewalld
+/// rich rule. firewalld only; ufw is explicitly refused.
+const HELPER_FIREWALL_RICH_RULE_ACTIONS: &[&str] = &["firewall_rich_rule"];
 
 /// Size cap for one `nginx_www_install` write. Web content is binary-
 /// tolerant (no gate beyond the size — the old echo-based flow could not
@@ -3967,6 +3925,172 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         ensure_safe_operand(repo_id, "repository id")?;
         return Ok(());
     }
+    if HELPER_FIREWALL_PANIC_ACTIONS.contains(&action.as_str()) {
+        // args: [action, enable|disable, confirm?] — two items, or three
+        // when the caller confirms.
+        if args.len() == 3 && args[2] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[2],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 2 && args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly an enable or disable verb, optionally followed by 'confirm'",
+            ));
+        }
+        if args[1] != "enable" && args[1] != "disable" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[1],
+                "the verb must be enable or disable",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_FIREWALL_INTERFACE_ZONE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, zone, interface, confirm?] — three items, or four
+        // when the caller confirms the SSH risk.
+        if args.len() == 4 && args[3] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[3],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 3 && args.len() != 4 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a zone and an interface, optionally followed by 'confirm'",
+            ));
+        }
+        firewall_zone_name_valid(&args[1])?;
+        firewall_interface_name_valid(&args[2])?;
+        return Ok(());
+    }
+    if HELPER_FIREWALL_ENABLE_HARDENED_ACTIONS.contains(&action.as_str()) {
+        // args: [action, firewalld|ufw, confirm?] — two items, or three when
+        // the caller confirms.
+        if args.len() == 3 && args[2] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[2],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 2 && args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a firewalld or ufw backend, optionally followed by 'confirm'",
+            ));
+        }
+        if args[1] != "firewalld" && args[1] != "ufw" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[1],
+                "the backend must be firewalld or ufw",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_FIREWALL_ZONE_RULE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, add|remove, zone, service|port, value, confirm?] —
+        // five items, or six when the caller confirms.
+        if args.len() == 6 && args[5] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[5],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 5 && args.len() != 6 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly an add/remove verb, a zone, a service/port kind and a value, optionally followed by 'confirm'",
+            ));
+        }
+        let verb = &args[1];
+        let zone = &args[2];
+        let kind = &args[3];
+        let value = &args[4];
+        if verb != "add" && verb != "remove" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                verb,
+                "the verb must be add or remove",
+            ));
+        }
+        // The zone may be empty only because ufw has no zones (an empty zone
+        // argument is the documented ufw shape); firewalld always requires a
+        // real zone and re-validates in the helper.
+        if !zone.is_empty() {
+            firewall_zone_name_valid(zone).map_err(|reason| {
+                operand_not_allowed("lcp-admin", zone, &reason)
+            })?;
+        }
+        match kind.as_str() {
+            "service" => firewall_service_name_valid(value).map_err(|reason| {
+                operand_not_allowed("lcp-admin", value, &reason)
+            })?,
+            "port" => firewall_port_value_valid(value).map_err(|reason| {
+                operand_not_allowed("lcp-admin", value, &reason)
+            })?,
+            other => {
+                return Err(operand_not_allowed(
+                    "lcp-admin",
+                    other,
+                    "the kind must be service or port",
+                ))
+            }
+        }
+        return Ok(());
+    }
+    if HELPER_FIREWALL_RICH_RULE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, add|remove, zone, rule, confirm?] — four items, or
+        // five when the caller confirms.
+        if args.len() == 5 && args[4] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[4],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 4 && args.len() != 5 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly an add/remove verb, a zone and a rule, optionally followed by 'confirm'",
+            ));
+        }
+        let verb = &args[1];
+        let zone = &args[2];
+        let rule = &args[3];
+        if verb != "add" && verb != "remove" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                verb,
+                "the verb must be add or remove",
+            ));
+        }
+        // The zone may be empty only because ufw has no zones (an empty zone
+        // argument is the documented ufw shape); firewalld always requires a
+        // real zone and re-validates in the helper.
+        if !zone.is_empty() {
+            firewall_zone_name_valid(zone).map_err(|reason| {
+                operand_not_allowed("lcp-admin", zone, &reason)
+            })?;
+        }
+        firewall_rich_rule_valid(rule).map_err(|reason| {
+            operand_not_allowed("lcp-admin", rule, &reason)
+        })?;
+        return Ok(());
+    }
     if args.len() != 1 {
         return Err(operand_not_allowed(
             "lcp-admin",
@@ -4005,7 +4129,6 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
         "setsebool" => check_setsebool(args),
         "semodule" => check_semodule(args),
         "ausearch" => check_ausearch(args),
-        "firewall-cmd" => check_firewall_cmd(args),
         "nmcli" => check_nmcli(args),
         "nmcli_connection_save" => check_nmcli_connection_save(args),
         "nmcli_interface_state" => check_nmcli_interface_state(args),
@@ -4024,12 +4147,872 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
     }
 }
 
+// ─── Firewall validators (migration batch 4) ─────────────────────────────────
+//
+// firewalld and ufw both expose command-line interfaces, but the panel may not
+// pass their raw arguments through. Every operand is checked here before a
+// privileged command can see it. The validators accept the narrow grammar the
+// panel itself can produce; anything richer is refused until it is designed.
+
+/// A firewalld zone name: one to 64 ASCII letters, digits, underscores or
+/// dashes. Predefined zones include mixed case (`FedoraWorkstation`).
+pub fn firewall_zone_name_valid(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 64 {
+        return Err("The firewall zone name must be 1 to 64 characters.".to_string());
+    }
+    let first = value.chars().next().expect("non-empty zone name");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!("The firewall zone name must start with a letter or digit: {value}"));
+    }
+    if !value.is_ascii()
+        || !value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+        })
+    {
+        return Err(format!("The firewall zone name contains unsafe characters: {value}"));
+    }
+    Ok(())
+}
+
+/// A firewalld service name: lowercase ASCII word characters only. The
+/// firewalld service definition is responsible for whether the name exists.
+pub fn firewall_service_name_valid(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 64 {
+        return Err("The firewall service name must be 1 to 64 characters.".to_string());
+    }
+    let mut chars = value.chars();
+    let first = chars.next().expect("non-empty service name");
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(format!("The firewall service name must start with a lowercase letter or digit: {value}"));
+    }
+    if !value.chars().all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-')
+    }) {
+        return Err(format!("The firewall service name contains unsafe characters: {value}"));
+    }
+    Ok(())
+}
+
+/// Protocols firewalld accepts for an IP port.
+const FIREWALL_PORT_PROTOCOLS: &[&str] = &["tcp", "udp", "sctp", "dccp"];
+
+fn firewall_port_number_valid(part: &str) -> Result<(), String> {
+    if part.is_empty() || part.len() > 5 {
+        return Err(format!("The firewall port number is out of range: {part}"));
+    }
+    if !part.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("The firewall port number is not numeric: {part}"));
+    }
+    let value: u32 = part
+        .parse()
+        .map_err(|_| format!("The firewall port number is not numeric: {part}"))?;
+    if value == 0 || value > 65535 {
+        return Err(format!("The firewall port number must be 1 to 65535: {part}"));
+    }
+    Ok(())
+}
+
+fn firewall_port_part_valid(value: &str) -> Result<(), String> {
+    match value.split_once('-') {
+        Some((start, end)) => {
+            firewall_port_number_valid(start)?;
+            firewall_port_number_valid(end)?;
+            let start: u32 = start.parse().unwrap_or(0);
+            let end: u32 = end.parse().unwrap_or(0);
+            if start > end {
+                return Err(format!("The firewall port range starts after it ends: {value}"));
+            }
+            Ok(())
+        }
+        None => firewall_port_number_valid(value),
+    }
+}
+
+/// A firewalld port value: `22/tcp`, `53/udp` or an inclusive range such as
+/// `1025-65535/tcp`.
+pub fn firewall_port_value_valid(value: &str) -> Result<(), String> {
+    let Some((ports, protocol)) = value.split_once('/') else {
+        return Err(format!("The firewall port must include a protocol: {value}"));
+    };
+    if !FIREWALL_PORT_PROTOCOLS.contains(&protocol) {
+        return Err(format!(
+            "The firewall port protocol must be one of {}: {protocol}",
+            FIREWALL_PORT_PROTOCOLS.join(", ")
+        ));
+    }
+    firewall_port_part_valid(ports)
+}
+
+/// A Linux network interface name: at most 15 bytes, no path separators and
+/// no characters outside the kernel's interface-name alphabet.
+pub fn firewall_interface_name_valid(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 15 {
+        return Err("The firewall interface name must be 1 to 15 bytes.".to_string());
+    }
+    let first = value.chars().next().expect("non-empty interface name");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!("The firewall interface name must start with a letter or digit: {value}"));
+    }
+    if !value.is_ascii()
+        || !value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+        })
+    {
+        return Err(format!("The firewall interface name contains unsafe characters: {value}"));
+    }
+    Ok(())
+}
+
+/// The family a rich rule applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirewallRichRuleFamily {
+    Ipv4,
+    Ipv6,
+}
+
+/// One source or destination address, optionally with an explicit prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirewallRichAddress {
+    pub address: std::net::IpAddr,
+    pub prefix: Option<u8>,
+}
+
+/// The element a rich rule matches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirewallRichRuleElement {
+    Service(String),
+    Port { port: String, protocol: String },
+    Protocol(String),
+}
+
+/// The action a rich rule applies to its matching element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirewallRichRuleAction {
+    Accept,
+    Reject,
+    Drop,
+}
+
+/// A parsed and validated firewalld rich rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirewallRichRule {
+    pub family: FirewallRichRuleFamily,
+    pub source: Option<FirewallRichAddress>,
+    pub destination: Option<FirewallRichAddress>,
+    pub element: FirewallRichRuleElement,
+    pub action: FirewallRichRuleAction,
+}
+
+const FIREWALL_RICH_RULE_MAX: usize = 512;
+
+fn rich_attr<'a>(token: &'a str, key: &str) -> Result<&'a str, String> {
+    let prefix = format!("{key}=\"");
+    if !token.starts_with(prefix.as_str()) || !token.ends_with('"') {
+        return Err(format!("The rich rule expected {key} with a quoted value, got: {token}"));
+    }
+    let value = &token[prefix.len()..token.len() - 1];
+    if value.contains('"')
+        || value.chars().any(|c| c.is_control())
+    {
+        return Err(format!("The rich rule {key} value contains unsafe characters."));
+    }
+    Ok(value)
+}
+
+fn rich_address_valid(
+    token: &str,
+    family: FirewallRichRuleFamily,
+) -> Result<FirewallRichAddress, String> {
+    let value = rich_attr(token, "address")?;
+    let (address_text, prefix_text) = match value.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix)),
+        None => (value, None),
+    };
+    let prefix = match prefix_text {
+        Some(text) => {
+            if text.is_empty() || text.len() > 3 || !text.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!("The rich rule address prefix is invalid: {value}"));
+            }
+            let prefix: u8 = text
+                .parse()
+                .map_err(|_| format!("The rich rule address prefix is invalid: {value}"))?;
+            let max = match family {
+                FirewallRichRuleFamily::Ipv4 => 32,
+                FirewallRichRuleFamily::Ipv6 => 128,
+            };
+            if prefix > max {
+                return Err(format!("The rich rule address prefix is too large for this family: {value}"));
+            }
+            Some(prefix)
+        }
+        None => None,
+    };
+    let address = match family {
+        FirewallRichRuleFamily::Ipv4 => address_text.parse::<std::net::Ipv4Addr>().map(std::net::IpAddr::V4),
+        FirewallRichRuleFamily::Ipv6 => address_text.parse::<std::net::Ipv6Addr>().map(std::net::IpAddr::V6),
+    }
+    .map_err(|_| format!("The rich rule address is not a valid address for this family: {value}"))?;
+    Ok(FirewallRichAddress { address, prefix })
+}
+
+fn rich_protocol_value_valid(value: &str) -> Result<String, String> {
+    if value.chars().all(|c| c.is_ascii_digit()) {
+        if value.len() > 1 && value.starts_with('0') {
+            return Err(format!("The rich rule protocol number must not have a leading zero: {value}"));
+        }
+        let number: u32 = value
+            .parse()
+            .map_err(|_| format!("The rich rule protocol number is invalid: {value}"))?;
+        if number == 0 || number > 255 {
+            return Err(format!("The rich rule protocol number must be 1 to 255: {value}"));
+        }
+        return Ok(number.to_string());
+    }
+    if value.is_empty() || value.len() > 32 {
+        return Err(format!("The rich rule protocol value is invalid: {value}"));
+    }
+    let mut chars = value.chars();
+    let first = chars.next().expect("non-empty protocol value");
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(format!("The rich rule protocol value is invalid: {value}"));
+    }
+    if !value.chars().all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-')
+    }) {
+        return Err(format!("The rich rule protocol value is invalid: {value}"));
+    }
+    Ok(value.to_string())
+}
+
+/// Parse and validate the firewalld rich-language subset supported by the
+/// panel. Anything outside this subset is refused, including logging, limits,
+/// priority, marking and port forwarding.
+pub fn firewall_rich_rule_valid(rule: &str) -> Result<FirewallRichRule, String> {
+    if rule.is_empty() || rule.len() > FIREWALL_RICH_RULE_MAX {
+        return Err(format!(
+            "The rich rule must be 1 to {FIREWALL_RICH_RULE_MAX} bytes."
+        ));
+    }
+    if rule.chars().any(|c| c.is_control()) {
+        return Err("The rich rule contains control characters.".to_string());
+    }
+
+    let tokens: Vec<&str> = rule.split_ascii_whitespace().collect();
+    if tokens.first() != Some(&"rule") {
+        return Err("The rich rule must start with 'rule'.".to_string());
+    }
+    let family_token = tokens.get(1).copied().unwrap_or("");
+    let family = match rich_attr(family_token, "family")? {
+        "ipv4" => FirewallRichRuleFamily::Ipv4,
+        "ipv6" => FirewallRichRuleFamily::Ipv6,
+        other => return Err(format!("The rich rule family must be ipv4 or ipv6, got: {other}")),
+    };
+
+    let mut index = 2;
+
+    // The accepted grammar is fixed: an optional source, an optional
+    // destination, exactly one element and exactly one action. Parse the
+    // phases in order; a token in the wrong phase is a grammar error.
+    let mut source = None;
+    if tokens.get(index) == Some(&"source") {
+        let token = tokens.get(index + 1).copied().unwrap_or("");
+        source = Some(rich_address_valid(token, family)?);
+        index += 2;
+    }
+    if tokens.get(index) == Some(&"source") {
+        return Err("The rich rule has more than one source.".to_string());
+    }
+
+    let mut destination = None;
+    if tokens.get(index) == Some(&"destination") {
+        let token = tokens.get(index + 1).copied().unwrap_or("");
+        destination = Some(rich_address_valid(token, family)?);
+        index += 2;
+    }
+    if tokens.get(index) == Some(&"destination") {
+        return Err("The rich rule has more than one destination.".to_string());
+    }
+    if tokens.get(index) == Some(&"source") {
+        return Err("The rich rule source must precede destination.".to_string());
+    }
+
+    let element_token = tokens.get(index).copied().unwrap_or("");
+    let element = match element_token {
+        "service" => {
+            let token = tokens.get(index + 1).copied().unwrap_or("");
+            let name = rich_attr(token, "name")?;
+            firewall_service_name_valid(name)?;
+            index += 2;
+            FirewallRichRuleElement::Service(name.to_string())
+        }
+        "port" => {
+            let port_token = tokens.get(index + 1).copied().unwrap_or("");
+            let protocol_token = tokens.get(index + 2).copied().unwrap_or("");
+            let port = rich_attr(port_token, "port")?;
+            let protocol = rich_attr(protocol_token, "protocol")?;
+            if !FIREWALL_PORT_PROTOCOLS.contains(&protocol) {
+                return Err(format!(
+                    "The rich rule port protocol must be one of {}: {protocol}",
+                    FIREWALL_PORT_PROTOCOLS.join(", ")
+                ));
+            }
+            firewall_port_part_valid(port)?;
+            index += 3;
+            FirewallRichRuleElement::Port {
+                port: port.to_string(),
+                protocol: protocol.to_string(),
+            }
+        }
+        "protocol" => {
+            let token = tokens.get(index + 1).copied().unwrap_or("");
+            let value = rich_attr(token, "value")?;
+            index += 2;
+            FirewallRichRuleElement::Protocol(rich_protocol_value_valid(value)?)
+        }
+        "source" | "destination" => {
+            return Err("The rich rule source and destination must precede its element.".to_string())
+        }
+        "" => return Err("The rich rule must contain an element.".to_string()),
+        other => {
+            return Err(format!("The rich rule must contain an element, got: {other}"));
+        }
+    };
+    if matches!(tokens.get(index).copied(), Some("service" | "port" | "protocol")) {
+        return Err("The rich rule has more than one element.".to_string());
+    }
+    if matches!(tokens.get(index).copied(), Some("source" | "destination")) {
+        return Err("The rich rule source and destination must precede its element.".to_string());
+    }
+
+    let action_token = tokens.get(index).copied().unwrap_or("");
+    let action = match action_token {
+        "accept" => FirewallRichRuleAction::Accept,
+        "reject" => FirewallRichRuleAction::Reject,
+        "drop" => FirewallRichRuleAction::Drop,
+        "service" | "port" | "protocol" => return Err("The rich rule has more than one element.".to_string()),
+        "source" | "destination" => {
+            return Err("The rich rule source and destination must precede its element.".to_string())
+        }
+        "" => return Err("The rich rule must contain accept, reject or drop.".to_string()),
+        other => {
+            return Err(format!(
+                "The rich rule must contain accept, reject or drop, got: {other}"
+            ));
+        }
+    };
+    index += 1;
+
+    if tokens.get(index).is_some_and(|token| matches!(*token, "accept" | "reject" | "drop")) {
+        return Err("The rich rule has more than one action.".to_string());
+    }
+    if index != tokens.len() {
+        return Err("The rich rule has content after its action.".to_string());
+    }
+
+    Ok(FirewallRichRule {
+        family,
+        source,
+        destination,
+        element,
+        action,
+    })
+}
+
+#[cfg(test)]
+mod firewall_policy_tests {
+    use super::{
+        firewall_interface_name_valid, firewall_port_value_valid, firewall_rich_rule_valid,
+        firewall_service_name_valid, firewall_zone_name_valid,
+        FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
+    };
+
+    #[test]
+    fn firewall_zone_name_accepts_predefined_and_custom() {
+        for zone in [
+            "FedoraWorkstation",
+            "FedoraServer",
+            "public",
+            "trusted",
+            "drop",
+            "custom-zone",
+            "zone_1",
+        ] {
+            assert!(firewall_zone_name_valid(zone).is_ok(), "zone must pass: {zone}");
+        }
+    }
+
+    #[test]
+    fn firewall_zone_name_rejects_empty_and_too_long() {
+        assert!(firewall_zone_name_valid("").is_err(), "empty zone must be refused");
+        assert!(
+            firewall_zone_name_valid(&"a".repeat(65)).is_err(),
+            "oversized zone must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_zone_name_rejects_punctuation_and_path_parts() {
+        for zone in ["public/ssh", "public ssh", "public;", "..", ".", "public,drop", "public@host"] {
+            assert!(firewall_zone_name_valid(zone).is_err(), "zone must be refused: {zone}");
+        }
+    }
+
+    #[test]
+    fn firewall_service_name_accepts_common_services() {
+        for service in ["ssh", "http", "https", "dhcpv6-client", "my-service", "my_service", "7zip"] {
+            assert!(firewall_service_name_valid(service).is_ok(), "service must pass: {service}");
+        }
+    }
+
+    #[test]
+    fn firewall_service_name_rejects_bad_shape() {
+        for service in ["", "SSH", "https/local", "https ssh", ".ssh", "-ssh", "https;"] {
+            assert!(firewall_service_name_valid(service).is_err(), "service must be refused: {service}");
+        }
+    }
+
+    #[test]
+    fn firewall_port_value_accepts_single_ports() {
+        for port in ["1/tcp", "22/tcp", "53/udp", "5353/sctp", "5353/dccp", "65535/tcp"] {
+            assert!(firewall_port_value_valid(port).is_ok(), "port must pass: {port}");
+        }
+    }
+
+    #[test]
+    fn firewall_port_value_accepts_ranges() {
+        for port in ["1025-65535/tcp", "8000-8001/udp", "1-1024/sctp"] {
+            assert!(firewall_port_value_valid(port).is_ok(), "range must pass: {port}");
+        }
+    }
+
+    #[test]
+    fn firewall_port_value_rejects_bad_numbers() {
+        for port in ["0/tcp", "65536/tcp", "+22/tcp", "22 /tcp", "", "abc/tcp", "22"] {
+            assert!(firewall_port_value_valid(port).is_err(), "port must be refused: {port}");
+        }
+    }
+
+    #[test]
+    fn firewall_port_value_rejects_bad_protocols() {
+        for port in ["22/TCP", "22/icmp", "22/tacp", "22/tcp ", "8000-8001/udp/extra"] {
+            assert!(firewall_port_value_valid(port).is_err(), "protocol must be refused: {port}");
+        }
+    }
+
+    #[test]
+    fn firewall_port_value_rejects_inverted_or_open_ranges() {
+        for port in ["-1/tcp", "65535-1/tcp", "8000-/tcp", "-8000/tcp", "8000-8000-8001/tcp"] {
+            assert!(firewall_port_value_valid(port).is_err(), "range must be refused: {port}");
+        }
+    }
+
+    #[test]
+    fn firewall_interface_name_accepts_real_linux_ifnames() {
+        for ifname in ["lo", "wlp1s0", "wlp0s20f0u3", "enp3s0", "br-lan", "vlan.10", "eth0:1"] {
+            assert!(firewall_interface_name_valid(ifname).is_ok(), "iface must pass: {ifname}");
+        }
+    }
+
+    #[test]
+    fn firewall_interface_name_rejects_empty_and_too_long() {
+        assert!(firewall_interface_name_valid("").is_err(), "empty interface must be refused");
+        assert!(
+            firewall_interface_name_valid(&"a".repeat(16)).is_err(),
+            "oversized interface name must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_interface_name_rejects_path_and_control_characters() {
+        for ifname in ["../eth0", "eth0/iface", "eth 0", "eth\0", "eth;0", "eth\n"] {
+            assert!(firewall_interface_name_valid(ifname).is_err(), "iface must be refused: {ifname}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_service() {
+        let rule = firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh" accept"#).unwrap();
+        assert_eq!(rule.family, FirewallRichRuleFamily::Ipv4);
+        assert_eq!(rule.source, None);
+        assert_eq!(rule.destination, None);
+        assert_eq!(rule.element, FirewallRichRuleElement::Service("ssh".to_string()));
+        assert_eq!(rule.action, FirewallRichRuleAction::Accept);
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_port_and_protocol() {
+        let rule = firewall_rich_rule_valid(
+            r#"rule family="ipv6" source address="::1" port port="5353" protocol="udp" reject"#,
+        ).unwrap();
+        assert_eq!(rule.family, FirewallRichRuleFamily::Ipv6);
+        assert_eq!(rule.source.unwrap().prefix, None);
+        assert_eq!(
+            rule.element,
+            FirewallRichRuleElement::Port { port: "5353".to_string(), protocol: "udp".to_string() }
+        );
+        assert_eq!(rule.action, FirewallRichRuleAction::Reject);
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_numeric_protocol() {
+        let rule = firewall_rich_rule_valid(
+            r#"rule family="ipv4" protocol value="47" accept"#,
+        ).unwrap();
+        assert_eq!(rule.element, FirewallRichRuleElement::Protocol("47".to_string()));
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_source_and_destination() {
+        let rule = firewall_rich_rule_valid(
+            r#"rule family="ipv4" source address="192.168.1.0/24" destination address="10.0.0.5/32" port port="8080" protocol="tcp" drop"#,
+        ).unwrap();
+        assert_eq!(rule.source.unwrap().prefix, Some(24));
+        assert_eq!(rule.destination.unwrap().prefix, Some(32));
+        assert_eq!(rule.action, FirewallRichRuleAction::Drop);
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_ipv6_prefixes_and_port_ranges() {
+        let rule = firewall_rich_rule_valid(
+            r#"rule family="ipv6" source address="2001:db8::/32" port port="1025-65535" protocol="tcp" accept"#,
+        ).unwrap();
+        assert_eq!(rule.source.unwrap().prefix, Some(32));
+        assert_eq!(
+            rule.element,
+            FirewallRichRuleElement::Port { port: "1025-65535".to_string(), protocol: "tcp".to_string() }
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_broad_cidrs_as_valid_input() {
+        for rule in [
+            r#"rule family="ipv4" source address="0.0.0.0/0" service name="ssh" drop"#,
+            r#"rule family="ipv6" source address="::/0" service name="ssh" reject"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_ok(), "broad CIDR must be syntactically valid: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_family_and_address_mismatch() {
+        for rule in [
+            r#"rule family="ipv4" source address="::1" service name="ssh" accept"#,
+            r#"rule family="ipv6" destination address="10.0.0.5" service name="ssh" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "mismatched family must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_missing_or_unknown_family() {
+        for rule in [
+            r#"rule service name="ssh" accept"#,
+            r#"rule family="any" service name="ssh" accept"#,
+            r#"rule family="ipv4 service name="ssh" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "family must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_invalid_prefixes() {
+        for rule in [
+            r#"rule family="ipv4" source address="10.0.0.0/33" service name="ssh" accept"#,
+            r#"rule family="ipv4" source address="10.0.0.0/abc" service name="ssh" accept"#,
+            r#"rule family="ipv6" source address="::/129" service name="ssh" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "prefix must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_advanced_keywords() {
+        for rule in [
+            r#"rule family="ipv4" priority="-1000" service name="ssh" accept"#,
+            r#"rule family="ipv4" service name="ssh" log prefix="blocked" accept"#,
+            r#"rule family="ipv4" service name="ssh" mark set="0x1" accept"#,
+            r#"rule family="ipv4" forward-port port="22" protocol="tcp" to-port="2222" accept"#,
+            r#"rule family="ipv4" source not address="10.0.0.0/8" service name="ssh" accept"#,
+            r#"rule family="ipv4" mac address="de:ad:be:ef:00:00" service name="ssh" accept"#,
+            r#"rule family="ipv4" ipset="admins" service name="ssh" accept"#,
+            r#"rule family="ipv4" masquerade"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "advanced keyword must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_bad_ports_and_protocols() {
+        for rule in [
+            r#"rule family="ipv4" port port="0" protocol="tcp" accept"#,
+            r#"rule family="ipv4" port port="65536" protocol="tcp" accept"#,
+            r#"rule family="ipv4" port port="11-10" protocol="tcp" accept"#,
+            r#"rule family="ipv4" port port="22" protocol="icmp" accept"#,
+            r#"rule family="ipv4" protocol value="0" accept"#,
+            r#"rule family="ipv4" protocol value="256" accept"#,
+            r#"rule family="ipv4" protocol value="ICMP" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "port or protocol must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_unbalanced_quotes_and_trailing_garbage() {
+        for rule in [
+            r#"rule family="ipv4" service name="ssh accept"#,
+            r#"rule family="ipv4" service name="ssh" accept extra"#,
+            r#"rule family="ipv4" service name="ssh" accept accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "malformed rule must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_empty_overlong_and_control() {
+        assert!(firewall_rich_rule_valid("").is_err(), "empty rule must be refused");
+        let oversized = format!("rule family=\"ipv4\" service name=\"ssh\" {}", "x".repeat(512));
+        assert!(
+            firewall_rich_rule_valid(&oversized).is_err(),
+            "oversized rule must be refused"
+        );
+        assert!(
+            firewall_rich_rule_valid("rule\nfamily=\"ipv4\" service name=\"ssh\" accept").is_err(),
+            "control character must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_missing_element_or_action() {
+        for rule in [
+            r#"rule family="ipv4" accept"#,
+            r#"rule family="ipv4" service name="ssh""#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "incomplete rule must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_unsupported_elements() {
+        for rule in [
+            r#"rule family="ipv4" icmp-block name="echo-request" accept"#,
+            r#"rule family="ipv4" icmp-type name="echo-reply" accept"#,
+            r#"rule family="ipv4" source-port port="1025" protocol="tcp" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "unsupported element must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_duplicate_source_destination_and_element() {
+        for rule in [
+            r#"rule family="ipv4" source address="10.0.0.1" source address="10.0.0.2" service name="ssh" accept"#,
+            r#"rule family="ipv4" destination address="10.0.0.1" destination address="10.0.0.2" service name="ssh" accept"#,
+            r#"rule family="ipv4" service name="ssh" protocol value="icmp" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "duplicate component must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_bad_protocol_values() {
+        for rule in [
+            r#"rule family="ipv4" protocol value="256" accept"#,
+            r#"rule family="ipv4" protocol value="01" accept"#,
+            r#"rule family="ipv4" protocol value="-gre" accept"#,
+        ] {
+            assert!(firewall_rich_rule_valid(rule).is_err(), "protocol value must be refused: {rule}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_named_protocol() {
+        let rule = firewall_rich_rule_valid(r#"rule family="ipv4" protocol value="gre" accept"#).unwrap();
+        assert_eq!(rule.element, FirewallRichRuleElement::Protocol("gre".to_string()));
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_ipv4_prefix_256() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" source address="10.0.0.0/256" service name="ssh" accept"#).is_err(),
+            "IPv4 /256 must be refused without panicking"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_ipv4_prefix_999() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" source address="10.0.0.0/999" service name="ssh" accept"#).is_err(),
+            "IPv4 /999 must be refused without panicking"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_ipv6_prefix_256() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv6" source address="::1/256" service name="ssh" accept"#).is_err(),
+            "IPv6 /256 must be refused without panicking"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_ipv6_prefix_999() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv6" source address="::1/999" service name="ssh" accept"#).is_err(),
+            "IPv6 /999 must be refused without panicking"
+        );
+    }
+}
+
+#[cfg(test)]
+mod firewall_ordering_tests {
+    use super::{
+        firewall_interface_name_valid, firewall_rich_rule_valid, firewall_zone_name_valid,
+        FirewallRichRuleAction, FirewallRichRuleElement,
+    };
+
+    #[test]
+    fn firewall_zone_name_rejects_leading_hyphen() {
+        for zone in ["-public", "-", "-_zone", "-1"] {
+            assert!(firewall_zone_name_valid(zone).is_err(), "leading hyphen must be refused: {zone}");
+        }
+    }
+
+    #[test]
+    fn firewall_interface_name_rejects_leading_hyphen() {
+        for ifname in ["-eth0", "-lo", "-wlp1s0", "-1"] {
+            assert!(firewall_interface_name_valid(ifname).is_err(), "leading hyphen must be refused: {ifname}");
+        }
+    }
+
+    #[test]
+    fn firewall_zone_and_interface_valid_names_remain_accepted() {
+        for zone in ["public", "FedoraWorkstation", "br-lan"] {
+            assert!(firewall_zone_name_valid(zone).is_ok(), "zone must remain accepted: {zone}");
+        }
+        for ifname in ["br-lan", "vlan.10", "eth0:1"] {
+            assert!(firewall_interface_name_valid(ifname).is_ok(), "interface must remain accepted: {ifname}");
+        }
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_source_after_element() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh" source address="10.0.0.1" accept"#).is_err(),
+            "source after element must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_destination_after_element() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh" destination address="10.0.0.2" accept"#).is_err(),
+            "destination after element must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_destination_before_source() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" destination address="10.0.0.2" source address="10.0.0.1" service name="ssh" accept"#).is_err(),
+            "destination before source must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_source_and_destination_in_order() {
+        let rule = firewall_rich_rule_valid(
+            r#"rule family="ipv4" source address="192.168.1.0/24" destination address="10.0.0.5/32" service name="ssh" accept"#,
+        ).unwrap();
+        assert_eq!(rule.source.unwrap().prefix, Some(24));
+        assert_eq!(rule.destination.unwrap().prefix, Some(32));
+        assert_eq!(rule.element, FirewallRichRuleElement::Service("ssh".to_string()));
+        assert_eq!(rule.action, FirewallRichRuleAction::Accept);
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_source_without_destination() {
+        let rule = firewall_rich_rule_valid(r#"rule family="ipv4" source address="10.0.0.1" service name="ssh" accept"#).unwrap();
+        assert!(rule.source.is_some());
+        assert_eq!(rule.destination, None);
+        assert_eq!(rule.element, FirewallRichRuleElement::Service("ssh".to_string()));
+    }
+
+    #[test]
+    fn firewall_rich_rule_accepts_destination_without_source() {
+        let rule = firewall_rich_rule_valid(r#"rule family="ipv4" destination address="10.0.0.2" service name="ssh" accept"#).unwrap();
+        assert_eq!(rule.source, None);
+        assert!(rule.destination.is_some());
+        assert_eq!(rule.element, FirewallRichRuleElement::Service("ssh".to_string()));
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_duplicate_source() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" source address="10.0.0.1" source address="10.0.0.2" service name="ssh" accept"#).is_err(),
+            "duplicate source must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_duplicate_destination() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" destination address="10.0.0.1" destination address="10.0.0.2" service name="ssh" accept"#).is_err(),
+            "duplicate destination must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_multiple_elements() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh" protocol value="icmp" accept"#).is_err(),
+            "multiple elements must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_multiple_actions() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh" accept drop"#).is_err(),
+            "multiple actions must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_missing_element() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" accept"#).is_err(),
+            "missing element must be refused"
+        );
+    }
+
+    #[test]
+    fn firewall_rich_rule_rejects_missing_action() {
+        assert!(
+            firewall_rich_rule_valid(r#"rule family="ipv4" service name="ssh""#).is_err(),
+            "missing action must be refused"
+        );
+    }
+}
+
 #[cfg(test)]
 mod argument_policy_tests {
     use super::{
-        ensure_arguments_for_program as check, is_uuid, nmcli_import_allowed_dirs,
-        nmcli_import_path_valid,
+        ensure_arguments_for_program as check, ensure_program_allowed, is_uuid,
+        nmcli_import_allowed_dirs, nmcli_import_path_valid,
     };
+
+    #[test]
+    fn firewall_tools_are_not_on_the_generic_allow_list() {
+        // The firewall is mutated only through named helper actions. The
+        // generic program channel must refuse both tools outright, so no
+        // caller can bypass the action-level SSH guards.
+        for program in ["firewall-cmd", "ufw"] {
+            assert!(
+                ensure_program_allowed(program).is_err(),
+                "{program} must not be executable through the generic root channel"
+            );
+        }
+    }
 
     fn ok(program: &str, args: &[&str]) {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -4309,7 +5292,8 @@ mod argument_policy_tests {
         refused("journalctl", &["--no-pager"]);
         refused("getent", &["--dash"]);
         refused("head", &["-o", "/etc/passwd"]);
-        ok("ufw", &["default", "deny", "outgoing"]);
+        // firewall tools are named-action only; the allow-list refusal is
+        // asserted in `firewall_tools_are_not_on_the_generic_allow_list`
         ok("getent", &["passwd", "someuser"]);
         ok("hostname", &[]);
     }
@@ -4356,9 +5340,11 @@ mod argument_policy_tests {
 
         ok("ausearch", &["-m", "AVC", "-ts", "recent"]);
 
-        ok("firewall-cmd", &["--zone", "public", "--add-port=8080/tcp"]);
-        ok("firewall-cmd", &["--panic-on"]);
-        ok("firewall-cmd", &["--zone", "home", "--permanent"]);
+        // firewall tools are named-action only: the generic channel must
+        // refuse every invocation, including formerly-permitted operations.
+        refused("firewall-cmd", &["--zone", "public", "--add-port=8080/tcp"]);
+        refused("firewall-cmd", &["--panic-on"]);
+        refused("firewall-cmd", &["--zone", "home", "--permanent"]);
         refused("firewall-cmd", &["--zone", "public", "--add-service=<b>"]);
         refused("firewall-cmd", &["--zone", "public", "--add-port=;id"]);
         refused("firewall-cmd", &["-X", "public"]);
