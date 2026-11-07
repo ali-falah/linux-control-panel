@@ -102,6 +102,66 @@ fn ss_bin() -> Option<&'static str> {
         .copied()
 }
 
+/// Package-manager binaries and lock locations are addressed by absolute
+/// candidate paths. The fixture build swaps in stubs so tests never touch the
+/// host package databases or run a real transaction.
+#[cfg(not(feature = "test-fixture"))]
+const DNF_CANDIDATES: [&str; 2] = ["/usr/bin/dnf", "/bin/dnf"];
+#[cfg(feature = "test-fixture")]
+const DNF_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/dnf"];
+#[cfg(not(feature = "test-fixture"))]
+const APT_GET_CANDIDATES: [&str; 2] = ["/usr/bin/apt-get", "/bin/apt-get"];
+#[cfg(feature = "test-fixture")]
+const APT_GET_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/apt-get"];
+#[cfg(not(feature = "test-fixture"))]
+const DF_CANDIDATES: [&str; 2] = ["/usr/bin/df", "/bin/df"];
+#[cfg(feature = "test-fixture")]
+const DF_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/df"];
+#[cfg(not(feature = "test-fixture"))]
+const UNAME_CANDIDATES: [&str; 2] = ["/usr/bin/uname", "/bin/uname"];
+#[cfg(feature = "test-fixture")]
+const UNAME_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/uname"];
+#[cfg(not(feature = "test-fixture"))]
+const PACKAGE_LOCK_PATHS: &[&str] = &[
+    "/run/dnf.pid",
+    "/run/dnf.lock",
+    "/var/cache/dnf/dnf.pid",
+    "/var/lib/dpkg/lock-frontend",
+    "/var/lib/dpkg/lock",
+    "/var/lib/apt/lists/lock",
+];
+#[cfg(feature = "test-fixture")]
+const PACKAGE_LOCK_PATHS: &[&str] = &["/tmp/lcp-admin-test-fixture/ctl/pkg-lock"];
+const PACKAGE_MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn dnf_bin() -> Option<&'static str> {
+    DNF_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+fn apt_get_bin() -> Option<&'static str> {
+    APT_GET_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+fn df_bin() -> Option<&'static str> {
+    DF_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
+fn uname_bin() -> Option<&'static str> {
+    UNAME_CANDIDATES
+        .iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .copied()
+}
+
 /// One change that can interrupt the administrator's SSH session. The
 /// variants map to the cases approved for GROUP 2 of the firewall
 /// migration. The guard runs in the helper, before any firewall command —
@@ -831,6 +891,387 @@ fn firewall_panic_action(enable: bool, confirmed: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Run one package-manager operation. Non-zero exits are always errors: the
+/// previous app path silently reported success for autoremove/makecache.
+fn run_package_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        Err(format!("lcp-admin: {label} failed with exit status {}", output.status))
+    } else {
+        Err(format!("lcp-admin: {label} failed: {detail}"))
+    }
+}
+
+/// Capture a preview command's combined output. A preview that intentionally
+/// answers "no" (`dnf --assumeno`) exits non-zero, so only spawn failures are
+/// errors here; the caller parses the transaction text.
+fn capture_package_output(program: &str, args: &[&str], label: &str) -> Result<String, String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(text)
+}
+
+/// A live package-manager lock owned by a running process, if any.
+fn package_lock_owner() -> Option<String> {
+    for path in PACKAGE_LOCK_PATHS {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let text = content.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if let Ok(pid) = text.parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                return Some(format!(
+                    "process '{}' (PID {pid}) holds {path}",
+                    name.trim()
+                ));
+            }
+            continue;
+        }
+        // dpkg lock files are usually empty; a non-numeric, non-empty value
+        // is checked with fuser so a real holder is not missed.
+        if let Ok(output) = std::process::Command::new("fuser").arg(path).output() {
+            if output.status.success() {
+                let pids = String::from_utf8_lossy(&output.stdout);
+                if let Some(pid) = pids.split_whitespace().next() {
+                    return Some(format!("process (PID {pid}) holds {path}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Free bytes on the root filesystem; `None` means the check could not run.
+fn package_disk_free_bytes() -> Option<u64> {
+    let df = df_bin()?;
+    let output = std::process::Command::new(df)
+        .args(["--output=avail", "-B1", "/"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .nth(1)
+        .and_then(|line| line.trim().parse::<u64>().ok())
+}
+
+fn collect_protected(tokens: impl Iterator<Item = String>) -> Vec<String> {
+    let mut found: Vec<String> = tokens
+        .filter(|token| root_policy::is_protected_package(token))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Resolved packages a dnf autoremove transaction would remove. dnf's
+/// transaction lines are indented; the first token is the package NEVRA, and
+/// the shared protected-package prefix list understands NEVRA names.
+fn dnf_autoremove_protected(program: &str) -> Result<Vec<String>, String> {
+    let text = capture_package_output(program, &["autoremove", "--assumeno"], "dnf")?;
+    Ok(collect_protected(text.lines().filter_map(|line| {
+        if !line.starts_with(' ') {
+            return None;
+        }
+        line.split_whitespace().next().map(str::to_string)
+    })))
+}
+
+/// Resolved packages an apt autoremove simulation would remove (`Remv <pkg>`).
+fn apt_autoremove_protected(program: &str) -> Result<Vec<String>, String> {
+    let text = capture_package_output(program, &["-s", "autoremove"], "apt-get")?;
+    Ok(collect_protected(text.lines().filter_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next() == Some("Remv"))
+            .then(|| parts.next().map(str::to_string))
+            .flatten()
+    })))
+}
+
+/// `pkg_maintenance <clean|autoremove|makecache>`. dnf is preferred; apt-get
+/// runs only when dnf is not installed. Autoremove is the destructive member:
+/// a live package-manager lock or low disk space refuses before anything runs,
+/// and a resolved-removal preview is hard-blocked when it would remove a
+/// protected system package.
+fn pkg_maintenance_action(op: &str) -> Result<(), String> {
+    root_policy::pkg_maintenance_op_valid(op)?;
+
+    let dnf = dnf_bin();
+    let apt = apt_get_bin();
+
+    if op == "autoremove" {
+        if let Some(owner) = package_lock_owner() {
+            return Err(format!(
+                "lcp-admin: the package manager is locked by {owner}; no changes were made"
+            ));
+        }
+        match package_disk_free_bytes() {
+            Some(free) if free < PACKAGE_MIN_FREE_BYTES => {
+                return Err(format!(
+                    "lcp-admin: insufficient disk space: {} MB free on /, at least {} MB is required",
+                    free / (1024 * 1024),
+                    PACKAGE_MIN_FREE_BYTES / (1024 * 1024)
+                ))
+            }
+            Some(_) => {}
+            None => eprintln!(
+                "lcp-admin: warning: could not determine free disk space before autoremove"
+            ),
+        }
+    }
+
+    let (program, label) = match (dnf, apt) {
+        (Some(program), _) => (program, "dnf"),
+        (None, Some(program)) => (program, "apt-get"),
+        (None, None) => {
+            return Err("lcp-admin: neither dnf nor apt-get is available".to_string())
+        }
+    };
+
+    match (op, label) {
+        ("clean", "dnf") => run_package_program(program, &["clean", "all"], "dnf"),
+        ("clean", _) => run_package_program(program, &["clean"], "apt-get"),
+        ("autoremove", "dnf") => {
+            let protected = dnf_autoremove_protected(program)?;
+            if !protected.is_empty() {
+                return Err(format!(
+                    "lcp-admin: autoremove would remove protected system package(s): {}; \
+                     refusing to run it",
+                    protected.join(", ")
+                ));
+            }
+            run_package_program(program, &["autoremove", "-y"], "dnf")
+        }
+        ("autoremove", _) => {
+            let protected = apt_autoremove_protected(program)?;
+            if !protected.is_empty() {
+                return Err(format!(
+                    "lcp-admin: autoremove would remove protected system package(s): {}; \
+                     refusing to run it",
+                    protected.join(", ")
+                ));
+            }
+            run_package_program(program, &["autoremove", "-y"], "apt-get")
+        }
+        ("makecache", "dnf") => run_package_program(program, &["makecache"], "dnf"),
+        ("makecache", _) => run_package_program(program, &["update"], "apt-get"),
+        (other, _) => Err(format!("lcp-admin: unsupported maintenance operation: {other}")),
+    }
+}
+
+/// The running kernel release (`uname -r`), used only to detect a rollback
+/// that would affect the kernel the administrator is currently booted into.
+fn running_kernel_release() -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let uname = uname_bin()?;
+    let mut child = std::process::Command::new(uname)
+        .arg("-r")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // A bounded wait keeps a hung uname from blocking the privileged action
+    // indefinitely; the caller treats `None` as "kernel identity unknown".
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    let release = output.trim().to_string();
+    (!release.is_empty()).then_some(release)
+}
+
+/// Packages a `dnf history info <id>` entry altered. The transaction block is
+/// introduced by "Packages Altered:" and every package line is indented; the
+/// action keyword precedes the package identifier(s).
+fn parse_dnf_history_packages(text: &str) -> Vec<String> {
+    let mut in_altered = false;
+    let mut packages: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.trim() == "Packages Altered:" {
+            in_altered = true;
+            continue;
+        }
+        if !in_altered {
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            // the next top-level section
+            in_altered = false;
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(action) = parts.next() else { continue };
+        let Some(package) = parts.next() else { continue };
+        match action {
+            "Install" | "Installed" | "Removed" | "Remove" | "Reinstall"
+            | "Reinstalled" | "Obsoleted" | "Obsoletes" | "Upgrade" | "Upgraded"
+            | "Downgrade" | "Downgraded" => {
+                if package != "->" && package != "none" {
+                    packages.push(package.to_string());
+                }
+                // "Upgraded <old> -> <new>": include the new identifier too.
+                if let Some(arrow) = parts.next() {
+                    if arrow == "->" {
+                        if let Some(new_package) = parts.next() {
+                            packages.push(new_package.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    packages.sort();
+    packages.dedup();
+    packages
+}
+
+/// `dnf_history_undo <transaction-id> [confirm]`. dnf only. The transaction
+/// preview is mandatory and read-only; the destructive command runs only when
+/// the preview is conclusive and, if a protected package or the currently
+/// running kernel is involved, the caller has explicitly confirmed.
+fn dnf_history_undo_action(id: &str, confirmed: bool) -> Result<(), String> {
+    root_policy::dnf_history_transaction_id_valid(id)?;
+
+    let Some(dnf) = dnf_bin() else {
+        return Err("lcp-admin: dnf is not available on this system".to_string());
+    };
+
+    if let Some(owner) = package_lock_owner() {
+        return Err(format!(
+            "lcp-admin: the package manager is locked by {owner}; no changes were made"
+        ));
+    }
+    match package_disk_free_bytes() {
+        Some(free) if free < PACKAGE_MIN_FREE_BYTES => {
+            return Err(format!(
+                "lcp-admin: insufficient disk space: {} MB free on /, at least {} MB is required",
+                free / (1024 * 1024),
+                PACKAGE_MIN_FREE_BYTES / (1024 * 1024)
+            ))
+        }
+        Some(_) => {}
+        None => eprintln!(
+            "lcp-admin: warning: could not determine free disk space before the rollback"
+        ),
+    }
+
+    // Read-only preview of the packages the transaction altered.
+    let preview = capture_package_output(dnf, &["history", "info", id], "dnf")?;
+    let packages = parse_dnf_history_packages(&preview);
+    if packages.is_empty() {
+        return Err(format!(
+            "lcp-admin: could not determine the package set of DNF transaction #{id}; \
+             refusing to roll it back"
+        ));
+    }
+
+    let mut risks: Vec<String> = Vec::new();
+    if let Some(release) = running_kernel_release() {
+        let kernel_packages: Vec<&String> = packages
+            .iter()
+            .filter(|package| root_policy::package_matches_running_kernel(package, &release))
+            .collect();
+        if !kernel_packages.is_empty() {
+            risks.push(format!(
+                "this would remove or downgrade the kernel you are currently running ({release})"
+            ));
+        }
+    } else if packages
+        .iter()
+        .any(|package| root_policy::package_is_kernel_package(package))
+    {
+        // Fail closed: the rollback involves a kernel package, but the running
+        // kernel could not be identified, so confirmation is always required.
+        risks.push(
+            "the running kernel could not be determined, so this rollback may              remove or downgrade the kernel you are running"
+                .to_string(),
+        );
+    } else {
+        eprintln!(
+            "lcp-admin: warning: the running kernel release could not be determined; \
+             no kernel package is affected by this rollback"
+        );
+    }
+    let protected: Vec<&String> = packages
+        .iter()
+        .filter(|package| root_policy::is_protected_package(package))
+        .collect();
+    for package in &protected {
+        risks.push(format!(
+            "this would affect {package}, a system-critical package"
+        ));
+    }
+
+    if !risks.is_empty() && !confirmed {
+        return Err(format!(
+            "CONFIRMATION_REQUIRED: Undoing DNF transaction #{id} will affect {} package(s): \
+             {}. WARNING: {}. Retry the same action with the explicit 'confirm' argument to \
+             proceed.",
+            packages.len(),
+            packages.join(", "),
+            risks.join("; ")
+        ));
+    }
+
+    // Defense in depth: the exact argv must also pass the shared dnf policy.
+    let argv: Vec<String> = vec![
+        "history".to_string(),
+        "undo".to_string(),
+        id.to_string(),
+        "-y".to_string(),
+    ];
+    root_policy::ensure_arguments_for_program(dnf, &argv)?;
+    run_package_program(dnf, &["history", "undo", id, "-y"], "dnf")
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -867,6 +1308,8 @@ const ROOT_ACTIONS: &[&str] = &[
     "firewall_panic",
     "firewall_interface_zone",
     "firewall_enable_hardened",
+    "pkg_maintenance",
+    "dnf_history_undo",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -1137,6 +1580,21 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "dnf_history_undo" {
+            // Optional trailing confirmation: [id, confirm?]. Only the exact
+            // literal authorizes a rollback whose preview is risky.
+            match firewall_confirm_split(&args, 2, 3) {
+                Ok((args, confirmed)) => dnf_history_undo_action(&args[1], confirmed),
+                Err(error) => Err(error),
+            }
+        } else if requested == "pkg_maintenance" {
+            if args.len() == 2 {
+                pkg_maintenance_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one maintenance operation."
+                ))
             }
         } else if requested == "firewall_panic" {
         // Optional trailing confirmation: [verb, confirm?]. No zone

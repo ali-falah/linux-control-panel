@@ -1950,6 +1950,92 @@ fn check_apt(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Package names the panel refuses to uninstall, autoremove or roll back.
+/// Exact names plus prefix families that are boot-, manager-, or
+/// security-critical. Shared by the app and the privileged helper.
+pub const PROTECTED_PACKAGES: &[&str] = &[
+    "glibc", "systemd", "dnf", "dnf5", "kernel", "kernel-core", "kernel-modules",
+    "bash", "coreutils", "rpm", "sudo", "shadow-utils", "polkit", "dbus",
+    "util-linux", "pam", "filesystem", "libselinux", "glibc-common",
+    "apt", "dpkg", "libc6", "ubuntu-minimal", "ubuntu-standard", "debian-archive-keyring",
+    "grub2", "grub2-common", "grub2-tools", "shim", "dracut", "NetworkManager",
+    "firewalld", "nftables", "openssl-libs", "cryptsetup", "lvm2", "selinux-policy"
+];
+
+pub fn is_protected_package(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    if [
+        "kernel", "linux-image", "systemd", "libsystemd", "glibc", "libc6", "dnf", "apt",
+        "grub", "shim", "dracut", "networkmanager", "selinux-policy", "libselinux",
+        "cryptsetup", "lvm2", "rpm", "coreutils", "libpam", "libssl", "openssl",
+        "dbus", "polkit", "sudo", "shadow", "passwd", "util-linux", "openssh",
+        "firewalld", "nftables", "iptables", "libnss", "systemd-boot",
+    ].iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    PROTECTED_PACKAGES.iter().any(|package| package.to_lowercase() == lower)
+}
+
+/// A `dnf history undo` transaction id. The value reaches the helper as a
+/// string, so it is validated independently of the app's `u32` IPC type:
+/// positive decimal, at most 10 digits (u32), never zero or padded with
+/// anything but digits.
+pub fn dnf_history_transaction_id_valid(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 10
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "The DNF transaction id must be a positive decimal number of at most 10 digits, got: {value}"
+        ));
+    }
+    let parsed: u32 = value
+        .parse()
+        .map_err(|_| format!("The DNF transaction id is out of range: {value}"))?;
+    if parsed == 0 {
+        return Err("The DNF transaction id must be greater than zero.".to_string());
+    }
+    Ok(())
+}
+
+/// The `pkg_maintenance` operation names. Anything else is refused before a
+/// package manager is started.
+pub fn pkg_maintenance_op_valid(op: &str) -> Result<(), String> {
+    match op {
+        "clean" | "autoremove" | "makecache" => Ok(()),
+        other => Err(format!(
+            "The package maintenance operation must be clean, autoremove or makecache, got: {other}"
+        )),
+    }
+}
+
+/// True when a resolved package identifier belongs to a kernel family
+/// (`kernel`, `kernel-core`, …, `linux-image`, …). Used to fail closed when the
+/// running kernel release cannot be determined but the rollback involves a
+/// kernel package at all.
+pub fn package_is_kernel_package(package: &str) -> bool {
+    let lower = package.trim().to_ascii_lowercase();
+    lower.starts_with("kernel") || lower.starts_with("linux-image")
+}
+
+/// True when a resolved package identifier names the kernel release that is
+/// currently running (`uname -r`). Kernel meta/subpackages
+/// (`kernel-core`, `kernel-modules`, `kernel-devel`, …) are matched only when
+/// their resolved version contains the running release, so comparisons stay
+/// version-specific; a version-less `kernel` entry cannot be proven to be the
+/// running one here.
+pub fn package_matches_running_kernel(package: &str, running_release: &str) -> bool {
+    let release = running_release.trim();
+    if release.is_empty() {
+        return false;
+    }
+    let package = package.trim();
+    if package.is_empty() {
+        return false;
+    }
+    package.to_ascii_lowercase().starts_with("kernel") && package.contains(release)
+}
+
 /// `add-apt-repository` handles exactly two shapes: a `ppa:<owner>/<name>` id
 /// or an http(s) repository URL — the forms the repository pages send.
 fn check_add_apt_repository(args: &[String]) -> Result<(), String> {
@@ -3140,6 +3226,8 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "firewall_panic",
     "firewall_interface_zone",
     "firewall_enable_hardened",
+    "pkg_maintenance",
+    "dnf_history_undo",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3316,6 +3404,18 @@ const HELPER_FIREWALL_INTERFACE_ZONE_ACTIONS: &[&str] = &["firewall_interface_zo
 /// mandatory (the change can cut network access); the backend is named
 /// explicitly so an ambiguous host is refused rather than guessed.
 const HELPER_FIREWALL_ENABLE_HARDENED_ACTIONS: &[&str] = &["firewall_enable_hardened"];
+
+/// `pkg_maintenance <clean|autoremove|makecache>` — package-manager cache
+/// maintenance. The verb is validated before any package manager starts;
+/// autoremove additionally runs a resolved-removal preview and a
+/// protected-package hard block inside the helper.
+const HELPER_PKG_MAINTENANCE_ACTIONS: &[&str] = &["pkg_maintenance"];
+
+/// `dnf_history_undo <transaction-id> [confirm]` — rolls back one DNF
+/// transaction. The id validator runs before any package manager starts; the
+/// trailing `confirm` is required only when the helper's preview finds a
+/// protected package or the running kernel in the affected set.
+const HELPER_DNF_HISTORY_UNDO_ACTIONS: &[&str] = &["dnf_history_undo"];
 
 /// `firewall_zone_rule <add|remove> <zone> <service|port> <value>` — modifies
 /// one service or port in a firewall zone. firewalld and ufw are supported.
@@ -3872,6 +3972,37 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "the backend must be firewalld or ufw",
             ));
         }
+        return Ok(());
+    }
+    if HELPER_DNF_HISTORY_UNDO_ACTIONS.contains(&action.as_str()) {
+        // args: [action, transaction-id, confirm?]
+        if args.len() == 3 && args[2] != "confirm" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[2],
+                "the trailing argument may only be the exact word 'confirm' to acknowledge the risk",
+            ));
+        }
+        if args.len() != 2 && args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one transaction id, optionally followed by 'confirm'",
+            ));
+        }
+        dnf_history_transaction_id_valid(&args[1])?;
+        return Ok(());
+    }
+    if HELPER_PKG_MAINTENANCE_ACTIONS.contains(&action.as_str()) {
+        // args: [action, clean|autoremove|makecache]
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one maintenance operation",
+            ));
+        }
+        pkg_maintenance_op_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_FIREWALL_ZONE_RULE_ACTIONS.contains(&action.as_str()) {
@@ -5361,6 +5492,28 @@ mod argument_policy_tests {
     }
 
     // ── the helper action ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dnf_history_undo_gate_requires_a_numeric_id_and_exact_confirm() {
+        ok("lcp-admin", &["dnf_history_undo", "42"]);
+        ok("lcp-admin", &["dnf_history_undo", "42", "confirm"]);
+        refused("lcp-admin", &["dnf_history_undo"]);
+        refused("lcp-admin", &["dnf_history_undo", "0"]);
+        refused("lcp-admin", &["dnf_history_undo", "4x"]);
+        refused("lcp-admin", &["dnf_history_undo", "42", "yes"]);
+        refused("lcp-admin", &["dnf_history_undo", "42", "confirm", "extra"]);
+    }
+
+    #[test]
+    fn pkg_maintenance_action_gate_accepts_only_the_three_operations() {
+        ok("lcp-admin", &["pkg_maintenance", "clean"]);
+        ok("lcp-admin", &["pkg_maintenance", "autoremove"]);
+        ok("lcp-admin", &["pkg_maintenance", "makecache"]);
+        refused("lcp-admin", &["pkg_maintenance"]);
+        refused("lcp-admin", &["pkg_maintenance", "update"]);
+        refused("lcp-admin", &["pkg_maintenance", "clean", "extra"]);
+        refused("lcp-admin", &[]);
+    }
 
     #[test]
     fn helper_action_calls_accept_only_known_actions() {
@@ -7079,5 +7232,105 @@ mod certbot_request_shape_tests {
         refused(&[]);
         refused(&["--nginx", "-d", "", "--non-interactive", "--agree-tos",
                   "--email=a@b.co"]);
+    }
+}
+
+#[cfg(test)]
+mod dnf_history_validator_tests {
+    use super::{
+        dnf_history_transaction_id_valid, package_is_kernel_package,
+        package_matches_running_kernel, pkg_maintenance_op_valid,
+    };
+
+    #[test]
+    fn dnf_transaction_ids_are_positive_decimal_u32_values() {
+        for valid in ["1", "42", "999999", "4294967295"] {
+            dnf_history_transaction_id_valid(valid)
+                .unwrap_or_else(|err| panic!("{valid:?} must be valid: {err}"));
+        }
+        for invalid in [
+            "", "0", "00", "-1", "+1", " 42", "42 ", "12a", "1.5", "１", "0x10",
+            "12345678901", "4294967296", "4_2",
+        ] {
+            assert!(
+                dnf_history_transaction_id_valid(invalid).is_err(),
+                "{invalid:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_operations_are_exactly_the_three_supported_names() {
+        for valid in ["clean", "autoremove", "makecache"] {
+            pkg_maintenance_op_valid(valid)
+                .unwrap_or_else(|err| panic!("{valid:?} must be valid: {err}"));
+        }
+        for invalid in [
+            "", "Clean", "update", "clean ", " autoremove", "remove", "history", "make-cache",
+        ] {
+            assert!(
+                pkg_maintenance_op_valid(invalid).is_err(),
+                "{invalid:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_package_family_detection_is_prefix_based() {
+        for package in [
+            "kernel",
+            "kernel-core-6.8.5-301.fc40.x86_64",
+            "kernel-modules-extra-6.8.5",
+            "linux-image-6.8.0-31-generic",
+        ] {
+            assert!(
+                package_is_kernel_package(package),
+                "{package:?} must be treated as a kernel package"
+            );
+        }
+        for package in ["glibc-2.39", "kmod-31", "dracut-100", ""] {
+            assert!(
+                !package_is_kernel_package(package),
+                "{package:?} must not be treated as a kernel package"
+            );
+        }
+    }
+
+    #[test]
+    fn running_kernel_matching_is_version_specific() {
+        let release = "6.8.5-301.fc40.x86_64";
+        // resolved kernel packages that contain the running release
+        for package in [
+            "kernel-core-6.8.5-301.fc40.x86_64",
+            "kernel-modules-6.8.5-301.fc40.x86_64",
+            "kernel-devel-6.8.5-301.fc40.x86_64",
+            "kernel-core-1:6.8.5-301.fc40.x86_64",
+        ] {
+            assert!(
+                package_matches_running_kernel(package, release),
+                "{package:?} must match the running kernel"
+            );
+        }
+        // other versions, non-kernel packages and unusable inputs must not match
+        for package in [
+            "kernel-core-6.7.4-200.fc39.x86_64",
+            "kernel-core-6.8.5-301.fc40.aarch64",
+            "glibc-6.8.5-301.fc40.x86_64",
+            "kernel",
+            "",
+        ] {
+            assert!(
+                !package_matches_running_kernel(package, release),
+                "{package:?} must not match the running kernel"
+            );
+        }
+        assert!(!package_matches_running_kernel(
+            "kernel-core-6.8.5-301.fc40.x86_64",
+            ""
+        ));
+        assert!(package_matches_running_kernel(
+            "  kernel-core-6.8.5-301.fc40.x86_64  ",
+            "  6.8.5-301.fc40.x86_64  "
+        ));
     }
 }

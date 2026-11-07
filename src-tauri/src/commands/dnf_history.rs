@@ -1,10 +1,43 @@
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
-use crate::utils::privilege::{build_privileged_tokio_command, RootAuth};
+use crate::utils::privilege::{build_privileged_tokio_command, run_privileged_with_stdin, RootAuth};
 use tauri::{AppHandle, Emitter};
 use std::sync::Mutex;
 
 use crate::{binary_exists, log_to_file};
+
+/// Run one package named action through the installed helper. The helper is
+/// authoritative: this function only forwards the validated parameters and the
+/// confirmation flag, and preserves a `CONFIRMATION_REQUIRED:` retry contract
+/// at character zero.
+async fn run_package_named_action(
+    action: &str,
+    params: &[String],
+    confirmed: bool,
+) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 2);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    if confirmed {
+        args.push("confirm".to_string());
+    }
+    let output = run_privileged_with_stdin(helper, &args, &RootAuth::Polkit, "").await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+fn package_helper_error_context(prefix: &str, error: String) -> String {
+    if error.starts_with("CONFIRMATION_REQUIRED:") {
+        error
+    } else {
+        format!("{prefix}{error}")
+    }
+}
 
 // ─── Shared child PID for cancel support ────────────────────────────────────
 
@@ -190,27 +223,20 @@ fn parse_dnf_history(output: &str) -> Vec<DnfHistoryEntry> {
     entries
 }
 
-/// Undo a DNF transaction by ID.
+/// Undo a DNF transaction by ID. The helper previews the resolved package set
+/// and asks for `confirm` when it contains the running kernel or a protected
+/// system package.
 #[tauri::command]
-pub async fn undo_transaction(id: u32) -> Result<String, String> {
-    if !binary_exists("dnf").await {
-        return Err("dnf is not available on this system".to_string());
-    }
-    let id_str = id.to_string();
-    let output = Command::new("pkexec")
-        .args(["/usr/bin/dnf", "history", "undo", &id_str, "-y"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !output.status.success() {
-        log_to_file("ERROR", &format!("undo_transaction {id} failed: {stderr}"));
-        return Err(format!("dnf history undo failed: {stderr}"));
-    }
-    log_to_file("INFO", &format!("Undid transaction #{id}"));
-    Ok(stdout)
+pub async fn undo_transaction(id: u32, confirmed: Option<bool>) -> Result<String, String> {
+    run_package_named_action(
+        "dnf_history_undo",
+        &[id.to_string()],
+        confirmed.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| package_helper_error_context("Failed to roll back the transaction: ", e))?;
+    log_to_file("INFO", &format!("Rolled back transaction #{id}"));
+    Ok(format!("Successfully rolled back transaction #{id}"))
 }
 
 // ─── Package Queries ──────────────────────────────────────────────────────────
@@ -288,52 +314,18 @@ pub async fn dnf_list_versions(pkg: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn dnf_clean_all() -> Result<String, String> {
-    if crate::binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "clean", "all"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-    }
-    if crate::binary_exists("apt-get").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/apt-get", "clean"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string() + "\nAPT cache cleaned successfully.");
-    }
-    Err("Package manager is not available".to_string())
+    run_package_named_action("pkg_maintenance", &["clean".to_string()], false)
+        .await
+        .map_err(|e| package_helper_error_context("Failed to clean the package cache: ", e))?;
+    Ok("Package cache cleaned successfully.".to_string())
 }
 
 #[tauri::command]
 pub async fn dnf_autoremove() -> Result<String, String> {
-    if crate::binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "autoremove", "-y"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr));
-    }
-    if crate::binary_exists("apt-get").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/apt-get", "autoremove", "-y"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr));
-    }
-    Err("Package manager is not available".to_string())
+    run_package_named_action("pkg_maintenance", &["autoremove".to_string()], false)
+        .await
+        .map_err(|e| package_helper_error_context("Failed to autoremove packages: ", e))?;
+    Ok("Unused packages removed successfully.".to_string())
 }
 
 #[tauri::command]
@@ -362,25 +354,10 @@ pub async fn dnf_check() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn dnf_makecache_cmd() -> Result<String, String> {
-    if crate::binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "makecache"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr));
-    }
-    if crate::binary_exists("apt-get").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/apt-get", "update"])
-            .output()
-            .await
-            .map_err(|e| format!("pkexec failed: {e}"))?;
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr));
-    }
-    Err("Package manager not available".to_string())
+    run_package_named_action("pkg_maintenance", &["makecache".to_string()], false)
+        .await
+        .map_err(|e| package_helper_error_context("Failed to refresh package metadata: ", e))?;
+    Ok("Package metadata refreshed successfully.".to_string())
 }
 
 fn format_log_timestamp(raw: &str) -> String {

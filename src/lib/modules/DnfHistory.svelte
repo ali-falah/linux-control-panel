@@ -365,17 +365,30 @@
     );
   }
 
-  async function doUndo(id: number) {
+  async function doUndo(id: number, confirmed = false) {
     undoingId = id;
     statusStore.setBusy(`Undoing transaction #${id}…`);
     try {
-      await invoke('undo_transaction', { id });
+      await invoke('undo_transaction', { id, confirmed });
       uiStore.addToast(`Successfully rolled back transaction #${id}`, 'success');
-      statusStore.setLastCommand(`pkexec dnf history undo ${id} -y`, 0, true);
+      statusStore.setLastCommand(`dnf history undo ${id} -y`, 0, true);
       loadHistory();
     } catch (e) {
+      const message = String(e);
+      if (message.startsWith('CONFIRMATION_REQUIRED:')) {
+        // The helper's preview found the running kernel or a protected
+        // package. Show its full package/risk list verbatim and retry the
+        // same rollback with the explicit confirmation value.
+        uiStore.confirm(
+          'Rollback Requires Confirmation',
+          message,
+          () => doUndo(id, true),
+          true
+        );
+        return;
+      }
       uiStore.addToast(`Rollback failed: ${e}`, 'error');
-      statusStore.setLastCommand(`pkexec dnf history undo ${id} -y`, 1, false);
+      statusStore.setLastCommand(`dnf history undo ${id} -y`, 1, false);
     } finally {
       undoingId = null;
       statusStore.clearBusy();

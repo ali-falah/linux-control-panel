@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::utils::privilege::tokio::Command;
 
+use crate::utils::root_policy;
 use crate::{binary_exists, log_to_file};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,27 +257,11 @@ pub async fn remove_flatpak(app_id: String, system_wide: bool) -> Result<String,
     Ok(stdout)
 }
 
-const PROTECTED_PACKAGES: &[&str] = &[
-    "glibc", "systemd", "dnf", "dnf5", "kernel", "kernel-core", "kernel-modules",
-    "bash", "coreutils", "rpm", "sudo", "shadow-utils", "polkit", "dbus",
-    "util-linux", "pam", "filesystem", "libselinux", "glibc-common",
-    "apt", "dpkg", "libc6", "ubuntu-minimal", "ubuntu-standard", "debian-archive-keyring",
-    "grub2", "grub2-common", "grub2-tools", "shim", "dracut", "NetworkManager",
-    "firewalld", "nftables", "openssl-libs", "cryptsetup", "lvm2", "selinux-policy"
-];
-
+/// Package names the panel refuses to uninstall, autoremove or roll back.
+/// Shared with the privileged helper so the app preview and the helper's
+/// own pre-flight check use exactly the same list.
 pub fn is_protected_package(name: &str) -> bool {
-    let lower = name.trim().to_lowercase();
-    if [
-        "kernel", "linux-image", "systemd", "libsystemd", "glibc", "libc6", "dnf", "apt",
-        "grub", "shim", "dracut", "networkmanager", "selinux-policy", "libselinux",
-        "cryptsetup", "lvm2", "rpm", "coreutils", "libpam", "libssl", "openssl",
-        "dbus", "polkit", "sudo", "shadow", "passwd", "util-linux", "openssh",
-        "firewalld", "nftables", "iptables", "libnss", "systemd-boot",
-    ].iter().any(|prefix| lower.starts_with(prefix)) {
-        return true;
-    }
-    PROTECTED_PACKAGES.iter().any(|package| package.to_lowercase() == lower)
+    root_policy::is_protected_package(name)
 }
 
 pub fn is_safe_package_id(name: &str) -> bool {
