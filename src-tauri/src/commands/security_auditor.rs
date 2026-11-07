@@ -182,6 +182,128 @@ fn info_finding(id: &str, title: &str, desc: &str, countermeasure: &str, categor
     }
 }
 
+// ─── SELinux status detection (read-only CIS 1.7) ────────────────────────────
+
+/// The SELinux mode reported by `sestatus`. `Unknown` means the value was
+/// missing or not recognised — never a negative answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelinuxMode {
+    Enforcing,
+    Permissive,
+    Disabled,
+    Unknown,
+}
+
+/// The three `sestatus` fields the CIS check evaluates. `enabled` comes from
+/// "SELinux status", the other two from "Current mode" and "Mode from config
+/// file". Missing lines stay `None`/`Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SestatusInfo {
+    enabled: Option<bool>,
+    runtime: SelinuxMode,
+    config: SelinuxMode,
+}
+
+/// Parse `sestatus` output by line labels and trimmed values, not fixed
+/// columns: label/value spacing differs between versions and tabs.
+fn parse_sestatus(output: &str) -> SestatusInfo {
+    let mut info = SestatusInfo {
+        enabled: None,
+        runtime: SelinuxMode::Unknown,
+        config: SelinuxMode::Unknown,
+    };
+    for line in output.lines() {
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match label.trim() {
+            "SELinux status" => {
+                info.enabled = match value.to_ascii_lowercase().as_str() {
+                    "enabled" => Some(true),
+                    "disabled" => Some(false),
+                    _ => None,
+                };
+            }
+            "Current mode" => info.runtime = selinux_mode(value),
+            "Mode from config file" => info.config = selinux_mode(value),
+            _ => {}
+        }
+    }
+    info
+}
+
+fn selinux_mode(value: &str) -> SelinuxMode {
+    match value.to_ascii_lowercase().as_str() {
+        "enforcing" => SelinuxMode::Enforcing,
+        "permissive" => SelinuxMode::Permissive,
+        "disabled" => SelinuxMode::Disabled,
+        _ => SelinuxMode::Unknown,
+    }
+}
+
+/// The acknowledged compliance state of the SELinux check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelinuxEvaluation {
+    /// Runtime enforcing and the persistent configuration agrees.
+    Enforcing,
+    /// Runtime enforcing, but the boot configuration will change it.
+    EnforcingNotPersistent(SelinuxMode),
+    Permissive,
+    Disabled,
+    /// AppArmor is the active MAC; SELinux is not applicable here.
+    AppArmor,
+    /// The status could not be determined conclusively.
+    Unknown,
+}
+
+fn evaluate_selinux(
+    info: Option<&SestatusInfo>,
+    apparmor_active: bool,
+) -> SelinuxEvaluation {
+    let Some(info) = info else {
+        return if apparmor_active {
+            SelinuxEvaluation::AppArmor
+        } else {
+            SelinuxEvaluation::Unknown
+        };
+    };
+    // AppArmor is the MAC on this host; SELinux is not the applicable policy
+    // unless it is affirmatively enabled.
+    if apparmor_active && info.enabled != Some(true) {
+        return SelinuxEvaluation::AppArmor;
+    }
+    if info.enabled == Some(false) || info.runtime == SelinuxMode::Disabled {
+        return SelinuxEvaluation::Disabled;
+    }
+    match info.runtime {
+        SelinuxMode::Enforcing => match info.config {
+            SelinuxMode::Enforcing => SelinuxEvaluation::Enforcing,
+            SelinuxMode::Permissive | SelinuxMode::Disabled => {
+                SelinuxEvaluation::EnforcingNotPersistent(info.config)
+            }
+            SelinuxMode::Unknown => SelinuxEvaluation::Unknown,
+        },
+        SelinuxMode::Permissive => SelinuxEvaluation::Permissive,
+        SelinuxMode::Disabled => SelinuxEvaluation::Disabled,
+        SelinuxMode::Unknown => SelinuxEvaluation::Unknown,
+    }
+}
+
+/// Points this check contributes to the System Hygiene category. Only
+/// applicable, conclusive checks enter the denominator (5 points); AppArmor
+/// hosts and unknown/error states contribute nothing so they cannot raise or
+/// lower the score artificially.
+fn selinux_scoring(evaluation: SelinuxEvaluation) -> (u32, u32) {
+    match evaluation {
+        SelinuxEvaluation::Enforcing => (5, 5),
+        SelinuxEvaluation::EnforcingNotPersistent(_)
+        | SelinuxEvaluation::Permissive
+        | SelinuxEvaluation::Disabled => (5, 0),
+        SelinuxEvaluation::AppArmor | SelinuxEvaluation::Unknown => (0, 0),
+    }
+}
+
 // ─── Main Audit Command ───────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1062,28 +1184,65 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // ═══════════════════════════════════════════════════════════════════════
         let cat_sys = "System Hygiene";
 
-        // 6a. SELinux Status
-        system_max += 5;
-        let mut selinux_enforcing = false;
+        // 6a. SELinux Status (read-only; no remediation)
+        let distro = crate::utils::distro::detect_distro();
+        let apparmor_active = distro.mac_type == "apparmor";
+        let mut sestatus_info = None;
         if crate::binary_exists("sestatus").await {
-            let se_out = tokio::time::timeout(tokio::time::Duration::from_secs(5),
-                Command::new("sestatus").output()).await;
-            if let Ok(Ok(o)) = se_out {
-                let text = String::from_utf8_lossy(&o.stdout);
-                if text.contains("SELinux status:                 enabled") && text.contains("Current mode:                   enforcing") {
-                    selinux_enforcing = true;
+            let se_out = tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                Command::new("sestatus").output(),
+            )
+            .await;
+            if let Ok(Ok(output)) = se_out {
+                if output.status.success() {
+                    sestatus_info = Some(parse_sestatus(&String::from_utf8_lossy(&output.stdout)));
                 }
             }
         }
-        if selinux_enforcing {
-            system_cur += 5;
-            findings.push(good("selinux", "SELinux Enforcing",
-                "SELinux is enabled and in enforcing mode — mandatory access controls are active.",
-                "Maintain enforcing mode. Avoid setting to permissive unless actively debugging.", cat_sys, Some("CIS 1.7")));
-        } else {
-            findings.push(crit("selinux", "SELinux Disabled or Permissive",
-                "SELinux is not enforcing policies. This removes a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
-                "Enable SELinux and set to enforcing. A reboot is required after enabling.", cat_sys, true, Some("CIS 1.7")));
+        let selinux = evaluate_selinux(sestatus_info.as_ref(), apparmor_active);
+        let (selinux_max, selinux_cur) = selinux_scoring(selinux);
+        system_max += selinux_max;
+        system_cur += selinux_cur;
+        match selinux {
+            SelinuxEvaluation::Enforcing => {
+                let mut finding = good("selinux", "SELinux Enforcing",
+                    "SELinux is enabled, enforcing, and the boot configuration keeps it enforcing — mandatory access controls are active and persistent.",
+                    "Maintain enforcing mode. Avoid setting to permissive unless actively debugging.", cat_sys, Some("CIS 1.7"));
+                finding.has_auto_fix = false;
+                findings.push(finding);
+            }
+            SelinuxEvaluation::EnforcingNotPersistent(config) => {
+                let config = match config {
+                    SelinuxMode::Permissive => "permissive",
+                    SelinuxMode::Disabled => "disabled",
+                    _ => "not enforcing",
+                };
+                findings.push(warn("selinux", "SELinux Enforcing Not Persistent",
+                    &format!("SELinux is enforcing at runtime, but the boot configuration ({config}) will not keep it enforcing after the next reboot."),
+                    &format!("Set SELINUX=enforcing in /etc/selinux/config manually; the boot configuration is currently {config}."),
+                    cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::Permissive => {
+                findings.push(crit("selinux", "SELinux Permissive",
+                    "SELinux is enabled but permissive: it logs violations without blocking them, removing a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
+                    "Set SELinux to enforcing manually (runtime and persistent configuration). A reboot is required after enabling.", cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::Disabled => {
+                findings.push(crit("selinux", "SELinux Disabled",
+                    "SELinux is disabled. This removes a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
+                    "Enable SELinux and set it to enforcing manually. A reboot is required after enabling.", cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::AppArmor => {
+                findings.push(info_finding("selinux", "SELinux Not Applicable (AppArmor Active)",
+                    "SELinux is not the active mandatory access control system on this host; AppArmor is. The SELinux check is excluded from the compliance score.",
+                    "No action required for SELinux on this host. Manage AppArmor with the distribution's tooling.", cat_sys, false));
+            }
+            SelinuxEvaluation::Unknown => {
+                findings.push(info_finding("selinux", "SELinux Status Unknown",
+                    "SELinux status could not be determined conclusively (sestatus is unavailable, failed, or returned unrecognised output). The check is excluded from the compliance score rather than reported as a false failure.",
+                    "Verify that SELinux is installed and that sestatus runs successfully on this host.", cat_sys, false));
+            }
         }
 
         // 6b. Audit Daemon (auditd)
@@ -1639,28 +1798,6 @@ trap - EXIT"#;
     }
 }
 
-/// Enable/disable SELinux.
-#[tauri::command]
-pub async fn security_fix_selinux(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "sed -i 's/^SELINUX=.*/SELINUX=enforcing/g' /etc/selinux/config && touch /.autorelabel"
-    } else {
-        "sed -i 's/^SELINUX=.*/SELINUX=permissive/g' /etc/selinux/config"
-    };
-
-    let out = privileged::run_privileged_script(script).await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if enable {
-            Ok("SELinux set to enforcing. A system reboot is required to relabel the filesystem.".to_string())
-        } else {
-            Ok("SELinux set to permissive (not disabled — still logs violations). A reboot is required.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
-}
-
 /// Enable/disable auditd.
 #[tauri::command]
 pub async fn security_fix_auditd(enable: bool) -> Result<String, String> {
@@ -2064,5 +2201,187 @@ mod security_fix_firewall_tests {
                 "{bogus:?} must be refused"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selinux_status_tests {
+    use super::{
+        evaluate_selinux, parse_sestatus, selinux_scoring, SelinuxEvaluation, SelinuxMode,
+        SestatusInfo,
+    };
+
+    fn info(
+        enabled: Option<bool>,
+        runtime: SelinuxMode,
+        config: SelinuxMode,
+    ) -> SestatusInfo {
+        SestatusInfo {
+            enabled,
+            runtime,
+            config,
+        }
+    }
+
+    #[test]
+    fn sestatus_parses_the_standard_output() {
+        let output = "\
+SELinux status:                 enabled
+SELinuxfs mount:                /sys/fs/selinux
+Current mode:                   enforcing
+Mode from config file:          enforcing
+Policy MLS status:              enabled
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_permissive_runtime_and_config() {
+        let output = "\
+SELinux status:                 enabled
+Current mode:                   permissive
+Mode from config file:          permissive
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Permissive, SelinuxMode::Permissive)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_a_disabled_host() {
+        let output = "SELinux status:                 disabled\n";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_a_runtime_config_mismatch() {
+        let output = "\
+SELinux status:          enabled
+Current mode:            enforcing
+Mode from config file:   disabled
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Disabled)
+        );
+    }
+
+    #[test]
+    fn sestatus_tolerates_tabs_crlf_and_irregular_spacing() {
+        let output = "SELinux status:\tenabled\r\nCurrent mode:   permissive\r\nMode from config file:\tenforcing\r\n";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Permissive, SelinuxMode::Enforcing)
+        );
+    }
+
+    #[test]
+    fn sestatus_unknown_labels_and_values_stay_unknown() {
+        assert_eq!(
+            parse_sestatus(""),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+        assert_eq!(
+            parse_sestatus("SELinux status: maybe\nCurrent mode: relaxed\n"),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+        assert_eq!(
+            parse_sestatus("unrelated line without a colon\nSELinux status enabled\n"),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+    }
+
+    #[test]
+    fn enforcing_with_enforcing_config_is_compliant() {
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Enforcing
+        );
+    }
+
+    #[test]
+    fn enforcing_with_a_non_persistent_config_is_flagged() {
+        for (config, expected) in [
+            (SelinuxMode::Permissive, SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Permissive)),
+            (SelinuxMode::Disabled, SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Disabled)),
+        ] {
+            let parsed = info(Some(true), SelinuxMode::Enforcing, config);
+            assert_eq!(evaluate_selinux(Some(&parsed), false), expected);
+        }
+    }
+
+    #[test]
+    fn enforcing_with_an_unknown_config_is_inconclusive() {
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Unknown
+        );
+    }
+
+    #[test]
+    fn permissive_runtime_is_never_reported_as_enforcing() {
+        let parsed = info(Some(true), SelinuxMode::Permissive, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Permissive
+        );
+    }
+
+    #[test]
+    fn disabled_runtime_is_disabled_not_unknown() {
+        let parsed = info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Disabled
+        );
+    }
+
+    #[test]
+    fn apparmor_hosts_are_not_evaluated_as_selinux_failures() {
+        // missing sestatus / no usable output
+        assert_eq!(evaluate_selinux(None, true), SelinuxEvaluation::AppArmor);
+        let parsed = info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), true),
+            SelinuxEvaluation::AppArmor
+        );
+        // a host that does report SELinux enabled is still evaluated as SELinux
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), true),
+            SelinuxEvaluation::Enforcing
+        );
+    }
+
+    #[test]
+    fn missing_or_unusable_sestatus_on_a_non_apparmor_host_is_unknown() {
+        assert_eq!(evaluate_selinux(None, false), SelinuxEvaluation::Unknown);
+        let parsed = parse_sestatus("");
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Unknown
+        );
+    }
+
+    #[test]
+    fn scoring_counts_only_applicable_conclusive_checks() {
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Enforcing), (5, 5));
+        assert_eq!(
+            selinux_scoring(SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Disabled)),
+            (5, 0)
+        );
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Permissive), (5, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Disabled), (5, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::AppArmor), (0, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Unknown), (0, 0));
     }
 }

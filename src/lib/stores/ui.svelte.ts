@@ -22,8 +22,6 @@ export type TabId =
   | 'hosts-manager'
   | 'user-manager'
   | 'firewall-manager'
-  | 'grub-manager'
-  | 'selinux-manager'
   | 'cron-manager'
   | 'env-manager'
   | 'nginx-manager'
@@ -136,7 +134,17 @@ class UIStore {
         const rawVisited = localStorage.getItem('app_recent_visited_items');
         if (rawVisited) {
           const parsed = JSON.parse(rawVisited);
-          if (Array.isArray(parsed)) this.recentVisitedItems = parsed;
+          if (Array.isArray(parsed)) {
+            // Drop entries for management tabs that no longer exist, then
+            // persist the cleaned list so the stale entries cannot return.
+            this.recentVisitedItems = parsed.filter((item: any) =>
+              item && typeof item === 'object' &&
+              item.tabId !== 'grub-manager' && item.tabId !== 'selinux-manager'
+            );
+            try {
+              localStorage.setItem('app_recent_visited_items', JSON.stringify(this.recentVisitedItems));
+            } catch {}
+          }
         }
       } catch {
         this.recentSearches = [];

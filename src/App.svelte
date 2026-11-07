@@ -159,24 +159,6 @@
           {:then module}
             <module.default />
           {/await}
-        {:else if uiStore.activeTab === 'grub-manager'}
-          {#await import('./lib/modules/GrubManager.svelte')}
-            <div class="module-lazy-loader">
-              <div class="module-lazy-spinner"></div>
-              <span>Loading GRUB Bootloader…</span>
-            </div>
-          {:then module}
-            <module.default />
-          {/await}
-        {:else if uiStore.activeTab === 'selinux-manager'}
-          {#await import('./lib/modules/SelinuxManager.svelte')}
-            <div class="module-lazy-loader">
-              <div class="module-lazy-spinner"></div>
-              <span>Loading SELinux Manager…</span>
-            </div>
-          {:then module}
-            <module.default />
-          {/await}
         {:else if uiStore.activeTab === 'cron-manager'}
           {#await import('./lib/modules/CronManager.svelte')}
             <div class="module-lazy-loader">

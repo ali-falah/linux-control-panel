@@ -179,14 +179,6 @@ const SECURITY_FIX_LOOKUP: Record<string, HardcodedFix> = {
     tauri_command: 'security_fix_kernel_param',
     tauri_args: { key: 'net.ipv4.conf.all.log_martians', value: '1', revertValue: '0', enable: true },
   },
-  selinux: {
-    label: 'SELinux Mode',
-    target: '/etc/selinux/config → SELINUX=',
-    current_label: 'SELINUX=permissive  (or disabled)',
-    proposed_label: 'SELINUX=enforcing  (+ filesystem relabel + reboot)',
-    tauri_command: 'security_fix_selinux',
-    tauri_args: { enable: true },
-  },
   auditd: {
     label: 'Audit Daemon (auditd)',
     target: 'systemd unit: auditd',

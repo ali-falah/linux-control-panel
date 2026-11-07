@@ -84,7 +84,6 @@ fn relative_paths_are_refused_where_absolute_is_required() {
     refused("cat", &["../etc/shadow"], "relative path");
     refused("cat", &["etc/shadow"], "relative path");
     refused("cat", &["/etc/../../shadow"], "relative parts");
-    refused("semodule", &["-i", "somefile.pp"], "policy file must be absolute");
     refused("mkdir", &["-p", "relative/dir"], "directory must be absolute");
     refused("tail", &["-n", "5", "log.tmp"], "log file must be absolute");
     refused("useradd", &["-c", "ok", "/abs/name"], "names have no slash");
@@ -235,9 +234,6 @@ fn credential_files_are_never_readable_through_the_helper() {
 fn readers_still_see_the_everyday_files() {
     allowed("cat", &["/etc/hostname"]);
     allowed("cat", &["/etc/hosts"]);
-    // semodule -l is policy-allowed (unit-test ok("semodule", &["-l"])) but
-    // as the *invoking user* here it can not open the SELinux store — so it
-    // is only asserted at policy level
     allowed("systemctl", &["is-active", "dbus"]);
 }
 

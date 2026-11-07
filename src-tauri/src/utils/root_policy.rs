@@ -48,12 +48,9 @@ pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
     "cat", "ls", "stat", "grep", "tail", "head", "zcat", "cut", "sort", "wc", "tr",
     "mkdir", "date", "readlink", "dirname", "basename",
     // hardware and boot
-    "modprobe", "rmmod", "grub2-mkconfig", "grub-mkconfig", "grub2-script-check",
-    "grub-script-check", "fail2ban-client",
+    "modprobe", "rmmod", "fail2ban-client",
     // the root helper itself — named-action dispatch only (check_helper_action)
     "lcp-admin",
-    // selinux
-    "setsebool", "semodule", "semanage", "restorecon", "ausearch",
     // web servers (test/config reads only)
     "nginx", "sshd",
 ];
@@ -2654,127 +2651,6 @@ fn check_fail2ban(args: &[String]) -> Result<(), String> {
     }
 }
 
-// ─── SELinux and audit ───────────────────────────────────────────────────────
-
-/// `-P` makes a change persistent; else a boolean name plus one of its four
-/// values — exactly what the SELinux page sends.
-fn check_setsebool(args: &[String]) -> Result<(), String> {
-    const PROGRAM: &str = "setsebool";
-    let rest: &[String] = match args.first().map(String::as_str) {
-        Some("-P") => &args[1..],
-        _ => args,
-    };
-    let exact = rest.len() == 2
-        && is_identifier(&rest[0])
-        && matches!(rest[1].as_str(), "on" | "off" | "1" | "0");
-    if exact {
-        Ok(())
-    } else {
-        Err(operand_not_allowed(
-            PROGRAM,
-            args.first().map(String::as_str).unwrap_or(""),
-            "only '<boolean> on|off|1|0' with an optional -P is allowed",
-        ))
-    }
-}
-
-/// `-i` loads a compiled policy package from a path. The path is checked like
-/// every other path operand (absolute, no relative parts, no symlinks); the
-/// policy *content* still originates from the app's own audit module — a
-/// fixed, approved source directory is phase 3 work.
-fn check_semodule(args: &[String]) -> Result<(), String> {
-    const PROGRAM: &str = "semodule";
-    // The one directory policy packages may be installed from. It is owned by
-    // root and not writable by other users, so the same user who calls the
-    // helper can not swap the package after it passed validation (and
-    // `ensure_trusted_path` additionally refuses symlinked paths).
-    const POLICY_DIR: &str = "/var/lib/linux-control-panel/policy";
-    let mut saw_install = false;
-    let mut saw_other_flag = false;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg.starts_with('-') {
-            match arg {
-                "-i" => {
-                    let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                    ensure_trusted_path(PROGRAM, &value, "policy package file")?;
-                    if !value.starts_with(&format!("{POLICY_DIR}/")) {
-                        return Err(operand_not_allowed(
-                            PROGRAM,
-                            &value,
-                            "policy packages must be staged in /var/lib/linux-control-panel/policy (a root-owned directory), not in a user-writable location",
-                        ));
-                    }
-                    // the package is installed by root: verify the reachable
-                    // target is root owned and not user writable
-                    match std::fs::canonicalize(&value) {
-                        Ok(canonical) => {
-                            verify_trusted_binary(&canonical.to_string_lossy())?;
-                        }
-                        Err(_) => {
-                            return Err(operand_not_allowed(
-                                PROGRAM,
-                                &value,
-                                "the policy package must exist and be reachable",
-                            ));
-                        }
-                    }
-                    saw_install = true;
-                }
-                "-l" => saw_other_flag = true,
-                _ => return Err(flag_not_allowed(PROGRAM, arg)),
-            }
-        } else {
-            return Err(operand_not_allowed(
-                PROGRAM,
-                arg,
-                "semodule takes no bare operands, only -i <file> or -l",
-            ));
-        }
-        index += 1;
-    }
-    if !saw_install && !saw_other_flag {
-        return Err(operand_not_allowed(
-            PROGRAM,
-            "",
-            "a policy install (-i <file>) or list (-l) is required",
-        ));
-    }
-    Ok(())
-}
-
-fn check_ausearch(args: &[String]) -> Result<(), String> {
-    const PROGRAM: &str = "ausearch";
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg.starts_with('-') {
-            match arg {
-                // -m <type>: only AVC records are requested today,
-                // -ts/-te <date>: the recent window
-                "-m" | "-ts" | "-te" => {
-                    let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                    require(PROGRAM, &value, "an ausearch value", is_search_token)?;
-                }
-                _ => return Err(flag_not_allowed(PROGRAM, arg)),
-            }
-        } else {
-            require(PROGRAM, arg, "an ausearch value", is_search_token)?;
-        }
-        index += 1;
-    }
-    Ok(())
-}
-
-fn is_search_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ',' | '.'))
-}
-
 // ─── files ───────────────────────────────────────────────────────────────────
 
 fn check_mkdir(args: &[String]) -> Result<(), String> {
@@ -3214,9 +3090,9 @@ fn check_certbot_renew(args: &[String]) -> Result<(), String> {
 
 /// Programs without a specific rule: no flag at all may be passed. They are
 /// only ever called with argument shapes of pure words today (`journalctl`,
-/// `ss`, `ping`, `dig`, `host`, `update-alternatives`, `grub2-mkconfig`,
-/// `dpkg`, `date`, `wc`, `tr`, `cut`, `sort`, `getent`, `id`, `restorecon`,
-/// `semanage`, `augenrules`, `dirname`, `basename`, `head`, `hostname` …).
+/// `ss`, `ping`, `dig`, `host`, `update-alternatives`,
+/// `dpkg`, `date`, `wc`, `tr`, `cut`, `sort`, `getent`, `id`,
+/// `augenrules`, `dirname`, `basename`, `head`, `hostname` …).
 fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
     for arg in args {
         if arg.starts_with('-') {
@@ -4126,9 +4002,6 @@ pub fn ensure_arguments_for_program(program: &str, args: &[String]) -> Result<()
         "smartctl" => check_smartctl(args),
         "modprobe" | "rmmod" => check_module_tools(base.as_str(), args),
         "fail2ban-client" => check_fail2ban(args),
-        "setsebool" => check_setsebool(args),
-        "semodule" => check_semodule(args),
-        "ausearch" => check_ausearch(args),
         "nmcli" => check_nmcli(args),
         "nmcli_connection_save" => check_nmcli_connection_save(args),
         "nmcli_interface_state" => check_nmcli_interface_state(args),
@@ -5275,7 +5148,6 @@ mod argument_policy_tests {
         refused("cat", &["../etc/shadow"]);
         refused("cat", &["etc/shadow"]);
         refused("cat", &["/etc/../../shadow"]);
-        refused("semodule", &["-i", "somefile.pp"]);
         refused("mkdir", &["-p", "relative/dir"]);
         refused("tail", &["-n", "5", "untrusted.log"]);
         ok("cat", &["/etc/hostname"]);
@@ -5320,25 +5192,6 @@ mod argument_policy_tests {
         refused("fail2ban-client", &["set", "sshd", "addjail", "new"]);
         refused("fail2ban-client", &["-bogus"]);
         refused("fail2ban-client", &["status", "weird.name"]);
-
-        ok("setsebool", &["-P", "ftpd_full_access", "on"]);
-        ok("setsebool", &["httpd_can_network_connect", "0"]);
-        refused("setsebool", &["-P", "ftpd_full_access", "maybe"]);
-        refused("setsebool", &["-P", "ftpd_full_access"]);
-        refused("setsebool", &["-P"]);
-        refused("setsebool", &["ftpd_full_access", "on", "extra"]);
-
-        ok("semodule", &["-l"]);
-        // installs are only allowed from the panel's root-owned policy dir;
-        // on dev machines that file does not exist → also refused
-        refused("semodule", &["-i", "/tmp/audit2allow/mod.pp"]);
-        refused("semodule", &["-i", "/var/lib/linux-control-panel/policy/mod.pp"]);
-        refused("semodule", &["-B"]);
-        refused("semodule", &["-i"]);
-        // an existing symlinked prefix must not be usable to escape
-        refused("semodule", &["-i", "/proc/self/root/evil.pp"]);
-
-        ok("ausearch", &["-m", "AVC", "-ts", "recent"]);
 
         // firewall tools are named-action only: the generic channel must
         // refuse every invocation, including formerly-permitted operations.

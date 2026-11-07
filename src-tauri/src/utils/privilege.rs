@@ -473,8 +473,8 @@ fn allowed_root_config_path(path: &std::path::Path) -> bool {
 
     let value = path.to_string_lossy();
     let fixed = [
-        "/etc/hosts", "/etc/environment", "/etc/default/grub", "/etc/default/grub.bak",
-        "/etc/selinux/config", "/etc/selinux/config.bak", "/etc/apt/sources.list",
+        "/etc/hosts", "/etc/environment",
+        "/etc/apt/sources.list",
         "/etc/profile", "/etc/bash.bashrc", "/etc/nginx/nginx.conf",
     ];
     if fixed.contains(&value.as_ref()) {
@@ -934,7 +934,7 @@ mod tests {
         let argv = privileged_argv("/usr/bin/dnf", &args, &RootAuth::Polkit).unwrap();
         assert!(!argv.iter().any(|arg| arg == "--"), "{argv:?}");
 
-        // the fixed script path (SELinux, audit, GRUB, cron)
+        // the fixed script path (audit, cron)
         let argv = privileged_script_argv("/bin/bash", "set -e", &[]);
         assert!(!argv.iter().any(|arg| arg == "--"), "{argv:?}");
         assert_eq!(argv[0], "/usr/bin/pkexec");

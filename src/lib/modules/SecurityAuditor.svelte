@@ -554,32 +554,6 @@
         break;
 
       // ── System Hygiene ───────────────────────────────────────────────────
-      case 'selinux': {
-        const enable = !finding.is_resolved;
-        uiStore.confirm(
-          enable ? 'Enable SELinux Enforcing' : 'Set SELinux Permissive',
-          enable
-            ? 'SELinux will be set to enforcing mode. A filesystem relabel and reboot are required. The system will reboot automatically in 5 seconds after confirming.'
-            : 'SELinux will be set to permissive (still logs violations but does not block). A reboot is required.',
-          async () => {
-            fixingId = finding.id;
-            try {
-              const msg = await invoke<string>('security_fix_selinux', { enable });
-              uiStore.addToast(msg, 'success');
-              if (enable) {
-                uiStore.addToast('System will reboot in 5 seconds to apply SELinux changes...', 'warning', 8000);
-                setTimeout(() => {
-                  invoke('shell_run_command', { command: 'reboot' }).catch(() => {});
-                }, 5000);
-              }
-            } catch (e) {
-              uiStore.addToast(`Failed: ${e}`, 'error');
-              fixingId = null;
-            }
-          }, true
-        );
-        break;
-      }
 
       case 'auditd': {
         const enable = !finding.is_resolved;
@@ -724,7 +698,7 @@
             'kernel_dmesg','kernel_icmp_redirect',
             'pass_policy','fs_tmp_sticky','fs_coredump',
             'net_src_route','net_bogus_icmp','net_martians',
-            'selinux','auditd','time_sync','usbguard'].includes(finding.id);
+            'auditd','time_sync','usbguard'].includes(finding.id);
   }
 
   // Export report as JSON

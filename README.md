@@ -10,7 +10,7 @@
 [![Fedora](https://img.shields.io/badge/Fedora-40%2B-294172?style=for-the-badge&logo=fedora&logoColor=white)](https://fedoraproject.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-> A blazing-fast, native desktop application engineered to manage system telemetry, security hardening, systemd services, packages, firewall, network connections, Nginx server blocks, SELinux, and system configurations — all from a stunning modern UI.
+> A blazing-fast, native desktop application engineered to manage system telemetry, security hardening, systemd services, packages, firewall, network connections, Nginx server blocks, and system configurations — all from a stunning modern UI.
 
 </div>
 
@@ -40,7 +40,6 @@
 | :--- | :--- |
 | 🛡️ **Security Auditor** | Automated system hardening audit based on CIS/Fedora benchmarks. Calculates compliance score (% score), categorizes findings (Kernel, Network, User Privileges, System Integrity, Firewall), provides interactive fix guides and 1-click remediation. Exports audit reports in **PDF**, **Styled HTML**, and **JSON** with **Open Downloads Folder** integration. |
 | 📜 **Journal Logs & Threats** | Real-time `journalctl` log stream with log level priority filtering (`Error`, `Warning`, `Info`, `Debug`), **Auth Events Tab** (SSH logins, sudo escalations, failed password attempts), **Command Audit Tab** (terminal command auditing), **Threat Detection Tab** (brute-force & unauthorized access analysis), and custom Date/Time range picker. |
-| 🛡️ **SELinux Manager** | SELinux Mode Switcher (`Enforcing`, `Permissive`, `Disabled`) with configuration persistence (`/etc/selinux/config`), SELinux Booleans Manager (search, view descriptions, toggle booleans with `setsebool -P`), and audit log denial parser (`ausearch`/`sealert`). |
 
 ### 🌐 Server & Web
 | Module | Description & Capabilities |
@@ -62,7 +61,6 @@
 | :--- | :--- |
 | ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), unit file inspector, and inline `journalctl -u` log stream. |
 | 🔌 **Device Manager** | PCI & USB Device Explorer (`lspci`, `lsusb`), Block Storage Devices (`lsblk`) with filesystem types & mount points, CPU/GPU hardware specs, Thermal Sensors inspector (core temps, fan speeds), and **SMART Disk Health & Self-Test Inspector** (`smartctl`). |
-| 🚀 **GRUB Bootloader** | GRUB configuration manager (`/etc/default/grub`), Kernel Command Line Arguments editor (`GRUB_CMDLINE_LINUX`), default boot entry selector, boot timeout adjustment, and GRUB config rebuild trigger (`grub2-mkconfig`). |
 | 👥 **User Manager** | System Users & Groups manager (`/etc/passwd`, `/etc/group`), user creation & deletion, password management, UID/GID config, default shell selector (`bash`, `zsh`, `fish`), **Sudoers Privilege Rule Builder** (`/etc/sudoers.d/`), and SSH Authorized Keys manager (`~/.ssh/authorized_keys`). |
 | 💻 **Shell Environment** | Graphical editor for shell environment files (`.bashrc`, `.zshrc`, `.bash_profile`), **Shell Aliases Manager** (create, edit, toggle, delete command aliases), **PATH Variable Visual Manager** (add, reorder, or remove directory paths), and shell config backup helper. |
 | 🌐 **Hosts Manager** | Graphical `/etc/hosts` domain mapping editor, IP-to-Domain entry management with status toggles (enable/disable without deletion), pre-configured adware/malware blocklist integration, and domain ping verification tool. |

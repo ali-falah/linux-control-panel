@@ -11,8 +11,6 @@
 
   let appVersion = $state('...');
   let currentUsername = $state('user');
-  let grubAvailable = $state(false);
-  let macAvailable = $state(false);
   let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
   
   onMount(() => {
@@ -20,12 +18,6 @@
     invoke<string>('get_current_user')
       .then(u => { if (u) currentUsername = u; })
       .catch(() => {});
-    invoke<boolean>('grub_is_available')
-      .then(available => grubAvailable = available)
-      .catch(() => grubAvailable = false);
-    invoke<{ status: string; config_mode: string }>('get_selinux_status')
-      .then(status => macAvailable = status.status !== 'disabled' || status.config_mode !== 'none')
-      .catch(() => macAvailable = false);
   });
 
   let searchQuery = $state('');
@@ -155,7 +147,6 @@
       items: [
         { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
-        { id: 'selinux-manager',  label: 'SELinux & AppArmor', icon: ShieldCheck, desc: 'Security policies & MAC' },
         { id: 'journal-logs',     label: 'Journal Logs',     icon: FileText, desc: 'Systemd Journal logs' },
         { id: 'user-manager',     label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
       ],
@@ -165,7 +156,6 @@
       icon: Cpu,
       items: [
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
-        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
         { id: 'cron-manager',    label: 'Scheduled Tasks', icon: Clock, desc: 'Crontab jobs & timers' },
         { id: 'env-manager',     label: 'Environment',     icon: FileText, desc: 'System environment vars' },
         { id: 'shell-env',       label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
@@ -173,13 +163,7 @@
     },
   ];
 
-  let visibleGroups = $derived(groups.map(group => ({
-    ...group,
-    items: group.items.filter(item =>
-      (item.id !== 'grub-manager' || grubAvailable) &&
-      (item.id !== 'selinux-manager' || macAvailable)
-    )
-  })).filter(group => group.items.length > 0));
+  let visibleGroups = $derived(groups.filter(group => group.items.length > 0));
 
   function getItemByTabId(id: TabId) {
     for (const g of visibleGroups) {
