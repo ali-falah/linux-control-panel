@@ -47,10 +47,56 @@ fn refused(program: &str, args: &[&str], because: &str) {
     );
 }
 
+/// A production helper invoked without root must now refuse before executing
+/// the program; the fixture build is the documented non-root exception.
+fn production_non_root_refusal() -> bool {
+    #[cfg(feature = "test-fixture")]
+    {
+        false
+    }
+    #[cfg(not(feature = "test-fixture"))]
+    {
+        rustix::process::geteuid().as_raw() != 0
+    }
+}
+
 fn allowed(program: &str, args: &[&str]) {
     let run = run(program, args)
         .unwrap_or_else(|err| panic!("{program} {args:?}: unexpected spawn error {err}"));
-    assert_eq!(run.code, 0, "expected success: {program} {args:?} — {run:?}");
+    if production_non_root_refusal() {
+        assert_eq!(
+            run.code, 2,
+            "a non-root production helper must refuse: {program} {args:?} — {run:?}"
+        );
+        assert!(
+            run.stderr.contains("must run as root"),
+            "the refusal must name the identity requirement: {run:?}"
+        );
+    } else {
+        assert_eq!(run.code, 0, "expected success: {program} {args:?} — {run:?}");
+    }
+}
+
+#[test]
+fn generic_add_apt_repository_is_never_a_root_channel() {
+    // SEC-1: the generic program channel must refuse the repository tool even
+    // with an otherwise valid https URL or PPA id. Named repo_add/copr_manage
+    // actions are the only supported paths.
+    refused(
+        "add-apt-repository",
+        &["-y", "ppa:some-owner/some-ppa"],
+        "the generic repository channel must be closed",
+    );
+    refused(
+        "add-apt-repository",
+        &["-y", "https://example.com/example.repo"],
+        "the generic repository channel must be closed",
+    );
+    refused(
+        "add-apt-repository",
+        &["-y", "http://example.com/example.repo"],
+        "http is refused even if the program channel were reachable",
+    );
 }
 
 #[test]
@@ -323,9 +369,17 @@ fn admin_keep_does_nothing_but_exit_zero() {
         .arg("admin_keep")
         .output()
         .expect("admin_keep: unexpected spawn error");
-    assert_eq!(out.status.code(), Some(0), "admin_keep must exit 0: {out:?}");
-    assert!(out.stdout.is_empty(), "admin_keep must not print: {:?}", out.stdout);
-    assert!(out.stderr.is_empty(), "admin_keep must not print: {:?}", out.stderr);
+    if production_non_root_refusal() {
+        assert_eq!(out.status.code(), Some(2), "a non-root helper must refuse: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("must run as root"),
+            "the refusal must name the identity requirement: {out:?}"
+        );
+    } else {
+        assert_eq!(out.status.code(), Some(0), "admin_keep must exit 0: {out:?}");
+        assert!(out.stdout.is_empty(), "admin_keep must not print: {:?}", out.stdout);
+        assert!(out.stderr.is_empty(), "admin_keep must not print: {:?}", out.stderr);
+    }
 
     refused("admin_keep", &["extra"], "the action takes no further arguments");
 }

@@ -34,7 +34,7 @@ compile_error!(
 /// absolute path is resolved at runtime and then verified).
 pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
     // package management
-    "dnf", "dnf5", "rpm", "apt", "apt-get", "add-apt-repository", "flatpak", "dpkg",
+    "dnf", "dnf5", "rpm", "apt", "apt-get", "flatpak", "dpkg",
     "update-alternatives", "update-rc.d", "chkconfig", "certbot", "augenrules",
     // init system and services
     "systemctl", "journalctl", "loginctl", "ss", "ip", "ping", "dig", "host", "resolvectl",
@@ -87,7 +87,17 @@ pub const MIGRATING_ROOT_PROGRAMS: &[&str] = &[
     "crontab",
     // root/grant-primitives
     "chpasswd", "passwd", "gpasswd", "usermod",
+    // repository trust decisions: repo_add and copr_manage are the only
+    // validated paths; the generic program channel must not add repositories
+    "add-apt-repository",
 ];
+
+/// Test-only serialization between the root-policy path-pin tests and the
+/// end-to-end fixture tests. They share `/tmp/lcp-admin-test-fixture`, and a
+/// fixture rebuild removes the directory tree while a path validator is
+/// walking it. Production never uses this lock.
+#[cfg(test)]
+pub(crate) static FIXTURE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ─── The helper's own fixed constants (shared with the app) ──────────────────
 
@@ -102,6 +112,13 @@ pub const POLKIT_RULE_FILE: &str = "/etc/polkit-1/rules.d/50-linux-control-panel
 #[cfg(feature = "test-fixture")]
 pub const POLKIT_RULE_FILE: &str =
     "/tmp/lcp-admin-test-fixture/etc/polkit-1/rules.d/50-linux-control-panel.rules";
+
+/// Where the packaged PolicyKit action definitions are installed. The app and
+/// the helper verify this file at startup because a stale copy that annotates
+/// generic utilities (or caches authorisations) would silently weaken the
+/// whole privilege boundary.
+pub const POLKIT_POLICY_FILE: &str =
+    "/usr/share/polkit-1/actions/com.controlpanel.pkexec.policy";
 
 /// The PolicyKit action ids the bundled `.policy` file defines for the two
 /// helper install paths — the ids pkexec actually authorises under.
@@ -235,6 +252,250 @@ pub fn verify_trusted_binary(path: &str) -> Result<(), String> {
         return Err(format!(
             "Refused to run {path} with administrator rights: the file is writable by other users."
         ));
+    }
+    Ok(())
+}
+
+/// Verify the shipped PolicyKit action definition text.
+///
+/// The policy is the actual authorization boundary: it must annotate exactly
+/// the two root-owned helper install paths and use `auth_admin` for every
+/// subject class. A stale copy that annotates a generic utility, weakens a
+/// default to `yes`/`no`, or caches with `auth_admin_keep` is refused.
+pub fn verify_polkit_policy_text(text: &str) -> Result<(), String> {
+    const EXPECTED_IDS: [&str; 2] = [
+        "com.controlpanel.helper.packaged",
+        "com.controlpanel.helper.system",
+    ];
+    const EXPECTED_PATHS: [&str; 2] = ["/usr/bin/lcp-admin", "/usr/local/libexec/lcp-admin"];
+
+    fn marker_values<'a>(
+        text: &'a str,
+        marker: &str,
+        terminator: char,
+    ) -> Result<Vec<&'a str>, String> {
+        let mut values = Vec::new();
+        let mut rest = text;
+        while let Some(position) = rest.find(marker) {
+            rest = &rest[position + marker.len()..];
+            let end = rest.find(terminator).ok_or_else(|| {
+                format!("the PolicyKit policy has an unterminated '{marker}' value")
+            })?;
+            values.push(&rest[..end]);
+            rest = &rest[end + terminator.len_utf8()..];
+        }
+        Ok(values)
+    }
+
+    let mut ids = marker_values(text, "<action id=\"", '"')?;
+    ids.sort_unstable();
+    if ids != EXPECTED_IDS {
+        return Err(format!(
+            "the PolicyKit policy action ids are stale or unexpected: {ids:?}"
+        ));
+    }
+
+    let mut paths = marker_values(text, "org.freedesktop.policykit.exec.path\">", '<')?;
+    paths.sort_unstable();
+    if paths != EXPECTED_PATHS {
+        return Err(format!(
+            "the PolicyKit policy annotates unexpected programs: {paths:?}"
+        ));
+    }
+
+    for tag in ["allow_any", "allow_inactive", "allow_active"] {
+        let exact = format!("<{tag}>auth_admin</{tag}>");
+        let total = text.matches(&format!("<{tag}>")).count();
+        if total != 2 || text.matches(&exact).count() != 2 {
+            return Err(format!(
+                "the PolicyKit policy must use auth_admin for every {tag} default"
+            ));
+        }
+    }
+    for weakened in [
+        "auth_admin_keep",
+        "auth_self_keep",
+        "auth_self",
+        "<allow_any>yes</allow_any>",
+        "<allow_inactive>yes</allow_inactive>",
+        "<allow_active>yes</allow_active>",
+        "<allow_any>no</allow_any>",
+        "<allow_inactive>no</allow_inactive>",
+        "<allow_active>no</allow_active>",
+    ] {
+        if text.contains(weakened) {
+            return Err(format!(
+                "the PolicyKit policy contains a weakened authorization default ({weakened})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read and verify one installed PolicyKit policy file.
+pub fn verify_polkit_policy_file(path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        format!("the installed PolicyKit policy {path} could not be read: {e}")
+    })?;
+    verify_polkit_policy_text(&text)
+}
+
+/// Verify one PolicyKit actions directory. The canonical file must pass the
+/// text policy; no sibling `*.policy` file may also define the control-panel
+/// helper action ids or annotate either helper path. A duplicate file can
+/// shadow or weaken the authorization depending on polkit's load order.
+pub fn verify_polkit_policy_directory(directory: &std::path::Path) -> Result<(), String> {
+    let canonical = directory.join("com.controlpanel.pkexec.policy");
+    let canonical_text = std::fs::read_to_string(&canonical).map_err(|e| {
+        format!("the installed PolicyKit policy {} could not be read: {e}", canonical.display())
+    })?;
+    verify_polkit_policy_text(&canonical_text)?;
+
+    let entries = std::fs::read_dir(directory).map_err(|e| {
+        format!("the PolicyKit actions directory {} could not be read: {e}", directory.display())
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("the PolicyKit actions directory could not be read: {e}"))?
+            .path();
+        if path == canonical {
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("policy") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!("the PolicyKit policy {} could not be read: {e}", path.display())
+        })?;
+        if text.contains("com.controlpanel.helper.")
+            || text.contains("/usr/bin/lcp-admin")
+            || text.contains("/usr/local/libexec/lcp-admin")
+        {
+            return Err(format!(
+                "duplicate or conflicting PolicyKit policy file: {} also defines the control-panel helper",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Scan one optional override directory. `/etc/polkit-1/actions` and
+/// `/run/polkit-1/actions` take precedence over `/usr/share` (see
+/// `man polkit` and the action-pool directory list in polkitd), so any file
+/// there that defines the helper ids/paths, or reuses the canonical filename,
+/// is a conflicting or duplicate definition and is refused.
+fn verify_polkit_override_directory(directory: &std::path::Path) -> Result<(), String> {
+    // Distinguish "optional directory absent" from "cannot inspect it".
+    // Path::exists() swallows permission errors, so use metadata explicitly.
+    match std::fs::metadata(directory) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The /etc and /run action directories are optional on a stock
+            // system.
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(format!(
+                "the PolicyKit actions directory {} could not be inspected: {e}",
+                directory.display()
+            ));
+        }
+    }
+    let entries = std::fs::read_dir(directory).map_err(|e| {
+        format!(
+            "the PolicyKit actions directory {} could not be read: {e}",
+            directory.display()
+        )
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("the PolicyKit actions directory could not be read: {e}"))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("policy") {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str())
+            == Some("com.controlpanel.pkexec.policy")
+        {
+            return Err(format!(
+                "duplicate PolicyKit policy file: {} shadows the shipped policy",
+                path.display()
+            ));
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!("the PolicyKit policy {} could not be read: {e}", path.display())
+        })?;
+        if text.contains("com.controlpanel.helper.")
+            || text.contains("/usr/bin/lcp-admin")
+            || text.contains("/usr/local/libexec/lcp-admin")
+        {
+            return Err(format!(
+                "duplicate or conflicting PolicyKit policy file: {} also defines the control-panel helper",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Verify the canonical shipped policy plus every optional override directory.
+fn verify_polkit_policy_layout(
+    canonical_dir: &std::path::Path,
+    override_dirs: &[&std::path::Path],
+) -> Result<(), String> {
+    verify_polkit_policy_directory(canonical_dir)?;
+    for directory in override_dirs {
+        verify_polkit_override_directory(directory)?;
+    }
+    Ok(())
+}
+
+/// Verify the packaged PolicyKit action definitions at their installed path.
+/// A missing, stale, weakened or duplicated file is an error, never a warning.
+///
+/// Polkit loads action files from `/etc/polkit-1/actions`,
+/// `/run/polkit-1/actions`, `/usr/local/share/polkit-1/actions` and
+/// `/usr/share/polkit-1/actions` (the order is documented in `man polkit` and
+/// appears in the polkitd action-pool strings). The canonical shipped file
+/// lives in `/usr/share`; any helper definition in the other three would
+/// shadow or conflict with it.
+pub fn verify_installed_polkit_policy() -> Result<(), String> {
+    let canonical_dir = std::path::Path::new(POLKIT_POLICY_FILE)
+        .parent()
+        .ok_or_else(|| format!("invalid PolicyKit policy path: {POLKIT_POLICY_FILE}"))?;
+    verify_polkit_policy_layout(
+        canonical_dir,
+        &[
+            std::path::Path::new("/etc/polkit-1/actions"),
+            std::path::Path::new("/run/polkit-1/actions"),
+            std::path::Path::new("/usr/local/share/polkit-1/actions"),
+        ],
+    )
+}
+
+/// Verify the installed rules.d rule as well. The rule is what grants the
+/// five-minute keep, so a stale copy that mentions a generic action would
+/// weaken the boundary. This is a startup/status diagnostic rather than a hard
+/// execution gate: the helper's `install_polkit_rule` action must remain able
+/// to repair a missing rule.
+pub fn verify_installed_polkit_state() -> Result<(), String> {
+    verify_installed_polkit_policy()?;
+    let text = std::fs::read_to_string(POLKIT_RULE_FILE).map_err(|e| {
+        format!("the installed PolicyKit rule {} could not be read: {e}", POLKIT_RULE_FILE)
+    })?;
+    verify_polkit_rule_text(&text)
+}
+
+/// Verify the installed rules.d rule. It must be byte-identical to the text
+/// the helper writes; anything else is stale or was modified.
+pub fn verify_polkit_rule_text(text: &str) -> Result<(), String> {
+    if text != POLKIT_RULE_TEXT {
+        return Err(
+            "the installed PolicyKit rule is stale or was modified; reinstall it with the \
+             helper's install_polkit_rule action"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -1593,6 +1854,38 @@ pub fn user_password_valid(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A Copr/PPA repository reference: `owner/project`, optionally prefixed
+/// `ppa:`. Exactly one slash, no spaces, control characters, path traversal
+/// or option-leading segments.
+pub fn copr_repo_valid(repo: &str) -> Result<(), String> {
+    let body = repo.strip_prefix("ppa:").unwrap_or(repo);
+    if body.is_empty() || body.len() > 200 || body.contains(':') {
+        return Err(format!("The Copr repository must be owner/project, got: {repo}"));
+    }
+    let (owner, project) = body
+        .split_once('/')
+        .ok_or_else(|| format!("The Copr repository must be owner/project, got: {repo}"))?;
+    if owner.is_empty() || project.is_empty() || project.contains('/') {
+        return Err(format!("The Copr repository must be owner/project, got: {repo}"));
+    }
+    for part in [owner, project] {
+        if part == "." || part == ".." || part.starts_with('-')
+            || !part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+        {
+            return Err(format!("The Copr repository contains unsafe characters: {repo}"));
+        }
+    }
+    Ok(())
+}
+
+/// The only verbs the Copr action accepts.
+pub fn copr_verb_valid(verb: &str) -> Result<(), String> {
+    match verb {
+        "enable" | "disable" => Ok(()),
+        other => Err(format!("The Copr verb must be enable or disable, got: {other}")),
+    }
+}
+
 /// Units the security-auditor service action may enable/disable. The list is
 /// deliberately closed: this is not a generic systemctl channel.
 pub fn security_service_unit_valid(unit: &str) -> Result<(), String> {
@@ -2316,17 +2609,26 @@ fn check_add_apt_repository(args: &[String]) -> Result<(), String> {
             "exactly one PPA id or repository URL is required",
         ));
     };
-    let ppa = value.starts_with("ppa:")
-        && value
-            .chars()
-            .skip(4)
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '+'));
-    let url = value.starts_with("https://") || value.starts_with("http://");
-    if !ppa && !url {
+    ensure_safe_operand(value, "repository URL")?;
+    if value.starts_with("ppa:") {
+        // The same closed owner/project grammar as the named Copr/PPA action:
+        // no empty ids, extra slashes, dot segments or option-like parts.
+        copr_repo_valid(value).map_err(|reason| {
+            operand_not_allowed(PROGRAM, value, &reason)
+        })?;
+    } else if value.starts_with("https://") {
+        if value.len() == "https://".len() || value.chars().any(char::is_whitespace) {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                value,
+                "the repository URL must include a host and contain no whitespace",
+            ));
+        }
+    } else {
         return Err(operand_not_allowed(
             PROGRAM,
             value,
-            "the repository must be a 'ppa:<owner>/<name>' id or an http(s) URL",
+            "the repository must be a 'ppa:<owner>/<project>' id or an https URL (http is refused)",
         ));
     }
     Ok(())
@@ -2381,48 +2683,63 @@ fn check_flatpak(args: &[String]) -> Result<(), String> {
 /// namespace) and `-batch` (reads a script file of commands) are refused.
 fn check_ip(args: &[String]) -> Result<(), String> {
     const PROGRAM: &str = "ip";
-    let subcommands = ["link", "addr", "route", "neigh"];
-    let mut saw_subcommand = false;
-    for arg in args {
-        if arg == "netns" || arg == "exec" {
-            return Err(operand_not_allowed(
-                PROGRAM,
-                arg,
-                "'netns' and 'exec' are not allowed for ip",
-            ));
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if !arg.starts_with('-') {
+            break;
         }
-        if arg == "-batch" || arg.starts_with("-batch") {
+        if !matches!(arg, "-j" | "-o" | "-4" | "-6") {
             return Err(flag_not_allowed(PROGRAM, arg));
         }
-        if arg.starts_with('-') {
-            // -o for one-line output, -4/-6 for the address family
-            if !matches!(arg.as_str(), "-o" | "-4" | "-6") {
-                return Err(flag_not_allowed(PROGRAM, arg));
-            }
-        } else if !saw_subcommand {
-            if !subcommands.contains(&arg.as_str()) {
-                return Err(operand_not_allowed(
-                    PROGRAM,
-                    arg,
-                    "the subcommand must be one of link|addr|route|neigh",
-                ));
-            }
-            saw_subcommand = true;
-        } else {
-            require(PROGRAM, arg, "an ip operand", |value| {
-                value.len() <= 128
-                    && value.chars().all(|c| {
-                        c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '@' | '_' | '-')
-                    })
-            })?;
-        }
+        index += 1;
     }
-    if !saw_subcommand {
+
+    let Some(subcommand) = args.get(index) else {
         return Err(operand_not_allowed(
             PROGRAM,
             "",
-            "an ip subcommand (link, addr, route, neigh) is required",
+            "a read-only ip subcommand (a/addr/link/route/neigh) is required",
         ));
+    };
+    if !matches!(
+        subcommand.as_str(),
+        "a" | "addr" | "address" | "link" | "route" | "neigh" | "neighbor"
+    ) {
+        return Err(operand_not_allowed(
+            PROGRAM,
+            subcommand,
+            "the subcommand must be a read-only a|addr|link|route|neigh form",
+        ));
+    }
+    index += 1;
+
+    if let Some(verb) = args.get(index) {
+        if !matches!(verb.as_str(), "show" | "list" | "get") {
+            return Err(operand_not_allowed(
+                PROGRAM,
+                verb,
+                "only read-only show|list|get is allowed; interface changes use the named action",
+            ));
+        }
+        for operand in &args[index + 1..] {
+            if matches!(
+                operand.as_str(),
+                "set" | "add" | "del" | "delete" | "flush" | "change" | "replace" | "up" | "down"
+            ) {
+                return Err(operand_not_allowed(
+                    PROGRAM,
+                    operand,
+                    "a write verb is not allowed on the generic ip channel",
+                ));
+            }
+            require(PROGRAM, operand, "an ip operand", |value| {
+                value.len() <= 128
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '@' | '_' | '-'))
+            })?;
+        }
     }
     Ok(())
 }
@@ -2435,25 +2752,46 @@ fn check_nmcli(args: &[String]) -> Result<(), String> {
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
-        if arg.starts_with('-') {
-            match arg {
-                "-t" => {}
-                "-f" | "-c" => {
-                    let value = flag_value(PROGRAM, arg, &mut index, args)?;
-                    require(PROGRAM, &value, "a field list or output mode", |v| {
-                        !v.is_empty()
-                            && v.len() <= 64
-                            && v.chars().all(|c| {
-                                c.is_ascii_alphanumeric() || matches!(c, ',' | '.' | '_' | '-')
-                            })
-                    })?;
-                }
-                _ => return Err(flag_not_allowed(PROGRAM, arg)),
+        if !arg.starts_with('-') {
+            break;
+        }
+        match arg {
+            "-t" => {}
+            "-f" | "-c" => {
+                let value = flag_value(PROGRAM, arg, &mut index, args)?;
+                require(PROGRAM, &value, "a field list or output mode", |v| {
+                    !v.is_empty()
+                        && v.len() <= 64
+                        && v.chars().all(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, ',' | '.' | '_' | '-')
+                        })
+                })?;
             }
+            _ => return Err(flag_not_allowed(PROGRAM, arg)),
         }
         index += 1;
     }
-    Ok(())
+
+    let rest = &args[index..];
+    match rest {
+        [connection, show] if connection == "connection" && show == "show" => Ok(()),
+        [connection, show, uuid] if connection == "connection" && show == "show" => {
+            ensure_safe_operand(uuid, "connection id")?;
+            if !is_uuid(uuid) {
+                return Err(operand_not_allowed(
+                    PROGRAM,
+                    uuid,
+                    "a connection UUID is required",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(operand_not_allowed(
+            PROGRAM,
+            rest.first().map(String::as_str).unwrap_or(""),
+            "only read-only 'connection show [<uuid>]' is allowed; writes use the named nmcli actions",
+        )),
+    }
 }
 
 /// The `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
@@ -2558,7 +2896,7 @@ fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
 /// The `nmcli_interface_state <iface> <up|down>` action: brings an interface
 /// up or down with `ip link set dev <iface> up|down`. The interface name is
 /// confined like an ip operand; `down` on `lo` or `loopback` is refused.
-fn check_nmcli_interface_state(args: &[String]) -> Result<(), String> {
+pub fn check_nmcli_interface_state(args: &[String]) -> Result<(), String> {
     const PROGRAM: &str = "nmcli_interface_state";
     if args.len() != 2 {
         return Err(operand_not_allowed(
@@ -3505,6 +3843,8 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "unit_action",
     "unit_dropin_write",
     "unit_daemon_reload",
+    "copr_manage",
+    "nmcli_interface_state",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3706,6 +4046,8 @@ const HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS: &[&str] = &["security_lock_account"]
 const HELPER_UNIT_ACTION_ACTIONS: &[&str] = &["unit_action"];
 const HELPER_UNIT_DROPIN_ACTIONS: &[&str] = &["unit_dropin_write"];
 const HELPER_UNIT_RECOVERY_ACTIONS: &[&str] = &["unit_daemon_reload"];
+const HELPER_COPR_ACTIONS: &[&str] = &["copr_manage"];
+const HELPER_NMCLI_INTERFACE_STATE_ACTIONS: &[&str] = &["nmcli_interface_state"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -4385,7 +4727,12 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "this action takes exactly a zone and an interface, optionally followed by 'confirm'",
             ));
         }
-        firewall_zone_name_valid(&args[1])?;
+        // The interface-zone action itself distinguishes "firewalld needs a
+        // zone" from "ufw has no zones"; the shared gate only validates a
+        // non-empty zone so the action-specific refusal stays reachable.
+        if !args[1].is_empty() {
+            firewall_zone_name_valid(&args[1])?;
+        }
         firewall_interface_name_valid(&args[2])?;
         return Ok(());
     }
@@ -4413,6 +4760,29 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "the backend must be firewalld or ufw",
             ));
         }
+        return Ok(());
+    }
+    if HELPER_NMCLI_INTERFACE_STATE_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes an interface name and up|down",
+            ));
+        }
+        check_nmcli_interface_state(&args[1..])?;
+        return Ok(());
+    }
+    if HELPER_COPR_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes enable|disable and a Copr repository",
+            ));
+        }
+        copr_verb_valid(&args[1])?;
+        copr_repo_valid(&args[2])?;
         return Ok(());
     }
     if HELPER_UNIT_RECOVERY_ACTIONS.contains(&action.as_str()) {
@@ -5551,6 +5921,17 @@ mod argument_policy_tests {
     };
 
     #[test]
+    fn add_apt_repository_is_not_on_the_generic_allow_list() {
+        // The only repository trust paths are the named repo_add and
+        // copr_manage actions. The generic program channel must refuse the
+        // tool even before its argument policy is consulted.
+        assert!(
+            ensure_program_allowed("/usr/bin/add-apt-repository").is_err(),
+            "add-apt-repository must not be executable through the generic root channel"
+        );
+    }
+
+    #[test]
     fn firewall_tools_are_not_on_the_generic_allow_list() {
         // The firewall is mutated only through named helper actions. The
         // generic program channel must refuse both tools outright, so no
@@ -5795,8 +6176,14 @@ mod argument_policy_tests {
         for sub in ["link", "addr", "route", "neigh"] {
             ok("ip", &[sub, "show"]);
         }
-        ok("ip", &["link", "set", "dev", "ens3", "up"]);
+        ok("ip", &["-j", "a"]);
+        ok("ip", &["-j", "addr", "show"]);
         ok("ip", &["-o", "link", "show"]);
+        ok("ip", &["route", "get", "1.1.1.1"]);
+        refused("ip", &["link", "set", "dev", "ens3", "up"]);
+        refused("ip", &["link", "set", "dev", "ens3", "down"]);
+        refused("ip", &["addr", "add", "192.0.2.1/24", "dev", "ens3"]);
+        refused("ip", &["route", "flush"]);
         refused("ip", &["netns", "exec", "something"]);
         refused("ip", &["netns", "list"]);
         refused("ip", &["-batch", "/tmp/evil"]);
@@ -5879,6 +6266,13 @@ mod argument_policy_tests {
         refused("firewall-cmd", &["-X", "public"]);
 
         ok("nmcli", &["-t", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
+        ok("nmcli", &["-t", "-c", "no", "-f", "ipv4,ipv6,connection", "connection", "show", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"]);
+        refused("nmcli", &["connection", "add", "type", "vpn"]);
+        refused("nmcli", &["connection", "modify", "name", "ipv4.method", "manual"]);
+        refused("nmcli", &["connection", "delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"]);
+        refused("nmcli", &["connection", "up", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"]);
+        refused("nmcli", &["connection", "down", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"]);
+        refused("nmcli", &["general", "reload"]);
         refused("nmcli", &["--bogus"]);
         refused("nmcli", &["-f", "this-field-list-is-deliberately-well-over-the-sixty-four-character-limit-for-test-purposes"]);
 
@@ -5907,8 +6301,13 @@ mod argument_policy_tests {
 
         ok("add-apt-repository", &["-y", "ppa:some-owner/some-ppa"]);
         ok("add-apt-repository", &["--remove", "-y", "ppa:some-owner/some-ppa"]);
+        ok("add-apt-repository", &["-y", "https://example.com/example.repo"]);
         refused("add-apt-repository", &["-y", "--x-www", "ppa:some-owner/some-ppa"]);
         refused("add-apt-repository", &["-y", "ppa:some owner"]);
+        refused("add-apt-repository", &["-y", "ppa:"]);
+        refused("add-apt-repository", &["-y", "ppa:some-owner/.."]);
+        refused("add-apt-repository", &["-y", "ppa:some-owner/name/extra"]);
+        refused("add-apt-repository", &["-y", "http://example.com/example.repo"]);
 
         ok("grep", &["-i", "pattern", "/var/log/messages"]);
         ok("grep", &["-m", "3", "-q", "pattern", "/var/log/messages"]);
@@ -6273,6 +6672,9 @@ mod argument_policy_tests {
 
     #[test]
     fn write_profile_sh_takes_exactly_one_profile_d_sh_path() {
+        let _fixture_guard = super::FIXTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use super::ensure_arguments_for_program as check;
 
         // keep the fixture PROFILE_D_DIR real for the validator's path walk
@@ -6309,6 +6711,9 @@ mod argument_policy_tests {
     /// the backup through the revision-sibling shape rule.
     #[test]
     fn restore_profile_sh_takes_one_dest_and_one_backup_sibling() {
+        let _fixture_guard = super::FIXTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use super::{ensure_arguments_for_program as check, restore_profile_sh_backup_shape};
 
         // keep the fixture PROFILE_D_DIR real for the validator's path walk
@@ -6393,6 +6798,9 @@ mod profile_sh_policy_tests {
 
     #[test]
     fn profile_paths_must_be_exact_profile_d_sh_names() {
+        let _fixture_guard = super::FIXTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ensure_profile_dir();
         // PROFILE_D_DIR is the /etc/profile.d in production and its fixture
         // twin in a test-fixture build of the helper — the tests keep both
@@ -8197,5 +8605,275 @@ mod service_manager_validator_tests {
         ] {
             assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod copr_validator_tests {
+    use super::{copr_repo_valid, copr_verb_valid, ensure_arguments_for_program};
+
+    fn check_lcp(args: &[&str]) -> Result<(), String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        ensure_arguments_for_program("lcp-admin", &argv)
+    }
+
+    #[test]
+    fn copr_repo_grammar_is_closed() {
+        for repo in [
+            "owner/project",
+            "ppa:owner/project",
+            "owner/project-1.2+x",
+            "a_b/c.d",
+        ] {
+            copr_repo_valid(repo).unwrap_or_else(|e| panic!("{repo:?} must be valid: {e}"));
+        }
+        for repo in [
+            "",
+            "owner",
+            "owner/",
+            "/project",
+            "owner/project/extra",
+            "-owner/project",
+            "owner/-project",
+            "owner/.",
+            "owner/..",
+            "../etc/passwd",
+            "own er/project",
+            "owner/project:tag",
+            "PPA:owner/project",
+            "ppa:",
+            "owner/pro\nject",
+        ] {
+            assert!(copr_repo_valid(repo).is_err(), "{repo:?} must be refused");
+        }
+        let overlong = format!("{}/{}", "a".repeat(120), "b".repeat(120));
+        assert!(copr_repo_valid(&overlong).is_err(), "overlong repo must be refused");
+    }
+
+    #[test]
+    fn copr_verbs_are_enable_or_disable_only() {
+        for verb in ["enable", "disable"] {
+            copr_verb_valid(verb).unwrap_or_else(|e| panic!("{verb}: {e}"));
+        }
+        for verb in ["", "install", "ENABLE", "enable ", "--enable"] {
+            assert!(copr_verb_valid(verb).is_err(), "{verb:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn nmcli_interface_state_gate_enforces_shape() {
+        check_lcp(&["nmcli_interface_state", "eth0", "up"]).expect("valid up");
+        check_lcp(&["nmcli_interface_state", "wlan0", "down"]).expect("valid down");
+        for args in [
+            vec!["nmcli_interface_state"],
+            vec!["nmcli_interface_state", "eth0"],
+            vec!["nmcli_interface_state", "eth0", "toggle"],
+            vec!["nmcli_interface_state", "lo", "down"],
+            vec!["nmcli_interface_state", "eth0", "up", "extra"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn copr_action_gate_enforces_exact_shape() {
+        check_lcp(&["copr_manage", "enable", "owner/project"]).expect("valid enable");
+        check_lcp(&["copr_manage", "disable", "ppa:owner/project"]).expect("valid disable");
+        for args in [
+            vec!["copr_manage"],
+            vec!["copr_manage", "enable"],
+            vec!["copr_manage", "enable", "owner/project", "extra"],
+            vec!["copr_manage", "install", "owner/project"],
+            vec!["copr_manage", "enable", "owner"],
+            vec!["copr_manage", "enable", "-owner/project"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod polkit_policy_tests {
+    use super::{verify_polkit_policy_file, verify_polkit_policy_text};
+
+    const SHIPPED: &str = include_str!("../../polkit/com.controlpanel.pkexec.policy");
+
+    #[test]
+    fn the_shipped_policy_passes_verification() {
+        verify_polkit_policy_text(SHIPPED).expect("the shipped policy must be valid");
+    }
+
+    #[test]
+    fn missing_stale_or_weakened_policies_are_refused() {
+        let stale_id = SHIPPED.replace(
+            "com.controlpanel.helper.packaged",
+            "com.controlpanel.helper.other",
+        );
+        assert!(verify_polkit_policy_text(&stale_id).is_err());
+
+        let generic_program = SHIPPED.replace("/usr/bin/lcp-admin", "/usr/bin/bash");
+        assert!(verify_polkit_policy_text(&generic_program).is_err());
+
+        let cached = SHIPPED.replace(
+            "<allow_active>auth_admin</allow_active>",
+            "<allow_active>auth_admin_keep</allow_active>",
+        );
+        assert!(verify_polkit_policy_text(&cached).is_err());
+
+        let open = SHIPPED.replace(
+            "<allow_any>auth_admin</allow_any>",
+            "<allow_any>yes</allow_any>",
+        );
+        assert!(verify_polkit_policy_text(&open).is_err());
+
+        let malformed = SHIPPED.replace("org.freedesktop.policykit.exec.path\">", "unterminated=\"");
+        assert!(verify_polkit_policy_text(&malformed).is_err());
+
+        let truncated = SHIPPED.replace("</annotate>", "");
+        assert!(verify_polkit_policy_text(&truncated).is_err());
+
+        let duplicate_action = format!("{SHIPPED}{SHIPPED}");
+        assert!(verify_polkit_policy_text(&duplicate_action).is_err());
+
+        let extra_action = SHIPPED.replace(
+            "</policyconfig>",
+            "<action id=\"com.example.other\"><defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin</allow_active></defaults></action></policyconfig>",
+        );
+        assert!(verify_polkit_policy_text(&extra_action).is_err());
+    }
+
+    #[test]
+    fn the_installed_rule_must_match_the_shipped_text() {
+        use super::{verify_polkit_rule_text, POLKIT_RULE_TEXT};
+        verify_polkit_rule_text(POLKIT_RULE_TEXT).expect("the shipped rule text must be valid");
+        let weakened = POLKIT_RULE_TEXT.replace("subject.isInGroup(\"wheel\")", "true");
+        assert!(verify_polkit_rule_text(&weakened).is_err());
+    }
+
+    #[test]
+    fn duplicate_policy_files_are_refused() {
+        use super::verify_polkit_policy_directory;
+
+        let directory = std::env::temp_dir().join(format!(
+            "lcp-polkit-actions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("com.controlpanel.pkexec.policy"), SHIPPED).unwrap();
+        verify_polkit_policy_directory(&directory).expect("a single canonical policy is valid");
+
+        std::fs::write(directory.join("unrelated.policy"), "<policyconfig></policyconfig>").unwrap();
+        verify_polkit_policy_directory(&directory)
+            .expect("an unrelated policy file must not be treated as a duplicate");
+
+        std::fs::write(
+            directory.join("duplicate.policy"),
+            SHIPPED.replace("com.controlpanel.helper.packaged", "com.controlpanel.helper.shadow"),
+        )
+        .unwrap();
+        assert!(
+            verify_polkit_policy_directory(&directory).is_err(),
+            "a second file defining a control-panel helper action must be refused"
+        );
+
+        std::fs::write(
+            directory.join("duplicate.policy"),
+            "<policyconfig><annotate key=\"org.freedesktop.policykit.exec.path\">/usr/bin/lcp-admin</annotate></policyconfig>",
+        )
+        .unwrap();
+        assert!(
+            verify_polkit_policy_directory(&directory).is_err(),
+            "a second file annotating a helper path must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn override_action_directories_are_scanned_and_fail_closed() {
+        use super::verify_polkit_policy_layout;
+
+        let root = std::env::temp_dir().join(format!(
+            "lcp-polkit-layout-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let canonical = root.join("usr-share");
+        let etc = root.join("etc");
+        let run = root.join("run");
+        let local = root.join("local");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(
+            canonical.join("com.controlpanel.pkexec.policy"),
+            SHIPPED,
+        )
+        .unwrap();
+
+        // Optional override directories may be absent.
+        verify_polkit_policy_layout(&canonical, &[&etc, &run, &local])
+            .expect("missing optional action directories are valid");
+
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(etc.join("unrelated.policy"), "<policyconfig></policyconfig>").unwrap();
+        verify_polkit_policy_layout(&canonical, &[&etc, &run, &local])
+            .expect("an unrelated override policy must not be treated as a conflict");
+
+        // /etc takes precedence: a helper id there must be refused.
+        std::fs::write(
+            etc.join("shadow.policy"),
+            SHIPPED.replace("com.controlpanel.helper.packaged", "com.controlpanel.helper.shadow"),
+        )
+        .unwrap();
+        assert!(
+            verify_polkit_policy_layout(&canonical, &[&etc, &run, &local]).is_err(),
+            "a conflicting action id in /etc must be refused"
+        );
+        std::fs::remove_file(etc.join("shadow.policy")).unwrap();
+
+        // /run: even the same filename with unrelated content is a shadow.
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("com.controlpanel.pkexec.policy"),
+            "<policyconfig></policyconfig>",
+        )
+        .unwrap();
+        assert!(
+            verify_polkit_policy_layout(&canonical, &[&etc, &run, &local]).is_err(),
+            "a same-named policy in /run must be refused even if its content differs"
+        );
+        std::fs::remove_file(run.join("com.controlpanel.pkexec.policy")).unwrap();
+
+        // /usr/local/share: a helper path annotation is a conflict.
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(
+            local.join("annotate.policy"),
+            "<policyconfig><annotate key=\"org.freedesktop.policykit.exec.path\">/usr/bin/lcp-admin</annotate></policyconfig>",
+        )
+        .unwrap();
+        assert!(
+            verify_polkit_policy_layout(&canonical, &[&etc, &run, &local]).is_err(),
+            "a helper path annotation in /usr/local/share must be refused"
+        );
+
+        // An override path that exists but is not a directory must fail closed.
+        let not_a_directory = root.join("not-a-directory");
+        std::fs::write(&not_a_directory, b"not a directory").unwrap();
+        assert!(
+            verify_polkit_policy_layout(&canonical, &[&not_a_directory]).is_err(),
+            "an unreadable/non-directory override path must fail closed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_installed_policy_file_is_an_error() {
+        let error = verify_polkit_policy_file(
+            "/nonexistent-lcp-polkit-policy-for-test.policy",
+        )
+        .expect_err("a missing policy must be refused");
+        assert!(error.contains("could not be read"), "{error}");
     }
 }

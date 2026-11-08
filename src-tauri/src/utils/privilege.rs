@@ -217,6 +217,33 @@ pub fn privileged_argv(
     args: &[String],
     auth: &RootAuth,
 ) -> Result<Vec<String>, String> {
+    privileged_argv_with_helper(program, args, auth, privileged_helper_for_call())
+}
+
+/// Test-only deterministic helper path. The real host install state must not
+/// change the shape of the argv the unit tests assert.
+#[cfg(test)]
+fn privileged_helper_for_call() -> Option<&'static str> {
+    Some("/usr/bin/lcp-admin")
+}
+
+#[cfg(not(test))]
+fn privileged_helper_for_call() -> Option<&'static str> {
+    crate::commands::admin::installed_helper_path()
+}
+
+/// The argument vector for a privileged call with an explicit helper choice.
+///
+/// A `None` helper means a generic program would have to run under pkexec
+/// directly. That fallback is refused: the helper is the only authorised root
+/// target, so a missing helper is a hard error rather than a silent
+/// degradation to a generic root channel.
+fn privileged_argv_with_helper(
+    program: &str,
+    args: &[String],
+    auth: &RootAuth,
+    helper: Option<&str>,
+) -> Result<Vec<String>, String> {
     ensure_program_allowed(program)?;
     ensure_no_shell_escape(program, args)?;
     ensure_safe_arguments(args)?;
@@ -227,38 +254,67 @@ pub fn privileged_argv(
     let mut argv: Vec<String> = Vec::new();
     match auth {
         RootAuth::Polkit => {
+            // A missing, stale or weakened installed policy changes the
+            // authorization boundary; refuse before pkexec is even started.
+            // Unit tests exercise the policy parser separately.
+            #[cfg(not(test))]
+            crate::utils::root_policy::verify_installed_polkit_policy()?;
+
             // NOTE: pkexec does not understand the "--" separator — it would
             // try to execute a program called "--". The program is passed as an
             // absolute path, so there is nothing to disambiguate.
             // pkexec itself is addressed by its absolute path as well, so the
-            // call does not depend on the PATH of the desktop session.
-            argv.push(pkexec_path());
+            // call does not depend on the PATH of the desktop session. The
+            // resolved agent binary is verified before it is started.
+            let pkexec = pkexec_path();
+            verify_trusted_binary(&pkexec)?;
+            argv.push(pkexec.clone());
             if program.ends_with("/lcp-admin") {
                 // named action on the helper itself: the helper is the pkexec
                 // target, so there is no program argument — the action and its
                 // parameters follow directly (their policy is
                 // `ensure_arguments_for_program`'s check_helper_action).
-                return Ok(vec![pkexec_path(), program.to_string()]
+                return Ok(vec![pkexec, program.to_string()]
                     .into_iter()
                     .chain(args.iter().cloned())
                     .collect());
             }
-            // When the root owned helper is installed the request goes through
-            // it. PolicyKit then only ever authorises the helper — a cached
-            // authorisation can not be used to run dnf, systemctl or a shell
-            // as root by another program of the same user.
-            if let Some(helper) = crate::commands::admin::installed_helper_path() {
-                argv.push(String::from(helper));
-            }
+            // Generic programs are never run under pkexec directly. The root
+            // owned helper is the only authorised target; it re-validates the
+            // program and arguments and then runs it as root.
+            let Some(helper) = helper else {
+                return Err(
+                    "The administrator helper is not installed; refusing to run a generic \
+                     privileged program. Install the package or the root-owned helper first."
+                        .to_string(),
+                );
+            };
+            argv.push(helper.to_string());
         }
         RootAuth::SudoPassword(_) => {
             // `-S` reads the password from stdin, an empty prompt suppresses
-            // sudo's own prompt, `--` ends sudo's option parsing.
-            argv.push(String::from("sudo"));
+            // sudo's own prompt, `--` ends sudo's option parsing. The helper
+            // is still the only target: sudo authenticates, then the helper
+            // re-validates and executes the requested program. There is no
+            // direct sudo-to-generic-program route.
+            let sudo = resolve_root_program("sudo").ok_or_else(|| {
+                "sudo was not found on this system; refusing a generic privileged program."
+                    .to_string()
+            })?;
+            verify_trusted_binary(&sudo)?;
+            argv.push(sudo);
             argv.push(String::from("-S"));
             argv.push(String::from("-p"));
             argv.push(String::new());
             argv.push(String::from("--"));
+            let Some(helper) = helper else {
+                return Err(
+                    "The administrator helper is not installed; refusing to run a generic \
+                     privileged program. Install the package or the root-owned helper first."
+                        .to_string(),
+                );
+            };
+            argv.push(helper.to_string());
         }
     }
     argv.push(program.to_string());
@@ -397,7 +453,7 @@ pub async fn run_privileged_script(script: &str) -> std::io::Result<std::process
 ///
 /// `pkexec <shell> -c <script> [args…]` — note that pkexec does not
 /// understand the "--" separator.
-pub fn privileged_script_argv(shell: &str, script: &str, args: &[String]) -> Vec<String> {
+fn privileged_script_argv(shell: &str, script: &str, args: &[String]) -> Vec<String> {
     let mut argv = vec![pkexec_path(), shell.to_string(), String::from("-c"), script.to_string()];
     argv.extend(args.iter().cloned());
     argv
@@ -442,7 +498,15 @@ pub async fn run_privileged_script_with_args(
 /// Drop the cached sudo credential again, so a password typed for one action
 /// does not stay usable for the rest of the session.
 pub fn invalidate_cached_credentials() {
-    let _ = std::process::Command::new("sudo")
+    // This is an unprivileged credential-clearing call, but it must still not
+    // execute a PATH-resolved `sudo`. Resolve and verify the real binary.
+    let Some(sudo) = resolve_root_program("sudo") else {
+        return;
+    };
+    if verify_trusted_binary(&sudo).is_err() {
+        return;
+    }
+    let _ = std::process::Command::new(sudo)
         .arg("-k")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -521,6 +585,12 @@ fn validated_privileged_argv(
     program: &str,
     args: &[String],
 ) -> Result<Option<Vec<String>>, std::io::Error> {
+    if program == "sudo" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Direct sudo is not a permitted privileged channel; use the administrator helper.",
+        ));
+    }
     if program != "pkexec" {
         return Ok(None);
     }
@@ -902,20 +972,34 @@ mod tests {
         ];
         // this is the path the app really takes: the wrapper turns
         // `pkexec systemctl restart nginx.service` into the final argv.
-        // When the root owned helper is installed every request is re-routed
-        // through it — so the program offset depends on the (host) install
-        // state, never on the rule of the test.
-        let helper_prefix = crate::commands::admin::installed_helper_path().is_some();
-        let offset = usize::from(helper_prefix) + 1;
+        // Generic programs are always re-routed through the helper; the unit
+        // test pins a deterministic helper path instead of the host state.
         let argv = validated_privileged_argv("pkexec", &call).unwrap().unwrap();
         // pkexec is addressed by its absolute path, so the call does not
         // depend on the PATH of the desktop session
         assert_eq!(argv[0], "/usr/bin/pkexec");
         // pkexec would try to run a program called "--"
         assert!(!argv.iter().any(|arg| arg == "--"));
-        assert_eq!(argv[offset], "/usr/bin/systemctl");
-        assert_eq!(argv[offset + 1], "restart");
-        assert_eq!(argv[offset + 2], "nginx.service");
+        assert_eq!(argv[1], "/usr/bin/lcp-admin");
+        assert_eq!(argv[2], "/usr/bin/systemctl");
+        assert_eq!(argv[3], "restart");
+        assert_eq!(argv[4], "nginx.service");
+    }
+
+    #[test]
+    fn a_generic_pkexec_call_without_the_helper_fails_closed() {
+        let args = vec![String::from("restart"), String::from("nginx.service")];
+        let error = privileged_argv_with_helper(
+            "/usr/bin/systemctl",
+            &args,
+            &RootAuth::Polkit,
+            None,
+        )
+        .expect_err("a missing helper must not fall back to generic pkexec");
+        assert!(
+            error.contains("administrator helper is not installed"),
+            "the refusal must explain the missing helper: {error}"
+        );
     }
 
     #[test]
@@ -1197,6 +1281,40 @@ mod tests {
             SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
             before,
             "the wrapper must not spawn while admin mode is off"
+        );
+    }
+
+    #[test]
+    fn the_fixed_script_channel_is_unreachable() {
+        let before = SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let error = block_on(run_privileged_script_with_args("set -e", &[]))
+            .expect_err("the shell-script channel must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("temporarily disabled") || message.contains("Refused"),
+            "the shell channel must be refused by policy: {message}"
+        );
+        assert_eq!(
+            SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "the refused shell-script channel must not spawn"
+        );
+    }
+
+    #[test]
+    fn the_sudo_command_wrapper_is_refused_without_spawning() {
+        let before = SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let mut cmd = super::tokio::Command::new("sudo");
+        cmd.args(["dnf", "install", "example"]);
+        let error = block_on(cmd.output()).expect_err("direct sudo must be refused");
+        assert!(
+            error.to_string().contains("Direct sudo is not a permitted privileged channel"),
+            "{error}"
+        );
+        assert_eq!(
+            SPAWN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "the refused sudo wrapper must not spawn"
         );
     }
 

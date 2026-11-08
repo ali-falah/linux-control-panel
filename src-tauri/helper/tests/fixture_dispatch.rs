@@ -25,7 +25,7 @@ mod root_policy;
 use root_policy::{POLKIT_RULE_FILE, POLKIT_RULE_TEXT, PROFILE_D_DIR};
 
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 const FIXTURE_ROOT: &str = "/tmp/lcp-admin-test-fixture";
 
@@ -33,8 +33,9 @@ const FIXTURE_ROOT: &str = "/tmp/lcp-admin-test-fixture";
 /// activated this file (Cargo guarantees that for CARGO_BIN_EXE_*).
 const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
 
-/// One compiler-fixed fixture directory, shared by all the tests here.
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+// The fixture tree is shared with the root_policy path-pin tests compiled
+// into this same integration-test binary. Use the lock from that module so a
+// rebuild (which removes the tree) cannot race a validator walking it.
 
 #[derive(Debug)]
 struct Run {
@@ -112,7 +113,7 @@ fn build_fixture() {
 /// Take the fixture lock, wipe and rebuild the tree; hold the guard for the
 /// rest of the test.
 fn fixture() -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK
+    let guard = root_policy::FIXTURE_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     build_fixture();

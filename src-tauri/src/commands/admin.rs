@@ -114,16 +114,19 @@ impl AdminModeState {
 
 /// Resolve `pkcheck` the same way the privileged programs are resolved; it is
 /// only ever run unprivileged here.
-fn pkcheck_path() -> String {
-    crate::utils::privilege::resolve_root_program("pkcheck")
-        .unwrap_or_else(|| String::from("/usr/bin/pkcheck"))
+fn pkcheck_path() -> Result<String, String> {
+    let path = crate::utils::privilege::resolve_root_program("pkcheck")
+        .ok_or_else(|| "PolicyKit (pkcheck) was not found on this system.".to_string())?;
+    crate::utils::privilege::verify_trusted_binary(&path)?;
+    Ok(path)
 }
 
 /// Run one read-only `pkcheck` query. `LC_ALL=C` is deliberate: the expiry is
 /// printed with `strftime("%c")`, and the C locale is the only one whose
 /// shape we parse.
 fn run_pkcheck(args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(pkcheck_path())
+    let pkcheck = pkcheck_path()?;
+    let output = std::process::Command::new(pkcheck)
         .args(args)
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
@@ -243,6 +246,14 @@ pub async fn admin_mode_state() -> AdminModeState {
     read_admin_mode_state()
 }
 
+/// Check the installed PolicyKit action definitions at startup or on demand.
+/// A missing, stale or weakened file is reported as an error; the helper and
+/// the Polkit call path also refuse to proceed.
+#[tauri::command]
+pub async fn admin_policy_status() -> Result<(), String> {
+    crate::utils::root_policy::verify_installed_polkit_state()
+}
+
 /// Turn admin mode ON by taking the one authorisation the panel caches.
 ///
 /// The prompt is raised by the helper's dedicated `admin_keep` action: it does
@@ -253,6 +264,12 @@ pub async fn admin_mode_state() -> AdminModeState {
 /// empty and ON could never be verified.
 #[tauri::command]
 pub async fn admin_mode_on() -> AdminModeState {
+    if let Err(error) = crate::utils::root_policy::verify_installed_polkit_policy() {
+        return AdminModeState::off(Some(format!(
+            "The installed PolicyKit policy is missing or unsafe: {error}. \
+             Reinstall src-tauri/polkit/com.controlpanel.pkexec.policy before enabling admin mode."
+        )));
+    }
     let before = read_admin_mode_state();
     if before.on {
         return before;

@@ -85,17 +85,17 @@
     enablingRepo = repoName;
     uiStore.confirm(
       'Enable Copr Repository',
-      `Enable "${repoName}"?\n\nThis will add the repository to your system via "dnf copr enable". A polkit authentication prompt will appear.`,
+      `Enable "${repoName}"?\n\nThis adds a third-party package repository using dnf (Copr) or add-apt-repository (PPA). A polkit authentication prompt will appear.\n\nWARNING: The repository's maintainers can distribute software that executes with root privileges when you install or update packages. Only enable sources you trust.`,
       async () => {
         statusStore.setBusy(`Enabling ${repoName}…`);
         try {
           await invoke('enable_copr', { repo: repoName });
           uiStore.addToast(`Copr repo "${repoName}" enabled`, 'success');
-          statusStore.setLastCommand(`dnf copr enable ${repoName}`, 0, true);
+          statusStore.setLastCommand(`copr enable ${repoName}`, 0, true);
           await loadSystemCoprs();
         } catch (e) {
           uiStore.addToast(`Failed to enable repo: ${e}`, 'error');
-          statusStore.setLastCommand(`dnf copr enable ${repoName}`, 1, false);
+          statusStore.setLastCommand(`copr enable ${repoName}`, 1, false);
         } finally {
           enablingRepo = null;
           statusStore.clearBusy();
@@ -108,17 +108,17 @@
   async function disableRepo(repoName: string) {
     uiStore.confirm(
       'Disable Copr Repository',
-      `Disable "${repoName}"? This will run "dnf copr disable" with polkit authentication.`,
+      `Disable "${repoName}"?\n\nThis removes or disables the repository using dnf (Copr) or add-apt-repository (PPA). A polkit authentication prompt will appear.`,
       async () => {
         statusStore.setBusy(`Disabling ${repoName}…`);
         try {
           await invoke('disable_copr', { repo: repoName });
           uiStore.addToast(`Copr repo "${repoName}" disabled`, 'info');
-          statusStore.setLastCommand(`dnf copr disable ${repoName}`, 0, true);
+          statusStore.setLastCommand(`copr disable ${repoName}`, 0, true);
           await loadSystemCoprs();
         } catch (e) {
           uiStore.addToast(`Failed to disable repo: ${e}`, 'error');
-          statusStore.setLastCommand(`dnf copr disable ${repoName}`, 1, false);
+          statusStore.setLastCommand(`copr disable ${repoName}`, 1, false);
         } finally {
           statusStore.clearBusy();
         }

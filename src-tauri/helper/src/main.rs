@@ -28,6 +28,7 @@ use root_policy::{
     firewall_rich_rule_valid, firewall_port_value_valid, firewall_service_name_valid,
     firewall_zone_name_valid, firewall_interface_name_valid, FirewallRichRule,
     FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
+    check_nmcli_interface_state,
     var_www_path_valid, NGINX_BACKUPS_DIR, NGINX_CONFIG_CONTENT_MAX, NGINX_SITES_AVAILABLE,
     NGINX_SITES_ENABLED, NGINX_WWW_INSTALL_MAX, PROFILE_CONTENT_MAX, POLKIT_RULE_FILE,
     POLKIT_RULE_TEXT, PROFILE_D_DIR, REPO_CONTENT_MAX, VAR_WWW_DIR,
@@ -61,6 +62,149 @@ fn privileged_gid() -> u32 {
 #[cfg(feature = "test-fixture")]
 fn privileged_uid() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// Production helper identity gate. The helper is only ever started through
+/// PolicyKit/sudo as root; a direct invocation, a setuid mistake or a
+/// world-writable install must not be able to run a named action. The
+/// fixture build deliberately runs as the test user and is exempt.
+#[allow(dead_code)] // used by the production gate and by unit tests
+fn privileged_identity_is_root(euid: u32) -> bool {
+    euid == 0
+}
+
+/// The helper must not rely on the setuid bit: pkexec/sudo set the real uid
+/// to 0 as well, so a non-root real uid is a packaging error.
+#[allow(dead_code)] // used by the production gate and by unit tests
+fn privileged_identity_is_not_setuid(ruid: u32) -> bool {
+    ruid == 0
+}
+
+/// Refuse to execute anything unless the production helper was started as
+/// root and the installed PolicyKit policy is still the shipped, unweakened
+/// definition. Called after argument validation and immediately before
+/// dispatch, so invalid input still gets its specific validation error while
+/// no privileged operation can run without the identity/policy checks. The
+/// fixture build is the explicit exception.
+fn enforce_production_identity_and_policy() {
+    #[cfg(not(feature = "test-fixture"))]
+    {
+        let euid = rustix::process::geteuid().as_raw();
+        if !privileged_identity_is_root(euid) {
+            eprintln!(
+                "lcp-admin: must run as root (effective uid {euid}); refusing to continue."
+            );
+            std::process::exit(2);
+        }
+        // A setuid-root install would also report euid 0. The helper is only
+        // ever started by pkexec/sudo, which set the real uid to 0 as well;
+        // a non-root real uid therefore means the binary is mispackaged.
+        let ruid = rustix::process::getuid().as_raw();
+        if !privileged_identity_is_not_setuid(ruid) {
+            eprintln!(
+                "lcp-admin: must not be installed setuid-root (real uid {ruid}); \
+                 invoke the helper through pkexec or sudo."
+            );
+            std::process::exit(2);
+        }
+        if let Err(error) = root_policy::verify_installed_polkit_policy() {
+            eprintln!(
+                "lcp-admin: the installed PolicyKit policy is missing or unsafe: {error}; \
+                 refusing to continue. Reinstall src-tauri/polkit/com.controlpanel.pkexec.policy."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Ownership/mode rule for an executable the root helper is about to run.
+/// Production accepts only root-owned files; the fixture build also accepts
+/// files owned by the invoking test user (the fixture stubs). A file that is
+/// writable by group or others is never trusted.
+fn binary_identity_trusted(
+    owner_uid: u32,
+    mode: u32,
+    is_file: bool,
+    expected_uid: u32,
+) -> bool {
+    is_file
+        && (owner_uid == 0 || owner_uid == expected_uid)
+        && mode & 0o022 == 0
+}
+
+/// Resolve a program to an absolute path, follow symlinks once and verify the
+/// final file is owned by the privileged identity and not writable by other
+/// users. Rejecting a symlink outright would break legitimate layouts such as
+/// `/bin` -> `/usr/bin` or `dnf` -> `dnf5`; verifying the canonical target
+/// keeps those working while still refusing a link to an untrusted file.
+fn trusted_program(path: &str) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !std::path::Path::new(path).is_absolute() {
+        return Err(format!("lcp-admin: refusing a relative program path: {path}"));
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| format!("lcp-admin: {path} could not be resolved ({e})"))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| format!("lcp-admin: {path} could not be verified ({e})"))?;
+    if !binary_identity_trusted(
+        metadata.uid(),
+        metadata.mode(),
+        metadata.is_file(),
+        privileged_uid(),
+    ) {
+        return Err(format!(
+            "lcp-admin: refusing to run {path}: it is not a regular file owned by the \
+             privileged identity or it is writable by other users"
+        ));
+    }
+    Ok(canonical.to_string_lossy().to_string())
+}
+
+/// Resolve a bare executable name (or an absolute path) for a named action.
+/// The fixed, root-owned system directories are searched first; the PATH is
+/// only a last resort and every candidate must pass `trusted_program`, so a
+/// user-writable PATH entry can never win.
+fn resolve_trusted_program(name: &str) -> Result<String, String> {
+    if name.contains('/') {
+        return trusted_program(name);
+    }
+    #[cfg(feature = "test-fixture")]
+    {
+        let fixture = format!("/tmp/lcp-admin-test-fixture/bin/{name}");
+        if std::path::Path::new(&fixture).is_file() {
+            return trusted_program(&fixture);
+        }
+    }
+    for directory in [
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ] {
+        let candidate = format!("{directory}/{name}");
+        if std::path::Path::new(&candidate).is_file() {
+            if let Ok(path) = trusted_program(&candidate) {
+                return Ok(path);
+            }
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for directory in path_var.split(':') {
+            if directory.is_empty() || !std::path::Path::new(directory).is_absolute() {
+                continue;
+            }
+            let candidate = format!("{directory}/{name}");
+            if std::path::Path::new(&candidate).is_file() {
+                if let Ok(path) = trusted_program(&candidate) {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    Err(format!("lcp-admin: {name} was not found in a trusted location"))
 }
 #[cfg(feature = "test-fixture")]
 fn privileged_gid() -> u32 {
@@ -110,9 +254,20 @@ const DNF_CANDIDATES: [&str; 2] = ["/usr/bin/dnf", "/bin/dnf"];
 #[cfg(feature = "test-fixture")]
 const DNF_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/dnf"];
 #[cfg(not(feature = "test-fixture"))]
+const ADD_APT_REPOSITORY_CANDIDATES: [&str; 2] = ["/usr/bin/add-apt-repository", "/bin/add-apt-repository"];
+#[cfg(feature = "test-fixture")]
+const ADD_APT_REPOSITORY_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/add-apt-repository"];
+#[cfg(not(feature = "test-fixture"))]
 const APT_GET_CANDIDATES: [&str; 2] = ["/usr/bin/apt-get", "/bin/apt-get"];
 #[cfg(feature = "test-fixture")]
 const APT_GET_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/apt-get"];
+
+/// `ip` is used by the interface-state action and by read-only probes. The
+/// fixture build swaps in a stub so a test never changes a real interface.
+#[cfg(not(feature = "test-fixture"))]
+const IP_CANDIDATES: [&str; 2] = ["/usr/bin/ip", "/bin/ip"];
+#[cfg(feature = "test-fixture")]
+const IP_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/ip"];
 #[cfg(not(feature = "test-fixture"))]
 const DF_CANDIDATES: [&str; 2] = ["/usr/bin/df", "/bin/df"];
 #[cfg(feature = "test-fixture")]
@@ -286,6 +441,9 @@ fn security_ensure_root_owner(path: &str) -> Result<(), String> {
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    let Ok(program) = resolve_trusted_program(program) else {
+        return false;
+    };
     std::process::Command::new(program)
         .args(args)
         .status()
@@ -506,7 +664,7 @@ fn firewall_rich_rule_guard(
 /// Best-effort SSH session detection inside the helper. `None` means the
 /// probe failed — an inconclusive, not a negative, answer.
 fn detect_ssh_sessions() -> Option<Vec<String>> {
-    let ss = ss_bin()?;
+    let ss = trusted_program(ss_bin()?).ok()?;
     let output = std::process::Command::new(ss)
         .args(["-tnp", "state", "established", "( sport = :22 )"])
         .output()
@@ -633,7 +791,8 @@ fn firewall_program_detail(output: std::process::Output, label: &str) -> String 
 }
 
 fn run_firewall_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
-    let output = std::process::Command::new(program)
+    let program = trusted_program(program)?;
+    let output = std::process::Command::new(&program)
         .args(args)
         .output()
         .map_err(|e| format!("{label} could not be started ({e})"))?;
@@ -881,7 +1040,10 @@ fn ssh_sessions_touch_interface(sessions: &[String], interface: &str) -> bool {
 /// guard then applies and, if it fires, explicit confirmation still allows
 /// the operator to proceed — never a silent application.
 fn firewall_zone_permits_ssh(zone: &str) -> bool {
-    if let Ok(output) = std::process::Command::new(FIREWALL_CMD_BIN)
+    let Ok(program) = trusted_program(FIREWALL_CMD_BIN) else {
+        return false;
+    };
+    if let Ok(output) = std::process::Command::new(program)
         .args(["--zone", zone, "--query-service=ssh"])
         .output()
     {
@@ -1151,7 +1313,8 @@ fn firewall_panic_action(enable: bool, confirmed: bool) -> Result<(), String> {
 /// Run one package-manager operation. Non-zero exits are always errors: the
 /// previous app path silently reported success for autoremove/makecache.
 fn run_package_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
-    let output = std::process::Command::new(program)
+    let program = trusted_program(program)?;
+    let output = std::process::Command::new(&program)
         .args(args)
         .output()
         .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
@@ -1172,7 +1335,8 @@ fn run_package_program(program: &str, args: &[&str], label: &str) -> Result<(), 
 /// answers "no" (`dnf --assumeno`) exits non-zero, so only spawn failures are
 /// errors here; the caller parses the transaction text.
 fn capture_package_output(program: &str, args: &[&str], label: &str) -> Result<String, String> {
-    let output = std::process::Command::new(program)
+    let program = trusted_program(program)?;
+    let output = std::process::Command::new(&program)
         .args(args)
         .output()
         .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
@@ -1205,11 +1369,13 @@ fn package_lock_owner() -> Option<String> {
         }
         // dpkg lock files are usually empty; a non-numeric, non-empty value
         // is checked with fuser so a real holder is not missed.
-        if let Ok(output) = std::process::Command::new("fuser").arg(path).output() {
-            if output.status.success() {
-                let pids = String::from_utf8_lossy(&output.stdout);
-                if let Some(pid) = pids.split_whitespace().next() {
-                    return Some(format!("process (PID {pid}) holds {path}"));
+        if let Ok(fuser) = resolve_trusted_program("fuser") {
+            if let Ok(output) = std::process::Command::new(fuser).arg(path).output() {
+                if output.status.success() {
+                    let pids = String::from_utf8_lossy(&output.stdout);
+                    if let Some(pid) = pids.split_whitespace().next() {
+                        return Some(format!("process (PID {pid}) holds {path}"));
+                    }
                 }
             }
         }
@@ -1219,7 +1385,7 @@ fn package_lock_owner() -> Option<String> {
 
 /// Free bytes on the root filesystem; `None` means the check could not run.
 fn package_disk_free_bytes() -> Option<u64> {
-    let df = df_bin()?;
+    let df = trusted_program(df_bin()?).ok()?;
     let output = std::process::Command::new(df)
         .args(["--output=avail", "-B1", "/"])
         .output()
@@ -1344,7 +1510,7 @@ fn running_kernel_release() -> Option<String> {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    let uname = uname_bin()?;
+    let uname = trusted_program(uname_bin()?).ok()?;
     let mut child = std::process::Command::new(uname)
         .arg("-r")
         .stdout(Stdio::piped())
@@ -1532,7 +1698,8 @@ fn dnf_history_undo_action(id: &str, confirmed: bool) -> Result<(), String> {
 /// Run a user/group tool and format a consistent error. All arguments were
 /// validated before this point; the exact argv is passed without a shell.
 fn run_user_program(program: &str, args: &[&str], label: &str) -> Result<(), String> {
-    let output = std::process::Command::new(program)
+    let program = trusted_program(program)?;
+    let output = std::process::Command::new(&program)
         .args(args)
         .output()
         .map_err(|e| format!("lcp-admin: {label} could not be started ({e})"))?;
@@ -1610,7 +1777,7 @@ fn user_set_password_action(username: &str) -> Result<(), String> {
     }
     let password = read_stdin_content(4096, "password")?;
     root_policy::user_password_valid(&password)?;
-    let program = require_user_tool(5, "chpasswd")?;
+    let program = trusted_program(require_user_tool(5, "chpasswd")?)?;
     let input = format!("{username}:{password}\n");
     use std::io::Write;
     let mut child = std::process::Command::new(program)
@@ -1741,6 +1908,7 @@ fn invoking_uid() -> Option<u32> {
 
 /// Owner UID of a login session, resolved by loginctl (authoritative).
 fn session_owner_uid(program: &str, session_id: &str) -> Result<u32, String> {
+    let program = trusted_program(program)?;
     let output = std::process::Command::new(program)
         .args(["show-session", session_id, "-p", "User", "--value"])
         .output()
@@ -1821,16 +1989,18 @@ fn security_ssh_param_action(param: &str, value: &str) -> Result<(), String> {
     }
     // Verify the effective value, like the previous flow: another included
     // config can override the edited line, and success must not be claimed.
-    let effective = match std::process::Command::new(sshd)
-        .args(["-T", "-f", &cfg])
-        .output()
+    let effective = match trusted_program(sshd)
+        .and_then(|sshd| {
+            std::process::Command::new(sshd)
+                .args(["-T", "-f", &cfg])
+                .output()
+                .map_err(|e| format!("lcp-admin: sshd -T could not be started ({e})"))
+        })
     {
         Ok(output) => output,
         Err(e) => {
             security_restore_file(rel, &original)?;
-            return Err(format!(
-                "lcp-admin: sshd -T could not be started ({e}); the edit was restored"
-            ));
+            return Err(format!("lcp-admin: {e}; the edit was restored"));
         }
     };
     let text = String::from_utf8_lossy(&effective.stdout);
@@ -1966,6 +2136,7 @@ fn security_apply_action(op: &str) -> Result<(), String> {
                 "deny = 5\nunlock_time = 900\nfail_interval = 900\n",
             )?;
             if let Some(authselect) = authselect_bin() {
+                let authselect = trusted_program(authselect)?;
                 let status = std::process::Command::new(authselect)
                     .args(["enable-feature", "with-faillock"])
                     .status()
@@ -1982,6 +2153,7 @@ fn security_apply_action(op: &str) -> Result<(), String> {
         "pam_faillock_off" => {
             security_remove_file("security/faillock.conf.d/50-hardening.conf")?;
             if let Some(authselect) = authselect_bin() {
+                let authselect = trusted_program(authselect)?;
                 let status = std::process::Command::new(authselect)
                     .args(["disable-feature", "with-faillock"])
                     .status()
@@ -2182,6 +2354,61 @@ fn unit_daemon_reload_action() -> Result<(), String> {
     run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl")
 }
 
+fn add_apt_repository_bin() -> Option<&'static str> {
+    ADD_APT_REPOSITORY_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .copied()
+}
+
+fn ip_bin() -> Option<&'static str> {
+    IP_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .copied()
+}
+
+/// `nmcli_interface_state <iface> <up|down>`: the one root path that changes an
+/// interface's administrative state. The loopback guard is enforced by the
+/// shared validator before the fixed `ip link set` argv is built.
+fn nmcli_interface_state_action(iface: &str, direction: &str) -> Result<(), String> {
+    check_nmcli_interface_state(&[iface.to_string(), direction.to_string()])?;
+    let ip = ip_bin().ok_or_else(|| "lcp-admin: ip is not available".to_string())?;
+    run_firewall_program(ip, &["link", "set", "dev", iface, direction], "ip")
+}
+
+/// `copr_manage <enable|disable> <owner/project>`: the Copr/PPA action. dnf
+/// is preferred; add-apt-repository runs only when dnf is not installed and
+/// only for `ppa:` repositories (or bare owner/project, which is prefixed).
+fn copr_manage_action(verb: &str, repo: &str) -> Result<(), String> {
+    root_policy::copr_verb_valid(verb)?;
+    root_policy::copr_repo_valid(repo)?;
+
+    if let Some(dnf) = dnf_bin() {
+        if repo.starts_with("ppa:") {
+            return Err(
+                "lcp-admin: ppa: repositories require add-apt-repository; dnf is the active manager"
+                    .to_string(),
+            );
+        }
+        return run_firewall_program(dnf, &["copr", verb, repo, "-y"], "dnf");
+    }
+
+    if let Some(apt) = add_apt_repository_bin() {
+        let repo_arg = if repo.starts_with("ppa:") {
+            repo.to_string()
+        } else {
+            format!("ppa:{repo}")
+        };
+        if verb == "enable" {
+            return run_firewall_program(apt, &["-y", &repo_arg], "add-apt-repository");
+        }
+        return run_firewall_program(apt, &["--remove", "-y", &repo_arg], "add-apt-repository");
+    }
+
+    Err("lcp-admin: neither dnf nor add-apt-repository is available".to_string())
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -2237,6 +2464,8 @@ const ROOT_ACTIONS: &[&str] = &[
     "unit_action",
     "unit_dropin_write",
     "unit_daemon_reload",
+    "copr_manage",
+    "nmcli_interface_state",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -2314,6 +2543,7 @@ fn read_stdin_bytes(limit: u64, what: &str) -> Result<Vec<u8>, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
     let Some(requested) = args.first() else {
         eprintln!("lcp-admin: no program given.");
         std::process::exit(2);
@@ -2324,6 +2554,15 @@ fn main() {
     // result — the process only reaches exit 0 for an operation that
     // succeeded, and exit 2 (with the reason on stderr) for everything else.
     if ROOT_ACTIONS.contains(&requested.as_str()) {
+        // Re-run the shared named-action gate inside the helper itself. The
+        // app already validates before building the call, but a direct helper
+        // invocation skips that layer; the action-specific validators remain
+        // the last line of defence.
+        if let Err(message) = ensure_arguments_for_program("lcp-admin", &args) {
+            eprintln!("lcp-admin: {message}");
+            std::process::exit(2);
+        }
+        enforce_production_identity_and_policy();
         let outcome = if requested == "admin_keep" {
             // Exists only to take the panel's one kept authorisation: the
             // polkit rule grants AUTH_ADMIN_KEEP to this helper and the
@@ -2507,6 +2746,22 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "nmcli_interface_state" {
+            if args.len() == 3 {
+                nmcli_interface_state_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes an interface name and up|down."
+                ))
+            }
+        } else if requested == "copr_manage" {
+            if args.len() == 3 {
+                copr_manage_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes enable|disable and a Copr repository."
+                ))
             }
         } else if requested == "unit_daemon_reload" {
             if args.len() == 1 {
@@ -2769,6 +3024,8 @@ fn main() {
         eprintln!("lcp-admin: {message}");
         std::process::exit(2);
     }
+
+    enforce_production_identity_and_policy();
 
     // `exec` replaces the helper with the program, so the exit status and the
     // output of the program are the ones the app sees.
@@ -4036,7 +4293,8 @@ fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
     let connection = args.get(2).ok_or_else(|| {
         "lcp-admin: nmcli_connection_save requires a connection name.".to_string()
     })?;
-    let mut cmd = std::process::Command::new("nmcli");
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let mut cmd = std::process::Command::new(nmcli);
     cmd.arg("connection").arg(verb.as_str()).arg(connection.as_str());
     for pair in args[3..].chunks(2) {
         cmd.arg(pair[0].as_str()).arg(pair[1].as_str());
@@ -4056,7 +4314,8 @@ fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
 /// The `nmcli_connection_delete <uuid>` action: deletes exactly one
 /// connection profile by UUID.
 fn nmcli_connection_delete_action(uuid: &str) -> Result<(), String> {
-    let output = std::process::Command::new("nmcli")
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
         .args(["connection", "delete", uuid])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
@@ -4072,7 +4331,8 @@ fn nmcli_connection_delete_action(uuid: &str) -> Result<(), String> {
 /// The `nmcli_connection_up <uuid>` action: activates exactly one
 /// connection profile by UUID.
 fn nmcli_connection_up_action(uuid: &str) -> Result<(), String> {
-    let output = std::process::Command::new("nmcli")
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
         .args(["connection", "up", uuid])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
@@ -4088,7 +4348,8 @@ fn nmcli_connection_up_action(uuid: &str) -> Result<(), String> {
 /// The `nmcli_connection_down <uuid>` action: deactivates exactly one
 /// connection profile by UUID.
 fn nmcli_connection_down_action(uuid: &str) -> Result<(), String> {
-    let output = std::process::Command::new("nmcli")
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
         .args(["connection", "down", uuid])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn nmcli: {e}"))?;
@@ -4118,7 +4379,8 @@ fn nmcli_connection_import_action(import_type: &str, file_path: &str) -> Result<
         file_path.to_string(),
     ])?;
 
-    let output = std::process::Command::new("nmcli")
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
         .args([
             "connection",
             "import",
@@ -4162,9 +4424,10 @@ fn repo_toggle_enable_action(file_path: &str, repo_id: &str) -> Result<(), Strin
     use root_policy::{ensure_repo_file_path, ensure_safe_operand};
     ensure_repo_file_path(file_path)?;
     ensure_safe_operand(repo_id, "repo id")?;
+    let sed = resolve_trusted_program("sed")?;
 
     if file_path.ends_with(".sources") {
-        let output = std::process::Command::new("sed")
+        let output = std::process::Command::new(&sed)
             .args(["-i", "s/^Enabled:\\s*.*/Enabled: yes/I", file_path])
             .output()
             .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4178,7 +4441,7 @@ fn repo_toggle_enable_action(file_path: &str, repo_id: &str) -> Result<(), Strin
     }
 
     if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
-        let output = std::process::Command::new("sed")
+        let output = std::process::Command::new(&sed)
             .args(["-i", "s/^#\\s*\\(deb\\s.*\\)/\\1/", file_path])
             .output()
             .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4197,7 +4460,7 @@ fn repo_toggle_enable_action(file_path: &str, repo_id: &str) -> Result<(), Strin
         "/^\\[{}\\]/,/^\\[/ s/^enabled\\s*=.*/enabled=1;/",
         escaped
     );
-    let output = std::process::Command::new("sed")
+    let output = std::process::Command::new(&sed)
         .args(["-i", &script, file_path])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4218,9 +4481,10 @@ fn repo_toggle_disable_action(file_path: &str, repo_id: &str) -> Result<(), Stri
     use root_policy::{ensure_repo_file_path, ensure_safe_operand};
     ensure_repo_file_path(file_path)?;
     ensure_safe_operand(repo_id, "repo id")?;
+    let sed = resolve_trusted_program("sed")?;
 
     if file_path.ends_with(".sources") {
-        let output = std::process::Command::new("sed")
+        let output = std::process::Command::new(&sed)
             .args(["-i", "s/^Enabled:\\s*.*/Enabled: no/I", file_path])
             .output()
             .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4234,7 +4498,7 @@ fn repo_toggle_disable_action(file_path: &str, repo_id: &str) -> Result<(), Stri
     }
 
     if file_path.ends_with(".list") || file_path.ends_with("sources.list") {
-        let output = std::process::Command::new("sed")
+        let output = std::process::Command::new(&sed)
             .args(["-i", "s/^\\(deb\\s.*\\)/# \\1/", file_path])
             .output()
             .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4253,7 +4517,7 @@ fn repo_toggle_disable_action(file_path: &str, repo_id: &str) -> Result<(), Stri
         "/^\\[{}\\]/,/^\\[/ s/^enabled\\s*=.*/enabled=0;/",
         escaped
     );
-    let output = std::process::Command::new("sed")
+    let output = std::process::Command::new(&sed)
         .args(["-i", &script, file_path])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn sed: {e}"))?;
@@ -4322,7 +4586,10 @@ fn run_repo_program(
     args: &[&str],
     label: &str,
 ) -> Result<(), RepoProgramFailure> {
-    let output = std::process::Command::new(program)
+    let program = resolve_trusted_program(program).map_err(|e| {
+        RepoProgramFailure::NotAvailable(format!("{label} could not be started ({e})"))
+    })?;
+    let output = std::process::Command::new(&program)
         .args(args)
         .output()
         .map_err(|e| RepoProgramFailure::NotAvailable(format!(
@@ -4514,7 +4781,8 @@ fn repo_delete_action(file_path: &str) -> Result<(), String> {
     use root_policy::ensure_repo_file_path;
     ensure_repo_file_path(file_path)?;
 
-    let output = std::process::Command::new("rm")
+    let rm = resolve_trusted_program("rm")?;
+    let output = std::process::Command::new(rm)
         .args(["-f", file_path])
         .output()
         .map_err(|e| format!("lcp-admin: failed to spawn rm: {e}"))?;
@@ -5748,5 +6016,101 @@ mod firewall_ssh_guard_tests {
     fn ss_empty_output_means_no_sessions() {
         assert!(parse_ss_sessions("").is_empty());
         assert!(parse_ss_sessions("\n\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod trusted_program_tests {
+    use super::{binary_identity_trusted, privileged_identity_is_root, trusted_program};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_effective_root_is_privileged() {
+        assert!(privileged_identity_is_root(0));
+        assert!(!privileged_identity_is_root(1000));
+        assert!(super::privileged_identity_is_not_setuid(0));
+        assert!(!super::privileged_identity_is_not_setuid(1000));
+    }
+
+    #[test]
+    fn ownership_and_write_bits_are_enforced() {
+        assert!(binary_identity_trusted(0, 0o755, true, 0));
+        assert!(binary_identity_trusted(0, 0o555, true, 0));
+        assert!(!binary_identity_trusted(1000, 0o755, true, 0));
+        assert!(!binary_identity_trusted(0, 0o775, true, 0));
+        assert!(!binary_identity_trusted(0, 0o757, true, 0));
+        assert!(!binary_identity_trusted(0, 0o755, false, 0));
+    }
+
+    fn temp_file(label: &str, mode: u32) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "lcp-trusted-program-{}-{label}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_world_writable_program_is_refused() {
+        let path = temp_file("world-writable", 0o777);
+        let error = trusted_program(path.to_str().unwrap())
+            .expect_err("a 0777 program must be refused");
+        assert!(
+            error.contains("writable by other users") || error.contains("privileged identity"),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_symlink_to_an_untrusted_program_is_refused() {
+        let target = temp_file("symlink-target", 0o777);
+        let link = std::env::temp_dir().join(format!(
+            "lcp-trusted-program-{}-symlink-link",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = trusted_program(link.to_str().unwrap())
+            .expect_err("a symlink to an untrusted program must be refused");
+        assert!(
+            error.contains("writable by other users") || error.contains("privileged identity"),
+            "{error}"
+        );
+        let _ = std::fs::remove_file(link);
+        let _ = std::fs::remove_file(target);
+    }
+
+    #[test]
+    fn a_symlink_to_a_trusted_program_is_accepted() {
+        let link = std::env::temp_dir().join(format!(
+            "lcp-trusted-program-{}-trusted-link",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
+        let resolved = trusted_program(link.to_str().unwrap())
+            .expect("a symlink to a trusted root-owned binary must be accepted");
+        assert_eq!(
+            std::fs::canonicalize("/usr/bin/true").unwrap().to_string_lossy(),
+            resolved
+        );
+        let _ = std::fs::remove_file(link);
+    }
+
+    #[cfg(feature = "test-fixture")]
+    #[test]
+    fn a_test_user_owned_fixture_program_is_trusted() {
+        let path = temp_file("fixture-owned", 0o755);
+        trusted_program(path.to_str().unwrap())
+            .expect("a test-user owned 0755 fixture program is trusted");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_real_system_binary_is_trusted() {
+        trusted_program("/usr/bin/true").expect("/usr/bin/true is root-owned and trusted");
     }
 }

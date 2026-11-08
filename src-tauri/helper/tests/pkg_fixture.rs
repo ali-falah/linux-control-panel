@@ -534,3 +534,17 @@ fn undo_timed_out_uname_with_kernel_package_fails_closed() {
     );
     assert_eq!(calls(), vec!["history info 42"]);
 }
+
+#[test]
+fn repo_add_named_action_still_uses_the_validated_package_manager_path() {
+    let _guard = fixture(true);
+    let run = run_helper(&["repo_add", "https://example.com/example.repo"]);
+    assert_eq!(run.code, 0, "named repo_add must still work: {run:?}");
+    let calls = calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.contains("config-manager") && call.contains("addrepo")
+        }),
+        "named repo_add must use the validated dnf path: {calls:?}"
+    );
+}

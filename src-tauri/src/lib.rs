@@ -10,7 +10,10 @@ use commands::{
         list_cron_jobs, add_cron_job, delete_cron_job,
         cron_list_timers, cron_toggle_timer,
     },
-    admin::{admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, helper_installed},
+    admin::{
+        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_status,
+        helper_installed,
+    },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
@@ -210,6 +213,7 @@ pub fn run() {
             admin_mode_on,
             admin_mode_off,
             admin_mode_state,
+            admin_policy_status,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,
@@ -487,6 +491,17 @@ pub fn run() {
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
                 ),
             );
+            if let Err(error) =
+                crate::utils::root_policy::verify_installed_polkit_state()
+            {
+                log_to_file(
+                    "WARN",
+                    &format!(
+                        "PolicyKit policy verification failed: {error}. Privileged actions \
+                         will be refused until the shipped policy is reinstalled."
+                    ),
+                );
+            }
             tauri::async_runtime::spawn(async {
                 let _ = commands::service_manager::get_boot_times(Some(false)).await;
                 let _ = commands::service_manager::get_boot_blame(Some(false)).await;
