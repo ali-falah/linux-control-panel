@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Control Panel",
-  "version": "1.2.0",
+  "version": "0.3.0",
   "identifier": "com.controlpanel.app",
   "build": {
     "frontendDist": "../dist",
@@ -54,13 +54,23 @@
           "libwebkit2gtk-4.1-0",
           "libgtk-3-0",
           "libayatana-appindicator3-1"
-        ]
+        ],
+        "files": {
+          "/usr/share/polkit-1/actions/com.controlpanel.pkexec.policy": "polkit/com.controlpanel.pkexec.policy",
+          "/usr/share/doc/control-panel/copyright": "../LICENSE",
+          "/etc/polkit-1/rules.d/50-linux-control-panel.rules": "polkit/50-linux-control-panel.rules"
+        }
       },
       "rpm": {
         "depends": [
           "webkit2gtk4.1",
           "gtk3"
-        ]
+        ],
+        "files": {
+          "/usr/share/polkit-1/actions/com.controlpanel.pkexec.policy": "polkit/com.controlpanel.pkexec.policy",
+          "/usr/share/licenses/control-panel/LICENSE": "../LICENSE",
+          "/etc/polkit-1/rules.d/50-linux-control-panel.rules": "polkit/50-linux-control-panel.rules"
+        }
       },
       "appimage": {
         "bundleMediaFramework": true
@@ -68,6 +78,7 @@
     },
     "externalBin": [
       "binaries/lcp-admin"
-    ]
+    ],
+    "licenseFile": "../LICENSE"
   }
 }

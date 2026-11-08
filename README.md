@@ -120,7 +120,7 @@ npm install
 # Run in Development Mode (Hot Reload)
 npm run tauri:dev
 
-# Production Build (generates RPM & AppImage bundles)
+# Production Build (native package for the host: RPM on Fedora, DEB on Debian/Ubuntu)
 npm run tauri:build
 ```
 
@@ -171,9 +171,11 @@ grep -o 'policykit.exec.path">[^<]*' \
 ```
 
 The five-minute authorisation keep (`AUTH_ADMIN_KEEP`) is granted exclusively
-by the rules.d rule the helper installs at
+by the rules.d rule shipped by the RPM/DEB package at
 `/etc/polkit-1/rules.d/50-linux-control-panel.rules` — it matches the helper's
-two paths and nothing else.
+two paths and nothing else. The helper's `install_polkit_rule` action can
+repair or reinstall that rule. AppImage builds do not install host system
+policy; install the policy and rule manually when using an AppImage.
 
 ---
 

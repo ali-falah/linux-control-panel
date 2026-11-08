@@ -1,0 +1,18 @@
+// Installed by the Linux Control Panel.
+// Grants the root owned helper (and only the helper) the right to run with
+// administrator rights. The authorisation is kept for the default
+// timestamp_timeout (5 minutes), so a multi step action asks only once.
+// The helper lives at the developer install path (/usr/local/libexec) or
+// at the distro package path (/usr/bin) — both are that same helper.
+// These are the action ids of the app's com.controlpanel.pkexec.policy:
+// pkexec authorises under the annotated action, never under the generic
+// exec action (which must not get the keep — every other root program
+// goes through it).
+polkit.addRule(function(action, subject) {
+    if ((action.id == "com.controlpanel.helper.system" ||
+         action.id == "com.controlpanel.helper.packaged") &&
+        subject.active && subject.local &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+});
