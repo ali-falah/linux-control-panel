@@ -3,6 +3,52 @@ use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 use crate::{binary_exists, log_to_file};
 
+/// Forward a validated system-scope unit operation to the installed helper.
+/// The helper re-validates the unit name and the protected-unit policy.
+async fn run_service_named_action(
+    action: &str,
+    params: &[String],
+    input: &str,
+) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = crate::utils::privilege::run_privileged_with_stdin(
+        helper,
+        &args,
+        &crate::utils::privilege::RootAuth::Polkit,
+        input,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+/// Shared success bookkeeping after a system helper action.
+fn finish_unit_action(
+    name: &str,
+    action_str: &str,
+    is_user: bool,
+    stdout: &str,
+    _stderr: String,
+) -> Result<String, String> {
+    if matches!(action_str, "enable" | "disable" | "mask" | "unmask") {
+        invalidate_unit_file_cache();
+    }
+    let scope = if is_user { "user" } else { "system" };
+    log_to_file("INFO", &format!("Service action ({scope}): {action_str} {name}"));
+    Ok(if stdout.is_empty() {
+        format!("Successfully ran: systemctl {action_str} {name}")
+    } else {
+        stdout.to_string()
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceUnit {
     pub name: String,
@@ -508,14 +554,17 @@ pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<
         );
 
         if needs_elevation {
-            // The unit name is an operand of systemctl — a name that starts
-            // with a dash would be read as an option.
+            // The name is validated here for an early message and again in
+            // the helper, which also enforces the protected-unit policy.
             ensure_safe_operand(&name, "service name")?;
-            Command::new("pkexec")
-                .args(["systemctl", &action_str, &name])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run pkexec: {e}"))?
+            crate::utils::root_policy::unit_action_valid(&action_str, &name)?;
+            run_service_named_action(
+                "unit_action",
+                &[action_str.clone(), name.clone()],
+                "",
+            )
+            .await?;
+            return finish_unit_action(&name, &action_str, false, "", String::new());
         } else {
             Command::new("systemctl")
                 .args([&action_str, &name])
@@ -640,8 +689,7 @@ pub async fn write_unit_file(name: String, content: String, user_mode: Option<bo
 
     if is_user {
         let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;
-        let unit_stem = name.trim_end_matches(".service");
-        let drop_in_dir = format!("{}/.config/systemd/user/{}.d", home, unit_stem);
+        let drop_in_dir = format!("{}/.config/systemd/user/{}.d", home, name);
         let drop_in_file = format!("{}/override.conf", drop_in_dir);
 
         // Create directory
@@ -661,34 +709,22 @@ pub async fn write_unit_file(name: String, content: String, user_mode: Option<bo
         log_to_file("INFO", &format!("Wrote user unit file override for {name}"));
         Ok(())
     } else {
-        let unit_stem = name.trim_end_matches(".service");
-        let drop_in_dir = format!("/etc/systemd/system/{}.d", unit_stem);
-        let drop_in_file = format!("{}/override.conf", drop_in_dir);
-
-        // Create drop-in directory via pkexec
-        let mkdir_out = Command::new("pkexec")
-            .args(["mkdir", "-p", &drop_in_dir])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to create drop-in dir: {e}"))?;
-
-        if !mkdir_out.status.success() {
-            let err = String::from_utf8_lossy(&mkdir_out.stderr).to_string();
-            return Err(format!("Failed to create drop-in directory: {err}"));
-        }
-
-        // Write content safely as root
-        crate::utils::privilege::write_file_as_root(&drop_in_file, &content).await?;
-
-        // Reload systemd daemon
-        let _ = Command::new("pkexec")
-            .args(["systemctl", "daemon-reload"])
-            .output()
-            .await;
-
+        crate::utils::root_policy::service_unit_name_valid(&name)?;
+        run_service_named_action("unit_dropin_write", &[name.clone()], &content).await?;
+        invalidate_unit_file_cache();
         log_to_file("INFO", &format!("Wrote unit file override for {name}"));
         Ok(())
     }
+}
+
+/// Retry `systemctl daemon-reload` without rewriting any unit file. This is
+/// the recovery action when a write succeeded but the reload/rollback retry
+/// failed.
+#[tauri::command]
+pub async fn unit_daemon_reload() -> Result<String, String> {
+    run_service_named_action("unit_daemon_reload", &[], "").await?;
+    invalidate_unit_file_cache();
+    Ok("systemd daemon reloaded.".to_string())
 }
 
 static BOOT_BLAME_CACHE: Mutex<Option<Vec<BlameEntry>>> = Mutex::new(None);

@@ -238,6 +238,19 @@
       fullName += '.service';
     }
 
+    if (!userScope) {
+      uiStore.confirm(
+        'Create System Unit as Root',
+        `This will write a root-owned systemd drop-in for "${fullName}" and run daemon-reload.\n\nOnly continue if you trust this unit definition.\n\n${generatedUnitContent}`,
+        () => doCreateUnit(fullName, startImmediately),
+        true
+      );
+      return;
+    }
+    await doCreateUnit(fullName, startImmediately);
+  }
+
+  async function doCreateUnit(fullName: string, startImmediately: boolean) {
     isSubmittingUnit = true;
     try {
       await invoke('write_unit_file', {
@@ -671,6 +684,15 @@
 
   function confirmSaveUnitFile() {
     showUnitDiffModal = true;
+  }
+
+  async function retryDaemonReload() {
+    try {
+      await invoke<string>('unit_daemon_reload');
+      uiStore.addToast('systemd daemon reloaded successfully', 'success');
+    } catch (e) {
+      uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
+    }
   }
 
   async function saveUnitFile() {
@@ -1218,6 +1240,9 @@
             <FileText size={13} /> Full Journal ↗
           </Button>
         {:else if activePanel === 'editor'}
+          <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
+            Retry daemon-reload
+          </Button>
           <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
             disabled={saving || editedContent === unitFileContent}>
             {saving ? 'Saving…' : 'Save Override'}

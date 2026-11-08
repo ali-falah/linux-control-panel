@@ -1886,6 +1886,67 @@ pub fn service_protection_level(unit_name: &str) -> Option<&'static str> {
     None
 }
 
+/// Systemd unit-name contract shared by the app and the helper (the same
+/// grammar the service UI uses).
+pub fn service_unit_name_valid(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 255 || name.starts_with('-') || name.contains('/') {
+        return Err(format!("Invalid systemd unit name: {name}"));
+    }
+    let valid_suffix = [
+        ".service", ".socket", ".target", ".timer", ".mount", ".automount",
+        ".path", ".slice", ".scope", ".device", ".swap",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix));
+    if !valid_suffix {
+        return Err(format!("The unit name must end in a systemd unit suffix: {name}"));
+    }
+    let bytes = name.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || b"-_.@:".contains(&byte) {
+            index += 1;
+        } else if byte == b'\\'
+            && bytes.get(index + 1) == Some(&b'x')
+            && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(index + 3).is_some_and(u8::is_ascii_hexdigit)
+        {
+            index += 4;
+        } else {
+            return Err(format!("The unit name contains unsafe characters: {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// The system-scope unit actions and the shared protection policy. Critical
+/// units cannot be stopped/disabled/masked.
+pub fn unit_action_valid(verb: &str, unit: &str) -> Result<(), String> {
+    const VERBS: &[&str] = &[
+        "start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask",
+    ];
+    if !VERBS.contains(&verb) {
+        return Err(format!(
+            "The unit action must be start|stop|restart|reload|enable|disable|mask|unmask, got: {verb}"
+        ));
+    }
+    service_unit_name_valid(unit)?;
+    let level = service_protection_level(unit);
+    let blocked = match (verb, level) {
+        ("stop" | "disable" | "mask", Some("critical")) => true,
+        ("stop" | "disable" | "mask", Some("essential")) => true,
+        _ => false,
+    };
+    if blocked {
+        return Err(format!(
+            "The {} unit cannot be {verb}ed with administrator rights through this panel",
+            level.unwrap_or("protected")
+        ));
+    }
+    Ok(())
+}
+
 fn check_systemctl(args: &[String]) -> Result<(), String> {
     const PROGRAM: &str = "systemctl";
     for arg in args {
@@ -3441,6 +3502,9 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "unit_action",
+    "unit_dropin_write",
+    "unit_daemon_reload",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -3639,6 +3703,9 @@ const HELPER_SECURITY_APPLY_ACTIONS: &[&str] = &["security_apply"];
 const HELPER_SECURITY_SSH_PARAM_ACTIONS: &[&str] = &["security_ssh_param"];
 const HELPER_SECURITY_KERNEL_PARAM_ACTIONS: &[&str] = &["security_kernel_param"];
 const HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS: &[&str] = &["security_lock_account"];
+const HELPER_UNIT_ACTION_ACTIONS: &[&str] = &["unit_action"];
+const HELPER_UNIT_DROPIN_ACTIONS: &[&str] = &["unit_dropin_write"];
+const HELPER_UNIT_RECOVERY_ACTIONS: &[&str] = &["unit_daemon_reload"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -4346,6 +4413,38 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "the backend must be firewalld or ufw",
             ));
         }
+        return Ok(());
+    }
+    if HELPER_UNIT_RECOVERY_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no further arguments",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_UNIT_ACTION_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a verb and a unit name",
+            ));
+        }
+        unit_action_valid(&args[1], &args[2])?;
+        return Ok(());
+    }
+    if HELPER_UNIT_DROPIN_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one unit name",
+            ));
+        }
+        service_unit_name_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_SECURITY_APPLY_ACTIONS.contains(&action.as_str()) {
@@ -8031,6 +8130,70 @@ mod security_action_validator_tests {
             vec!["security_service_toggle", "auditd", "enable", "extra"],
             vec!["security_ctrl_alt_del", "start"],
             vec!["security_ctrl_alt_del", "mask", "extra"],
+        ] {
+            assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
+        }
+    }
+}
+
+#[cfg(test)]
+mod service_manager_validator_tests {
+    use super::{
+        ensure_arguments_for_program, service_unit_name_valid, unit_action_valid,
+    };
+
+    fn check_lcp(args: &[&str]) -> Result<(), String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        ensure_arguments_for_program("lcp-admin", &argv)
+    }
+
+    #[test]
+    fn unit_names_and_protected_action_policy() {
+        for unit in ["nginx.service", "cron-daily.timer", "dev-sda.device", "user@1000.service"] {
+            service_unit_name_valid(unit).unwrap_or_else(|e| panic!("{unit}: {e}"));
+        }
+        for unit in ["", "nginx", "-bad.service", "/etc/passwd", "bad;name.service", "a/b.service"] {
+            assert!(service_unit_name_valid(unit).is_err(), "{unit:?}");
+        }
+
+        for (verb, unit) in [
+            ("stop", "systemd-logind.service"),
+            ("disable", "dbus-broker.service"),
+            ("mask", "systemd-journald.service"),
+            ("stop", "firewalld.service"),
+            ("disable", "sshd.service"),
+            ("mask", "NetworkManager.service"),
+        ] {
+            assert!(unit_action_valid(verb, unit).is_err(), "{verb} {unit} must be blocked");
+        }
+        for (verb, unit) in [
+            ("restart", "sshd.service"),
+            ("start", "firewalld.service"),
+            ("unmask", "systemd-logind.service"),
+            ("stop", "nginx.service"),
+            ("disable", "httpd.service"),
+            ("mask", "cups.service"),
+        ] {
+            unit_action_valid(verb, unit)
+                .unwrap_or_else(|e| panic!("{verb} {unit}: {e}"));
+        }
+        assert!(unit_action_valid("explode", "nginx.service").is_err());
+    }
+
+    #[test]
+    fn unit_action_gate_enforces_shapes() {
+        check_lcp(&["unit_action", "restart", "nginx.service"]).expect("valid action");
+        check_lcp(&["unit_action", "mask", "cups.service"]).expect("valid mask");
+        check_lcp(&["unit_dropin_write", "nginx.service"]).expect("valid dropin");
+        check_lcp(&["unit_daemon_reload"]).expect("valid recovery");
+        for args in [
+            vec!["unit_action", "restart"],
+            vec!["unit_action", "explode", "nginx.service"],
+            vec!["unit_action", "stop", "sshd.service"],
+            vec!["unit_action", "restart", "nginx"],
+            vec!["unit_dropin_write"],
+            vec!["unit_dropin_write", "-bad.service"],
+            vec!["unit_daemon_reload", "extra"],
         ] {
             assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
         }

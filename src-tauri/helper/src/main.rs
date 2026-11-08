@@ -125,6 +125,10 @@ const UNAME_CANDIDATES: [&str; 1] = ["/tmp/lcp-admin-test-fixture/bin/uname"];
 /// Security-auditor files all live under this root; the fixture build swaps it
 /// below /tmp so tests never touch /etc or /tmp permissions.
 #[cfg(not(feature = "test-fixture"))]
+const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
+#[cfg(feature = "test-fixture")]
+const SYSTEMD_UNIT_ROOT: &str = "/tmp/lcp-admin-test-fixture/systemd/system";
+#[cfg(not(feature = "test-fixture"))]
 const SECURITY_ETC_ROOT: &str = "/etc";
 #[cfg(feature = "test-fixture")]
 const SECURITY_ETC_ROOT: &str = "/tmp/lcp-admin-test-fixture/etc";
@@ -2030,6 +2034,151 @@ fn security_apply_action(op: &str) -> Result<(), String> {
     }
 }
 
+/// `unit_action <verb> <unit>`: the system-scope unit actions. The shared
+/// policy enforces unit-name grammar and the protected-unit rules; --user
+/// actions stay unprivileged in the app.
+fn unit_action_action(verb: &str, unit: &str) -> Result<(), String> {
+    root_policy::unit_action_valid(verb, unit)?;
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    run_firewall_program(SYSTEMCTL_BIN, &[verb, unit], "systemctl")
+}
+
+/// Write an already-validated systemd override path atomically with a fixed
+/// 0644 root-owned file. Used both for the new content and for rollback (so a
+/// rollback never touches the preserved backup).
+fn write_systemd_override(path: &str, content: &str) -> Result<(), String> {
+    let tmp = format!("{path}.tmp.{}", std::process::id());
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("lcp-admin: could not write {tmp} ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("lcp-admin: could not replace {path} ({e})"));
+    }
+    Ok(())
+}
+
+/// `unit_dropin_write <unit>`: write the fixed `<unit>.d/override.conf`
+/// drop-in with content from stdin, then daemon-reload. The unit name is
+/// validated, the drop-in tree is symlink-checked, and the content is bounded.
+fn unit_dropin_write_action(unit: &str) -> Result<(), String> {
+    root_policy::service_unit_name_valid(unit)?;
+    let content = read_stdin_content(64 * 1024, "unit override")?;
+    if content.contains('\0') {
+        return Err("lcp-admin: the unit override must not contain NUL bytes".to_string());
+    }
+    if root_policy::service_protection_level(unit)
+        .is_some_and(|level| level == "critical")
+        && content.trim().is_empty()
+    {
+        return Err(format!(
+            "lcp-admin: writing an empty override to critical system unit '{unit}' is blocked"
+        ));
+    }
+
+    // systemd drop-ins live in `<unit>.d` — keep the full unit name.
+    let dir = format!("{SYSTEMD_UNIT_ROOT}/{unit}.d");
+    let path = format!("{dir}/override.conf");
+    let root = std::path::Path::new(SYSTEMD_UNIT_ROOT);
+    if root
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing a symlinked systemd unit root".to_string());
+    }
+    let mut current = root.to_path_buf();
+    for component in format!("{unit}.d").split('/') {
+        current.push(component);
+        if let Ok(metadata) = current.symlink_metadata() {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "lcp-admin: refusing a drop-in path containing a symbolic link: {}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    if std::path::Path::new(&path)
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(format!("lcp-admin: refusing to write a symlinked override: {path}"));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("lcp-admin: could not create {dir} ({e})"))?;
+    let previous = std::fs::read_to_string(&path).ok();
+    if let Some(old) = &previous {
+        let backup = format!("{path}.control-panel.bak");
+        if std::path::Path::new(&backup)
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(format!("lcp-admin: refusing a symlinked override backup: {backup}"));
+        }
+        let backup_tmp = format!("{backup}.tmp.{}", std::process::id());
+        std::fs::write(&backup_tmp, old)
+            .map_err(|e| format!("lcp-admin: could not write {backup_tmp} ({e})"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&backup_tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&backup_tmp, &backup)
+            .map_err(|e| format!("lcp-admin: could not replace {backup} ({e})"))?;
+    }
+    write_systemd_override(&path, &content)?;
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: the override was written but systemctl is not available for daemon-reload".to_string());
+    }
+    if let Err(reload_error) = run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl") {
+        let rollback = match &previous {
+            Some(old) => write_systemd_override(&path, old),
+            None => std::fs::remove_file(&path)
+                .map_err(|e| format!("lcp-admin: the override could not be removed ({e})")),
+        };
+        let retry = if rollback.is_ok() {
+            run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl")
+        } else {
+            Err("lcp-admin: retry reload skipped because the rollback failed".to_string())
+        };
+        let disk_state = match (&rollback, &previous) {
+            (Ok(()), Some(_)) => {
+                "the previous override was restored on disk".to_string()
+            }
+            (Ok(()), None) => {
+                "the newly written override was removed from disk".to_string()
+            }
+            (Err(e), _) => format!("the on-disk state could not be restored: {e}"),
+        };
+        let reload_state = match &retry {
+            Ok(()) => "a follow-up daemon-reload succeeded".to_string(),
+            Err(e) => format!(
+                "systemd was NOT reloaded by the retry ({e}); run the unit_daemon_reload recovery action to retry without rewriting configuration"
+            ),
+        };
+        return Err(format!(
+            "lcp-admin: {reload_error}; {disk_state}; {reload_state}"
+        ));
+    }
+    Ok(())
+}
+
+/// `unit_daemon_reload`: retry the fixed systemd daemon-reload without
+/// rewriting any configuration. Used as the recovery path after a failed
+/// rollback retry.
+fn unit_daemon_reload_action() -> Result<(), String> {
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl")
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -2082,6 +2231,9 @@ const ROOT_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "unit_action",
+    "unit_dropin_write",
+    "unit_daemon_reload",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -2352,6 +2504,30 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "unit_daemon_reload" {
+            if args.len() == 1 {
+                unit_daemon_reload_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no further arguments."
+                ))
+            }
+        } else if requested == "unit_action" {
+            if args.len() == 3 {
+                unit_action_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a verb and a unit name."
+                ))
+            }
+        } else if requested == "unit_dropin_write" {
+            if args.len() == 2 {
+                unit_dropin_write_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one unit name."
+                ))
             }
         } else if requested == "security_apply" {
             if args.len() == 2 {
