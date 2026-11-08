@@ -8,89 +8,46 @@
   <vendor>Control Panel</vendor>
   <vendor_url>https://github.com/your-org/linux-control-panel</vendor_url>
 
-  <!-- DNF package and repository management -->
-  <action id="com.controlpanel.dnf.execute">
-    <description>Manage DNF packages and repositories</description>
-    <description xml:lang="ar">إدارة حزم DNF والمستودعات</description>
-    <message>Authentication is required to manage packages and repositories</message>
-    <message xml:lang="ar">المصادقة مطلوبة لإدارة الحزم والمستودعات</message>
-    <icon_name>package-x-generic</icon_name>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/dnf</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
-  </action>
+  <!--
+    This file intentionally declares ONE privileged operation: the Control
+    Panel's root helper `lcp-admin`. Generic root utilities (tee, sed, cp,
+    mv, rm, chmod, chown, visudo, …) must NEVER be annotated here — an
+    annotation does not itself grant permission, but it points pkexec at a
+    custom action id, and action defaults usually replace polkit's stricter
+    built-in defaults for that very program.
 
-  <!-- systemctl service management -->
-  <action id="com.controlpanel.systemctl.execute">
-    <description>Manage system services with systemctl</description>
-    <message>Authentication is required to manage system services</message>
+    The helper lives at the developer install path, or at the distro
+    package path when it ships with the RPM/DEB. Both copies are the same
+    root-owned binary (the runtime verifies ownership and mode before use).
+  -->
+
+  <!-- Developer hand-install path: /usr/local/libexec/lcp-admin -->
+  <action id="com.controlpanel.helper.system">
+    <description>Run the Control Panel administrator helper</description>
+    <message>Authentication is required to run the Control Panel administrator helper</message>
     <icon_name>preferences-system</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
+      <!-- deliberately identical to polkit's built-in exec default (no
+           `keep`): the five-minute caching for wheel members is granted
+           exclusively by the rules.d rule the helper itself installs -->
+      <allow_active>auth_admin</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/systemctl</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/lcp-admin</annotate>
   </action>
 
-  <!-- Writing system configuration files (tee) -->
-  <action id="com.controlpanel.write.config">
-    <description>Write system configuration files</description>
-    <message>Authentication is required to write system configuration files</message>
-    <icon_name>text-editor</icon_name>
+  <!-- Package install path: /usr/bin/lcp-admin (RPM/DEB externalBin) -->
+  <action id="com.controlpanel.helper.packaged">
+    <description>Run the Control Panel administrator helper</description>
+    <message>Authentication is required to run the Control Panel administrator helper</message>
+    <icon_name>preferences-system</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
+      <allow_active>auth_admin</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/tee</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
-  </action>
-
-  <!-- Flatpak system-wide operations -->
-  <action id="com.controlpanel.flatpak.execute">
-    <description>Manage Flatpak applications</description>
-    <message>Authentication is required to manage Flatpak applications</message>
-    <icon_name>application-x-executable</icon_name>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/flatpak</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
-  </action>
-
-  <!-- sed for in-place file editing (repo toggling) -->
-  <action id="com.controlpanel.sed.execute">
-    <description>Edit repository configuration files</description>
-    <message>Authentication is required to edit repository configuration files</message>
-    <icon_name>text-editor</icon_name>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/sed</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
-  </action>
-
-  <!-- mkdir for creating drop-in unit directories -->
-  <action id="com.controlpanel.mkdir.execute">
-    <description>Create system directories for unit overrides</description>
-    <message>Authentication is required to create system directories</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
-    </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/mkdir</annotate>
-    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/lcp-admin</annotate>
   </action>
 
 </policyconfig>

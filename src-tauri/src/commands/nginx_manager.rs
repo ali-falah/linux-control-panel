@@ -132,46 +132,257 @@ async fn run_nginx_test() -> NginxTestResult {
     }
 }
 
-/// Create a timestamped backup of a file via pkexec cp
-async fn backup_file(original_path: &str) -> Result<String, String> {
-    // Ensure backup dir exists
-    let backup_dir = "/etc/nginx/backups";
-    let mkdir_out = Command::new("pkexec")
-        .args(["mkdir", "-p", backup_dir])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to create backup dir: {e}"))?;
-
-    if !mkdir_out.status.success() {
-        let err = String::from_utf8_lossy(&mkdir_out.stderr).to_string();
-        return Err(format!("Failed to create backup directory: {err}"));
-    }
-
-    let filename = Path::new(original_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_path = format!("{backup_dir}/{filename}.{timestamp}.bak");
-
-    let cp_out = Command::new("pkexec")
-        .args(["cp", original_path, &backup_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to backup file: {e}"))?;
-
-    if !cp_out.status.success() {
-        let err = String::from_utf8_lossy(&cp_out.stderr).to_string();
-        return Err(format!("Failed to copy to backup: {err}"));
-    }
-
-    Ok(backup_path)
-}
-
 /// Write content to a path safely as root
 async fn pkexec_write(path: &str, content: &str) -> Result<(), String> {
     crate::utils::privilege::write_file_as_root(path, content).await
+}
+
+// ─── The `lcp-admin` named-action runners ─────────────────────────────────────
+//
+// Every nginx write unifies on the helper's named actions: the argument list
+// is exactly the action name plus the already-validated operands, the content
+// travels on stdin (never inside a command string), and the helper re-validates
+// everything itself before it touches the filesystem. A non-zero helper exit
+// is the failure — its stderr is the error message the app shows.
+
+/// Run one named helper action with `stdin` as its input and, on success,
+/// return the helper's stdout (which actions use to print their one
+/// machine-readable line — e.g. the revision path a backup creates).
+async fn run_nginx_helper_action(
+    args: &[String],
+    stdin: &str,
+    what: &str,
+) -> Result<String, String> {
+    use crate::utils::privilege::{run_privileged_with_stdin, RootAuth};
+
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        format!("The administrator helper is not installed; the action was not executed ({what}).")
+    })?;
+    let output = run_privileged_with_stdin(helper, args, &RootAuth::Polkit, stdin).await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Admin activity that reports nothing beyond success/failure.
+async fn run_nginx_helper_quiet(args: &[String], what: &str) -> Result<(), String> {
+    run_nginx_helper_action(args, "", what).await.map(|_| ())
+}
+
+/// `nginx_config_install <path>` — one file in the nginx configuration tree,
+/// its content on stdin; returns the revision the helper created for the
+/// overwritten file (None when the file did not exist yet).
+async fn nginx_config_install_as_root(path: &str, content: &str) -> Result<Option<String>, String> {
+    let printed = run_nginx_helper_action(
+        &[String::from("nginx_config_install"), path.to_string()],
+        content,
+        "the nginx configuration write",
+    )
+    .await?;
+    Ok((!printed.is_empty()).then_some(printed))
+}
+
+/// `nginx_restore_backup <dest> <backup>` — one revision sibling exactly as
+/// the helper's own backup core created it, published (reversibly) over the
+/// destination.
+async fn nginx_restore_backup_as_root(dest: &str, backup: &str) -> Result<(), String> {
+    run_nginx_helper_quiet(
+        &[
+            String::from("nginx_restore_backup"),
+            dest.to_string(),
+            backup.to_string(),
+        ],
+        "the nginx configuration restore",
+    )
+    .await
+}
+
+/// `nginx_link_site <available> <enabled>` — the one enabling symlink.
+async fn nginx_link_site_as_root(available: &str, enabled: &str) -> Result<(), String> {
+    run_nginx_helper_quiet(
+        &[
+            String::from("nginx_link_site"),
+            available.to_string(),
+            enabled.to_string(),
+        ],
+        "the site enable",
+    )
+    .await
+}
+
+/// `nginx_unlink_site <enabled>` — removal of exactly one enabling symlink.
+async fn nginx_unlink_site_as_root(enabled: &str) -> Result<(), String> {
+    run_nginx_helper_quiet(
+        &[String::from("nginx_unlink_site"), enabled.to_string()],
+        "the site disable",
+    )
+    .await
+}
+
+/// `nginx_config_remove <path>` — removal of exactly one configuration file.
+async fn nginx_config_remove_as_root(path: &str) -> Result<(), String> {
+    run_nginx_helper_quiet(
+        &[String::from("nginx_config_remove"), path.to_string()],
+        "the configuration removal",
+    )
+    .await
+}
+
+/// `nginx_www_fs <sub-command> <paths>` — the three web-root operations
+/// (`mkdir`, `remove`, `rename`), each with its operands validated by the
+/// helper before anything is touched.
+async fn nginx_www_fs_as_root(sub_command: &str, paths: &[&str]) -> Result<(), String> {
+    let mut args = vec![String::from("nginx_www_fs"), sub_command.to_string()];
+    args.extend(paths.iter().map(|p| p.to_string()));
+    run_nginx_helper_quiet(&args, "the web-root operation").await
+}
+
+/// `nginx_www_install <dest>` — one web file, its content on stdin
+/// (binary-exact), forced root:root 0644 on publication.
+async fn nginx_www_install_as_root(dest: &str, content: &[u8]) -> Result<(), String> {
+    use crate::utils::privilege::{run_privileged_with_stdin_bytes, RootAuth};
+
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the web file was not written.".to_string()
+    })?;
+    let args = vec![String::from("nginx_www_install"), dest.to_string()];
+    let output = run_privileged_with_stdin_bytes(helper, &args, &RootAuth::Polkit, content).await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+/// `systemctl reload nginx` — the one reload every mutation ends with,
+/// through the validated privileged route (the same shape
+/// `nginx_service_action` uses).
+async fn nginx_reload_as_root() -> Result<(), String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    let args = vec![String::from("reload"), String::from("nginx")];
+    crate::utils::root_policy::ensure_arguments_for_program("systemctl", &args)?;
+    let output = run_privileged_output("/usr/bin/systemctl", &args, &RootAuth::Polkit)
+        .await
+        .map_err(|e| format!("Failed to run systemctl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "systemctl reload nginx failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+// ─── Layout detection (GROUP 7: native conf.d support) ────────────────────────
+//
+// The site lifecycle differs per nginx layout: Debian ships the
+// sites-available/sites-enabled pair (static configs + enable symlinks),
+// Fedora/RHEL ships only conf.d (every `*.conf` there is always active).
+// Detection must not guess from the distro family — the classifier asks the
+// two things that actually decide behavior:
+//   1. the sites-available directory exists, and
+//   2. nginx.conf really includes `…/sites-enabled/*`.
+// Both must hold for the Debian flow; a directory without an include loads
+// nothing, and an include without a directory keeps nginx from starting.
+
+use crate::utils::root_policy as rp;
+
+/// Which site lifecycle the code follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NginxLayout {
+    /// sites-available + sites-enabled (Debian convention, present on the
+    /// system and actually referenced by nginx.conf)
+    DebianSites,
+    /// everything active lives in conf.d (Fedora/RHEL default)
+    ConfD,
+}
+
+/// The pure half of the classifier; the fs-touching wrapper
+/// (`detect_nginx_layout`) only gathers the two inputs.
+fn nginx_layout_from(sites_dir_exists: bool, conf_refs_sites_enabled: bool) -> NginxLayout {
+    if sites_dir_exists && conf_refs_sites_enabled {
+        NginxLayout::DebianSites
+    } else {
+        NginxLayout::ConfD
+    }
+}
+
+/// Does a textual nginx.conf contain an `include` whose argument points at a
+/// `sites-enabled` directory glob? Match: some path segment is exactly
+/// `sites-enabled` and the argument ends in `*` or `*.conf` (the two shapes
+/// Debian's shipped nginx.conf uses). Commented-out lines never match — the
+/// line must start (after trimming) with the directive keyword.
+fn nginx_conf_includes_sites_enabled(conf_text: &str) -> bool {
+    for line in conf_text.lines() {
+        let line = line.trim();
+        let Some(arg) = line.strip_prefix("include ") else {
+            continue;
+        };
+        let arg = arg.trim().trim_end_matches(';').trim();
+        if arg.split('/').any(|segment| segment == "sites-enabled")
+            && (arg.ends_with('*') || arg.ends_with("*.conf"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Re-evaluated on every call, no cache — two cheap reads (`detect_distro`
+/// follows the same house style) and immune to an admin hand-editing the
+/// include structure mid-session.
+async fn detect_nginx_layout() -> NginxLayout {
+    let sites_dir_exists = tokio::fs::metadata(rp::NGINX_SITES_AVAILABLE)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let conf_text = tokio::fs::read_to_string(rp::NGINX_NGINX_CONF)
+        .await
+        .unwrap_or_default();
+    nginx_layout_from(sites_dir_exists, nginx_conf_includes_sites_enabled(&conf_text))
+}
+
+/// The two machinery paths of one conf.d site.
+struct ConfDPaths {
+    enabled: String,
+    disabled: String,
+}
+
+fn conf_d_paths(name: &str) -> ConfDPaths {
+    ConfDPaths {
+        enabled: format!("{}/{name}.conf", rp::NGINX_CONF_D),
+        disabled: format!("{}/{name}.conf.disabled", rp::NGINX_CONF_D),
+    }
+}
+
+/// What the pair of conf.d files admits (pure; unit-tested).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfDTogglePlan {
+    /// exactly `<name>.conf` exists — the site is live
+    SiteIsLive,
+    /// exactly `<name>.conf.disabled` exists — the site is toggled off
+    SiteIsDisabled,
+}
+
+fn conf_d_toggle_plan(
+    enabled_exists: bool,
+    disabled_exists: bool,
+    name: &str,
+) -> Result<ConfDTogglePlan, String> {
+    let paths = conf_d_paths(name);
+    match (enabled_exists, disabled_exists) {
+        (true, false) => Ok(ConfDTogglePlan::SiteIsLive),
+        (false, true) => Ok(ConfDTogglePlan::SiteIsDisabled),
+        (true, true) => Err(format!(
+            "Ambiguous state in {}: both {} and {} are present; remove one of them manually before toggling.",
+            rp::NGINX_CONF_D, paths.enabled, paths.disabled
+        )),
+        (false, false) => Err(format!(
+            "The site does not exist in {}: neither {} nor {} is present.",
+            rp::NGINX_CONF_D, paths.enabled, paths.disabled
+        )),
+    }
 }
 
 // ─── Commands: Install Check ───────────────────────────────────────────────────
@@ -254,11 +465,17 @@ pub async fn nginx_service_action(action: String) -> Result<String, String> {
         return Err(format!("Invalid action: {action}"));
     }
 
-    let output = Command::new("pkexec")
-        .args(["systemctl", &action, "nginx"])
-        .output()
+    // The service control travels the validated privileged path: the fixed
+    // argument shape `systemctl <verb> nginx` first passes root_policy's
+    // systemctl rules (the same ones the helper enforces), then runs with
+    // administrator rights and captured output — no raw pkexec invocation.
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    let args = vec![action.clone(), String::from("nginx")];
+    crate::utils::root_policy::ensure_arguments_for_program("systemctl", &args)?;
+    let output = run_privileged_output("/usr/bin/systemctl", &args, &RootAuth::Polkit)
         .await
-        .map_err(|e| format!("Failed to run pkexec: {e}"))?;
+        .map_err(|e| format!("Failed to run systemctl: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -397,6 +614,69 @@ fn parse_site_metadata(content: &str) -> (Vec<String>, Vec<String>, Vec<String>,
 }
 
 async fn nginx_list_sites_internal() -> Vec<NginxSite> {
+    if detect_nginx_layout().await == NginxLayout::ConfD {
+        // conf.d layout (Fedora/RHEL): group the two machinery suffixes of
+        // the same base name into one row — a live entry wins over a
+        // disabled twin, exactly the site the toggle will act on.
+        use std::collections::BTreeMap;
+        let mut sites = Vec::new();
+        let mut entries = match tokio::fs::read_dir(rp::NGINX_CONF_D).await {
+            Ok(e) => e,
+            Err(_) => return sites,
+        };
+
+        // base name → (live path, disabled path)
+        let mut grouped: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let path = path.to_string_lossy().to_string();
+            if let Some(stem) = name.strip_suffix(".conf") {
+                grouped
+                    .entry(stem.to_string())
+                    .or_default()
+                    .0 = Some(path);
+            } else if let Some(stem) = name.strip_suffix(".conf.disabled") {
+                grouped
+                    .entry(stem.to_string())
+                    .or_default()
+                    .1 = Some(path);
+            }
+            // anything else in conf.d (stray backups, editor leftovers) is
+            // not a site row
+        }
+
+        for (name, (live, disabled)) in grouped {
+            let (path, enabled) = match (live, disabled) {
+                (Some(live), _) => (live, true),
+                (None, Some(disabled)) => (disabled, false),
+                (None, None) => continue,
+            };
+            let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            let (domains, ports, proxies, has_ssl, access_log, error_log) =
+                parse_site_metadata(&content);
+
+            sites.push(NginxSite {
+                name,
+                path,
+                enabled,
+                source: String::from("conf.d"),
+                domains,
+                ports,
+                proxies,
+                has_ssl,
+                access_log,
+                error_log,
+            });
+        }
+        return sites;
+    }
+
+    // Debian-style layout: unchanged (conf.d plus sites-available with the
+    // sites-enabled symlink check).
     let mut sites = Vec::new();
 
     let dirs = [
@@ -467,36 +747,38 @@ pub async fn nginx_toggle_site(name: String, enable: bool) -> Result<NginxTestRe
         return Err("nginx not installed".to_string());
     }
 
+    if detect_nginx_layout().await == NginxLayout::ConfD {
+        return nginx_toggle_site_conf_d(name, enable).await;
+    }
+
     let source_path = format!("/etc/nginx/sites-available/{name}");
     let symlink_path = format!("/etc/nginx/sites-enabled/{name}");
 
-    // Ensure sites-enabled dir exists
-    let _ = Command::new("pkexec")
-        .args(["mkdir", "-p", "/etc/nginx/sites-enabled"])
-        .output()
-        .await;
-
     if enable {
-        let out = Command::new("pkexec")
-            .args(["ln", "-sf", &source_path, &symlink_path])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to create symlink: {e}"))?;
-
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).to_string();
-            return Err(format!("Failed to enable site: {err}"));
+        // The old `ln -sf` silently replaced whatever the target held. The
+        // strict link action refuses an existing entry instead — so the app
+        // checks the current state itself: an entry that is already exactly
+        // our own link is a no-op (a stale view, a repeated click), any
+        // conflicting entry is a refusal, and only a free target links.
+        match tokio::fs::symlink_metadata(&symlink_path).await {
+            Ok(_meta) => {
+                let points_here = tokio::fs::read_link(&symlink_path)
+                    .await
+                    .map(|target| target == std::path::PathBuf::from(&source_path))
+                    .unwrap_or(false);
+                if !points_here {
+                    return Err(format!(
+                        "A conflicting entry already exists at {symlink_path}; refusing to re-link over it — disable it first."
+                    ));
+                }
+            }
+            Err(_) => nginx_link_site_as_root(&source_path, &symlink_path).await?,
         }
     } else {
-        let out = Command::new("pkexec")
-            .args(["rm", "-f", &symlink_path])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to remove symlink: {e}"))?;
-
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).to_string();
-            return Err(format!("Failed to disable site: {err}"));
+        // The strict unlink action refuses a missing target by design; the
+        // app checks the state itself and treats "already gone" as success.
+        if tokio::fs::symlink_metadata(&symlink_path).await.is_ok() {
+            nginx_unlink_site_as_root(&symlink_path).await?;
         }
     }
 
@@ -504,28 +786,93 @@ pub async fn nginx_toggle_site(name: String, enable: bool) -> Result<NginxTestRe
     let test = run_nginx_test().await;
 
     if !test.passed {
-        // Revert
+        // Revert — the same operations in reverse, best-effort like the old
+        // fire-and-forget pkexec invocations
         if enable {
-            let _ = Command::new("pkexec")
-                .args(["rm", "-f", &symlink_path])
-                .output()
-                .await;
+            if tokio::fs::symlink_metadata(&symlink_path).await.is_ok() {
+                let _ = nginx_unlink_site_as_root(&symlink_path).await;
+            }
         } else {
-            let _ = Command::new("pkexec")
-                .args(["ln", "-sf", &source_path, &symlink_path])
-                .output()
-                .await;
+            let _ = nginx_link_site_as_root(&source_path, &symlink_path).await;
         }
         return Ok(test);
     }
 
     // Reload nginx
-    let _ = Command::new("pkexec")
-        .args(["systemctl", "reload", "nginx"])
-        .output()
-        .await;
+    let _ = nginx_reload_as_root().await;
 
     log_to_file("INFO", &format!("nginx_toggle_site {name} enable={enable}"));
+    Ok(test)
+}
+
+/// The conf.d toggle: no symlinks exist, so "disabling" archives the file as
+/// `<name>.conf.disabled` (never matched by nginx's `include *.conf` glob)
+/// and "enabling" publishes it back. Both directions run as a two-step
+/// ladder over the existing named actions — install content, then remove —
+/// keeping the non-atomic worst case benign: at any intermediate moment both
+/// files may exist, but only the live one is ever loaded.
+async fn nginx_toggle_site_conf_d(name: String, enable: bool) -> Result<NginxTestResult, String> {
+    let paths = conf_d_paths(&name);
+    let enabled_exists = tokio::fs::symlink_metadata(&paths.enabled).await.is_ok();
+    let disabled_exists = tokio::fs::symlink_metadata(&paths.disabled).await.is_ok();
+    let plan = conf_d_toggle_plan(enabled_exists, disabled_exists, &name)?;
+
+    // The direction the pair actually supports: a live site can be disabled
+    // (the requested "enable" is then the same stale-view no-op the Debian
+    // flow already treats benign, and vice versa).
+    let ladder = match (enable, plan) {
+        // disable the live site
+        (false, ConfDTogglePlan::SiteIsLive) => {
+            let content = tokio::fs::read_to_string(&paths.enabled)
+                .await
+                .map_err(|e| format!("Failed to read {}: {e}", paths.enabled))?;
+            // install the archive twin, then remove the live file
+            Some((&paths.disabled, &paths.enabled, content, "disable"))
+        }
+        // enable the archived site
+        (true, ConfDTogglePlan::SiteIsDisabled) => {
+            let content = tokio::fs::read_to_string(&paths.disabled)
+                .await
+                .map_err(|e| format!("Failed to read {}: {e}", paths.disabled))?;
+            // publish the live file back, then remove the archive
+            Some((&paths.enabled, &paths.disabled, content, "enable"))
+        }
+        // no-op: the requested direction equals the current state (a stale
+        // view or a repeated click) — the Debian flow behaves the same
+        _ => None,
+    };
+
+    let mut test = run_nginx_test().await;
+    if let Some((install_path, remove_path, content, action)) = ladder {
+        nginx_config_install_as_root(install_path, &content).await?;
+        nginx_config_remove_as_root(remove_path).await?;
+
+        // Test nginx config; on failure reverse the ladder — best-effort,
+        // "already gone" tolerances, exactly like the Debian revert branch
+        test = run_nginx_test().await;
+        if !test.passed {
+            // publish the original state back, then clean the archive
+            let (restore_path, cleanup_path) = if action == "enable" {
+                (&paths.disabled, &paths.enabled)
+            } else {
+                (&paths.enabled, &paths.disabled)
+            };
+            let _ = nginx_config_install_as_root(restore_path, &content).await;
+            if tokio::fs::symlink_metadata(cleanup_path).await.is_ok() {
+                let _ = nginx_config_remove_as_root(cleanup_path).await;
+            }
+            return Ok(test);
+        }
+        log_to_file("INFO", &format!("nginx_toggle_site conf.d {action} {name}"));
+    }
+
+    // Reload only when the (possibly re-tested) config is valid — a no-op
+    // toggle (requested direction already matches state) with a broken
+    // ambient config must not reload nginx just because a stale view asked
+    // for it.
+    if test.passed {
+        let _ = nginx_reload_as_root().await;
+    }
     Ok(test)
 }
 
@@ -539,7 +886,12 @@ pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> 
         .server_name
         .replace(['/', ' ', '\0'], "_");
 
-    let path = format!("/etc/nginx/sites-available/{safe_name}.conf");
+    let confd_layout = detect_nginx_layout().await == NginxLayout::ConfD;
+    let path = if confd_layout {
+        format!("{}/{safe_name}.conf", rp::NGINX_CONF_D)
+    } else {
+        format!("/etc/nginx/sites-available/{safe_name}.conf")
+    };
 
     let content = if config.is_proxy {
         format!(
@@ -583,36 +935,64 @@ pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> 
         )
     };
 
-    // Ensure dirs exist
-    let _ = Command::new("pkexec")
-        .args(["mkdir", "-p", "/etc/nginx/sites-available"])
-        .output()
-        .await;
+    if confd_layout {
+        // conf.d has no symlink step and no separate enable entry to
+        // conflict with. But a disabled twin of the same name would leave
+        // the toggle in its ambiguous state — refuse it like the Debian
+        // conflict check below.
+        let disabled = format!("{}/{safe_name}.conf.disabled", rp::NGINX_CONF_D);
+        if tokio::fs::symlink_metadata(&disabled).await.is_ok() {
+            return Err(format!(
+                "A disabled copy already exists at {disabled}; refusing to create a live twin — enable or delete it first."
+            ));
+        }
+        // the install publishes directly (creating one revision of a
+        // previous live file of the same name, if any)
+        nginx_config_install_as_root(&path, &content).await?;
 
-    pkexec_write(&path, &content).await?;
+        let test = run_nginx_test().await;
+        if !test.passed {
+            // Revert — best-effort, "already gone" is success at this layer
+            if tokio::fs::symlink_metadata(&path).await.is_ok() {
+                let _ = nginx_config_remove_as_root(&path).await;
+            }
+            return Err(format!("nginx -t failed after site creation:\n{}", test.output));
+        }
 
+        let _ = nginx_reload_as_root().await;
+
+        log_to_file("INFO", &format!("nginx_create_site {safe_name}"));
+        return Ok(path);
+    }
+
+    // A conflicting enabled entry is refused before anything is written —
+    // the old `ln -sf` would have silently replaced it
     let symlink = format!("/etc/nginx/sites-enabled/{safe_name}.conf");
-    let _ = Command::new("pkexec")
-        .args(["mkdir", "-p", "/etc/nginx/sites-enabled"])
-        .output()
-        .await;
+    if tokio::fs::symlink_metadata(&symlink).await.is_ok() {
+        return Err(format!(
+            "A conflicting entry already exists at {symlink}; refusing to overwrite it — disable it first."
+        ));
+    }
 
-    let _ = Command::new("pkexec")
-        .args(["ln", "-sf", &path, &symlink])
-        .output()
-        .await;
+    // The install is reversible: the helper creates a revision of any
+    // previous config before publishing the new one (None → a fresh file)
+    nginx_config_install_as_root(&path, &content).await?;
+
+    nginx_link_site_as_root(&path, &symlink).await?;
 
     let test = run_nginx_test().await;
     if !test.passed {
-        let _ = Command::new("pkexec").args(["rm", "-f", &path]).output().await;
-        let _ = Command::new("pkexec").args(["rm", "-f", &symlink]).output().await;
+        // Revert — best-effort, "already gone" is success at this layer
+        if tokio::fs::symlink_metadata(&symlink).await.is_ok() {
+            let _ = nginx_unlink_site_as_root(&symlink).await;
+        }
+        if tokio::fs::symlink_metadata(&path).await.is_ok() {
+            let _ = nginx_config_remove_as_root(&path).await;
+        }
         return Err(format!("nginx -t failed after site creation:\n{}", test.output));
     }
 
-    let _ = Command::new("pkexec")
-        .args(["systemctl", "reload", "nginx"])
-        .output()
-        .await;
+    let _ = nginx_reload_as_root().await;
 
     log_to_file("INFO", &format!("nginx_create_site {safe_name}"));
     Ok(path)
@@ -651,28 +1031,29 @@ pub async fn nginx_delete_site(name: String, path: String) -> Result<(), String>
     }
 
     let symlink = format!("/etc/nginx/sites-enabled/{name}");
-    let _ = Command::new("pkexec")
-        .args(["rm", "-f", &symlink])
-        .output()
-        .await;
 
-    let out = Command::new("pkexec")
-        .args(["rm", "-f", clean_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to delete site: {e}"))?;
+    // The enabling symlink goes first, exactly like before — but through the
+    // strict unlink action. "Already gone" is a success *at this layer* (the
+    // app checks the state explicitly instead of matching a refusal
+    // message); a conflicting entry (a regular file, a foreign link)
+    // propagates the helper's refusal instead of being force-removed.
+    // On conf.d layouts (Fedora/RHEL) there is no symlink phase at all —
+    // the delete touches only the configuration file.
+    if tokio::fs::symlink_metadata(&symlink).await.is_ok()
+        && detect_nginx_layout().await == NginxLayout::DebianSites
+    {
+        nginx_unlink_site_as_root(&symlink).await?;
+    }
 
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("Failed to delete site config: {err}"));
+    // The config file itself is removed through the strict one-regular-file
+    // removal; a file that is already gone is a success at this layer.
+    if tokio::fs::symlink_metadata(clean_path).await.is_ok() {
+        nginx_config_remove_as_root(clean_path).await?;
     }
 
     let test = run_nginx_test().await;
     if test.passed {
-        let _ = Command::new("pkexec")
-            .args(["systemctl", "reload", "nginx"])
-            .output()
-            .await;
+        let _ = nginx_reload_as_root().await;
     }
 
     log_to_file("INFO", &format!("nginx_delete_site {name} ({clean_path})"));
@@ -734,40 +1115,21 @@ pub async fn nginx_clone_site(
         source
     };
 
-    let mut child = Command::new("pkexec")
-        .args(["tee", &target_path])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pkexec tee: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(final_content.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write content: {e}"))?;
-    }
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("Failed to wait for pkexec tee: {e}"))?;
-
-    if !status.success() {
-        return Err("Failed to write cloned config file (pkexec denied or error)".to_string());
-    }
+    // The install is reversible: the helper creates a revision of the target
+    // file (None → fresh) before publishing the new content
+    nginx_config_install_as_root(&target_path, &final_content).await?;
 
     let test = run_nginx_test().await;
     if !test.passed {
-        let _ = Command::new("pkexec").args(["rm", "-f", &target_path]).output().await;
+        // Revert to the previous content through the helper-made revision;
+        // best-effort, like the old fire-and-forget `rm -f`
+        if tokio::fs::symlink_metadata(&target_path).await.is_ok() {
+            let _ = nginx_config_remove_as_root(&target_path).await;
+        }
         return Err(format!("nginx -t failed after cloning:\n{}", test.output));
     }
 
-    let _ = Command::new("pkexec")
-        .args(["systemctl", "reload", "nginx"])
-        .output()
-        .await;
+    let _ = nginx_reload_as_root().await;
 
     log_to_file("INFO", &format!("nginx_clone_site {source_path} -> {target_path}"));
     Ok(target_path)
@@ -805,6 +1167,9 @@ pub async fn nginx_list_configs() -> Result<Vec<NginxConfigFile>, String> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
 
+            // `.conf.disabled` twins are deliberately excluded here: the
+            // disabled state of a conf.d site is owned by the site toggle,
+            // never by the config editor (see nginx_write_config).
             if !name.ends_with(".conf") {
                 continue;
             }
@@ -834,60 +1199,35 @@ pub async fn nginx_write_config(path: String, content: String) -> Result<NginxTe
         return Err("nginx not installed".to_string());
     }
 
-    // Backup first
-    backup_file(&path)
-        .await
-        .map_err(|e| format!("Backup failed: {e}"))?;
-
-    // Write to temp, rename to real path
-    let tmp = format!("{path}.tmp_nginx_test");
-    pkexec_write(&tmp, &content).await?;
-
-    let mv_out = Command::new("pkexec")
-        .args(["mv", &tmp, &path])
-        .output()
-        .await
-        .map_err(|e| format!("mv failed: {e}"))?;
-
-    if !mv_out.status.success() {
-        let err = String::from_utf8_lossy(&mv_out.stderr).to_string();
-        return Err(format!("Failed to move temp file: {err}"));
+    // The toggle-only gate: in conf.d layouts `.conf.disabled` is the
+    // machinery of the site toggle — installing over it from the config
+    // editor would bypass (and corrupt) the toggle's state pair.
+    if path.ends_with(".conf.disabled") {
+        return Err(format!(
+            "Disabled conf.d sites are managed by the site toggle, not the config editor — enable the site first, then edit {path}."
+        ));
     }
+
+    // The install is reversible by construction: the helper creates exactly
+    // one revision of the previous content before publishing the new one and
+    // returns the revision path on stdout (None when the file is fresh) —
+    // no backup directory guessing, no tmp/mv dance.
+    let backup = nginx_config_install_as_root(&path, &content).await
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
     let test = run_nginx_test().await;
 
     if !test.passed {
-        // Restore from latest backup
-        let backup_dir = "/etc/nginx/backups";
-        let filename = Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if let Ok(mut dir) = tokio::fs::read_dir(backup_dir).await {
-            let mut backups: Vec<String> = Vec::new();
-            while let Ok(Some(entry)) = dir.next_entry().await {
-                let n = entry.file_name().to_string_lossy().to_string();
-                if n.starts_with(&filename) && n.ends_with(".bak") {
-                    backups.push(entry.path().to_string_lossy().to_string());
-                }
-            }
-            backups.sort();
-            if let Some(latest) = backups.last() {
-                let _ = Command::new("pkexec")
-                    .args(["cp", latest, &path])
-                    .output()
-                    .await;
-            }
+        // Restore the revision the install itself made — explicit sibling,
+        // exactly the shape the helper's own backup core created
+        if let Some(backup) = backup {
+            let _ = nginx_restore_backup_as_root(&path, &backup).await;
         }
 
         return Ok(test);
     }
 
-    let _ = Command::new("pkexec")
-        .args(["systemctl", "reload", "nginx"])
-        .output()
-        .await;
+    let _ = nginx_reload_as_root().await;
 
     log_to_file("INFO", &format!("nginx_write_config {path}"));
     Ok(test)
@@ -943,27 +1283,15 @@ pub async fn nginx_restore_backup(backup_path: String, original_path: String) ->
         return Err("nginx not installed".to_string());
     }
 
-    // Create a backup of current state before restoring
-    let _ = backup_file(&original_path).await;
-
-    let out = Command::new("pkexec")
-        .args(["cp", &backup_path, &original_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to restore backup: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("Failed to restore: {err}"));
-    }
+    // No app-side pre-backup (per the approved nginx design): restores are
+    // reversible through the revision list itself — the helper publishes the
+    // revision with its own install core, so nothing is lost by restoring.
+    nginx_restore_backup_as_root(&original_path, &backup_path).await?;
 
     let test = run_nginx_test().await;
 
     if test.passed {
-        let _ = Command::new("pkexec")
-            .args(["systemctl", "reload", "nginx"])
-            .output()
-            .await;
+        let _ = nginx_reload_as_root().await;
     }
 
     log_to_file("INFO", &format!("nginx_restore_backup {backup_path} -> {original_path}"));
@@ -1053,16 +1381,11 @@ pub async fn nginx_create_www_dir(path: String) -> Result<(), String> {
         return Err("Path must be under /var/www/".to_string());
     }
 
-    let out = Command::new("pkexec")
-        .args(["mkdir", "-p", &path])
-        .output()
+    // The strict mkdir creates exactly this branch below the web root
+    // (per-component no-follow, the web root and its protected names refuse)
+    nginx_www_fs_as_root("mkdir", &[&path])
         .await
-        .map_err(|e| format!("Failed to create dir: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("mkdir failed: {err}"));
-    }
+        .map_err(|e| format!("mkdir failed: {e}"))?;
 
     log_to_file("INFO", &format!("nginx_create_www_dir {path}"));
     Ok(())
@@ -1078,15 +1401,13 @@ pub async fn nginx_delete_www_entry(path: String) -> Result<(), String> {
         return Err("Protected Path: Target must be directly inside /var/www/ and cannot contain path traversal.".to_string());
     }
 
-    let out = Command::new("pkexec")
-        .args(["rm", "-rf", &path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to delete: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("rm failed: {err}"));
+    // The strict remove deletes the whole subtree through pinned
+    // descriptors; a symlink is refused instead of followed, and a target
+    // that is already gone is a success at this layer.
+    if tokio::fs::symlink_metadata(&path).await.is_ok() {
+        nginx_www_fs_as_root("remove", &[&path])
+            .await
+            .map_err(|e| format!("rm failed: {e}"))?;
     }
 
     log_to_file("INFO", &format!("nginx_delete_www_entry {path}"));
@@ -1105,16 +1426,11 @@ pub async fn nginx_rename_www_entry(old_path: String, new_path: String) -> Resul
         return Err("Protected Path: Paths must be under /var/www/ and cannot contain path traversal.".to_string());
     }
 
-    let out = Command::new("pkexec")
-        .args(["mv", &old_path, &new_path])
-        .output()
+    // The strict rename refuses a conflicting destination and protected
+    // endpoints; a missing source refuses (no mv-silence)
+    nginx_www_fs_as_root("rename", &[&old_path, &new_path])
         .await
-        .map_err(|e| format!("Failed to rename: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("mv failed: {err}"));
-    }
+        .map_err(|e| format!("mv failed: {e}"))?;
 
     log_to_file("INFO", &format!("nginx_rename_www_entry {old_path} -> {new_path}"));
     Ok(())
@@ -1133,16 +1449,23 @@ pub async fn nginx_upload_www_file(src_path: String, dest_dir: String) -> Result
 
     let dest_path = format!("{dest_dir}/{filename}");
 
-    let out = Command::new("pkexec")
-        .args(["cp", &src_path, &dest_path])
-        .output()
+    // The destination is validated below the web root *before* the file is
+    // read, the content is read app-side as raw bytes, and it travels on
+    // stdin — no source path is ever sent to the helper (it can only write
+    // where it validates). The helper caps and publishes (binary-exact,
+    // forced root:root 0644).
+    crate::utils::root_policy::var_www_path_valid(&dest_path)
+        .map_err(|e| format!("Invalid destination: {e}"))?;
+    let content = tokio::fs::read(&src_path)
         .await
-        .map_err(|e| format!("Failed to copy file: {e}"))?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(format!("cp failed: {err}"));
+        .map_err(|e| format!("Failed to read {src_path}: {e}"))?;
+    if content.len() > crate::utils::root_policy::NGINX_WWW_INSTALL_MAX {
+        return Err(format!(
+            "The file is too large for the web-file install (the limit is {} bytes).",
+            crate::utils::root_policy::NGINX_WWW_INSTALL_MAX
+        ));
     }
+    nginx_www_install_as_root(&dest_path, &content).await?;
 
     log_to_file("INFO", &format!("nginx_upload_www_file {src_path} -> {dest_path}"));
     Ok(())
@@ -1157,30 +1480,19 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
         return Err("Log path must be under /var/log/".to_string());
     }
 
-    let lines_str = lines.to_string();
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        // Read compressed log using gzip -dc
-        if let Ok(out) = Command::new("pkexec")
-            .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", path, lines_str)])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // Read the compressed log with a validated argument list — no shell,
+        // so a file name can never be interpreted as a command.
+        if let Ok(tail) = read_log_tail_as_root(&path, lines as usize).await {
+            content = tail;
         }
     } else {
-        // 1. Try reading from the requested active file
-        if let Ok(out) = Command::new("pkexec")
-            .args(["tail", "-n", &lines_str, &path])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // 1. Read the requested active file through the validated
+        // privileged-reader path (the same mechanism the `.gz` branch uses)
+        if let Ok(tail) = read_log_tail_as_root(&path, lines as usize).await {
+            content = tail;
         }
 
         // 2. Fallback to direct read
@@ -1200,36 +1512,14 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
             let current_count = content.lines().filter(|l| !l.trim().is_empty()).count();
             if current_count < lines as usize {
                 let needed = (lines as usize) - current_count;
-                let needed_str = needed.to_string();
                 let prefix = if path.contains("access") { "access.log-" } else { "error.log-" };
-                let find_cmd = format!("find /var/log/nginx -maxdepth 1 -name '{}*' -type f | sort -r | head -n 1", prefix);
-                if let Ok(out) = Command::new("pkexec")
-                    .args(["sh", "-c", &find_cmd])
-                    .output()
-                    .await
-                {
-                    if out.status.success() {
-                        let rotated_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Ok(rotated_path) = find_rotated_log_as_root(prefix).await {
                         if !rotated_path.is_empty() {
                             let mut rotated_content = String::new();
-                            if rotated_path.ends_with(".gz") {
-                                if let Ok(zout) = Command::new("pkexec")
-                                    .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", rotated_path, needed_str)])
-                                    .output()
-                                    .await
-                                {
-                                    if zout.status.success() {
-                                        rotated_content = String::from_utf8_lossy(&zout.stdout).to_string();
-                                    }
-                                }
-                            } else if let Ok(tout) = Command::new("pkexec")
-                                .args(["tail", "-n", &needed_str, &rotated_path])
-                                .output()
-                                .await
-                            {
-                                if tout.status.success() {
-                                    rotated_content = String::from_utf8_lossy(&tout.stdout).to_string();
-                                }
+                            // both branches read through the validated
+                            // privileged reader (gzip for .gz, tail else)
+                            if let Ok(zout) = read_log_tail_as_root(&rotated_path, needed).await {
+                                rotated_content = zout;
                             }
 
                             if !rotated_content.trim().is_empty() {
@@ -1241,7 +1531,6 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
                             }
                         }
                     }
-                }
             }
         }
     }
@@ -1274,26 +1563,43 @@ pub async fn nginx_clear_log(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn nginx_list_log_files() -> Result<Vec<String>, String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
     let mut logs = Vec::new();
 
     // Standard active logs
     logs.push("/var/log/nginx/access.log".to_string());
     logs.push("/var/log/nginx/error.log".to_string());
 
-    // Discover all logs in /var/log/nginx (including rotated access.log-*, error.log-*, *.gz, *.1)
-    if let Ok(out) = Command::new("pkexec")
-        .args(["find", "/var/log/nginx", "-maxdepth", "1", "-type", "f"])
-        .output()
-        .await
-    {
+    // Discover all logs in /var/log/nginx (including rotated access.log-*, error.log-*, *.gz, *.1).
+    // The listing runs through the validated privileged-reader path — `ls`
+    // with the fixed arguments `ls -la /var/log/nginx` — instead of a raw
+    // pkexec `find`; the argument shape is the one root_policy's log-reader
+    // rules already allow-list, the output is parsed one regular-file line
+    // at a time, and the read_dir fallback below still covers the cases
+    // where the privilege lift is unavailable but the directory is readable.
+    let args = vec![String::from("-la"), String::from("/var/log/nginx")];
+    if let Ok(out) = run_privileged_output("/usr/bin/ls", &args, &RootAuth::Polkit).await {
         if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if (trimmed.contains("access") || trimmed.contains("error") || trimmed.contains(".log"))
-                    && !logs.contains(&trimmed.to_string())
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                // only regular-file lines (`-rwxr-xr-x …`): the `total`
+                // summary, the directory itself and other members drop out
+                if !line.starts_with('-') {
+                    continue;
+                }
+                let Some(name) = ls_name_column(line) else {
+                    continue;
+                };
+                if name.is_empty() || name == "." || name == ".." {
+                    continue;
+                }
+                let path = format!("/var/log/nginx/{name}");
+                if (path.contains("access")
+                    || path.contains("error")
+                    || path.contains(".log"))
+                    && !logs.contains(&path)
                 {
-                    logs.push(trimmed.to_string());
+                    logs.push(path);
                 }
             }
         }
@@ -1329,6 +1635,20 @@ pub async fn nginx_list_log_files() -> Result<Vec<String>, String> {
 
     logs.dedup();
     Ok(logs)
+}
+
+/// The name column of one `ls -la` line: skip the mode, link count, owner,
+/// group, size and three date fields, and return everything after them —
+/// which keeps file names that contain spaces intact (everything after the
+/// small fixed column count is literally the name `ls` printed).
+fn ls_name_column(line: &str) -> Option<&str> {
+    let mut rest = line.trim_start();
+    for _ in 0..8 {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        rest = &rest[end..];
+        rest = rest.trim_start();
+    }
+    (!rest.is_empty()).then_some(rest)
 }
 
 // ─── Commands: SSL Manager ────────────────────────────────────────────────────
@@ -1426,9 +1746,17 @@ pub async fn nginx_renew_cert(domain: String) -> Result<String, String> {
         return Err("certbot is not installed".to_string());
     }
 
-    let out = Command::new("pkexec")
-        .args(["certbot", "renew", "--cert-name", &domain, "--non-interactive"])
-        .output()
+    // The fixed renewal shape passes root_policy's certbot rules (the same
+    // ones the helper enforces) before the privileged run
+    let args = vec![
+        String::from("renew"),
+        String::from("--cert-name"),
+        domain.clone(),
+        String::from("--non-interactive"),
+    ];
+    crate::utils::root_policy::ensure_arguments_for_program("certbot", &args)?;
+
+    let out = crate::utils::privilege::run_privileged_output("/usr/bin/certbot", &args, &crate::utils::privilege::RootAuth::Polkit)
         .await
         .map_err(|e| format!("Failed to run certbot: {e}"))?;
 
@@ -1451,30 +1779,29 @@ pub async fn nginx_request_cert(domain: String, email: Option<String>) -> Result
         return Err("certbot is not installed on this system".to_string());
     }
 
+    // The fixed request shape (validator-enforced: one domain, one of the
+    // two e-mail expressions) passes root_policy's certbot rules before the
+    // privileged run — the same rules the helper enforces.
     let mut args = vec![
-        "certbot",
-        "--nginx",
-        "-d",
-        &domain,
-        "--non-interactive",
-        "--agree-tos",
+        String::from("--nginx"),
+        String::from("-d"),
+        domain.clone(),
+        String::from("--non-interactive"),
+        String::from("--agree-tos"),
     ];
 
-    let email_arg;
     if let Some(ref em) = email {
         if !em.trim().is_empty() {
-            email_arg = format!("--email={em}");
-            args.push(&email_arg);
+            args.push(format!("--email={}", em.trim()));
         } else {
-            args.push("--register-unsafely-without-email");
+            args.push("--register-unsafely-without-email".to_string());
         }
     } else {
-        args.push("--register-unsafely-without-email");
+        args.push("--register-unsafely-without-email".to_string());
     }
+    crate::utils::root_policy::ensure_arguments_for_program("certbot", &args)?;
 
-    let out = Command::new("pkexec")
-        .args(&args)
-        .output()
+    let out = crate::utils::privilege::run_privileged_output("/usr/bin/certbot", &args, &crate::utils::privilege::RootAuth::Polkit)
         .await
         .map_err(|e| format!("Failed to run certbot: {e}"))?;
 
@@ -1487,7 +1814,7 @@ pub async fn nginx_request_cert(domain: String, email: Option<String>) -> Result
         return Err(format!("Certbot certificate request failed:\n{combined}"));
     }
 
-    let _ = Command::new("pkexec").args(["systemctl", "reload", "nginx"]).output().await;
+    let _ = nginx_reload_as_root().await;
     log_to_file("INFO", &format!("nginx_request_cert issued for {domain}"));
     Ok(combined)
 }
@@ -1553,25 +1880,14 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        if let Ok(out) = Command::new("pkexec")
-            .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n 15000", path)])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // Validated argument list instead of a shell command.
+        if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
+            content = tail;
         }
     } else {
-        // 1. Try reading with pkexec
-        if let Ok(out) = Command::new("pkexec")
-            .args(["tail", "-n", "15000", &path])
-            .output()
-            .await
-        {
-            if out.status.success() {
-                content = String::from_utf8_lossy(&out.stdout).to_string();
-            }
+        // 1. Read through the validated privileged-reader path
+        if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
+            content = tail;
         }
 
         // 2. Try direct read if pkexec not available or empty
@@ -1587,34 +1903,13 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
             if current_count < 15000 {
                 let needed = 15000 - current_count;
                 let prefix = if path.contains("access") { "access.log-" } else { "error.log-" };
-                let find_cmd = format!("find /var/log/nginx -maxdepth 1 -name '{}*' -type f | sort -r | head -n 1", prefix);
-                if let Ok(out) = Command::new("pkexec")
-                    .args(["sh", "-c", &find_cmd])
-                    .output()
-                    .await
-                {
-                    if out.status.success() {
-                        let rotated_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Ok(rotated_path) = find_rotated_log_as_root(prefix).await {
                         if !rotated_path.is_empty() {
                             let mut rotated_content = String::new();
-                            if rotated_path.ends_with(".gz") {
-                                if let Ok(zout) = Command::new("pkexec")
-                                    .args(["sh", "-c", &format!("gzip -dc '{}' | tail -n {}", rotated_path, needed)])
-                                    .output()
-                                    .await
-                                {
-                                    if zout.status.success() {
-                                        rotated_content = String::from_utf8_lossy(&zout.stdout).to_string();
-                                    }
-                                }
-                            } else if let Ok(tout) = Command::new("pkexec")
-                                .args(["tail", "-n", &needed.to_string(), &rotated_path])
-                                .output()
-                                .await
-                            {
-                                if tout.status.success() {
-                                    rotated_content = String::from_utf8_lossy(&tout.stdout).to_string();
-                                }
+                            // both branches read through the validated
+                            // privileged reader (gzip for .gz, tail else)
+                            if let Ok(zout) = read_log_tail_as_root(&rotated_path, needed).await {
+                                rotated_content = zout;
                             }
 
                             if !rotated_content.trim().is_empty() {
@@ -1625,7 +1920,6 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
                                 }
                             }
                         }
-                    }
                 }
             }
         }
@@ -1987,4 +2281,236 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
         top_methods,
         hourly_traffic,
     })
+}
+
+/// Read the last `lines` lines of a log file with administrator rights.
+///
+/// The file is read with a validated argument list — no shell is involved, so
+/// a file name can never turn into a command.
+async fn read_log_tail_as_root(path: &str, lines: usize) -> Result<String, String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    if !path.starts_with("/var/log/") {
+        return Err("Log path must be under /var/log/".to_string());
+    }
+    if path.contains('\n') || path.contains('\r') || path.contains('\0') {
+        return Err("Invalid log path.".to_string());
+    }
+
+    if path.ends_with(".gz") {
+        let args = vec![String::from("-dc"), path.to_string()];
+        let output = run_privileged_output("/usr/bin/gzip", &args, &RootAuth::Polkit).await?;
+        if !output.status.success() {
+            return Err(format!("Could not read {path}"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let all: Vec<&str> = text.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        return Ok(all[start..].join("\n"));
+    }
+
+    let args = vec![String::from("-n"), lines.to_string(), path.to_string()];
+    let output = run_privileged_output("/usr/bin/tail", &args, &RootAuth::Polkit).await?;
+    if !output.status.success() {
+        return Err(format!("Could not read {path}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Find the most recent rotated log file that starts with `prefix`.
+async fn find_rotated_log_as_root(prefix: &str) -> Result<String, String> {
+    use crate::utils::privilege::{run_privileged_output, RootAuth};
+
+    if !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+        return Err("Invalid log prefix.".to_string());
+    }
+
+    let args = vec![
+        String::from("/var/log/nginx"),
+        String::from("-maxdepth"),
+        String::from("1"),
+        String::from("-name"),
+        format!("{prefix}*"),
+        String::from("-type"),
+        String::from("f"),
+    ];
+    let output = run_privileged_output("/usr/bin/find", &args, &RootAuth::Polkit).await?;
+    if !output.status.success() {
+        return Err("Could not list the rotated log files.".to_string());
+    }
+    let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    files.sort();
+    files.reverse();
+    Ok(files.first().cloned().unwrap_or_default())
+}
+
+
+#[cfg(test)]
+mod nginx_layout_tests {
+    use super::{
+        conf_d_paths, conf_d_toggle_plan, nginx_conf_includes_sites_enabled, nginx_layout_from,
+        ConfDTogglePlan, NginxLayout,
+    };
+    use crate::utils::root_policy::NGINX_CONF_D;
+
+    // ── the pure classifier: BOTH conditions decide the Debian flow ──
+
+    #[test]
+    fn debian_layout_requires_dir_and_include_together() {
+        assert_eq!(
+            nginx_layout_from(true, true),
+            NginxLayout::DebianSites,
+            "dir exists AND nginx.conf includes sites-enabled → Debian flow"
+        );
+    }
+
+    #[test]
+    fn dir_without_the_include_is_not_a_debian_layout() {
+        // a sites-available directory whose include was never wired into
+        // nginx.conf loads nothing — treat it as conf.d, not as Debian
+        assert_eq!(nginx_layout_from(true, false), NginxLayout::ConfD);
+    }
+
+    #[test]
+    fn include_without_the_dir_is_not_a_debian_layout() {
+        // an include of a missing directory keeps nginx from starting —
+        // the layout cannot honestly claim the Debian flow either
+        assert_eq!(nginx_layout_from(false, true), NginxLayout::ConfD);
+    }
+
+    #[test]
+    fn neither_condition_is_conf_d() {
+        assert_eq!(nginx_layout_from(false, false), NginxLayout::ConfD);
+    }
+
+    // ── the include scanner on textual nginx.conf shapes ──
+
+    #[test]
+    fn the_scanner_accepts_the_shipped_debian_include_shapes() {
+        for conf in [
+            "include /etc/nginx/sites-enabled/*;\n",
+            "http {\n  include /etc/nginx/sites-enabled/*;\n}\n",
+            "include /etc/nginx/sites-enabled/*.conf;\n",
+        ] {
+            assert!(
+                nginx_conf_includes_sites_enabled(conf),
+                "must match the shipped Debian include: {conf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scanner_ignores_comments_and_unrelated_paths() {
+        for conf in [
+            "", // no include at all (a plain Fedora nginx.conf shape)
+            "# include /etc/nginx/sites-enabled/*;\n",
+            "include /etc/nginx/conf.d/*.conf;\n",
+            "include /etc/nginx/mime.types;\n",
+            "access_log /var/log/nginx/sites-enabled/access.log;\n",
+            "include /etc/nginx/sites-enabled_extra/*;\n",
+        ] {
+            assert!(
+                !nginx_conf_includes_sites_enabled(conf),
+                "must NOT count as a sites-enabled include: {conf:?}"
+            );
+        }
+    }
+
+    // ── the conf.d toggle state machine ──
+
+    #[test]
+    fn conf_d_paths_use_the_fixed_machinery_suffixes() {
+        let paths = conf_d_paths("example.com");
+        assert_eq!(paths.enabled, format!("{NGINX_CONF_D}/example.com.conf"));
+        assert_eq!(
+            paths.disabled,
+            format!("{NGINX_CONF_D}/example.com.conf.disabled")
+        );
+    }
+
+    #[test]
+    fn conf_d_toggle_plans_the_unique_file_states() {
+        assert_eq!(
+            conf_d_toggle_plan(true, false, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsLive,
+            "exactly the live file present → the site is live"
+        );
+        assert_eq!(
+            conf_d_toggle_plan(false, true, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsDisabled,
+            "exactly the archive present → the site is toggled off"
+        );
+    }
+
+    #[test]
+    fn conf_d_noop_states_match_the_requested_direction() {
+        // A no-op toggle is taken when the requested direction already equals
+        // the current state. These are the two no-op states; the command's
+        // `if let Some(ladder)` skips the install/remove ladder for them, so
+        // the final reload guard applies to the ambient `nginx -t` result
+        // instead of re-testing a freshly published config.
+        assert_eq!(
+            conf_d_toggle_plan(true, false, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsLive,
+            "enable on an already-live site is a no-op"
+        );
+        assert_eq!(
+            conf_d_toggle_plan(false, true, "example.com").unwrap(),
+            ConfDTogglePlan::SiteIsDisabled,
+            "disable on an already-disabled site is a no-op"
+        );
+    }
+
+    #[test]
+    fn conf_d_toggle_refuses_the_ambiguous_state_with_both_names() {
+        let error = conf_d_toggle_plan(true, true, "example.com")
+            .err()
+            .expect("both files present must be refused");
+        assert!(error.starts_with("Ambiguous state in "), "{error}");
+        assert!(error.contains(NGINX_CONF_D), "{error}");
+        assert!(error.contains(".conf "), "{error}");
+        assert!(error.contains(".conf.disabled"), "{error}");
+    }
+
+    #[test]
+    fn conf_d_toggle_refuses_the_hollow_state_with_both_names() {
+        let error = conf_d_toggle_plan(false, false, "example.com")
+            .err()
+            .expect("neither file present must be refused");
+        assert!(
+            error.starts_with("The site does not exist in "),
+            "the Fedora UX must name the directory: {error}"
+        );
+        assert!(error.contains(NGINX_CONF_D), "{error}");
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf nor")),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf.disabled is")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_ambiguous_and_hollow_messages_name_the_concrete_paths() {
+        // the error strings embed the literal constants via format — walk one
+        // concrete instance in and assert the fully expanded paths show up
+        let both = format!(
+            "{}/example.com.conf",
+            NGINX_CONF_D
+        );
+        let error = conf_d_toggle_plan(true, true, "example.com")
+            .err()
+            .unwrap();
+        assert!(error.contains(&both), "expanded live path missing: {error}");
+        assert!(
+            error.contains(&format!("{NGINX_CONF_D}/example.com.conf.disabled")),
+            "expanded archive path missing: {error}"
+        );
+    }
 }

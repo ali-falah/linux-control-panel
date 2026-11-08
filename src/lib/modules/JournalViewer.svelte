@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { 
@@ -19,15 +19,26 @@
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { highlightSegments } from '../utils/highlight.ts';
 
-  let logs = $state<any[]>([]);
+  // raw state: a large journal page is replaced wholesale, never mutated in
+  // place — deep reactivity would proxy every one of the 20k entries
+  let logs = $state.raw<any[]>([]);
   let isLoading = $state(false);
+  /** True when the selected range holds more entries than we fetched */
+  let journalTruncated = $state(false);
+  /** Wall-clock time of the last fetch (ms) */
+  let journalFetchMs = $state(0);
+  /** Total number of entries the current range holds (0 = not known yet) */
+  let journalTotalInRange = $state(0);
+  /** Timestamp of the oldest entry we have — used to page further back */
+  let journalOldestTs = $state<string | null>(null);
+  let isLoadingOlder = $state(false);
+  /** How many entries a single fetch may return */
+  let maxEntries = $state(20000);
 
   // Backend filters (re-fetch journalctl)
-  let currentUnitFilter = $state(uiStore.preAppliedJournalUnit || '');
-  if (uiStore.preAppliedJournalUnit) {
-    uiStore.preAppliedJournalUnit = '';
-  }
+  let currentUnitFilter = $state('');
   let filterPriority = $state('all');
   let timeRange = $state('1'); // Default to last 24 hours (1 day)
   let customStartDate = $state('');
@@ -104,8 +115,9 @@
     return `${customEndDate} ${customEndTime || '23:59'}:59`;
   }
 
-  async function fetchLogs() {
-    isLoading = true;
+  async function fetchLogs(opts: { appendOlder?: boolean } = {}) {
+    const appendOlder = opts.appendOlder === true;
+    if (appendOlder) isLoadingOlder = true; else isLoading = true;
     statusStore.setBusy('Fetching journal logs...');
     try {
       const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
@@ -118,29 +130,53 @@
         sinceF = `${timeRange} days ago`;
       }
 
+      // Paging further back: stop at the oldest entry we already have
+      if (appendOlder && journalOldestTs) {
+        const iso = new Date(Number(journalOldestTs) / 1000).toISOString();
+        untilF = iso;
+      }
+
       const unitF = currentUnitFilter.trim() || null;
-      const lines = await invoke<string[]>('get_journal_logs', {
+      const page = await invoke<any>('get_journal_logs', {
         unitFilter: unitF,
         priority: prioF,
         sinceFilter: sinceF,
         untilFilter: untilF,
+        maxEntries: maxEntries
       });
 
-      logs = lines.map(line => {
-        try { return JSON.parse(line); } catch { return null; }
-      }).filter(Boolean).reverse();
+      // The backend already returns newest-first
+      logs = appendOlder ? [...logs, ...(page.entries || [])] : (page.entries || []);
+      journalTruncated = !!page.truncated;
+      journalFetchMs = page.elapsed_ms || 0;
+      if (!appendOlder) {
+        journalOldestTs = page.oldest_ts || null;
+        setTimeout(() => {
+          const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
+          if (tableWrap) {
+            tableWrap.scrollTop = 0;
+            logScrollTop = 0;
+            logContainerHeight = tableWrap.clientHeight || 700;
+          }
+        }, 50);
 
-      setTimeout(() => {
-        const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
-        if (tableWrap) {
-          tableWrap.scrollTop = 0;
-          logScrollTop = 0;
-          logContainerHeight = tableWrap.clientHeight || 700;
+        // Count the whole range in the background — the table is already
+        // usable, the exact total fills in when it arrives.
+        countRange(unitF, prioF, sinceF, untilF);
+
+        if (page.truncated) {
+          uiStore.addToast(
+            `This range holds more entries — showing the most recent ${(page.entries || []).length.toLocaleString()}.`,
+            'warning',
+            5000,
+            'Load older',
+            () => loadOlderLogs()
+          );
         }
-      }, 50);
+      }
 
       statusStore.setLastCommand(
-        `journalctl -n 2000 -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''} ${untilF ? '--until="' + untilF + '"' : ''}`,
+        `journalctl -n ${maxEntries} -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''} ${untilF ? '--until="' + untilF + '"' : ''}`,
         0, true
       );
     } catch (e) {
@@ -148,7 +184,38 @@
       statusStore.setLastCommand('journalctl', 1, false);
     } finally {
       isLoading = false;
+      isLoadingOlder = false;
       statusStore.clearBusy();
+    }
+  }
+
+  /** Fetch the next page of older entries and append them. */
+  async function loadOlderLogs() {
+    if (isLoadingOlder) return;
+    await fetchLogs({ appendOlder: true });
+  }
+
+  /**
+   * Ask the backend how many entries the whole range holds. Runs in the
+   * background so the table is usable immediately; the total simply fills in
+   * when it arrives.
+   */
+  async function countRange(
+    unitFilter: string | null,
+    priority: number | null,
+    sinceFilter: string | null,
+    untilFilter: string | null
+  ) {
+    try {
+      const total = await invoke<number>('count_journal_entries', {
+        unitFilter,
+        priority,
+        sinceFilter,
+        untilFilter
+      });
+      journalTotalInRange = total || 0;
+    } catch {
+      journalTotalInRange = 0;
     }
   }
 
@@ -234,10 +301,12 @@
 
   function handleTabChange(tabId: string) {
     activeTab = tabId;
-    if (tabId === 'journal') fetchLogs();
-    else if (tabId === 'auth') fetchAuthEvents();
-    else if (tabId === 'audit') fetchAuditLogs();
-    else if (tabId === 'threats') fetchThreats();
+    // Load a tab the first time it is opened — switching back is instant.
+    // A range/level change calls refreshActiveTab() explicitly.
+    if (tabId === 'journal' && logs.length === 0) fetchLogs();
+    else if (tabId === 'auth' && authEvents.length === 0) fetchAuthEvents();
+    else if (tabId === 'audit' && auditLogs.length === 0) fetchAuditLogs();
+    else if (tabId === 'threats' && runtimeThreats.length === 0) fetchThreats();
   }
 
   function handleRangeChange() {
@@ -298,24 +367,67 @@
     searchQuery = '';
   }
 
+  /**
+   * Apply deep-link filters coming from another module (Dashboard, Service
+   * Manager …) exactly once — they are consumed here so that later state
+   * changes never overwrite what the user typed.
+   *
+   * Only the three deep-link fields are tracked. Applying them (and the
+   * fetch that follows) is untracked on purpose: an effect that reads and
+   * writes the same state re-triggers itself and Svelte aborts the update
+   * with "Maximum update depth exceeded".
+   */
+  let hasLoadedOnce = false;
   $effect(() => {
-    if (uiStore.preAppliedJournalPriority && uiStore.preAppliedJournalPriority !== 'all') {
-      filterPriority = uiStore.preAppliedJournalPriority;
-    }
-    if (uiStore.preAppliedJournalSearch !== undefined && uiStore.preAppliedJournalSearch !== null) {
-      searchQuery = uiStore.preAppliedJournalSearch;
-    }
-    if (uiStore.preAppliedJournalUnit !== undefined && uiStore.preAppliedJournalUnit !== null) {
-      currentUnitFilter = uiStore.preAppliedJournalUnit;
-    }
+    const prio = uiStore.preAppliedJournalPriority;
+    const search = uiStore.preAppliedJournalSearch;
+    const unit = uiStore.preAppliedJournalUnit;
+
+    untrack(() => {
+      let applied = false;
+
+      if (prio && prio !== 'all') {
+        filterPriority = prio;
+        applied = true;
+      }
+      if (search) {
+        searchQuery = search;
+        applied = true;
+      }
+      if (unit) {
+        currentUnitFilter = unit;
+        applied = true;
+      }
+
+      // consume the deep link so it is not applied again on the next visit
+      uiStore.preAppliedJournalPriority = 'all';
+      uiStore.preAppliedJournalSearch = '';
+      uiStore.preAppliedJournalUnit = '';
+
+      // remember the applied context — the page header shows it as a
+      // breadcrumb, but the pre-applied fields are already cleared here
+      if (applied) {
+        uiStore.journalDeepLinkContext = { unit: unit ?? '', search: search ?? '' };
+      }
+
+      // The first run loads the page: either with the deep-linked filters or
+      // the default tab. Later runs only refetch when a filter was applied.
+      if (applied) {
+        fetchLogs();
+        hasLoadedOnce = true;
+      } else if (!hasLoadedOnce) {
+        refreshActiveTab();
+        hasLoadedOnce = true;
+      }
+    });
+  });
+
+  // the deep-link context only belongs to this view
+  onDestroy(() => {
+    uiStore.journalDeepLinkContext = null;
   });
 
   onMount(() => {
-    fetchLogs();
-    fetchAuthEvents();
-    fetchAuditLogs();
-    fetchThreats();
-
     const handleTabSelect = (e: Event) => {
       const customEvent = e as CustomEvent;
       if (customEvent.detail) {
@@ -361,15 +473,13 @@
     if (isLiveFollowing) {
       try {
         const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
-        await invoke('start_journal_live_stream', { unitFilter: null, priority: prioF });
-        unlistenLive = await listen<string>('journal-live-log', (event) => {
-          try {
-            const parsed = JSON.parse(event.payload);
-            if (parsed) {
-              logs = [parsed, ...logs.slice(0, 2500)];
-            }
-          } catch(err) {
-            console.error(err);
+        // honour the active unit filter — the stream used to ignore it
+        const unitF = currentUnitFilter.trim() || null;
+        await invoke('start_journal_live_stream', { unitFilter: unitF, priority: prioF });
+        unlistenLive = await listen<any>('journal-live-log', (event) => {
+          const parsed = event.payload;
+          if (parsed) {
+            logs = [parsed, ...logs.slice(0, 2500)];
           }
         });
         uiStore.addToast('Live Journal streaming active', 'success');
@@ -475,22 +585,10 @@
     }
 
     try {
-      // 1. Write file via backend command directly to ~/Downloads
+      // The backend writes the file straight into ~/Downloads — a browser
+      // download on top of that would leave the user with two copies.
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
       lastExportedFile = { name: filename, path: savedPath };
-
-      // 2. Fallback browser download blob
-      try {
-        const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      } catch (err) {
-        console.warn('Browser download fallback failed:', err);
-      }
 
       if (openFolder) {
         await invoke('reveal_in_file_manager', { path: savedPath });
@@ -530,16 +628,10 @@
     return 'log-debug';
   }
 
-  function escapeRegex(s: string) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  function highlight(text: string, q: string): string {
-    if (!q || !text) return text || '';
-    try {
-      return text.replace(new RegExp(`(${escapeRegex(q)})`, 'gi'), '<mark class="hl">$1</mark>');
-    } catch { return text; }
-  }
+  // Highlight rendering: journal content is UNTRUSTED, so it is never put
+  // through `{@html}`. The `mark` snippet renders plain, framework-escaped
+  // text nodes and wraps literal query matches (case-insensitive) with
+  // `<mark class="hl">`. See src/lib/utils/highlight.ts.
 
   interface LogItem {
     PRIORITY: string | number;
@@ -549,7 +641,16 @@
     MESSAGE: string;
     count?: number;
     _unique_id?: string;
+    /** lower-cased searchable text, built once per fetch instead of per keystroke */
+    _hay?: string;
     [key: string]: any;
+  }
+
+  /** Lower-cased haystack for one entry — built once, not on every keystroke. */
+  function buildHaystack(log: any): string {
+    const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || log._COMM || 'kernel';
+    const msg = typeof log.MESSAGE === 'string' ? log.MESSAGE : JSON.stringify(log.MESSAGE || '');
+    return `${msg} ${unit} ${log.SYSLOG_IDENTIFIER || ''} ${log._COMM || ''} ${log._PID || ''} ${log._EXE || ''}`.toLowerCase();
   }
 
   // Collapse consecutive duplicates
@@ -567,7 +668,7 @@
       } else {
         idx++;
         const uniqueId = `${log.__REALTIME_TIMESTAMP || ''}_${unit}_${idx}`;
-        list.push({ ...log, _unique_id: uniqueId, count: 1 });
+        list.push({ ...log, _unique_id: uniqueId, count: 1, _hay: buildHaystack(log) });
       }
     }
     return list;
@@ -579,11 +680,8 @@
     if (!q) return collapsedLogs;
     return collapsedLogs.filter(log => {
       if (!log) return false;
-      const msg = typeof log.MESSAGE === 'string' ? log.MESSAGE.toLowerCase() : JSON.stringify(log.MESSAGE || '').toLowerCase();
-      const unit = String(log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || log._COMM || 'kernel').toLowerCase();
-      const sysIdent = String(log.SYSLOG_IDENTIFIER || '').toLowerCase();
-      const raw = JSON.stringify(log).toLowerCase();
-      return msg.includes(q) || unit.includes(q) || sysIdent.includes(q) || raw.includes(q);
+      // prebuilt haystack — no JSON.stringify on every keystroke
+      return (log._hay ?? buildHaystack(log)).includes(q);
     });
   });
 
@@ -777,6 +875,9 @@
 </script>
 
 <div class="module-page">
+  {#snippet mark(text: string)}
+    {#each highlightSegments(text, searchQuery) as seg, i (i)}{#if seg.hit}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+  {/snippet}
   <PageHeader title="Journal Logs" icon={FileText}>
     <!-- Single unified toolbar strip -->
     <div class="log-toolbar">
@@ -960,18 +1061,22 @@
           {#if isLoading}
             <div class="empty-state">Fetching logs…</div>
           {:else if hasActiveSearch && collapsedLogs.length > 0}
-            <EmptyState 
+            <EmptyState
               icon={FileText}
               title="No Matching Logs"
-              description={`No log messages matched "${searchQuery}".`}
+              description={currentUnitFilter
+                ? `No log messages matched "${searchQuery}" for unit ${currentUnitFilter}. Widen the range or clear the filters.`
+                : `No log messages matched "${searchQuery}". Widen the range or clear the filters.`}
               actionLabel="Clear Search"
               onAction={() => { searchQuery = ''; }}
             />
           {:else}
-            <EmptyState 
+            <EmptyState
               icon={FileText}
               title="No Logs in Selected Range"
-              description="No systemd journal messages found for the current time and level filters."
+              description={currentUnitFilter
+                ? `No systemd journal messages found for ${currentUnitFilter} with the current time and level filters. Try a wider range.`
+                : 'No systemd journal messages found for the current time and level filters.'}
               actionLabel="Refresh Logs"
               onAction={fetchLogs}
             />
@@ -996,10 +1101,10 @@
                 <tr class="log-row {getPriorityClass(log.PRIORITY)}" onclick={() => openLogDrawer(log)} style="cursor: pointer;">
                   <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
                   <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    {@html highlight(unit, searchQuery)}
+                    {@render mark(unit)}
                   </td>
                   <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
-                    {@html highlight(log.MESSAGE, searchQuery)}
+                    {@render mark(log.MESSAGE)}
                     {#if (log.count ?? 1) > 1}
                       <span class="repeat-badge">×{log.count}</span>
                     {/if}
@@ -1036,6 +1141,32 @@
               {/if}
             </tbody>
           </Table>
+          <!-- Table footer: entry count, fetch time, and paging for older entries -->
+          {#if !isLoading && logs.length > 0}
+            <div class="journal-table-footer">
+              <div class="journal-footer-stats">
+                <span class="journal-footer-count">
+                  <Layers size={12} />
+                  {journalTotalInRange
+                    ? `${logs.length.toLocaleString()} of ${journalTotalInRange.toLocaleString()} entries`
+                    : `${logs.length.toLocaleString()} entries`}
+                </span>
+                <span class="journal-footer-time">fetched in {journalFetchMs} ms</span>
+              </div>
+              {#if journalTruncated}
+                <button
+                  type="button"
+                  class="journal-footer-action"
+                  onclick={loadOlderLogs}
+                  disabled={isLoadingOlder}
+                  title="Load the next batch of older entries"
+                >
+                  {#if isLoadingOlder}<RefreshCw size={12} class="animate-spin-slow" />{:else}<ChevronDown size={12} />{/if}
+                  Load older entries
+                </button>
+              {/if}
+            </div>
+          {/if}
         {/if}
 
       <!-- Tab 2: Auth Events -->
@@ -1045,7 +1176,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to read authentication logs.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open authentication logs.</div>
             </div>
           </div>
         {/if}
@@ -1054,7 +1185,7 @@
             {#if loadingAuth}
               Fetching authentication logs…
             {:else if authError && authError.includes('Root privileges')}
-              Enable Root mode in the status bar to view authentication logs.
+              System authorization is requested when you open authentication logs.
             {:else if hasActiveSearch}
               No auth events match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1088,15 +1219,15 @@
                 <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
                   <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
                   <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
-                    {@html highlight(ev.user, searchQuery)}
+                    {@render mark(ev.user)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.event_type.includes('SSH') ? 'info' : (ev.event_type.includes('Sudo') ? 'warning' : 'muted')} style="font-size: 10px;">
-                      {@html highlight(ev.event_type, searchQuery)}
+                      {@render mark(ev.event_type)}
                     </Badge>
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary);">
-                    {@html highlight(ev.source_ip, searchQuery)}
+                    {@render mark(ev.source_ip)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
@@ -1104,7 +1235,7 @@
                     </Badge>
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.details}>
-                    {@html highlight(ev.details, searchQuery)}
+                    {@render mark(ev.details)}
                   </td>
                 </tr>
               {/each}
@@ -1119,7 +1250,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to read audit logs and configure auditd rules.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open audit logs or change audit rules.</div>
             </div>
           </div>
         {:else if setupError}
@@ -1158,7 +1289,7 @@
             {#if loadingAudit}
               Fetching command logs…
             {:else if auditError && auditError.includes('Root privileges')}
-              Enable Root mode in the status bar to view command audit logs.
+              System authorization is requested when you open command audit logs.
             {:else if hasActiveSearch}
               No commands match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1191,13 +1322,13 @@
                 <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
                   <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
                   <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
-                    {@html highlight(ev.user, searchQuery)}
+                    {@render mark(ev.user)}
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-accent); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.command}>
-                    {@html highlight(ev.command, searchQuery)}
+                    {@render mark(ev.command)}
                   </td>
                   <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.cwd}>
-                    {@html highlight(ev.cwd, searchQuery)}
+                    {@render mark(ev.cwd)}
                   </td>
                   <td style="padding: 8px 12px;">
                     <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
@@ -1217,7 +1348,7 @@
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
             <div>
               <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">Enable Root mode via the <strong>Root: Off</strong> button in the status bar to run threat correlation analysis.</div>
+              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you run threat correlation analysis.</div>
             </div>
           </div>
         {/if}
@@ -1303,7 +1434,7 @@
                   <div style="display:flex; align-items:center; gap:8px;">
                     <ShieldAlert size={16} color={threat.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)'} />
                     <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: var(--color-text-primary);">
-                      {@html highlight(threat.title, searchQuery)}
+                      {@render mark(threat.title)}
                     </h3>
                     <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="font-size: 9px; text-transform: uppercase;">
                       {threat.severity}
@@ -1311,7 +1442,7 @@
                     <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">{threat.timestamp}</span>
                   </div>
                   <p style="font-size: 12px; color: var(--color-text-secondary); margin: 4px 0 0 0; line-height: 1.5;">
-                    {@html highlight(threat.description, searchQuery)}
+                    {@render mark(threat.description)}
                   </p>
                   <div style="margin-top: 8px;">
                     <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: rgba(255,255,255,0.05); color: var(--color-text-muted);">
@@ -1487,9 +1618,7 @@
   </SideDrawer>
 {/if}
 
-<style>
-  /* ── Single unified toolbar strip ───────────────────── */
-  .log-toolbar {
+<style>/* ── Single unified toolbar strip ───────────────────── */ .log-toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1500,16 +1629,10 @@
     padding: 0 10px;
     width: 100%;
     box-sizing: border-box;
-  }
-
-  /* Search icon */
-  .log-toolbar :global(.log-search-icon) {
+  }/* Search icon */ .log-toolbar :global(.log-search-icon) {
     color: var(--color-text-muted);
     flex-shrink: 0;
-  }
-
-  /* Text input */
-  .log-search-input {
+  }/* Text input */ .log-search-input {
     flex: 1;
     min-width: 120px;
     height: 100%;
@@ -1519,13 +1642,9 @@
     color: var(--color-text-primary);
     font-size: 13px;
     font-family: var(--font-sans);
-  }
-  .log-search-input::placeholder {
+  }.log-search-input::placeholder {
     color: var(--color-text-muted);
-  }
-
-  /* Match count badge */
-  .log-count-badge {
+  }/* Match count badge */ .log-count-badge {
     font-size: 11px;
     font-family: var(--font-mono);
     color: var(--color-accent);
@@ -1534,10 +1653,7 @@
     border-radius: 10px;
     white-space: nowrap;
     flex-shrink: 0;
-  }
-
-  /* Clear search button */
-  .log-clear-btn {
+  }/* Clear search button */ .log-clear-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1550,30 +1666,20 @@
     color: var(--color-text-muted);
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
-  }
-  .log-clear-btn:hover {
+  }.log-clear-btn:hover {
     background: var(--color-active-bg);
     color: var(--color-text-primary);
-  }
-
-  /* Separator */
-  .log-sep {
+  }/* Separator */ .log-sep {
     width: 1px;
     height: 16px;
     background: var(--color-border-subtle);
     flex-shrink: 0;
-  }
-
-  /* Small label */
-  .log-label {
+  }/* Small label */ .log-label {
     font-size: 11px;
     color: var(--color-text-muted);
     white-space: nowrap;
     flex-shrink: 0;
-  }
-
-  /* Level select */
-  .log-select {
+  }/* Level select */ .log-select {
     height: 100%;
     background: transparent;
     border: none;
@@ -1585,11 +1691,7 @@
     appearance: none;
     -webkit-appearance: none;
     flex-shrink: 0;
-  }
-  .log-select option { background: var(--color-bg-card); color: var(--color-text-primary); }
-
-  /* Date / time inputs */
-  .log-dt {
+  }/* Date / time inputs */ .log-dt {
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
     border-radius: 6px;
@@ -1600,21 +1702,14 @@
     padding: 4px 8px;
     height: 28px;
     box-sizing: border-box;
-  }
-  .log-dt::-webkit-calendar-picker-indicator {
+  }.log-dt::-webkit-calendar-picker-indicator {
     filter: invert(1);
     opacity: 0.45;
     cursor: pointer;
-  }
-  .log-dt::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
-
-  /* Custom Range Popover */
-  .custom-range-container {
+  }.log-dt::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }/* Custom Range Popover */ .custom-range-container {
     position: relative;
     display: inline-block;
-  }
-
-  .custom-range-popover {
+  }.custom-range-popover {
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
@@ -1625,38 +1720,27 @@
     border-radius: 8px;
     padding: 14px;
     box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
-  }
-
-  .popover-row {
+  }.popover-row {
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  .popover-label {
+  }.popover-label {
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     color: var(--color-text-muted);
     letter-spacing: 0.5px;
-  }
-
-  /* Time input sits below the DatePicker trigger inside a popover row */
-  .popover-row .log-dt {
+  }/* Time input sits below the DatePicker trigger inside a popover row */ .popover-row .log-dt {
     width: 100%;
     box-sizing: border-box;
-  }
-
-  .popover-actions {
+  }.popover-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
     margin-top: 14px;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
     padding-top: 10px;
-  }
-
-  .popover-btn {
+  }.popover-btn {
     font-family: inherit;
     font-size: 11px;
     font-weight: 600;
@@ -1665,29 +1749,18 @@
     cursor: pointer;
     border: none;
     transition: all 0.15s ease;
-  }
-
-  .apply-btn {
+  }.apply-btn {
     background: var(--color-accent);
     color: #0f172a;
-  }
-
-  .apply-btn:hover {
+  }.apply-btn:hover {
     background: #00b9cf;
-  }
-
-  .cancel-btn {
+  }.cancel-btn {
     background: rgba(255, 255, 255, 0.08);
     color: var(--color-text-secondary);
-  }
-
-  .cancel-btn:hover {
+  }.cancel-btn:hover {
     background: rgba(255, 255, 255, 0.15);
     color: var(--color-text-primary);
-  }
-
-  /* Refresh / trash action buttons */
-  .log-action-btn {
+  }/* Refresh / trash action buttons */ .log-action-btn {
     display: flex;
     align-items: center;
     gap: 5px;
@@ -1703,34 +1776,23 @@
     flex-shrink: 0;
     transition: background 0.15s, color 0.15s;
     white-space: nowrap;
-  }
-  .log-action-btn:hover {
+  }.log-action-btn:hover {
     background: rgba(255, 255, 255, 0.1);
     color: var(--color-text-primary);
-  }
-  .log-action-btn:disabled {
+  }.log-action-btn:disabled {
     opacity: 0.4;
     cursor: default;
-  }
-  .log-action-danger { padding: 0 6px; }
-  .log-action-danger:hover {
+  }.log-action-danger { padding: 0 6px; }.log-action-danger:hover {
     background: rgba(255, 118, 117, 0.12);
     color: var(--color-error);
-  }
-
-  /* Export Dropdown Menu */
-  .export-dropdown-container {
+  }/* Export Dropdown Menu */ .export-dropdown-container {
     position: relative;
     display: inline-flex;
-  }
-
-  .export-main-btn {
+  }.export-main-btn {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-  }
-
-  .export-dropdown-menu {
+  }.export-dropdown-menu {
     position: absolute;
     top: calc(100% + 5px);
     right: 0;
@@ -1745,9 +1807,7 @@
     flex-direction: column;
     gap: 2px;
     animation: menu-fade 0.12s ease;
-  }
-
-  .export-menu-item {
+  }.export-menu-item {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1763,29 +1823,19 @@
     text-align: left;
     transition: all 0.12s ease;
     white-space: nowrap;
-  }
-
-  .export-menu-item:hover {
+  }.export-menu-item:hover {
     background: rgba(0, 218, 243, 0.1);
     color: var(--color-text-primary);
-  }
-
-  .export-menu-item.accent {
+  }.export-menu-item.accent {
     color: var(--color-accent);
     font-weight: 500;
-  }
-
-  .export-menu-item.accent:hover {
+  }.export-menu-item.accent:hover {
     background: rgba(0, 218, 243, 0.15);
-  }
-
-  .export-menu-divider {
+  }.export-menu-divider {
     height: 1px;
     background: var(--color-border, rgba(255, 255, 255, 0.08));
     margin: 3px 0;
-  }
-
-  .export-open-folder-btn {
+  }.export-open-folder-btn {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -1801,24 +1851,17 @@
     cursor: pointer;
     transition: all 0.15s ease;
     white-space: nowrap;
-  }
-
-  .export-open-folder-btn:hover {
+  }.export-open-folder-btn:hover {
     background: rgba(0, 218, 243, 0.22);
     color: #fff;
     border-color: rgba(0, 218, 243, 0.5);
-  }
-
-  /* ── Log viewer ──────────────────────────────────────── */
-  .log-viewer {
+  }/* ── Log viewer ──────────────────────────────────────── */ .log-viewer {
     padding: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     height: 100%;
-  }
-
-  .log-container {
+  }.log-container {
     flex: 1;
     min-height: 0;
     display: flex;
@@ -1828,14 +1871,69 @@
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
   }
+  /* ── Table footer (entry count + fetch time + paging) ───────── */
+  .journal-table-footer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 7px 12px;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-raised);
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-sans);
+    flex-shrink: 0;
+  }
 
-  :global(.log-container .table-wrap) {
+  .journal-footer-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .journal-footer-count {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .journal-footer-time {
+    color: var(--color-text-muted);
+  }
+
+  .journal-footer-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid var(--color-accent-glow);
+    border-radius: 6px;
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+    font-size: 11.5px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+
+  .journal-footer-action:hover:not(:disabled) {
+    border-color: var(--color-accent);
+  }
+
+  .journal-footer-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }:global(.log-container .table-wrap) {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-  }
-
-  .empty-state {
+  }.empty-state {
     display: flex;
     justify-content: center;
     align-items: center;
@@ -1843,72 +1941,34 @@
     color: var(--color-text-muted);
     font-size: 13px;
     font-family: var(--font-sans);
-  }
-
-  .log-table {
+  }.log-table {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed;
-  }
-
-  .log-table thead th {
+  }.log-table :global(thead th) {
     position: sticky !important;
     top: 0 !important;
     z-index: 20 !important;
-  }
-
-  .log-row {
+  }.log-row {
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  }
-  .log-row:hover { background: rgba(255, 255, 255, 0.04); }
-
-  .log-row td {
+  }.log-row:hover { background: rgba(255, 255, 255, 0.04); }.log-row td {
     padding: 4px 8px;
     vertical-align: top;
-  }
-
-  .col-time {
+  }.col-time {
     width: 155px;
     color: var(--color-text-muted);
     white-space: nowrap;
-  }
-
-  .col-unit {
+  }.col-unit {
     width: 145px;
     color: #8b949e;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .col-msg {
+  }.col-msg {
     color: #c9d1d9;
     word-break: break-word;
-  }
-
-  /* Priority Colors (Dark Mode Default) */
-  .log-error .col-msg  { color: #ff7b72; font-weight: 500; }
-  .log-error .col-unit { color: #f87171 !important; }
-  .log-warn  .col-msg  { color: #fbbf24; }
-  .log-warn  .col-unit { color: #f59e0b !important; }
-  .log-info  .col-msg  { color: #38bdf8; }
-  .log-info  .col-unit { color: #38bdf8 !important; }
-  .log-debug .col-msg  { color: #94a3b8; }
-  .log-debug .col-unit { color: #94a3b8 !important; }
-
-  /* Priority Colors for Light Mode */
-  :global(html.light-mode) .log-error .col-unit { color: #dc2626 !important; }
-  :global(html.light-mode) .log-warn  .col-unit { color: #d97706 !important; }
-  :global(html.light-mode) .log-info  .col-unit { color: #0284c7 !important; }
-  :global(html.light-mode) .log-debug .col-unit { color: #64748b !important; }
-
-  :global(html.light-mode) .log-error .col-msg { color: #dc2626; }
-  :global(html.light-mode) .log-warn  .col-msg { color: #b45309; }
-  :global(html.light-mode) .log-info  .col-msg { color: #334155; }
-  :global(html.light-mode) .log-debug .col-msg { color: #64748b; }
-
-  .repeat-badge {
+  }/* Priority Colors (Dark Mode Default) */ .log-error .col-msg { color: #ff7b72; font-weight: 500; }.log-error .col-unit { color: #f87171 !important; }.log-warn .col-msg { color: #fbbf24; }.log-warn .col-unit { color: #f59e0b !important; }.log-info .col-msg { color: #38bdf8; }.log-info .col-unit { color: #38bdf8 !important; }.log-debug .col-msg { color: #94a3b8; }.log-debug .col-unit { color: #94a3b8 !important; }/* Priority Colors for Light Mode */ :global(html.light-mode) .log-error .col-unit { color: #dc2626 !important; }:global(html.light-mode) .log-warn .col-unit { color: #d97706 !important; }:global(html.light-mode) .log-info .col-unit { color: #0284c7 !important; }:global(html.light-mode) .log-debug .col-unit { color: #64748b !important; }:global(html.light-mode) .log-error .col-msg { color: #dc2626; }:global(html.light-mode) .log-warn .col-msg { color: #b45309; }:global(html.light-mode) .log-info .col-msg { color: #334155; }:global(html.light-mode) .log-debug .col-msg { color: #64748b; }.repeat-badge {
     background: rgba(255, 255, 255, 0.1);
     color: var(--color-text-secondary);
     border-radius: 4px;
@@ -1917,64 +1977,42 @@
     margin-left: 8px;
     font-weight: bold;
     display: inline-block;
-  }
-
-  .live-following-btn {
+  }.live-following-btn {
     background: rgba(16, 185, 129, 0.15) !important;
     color: var(--color-success) !important;
     border: 1px solid rgba(16, 185, 129, 0.3) !important;
-  }
-
-  .live-status-dot {
+  }.live-status-dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: var(--color-text-muted);
     display: inline-block;
-  }
-
-  .live-status-dot.pulsing {
+  }.live-status-dot.pulsing {
     background: var(--color-success);
     box-shadow: 0 0 8px var(--color-success);
     animation: pulse-live 1.2s infinite;
   }
-
-  @keyframes pulse-live {
-    0% { transform: scale(0.95); opacity: 0.8; }
-    50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 10px var(--color-success); }
-    100% { transform: scale(0.95); opacity: 0.8; }
-  }
-
-  .log-row.log-error {
+@keyframes pulse-live {0% { transform: scale(0.95); opacity: 0.8; }50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 10px var(--color-success); }100% { transform: scale(0.95); opacity: 0.8; }
+}.log-row.log-error {
     border-left: 5px solid var(--color-error);
-  }
-  .log-row.log-warn {
+  }.log-row.log-warn {
     border-left: 5px solid var(--color-warning);
-  }
-  .log-row.log-info {
+  }.log-row.log-info {
     border-left: 5px solid var(--color-accent);
-  }
-  .log-row.log-debug {
+  }.log-row.log-debug {
     border-left: 5px solid var(--color-border);
-  }
-
-  /* ── Log Detail Drawer Styles ─────────────────────────────────────────── */
-  .log-drawer-body {
+  }/* ── Log Detail Drawer Styles ─────────────────────────────────────────── */ .log-drawer-body {
     display: flex;
     flex-direction: column;
     gap: 16px;
     padding: 16px;
-  }
-
-  .drawer-overview-card {
+  }.drawer-overview-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 14px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-  }
-
-  .drawer-action-btn {
+  }.drawer-action-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -1987,24 +2025,18 @@
     font-family: var(--font-sans);
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-  .drawer-action-btn:hover {
+  }.drawer-action-btn:hover {
     background: var(--color-bg-hover);
     color: var(--color-text-primary);
     border-color: var(--color-accent);
-  }
-  .drawer-action-btn.ai-btn:hover {
+  }.drawer-action-btn.ai-btn:hover {
     border-color: var(--color-accent);
     color: var(--color-accent);
-  }
-
-  .drawer-section {
+  }.drawer-section {
     display: flex;
     flex-direction: column;
     gap: 8px;
-  }
-
-  .drawer-section-title {
+  }.drawer-section-title {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -2013,9 +2045,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--color-text-muted);
-  }
-
-  .field-copy-btn {
+  }.field-copy-btn {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -2027,12 +2057,9 @@
     padding: 2px 4px;
     border-radius: 4px;
     transition: color 0.15s ease;
-  }
-  .field-copy-btn:hover {
+  }.field-copy-btn:hover {
     color: var(--color-accent);
-  }
-
-  .drawer-msg-box {
+  }.drawer-msg-box {
     background: var(--color-bg-base);
     border: 1px solid var(--color-border);
     border-radius: 6px;
@@ -2045,33 +2072,25 @@
     word-break: break-word;
     max-height: 200px;
     overflow-y: auto;
-  }
-
-  .drawer-fields-table {
+  }.drawer-fields-table {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--color-border);
     border-radius: 6px;
     overflow: hidden;
     background: var(--color-bg-card);
-  }
-
-  .drawer-field-row {
+  }.drawer-field-row {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 7px 10px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     font-size: 12px;
-  }
-  .drawer-field-row:last-child {
+  }.drawer-field-row:last-child {
     border-bottom: none;
-  }
-  .drawer-field-row:hover {
+  }.drawer-field-row:hover {
     background: rgba(255, 255, 255, 0.02);
-  }
-
-  .drawer-field-key {
+  }.drawer-field-key {
     width: 140px;
     flex-shrink: 0;
     font-weight: 600;
@@ -2080,9 +2099,7 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .drawer-field-val {
+  }.drawer-field-val {
     flex: 1;
     min-width: 0;
     font-family: var(--font-mono);
@@ -2091,16 +2108,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .drawer-field-val code {
+  }.drawer-field-val code {
     background: transparent;
     padding: 0;
     color: inherit;
     font-family: inherit;
-  }
-
-  .field-row-copy-btn {
+  }.field-row-copy-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2115,14 +2128,11 @@
     opacity: 0.6;
     transition: all 0.15s ease;
     flex-shrink: 0;
-  }
-  .field-row-copy-btn:hover {
+  }.field-row-copy-btn:hover {
     opacity: 1;
     color: var(--color-accent);
     background: rgba(255, 255, 255, 0.06);
-  }
-
-  .drawer-raw-json {
+  }.drawer-raw-json {
     background: var(--color-bg-base);
     border: 1px solid var(--color-border);
     border-radius: 6px;
@@ -2136,5 +2146,4 @@
     max-height: 500px;
     overflow-y: auto;
     margin: 0;
-  }
-</style>
+  }</style>

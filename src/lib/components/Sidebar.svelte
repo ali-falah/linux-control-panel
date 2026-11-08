@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Package, History, LayoutGrid, Layers, Settings2, Globe } from '@lucide/svelte';
   import { Users, Shield, Cpu, ShieldCheck, Clock, FileText, Server } from '@lucide/svelte';
   import { ChevronLeft, ChevronRight, Database, Terminal, ChevronDown } from '@lucide/svelte';
@@ -13,7 +13,7 @@
   let currentUsername = $state('user');
   let userInitial = $derived(currentUsername.charAt(0).toUpperCase());
   
-  $effect(() => {
+  onMount(() => {
     getVersion().then(v => appVersion = `v${v}`).catch(() => appVersion = 'v0.0.0');
     invoke<string>('get_current_user')
       .then(u => { if (u) currentUsername = u; })
@@ -54,16 +54,18 @@
 
   $effect(() => {
     const tab = uiStore.activeTab;
-    untrack(() => {
-      if (tab) {
-        for (const group of groups) {
+    if (tab && !uiStore.sidebarCollapsed) {
+      untrack(() => {
+        for (const group of visibleGroups) {
           if (group.items.some(i => i.id === tab)) {
-            expandedCategory = group.label;
+            if (expandedCategory !== group.label) {
+              expandedCategory = group.label;
+            }
             break;
           }
         }
-      }
-    });
+      });
+    }
   });
 
   let hoveredGroup = $state<string | null>(null);
@@ -71,19 +73,28 @@
 
   function handleGroupMouseEnter(groupLabel: string) {
     if (!uiStore.sidebarCollapsed) return;
-    if (hoverTimeout) clearTimeout(hoverTimeout);
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+      hoverTimeout = null;
+    }
+    if (hoveredGroup === groupLabel) return;
     hoveredGroup = groupLabel;
   }
 
   function handleGroupMouseLeave() {
     if (!uiStore.sidebarCollapsed) return;
+    if (hoverTimeout) clearTimeout(hoverTimeout);
     hoverTimeout = setTimeout(() => {
       hoveredGroup = null;
-    }, 60);
+      hoverTimeout = null;
+    }, 180);
   }
 
   function handleFlyoutMouseEnter() {
-    if (hoverTimeout) clearTimeout(hoverTimeout);
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+      hoverTimeout = null;
+    }
   }
 
   function handleFlyoutMouseLeave() {
@@ -127,7 +138,7 @@
       items: [
         { id: 'network-manager',  label: 'Advanced Network', icon: Network, desc: 'Interfaces, IP & DNS routing' },
         { id: 'hosts-manager',    label: 'Hosts Manager',    icon: Globe, desc: 'Local DNS & /etc/hosts' },
-        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault',  icon: KeyRound, desc: 'SSH keys, access & TLS certs' },
+        { id: 'ssh-cert-manager', label: 'SSH & SSL Vault', icon: KeyRound, desc: 'SSH keys, access & TLS certs' },
       ],
     },
     {
@@ -136,7 +147,6 @@
       items: [
         { id: 'security-auditor', label: 'Security Auditor', icon: ShieldCheck, desc: 'CIS & STIG hardening' },
         { id: 'firewall-manager', label: 'Firewall Manager', icon: Shield, desc: 'UFW & Firewalld rules' },
-        { id: 'selinux-manager',  label: 'SELinux & AppArmor', icon: ShieldCheck, desc: 'Security policies & MAC' },
         { id: 'journal-logs',     label: 'Journal Logs',     icon: FileText, desc: 'Systemd Journal logs' },
         { id: 'user-manager',     label: 'Users & Groups',   icon: Users, desc: 'User accounts & privileges' },
       ],
@@ -146,7 +156,6 @@
       icon: Cpu,
       items: [
         { id: 'device-manager',  label: 'Device Manager',  icon: HardDrive, desc: 'Disks, SMART & hardware' },
-        { id: 'grub-manager',    label: 'GRUB Bootloader', icon: Cpu, desc: 'Boot entries & kernel params' },
         { id: 'cron-manager',    label: 'Scheduled Tasks', icon: Clock, desc: 'Crontab jobs & timers' },
         { id: 'env-manager',     label: 'Environment',     icon: FileText, desc: 'System environment vars' },
         { id: 'shell-env',       label: 'Shell Environment', icon: Terminal, desc: 'Zsh / Bash profile config' },
@@ -154,8 +163,10 @@
     },
   ];
 
+  let visibleGroups = $derived(groups.filter(group => group.items.length > 0));
+
   function getItemByTabId(id: TabId) {
-    for (const g of groups) {
+    for (const g of visibleGroups) {
       const match = g.items.find(i => i.id === id);
       if (match) return match;
     }
@@ -205,10 +216,11 @@
     {#if uiStore.sidebarCollapsed}
       <!-- Collapsed Mode: Category Icons with Nested Flyout Menu -->
       <div class="collapsed-categories-list">
-        {#each groups as group}
+        {#each visibleGroups as group (group.label)}
           {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
           <div
             class="collapsed-cat-wrapper"
+            role="presentation"
             onmouseenter={() => handleGroupMouseEnter(group.label)}
             onmouseleave={handleGroupMouseLeave}
           >
@@ -232,6 +244,7 @@
                 onmouseenter={handleFlyoutMouseEnter}
                 onmouseleave={handleFlyoutMouseLeave}
                 role="menu"
+                tabindex="-1"
               >
                 <div class="flyout-arrow"></div>
                 <div class="flyout-header">
@@ -278,7 +291,7 @@
       </div>
     {:else}
       <!-- Expanded Mode -->
-      {#each groups as group}
+      {#each visibleGroups as group}
         {@const filteredItems = group.items.filter(i => i.label.toLowerCase().includes(searchQuery.toLowerCase()))}
         {@const isGroupActive = group.items.some(i => i.id === uiStore.activeTab)}
         {@const isExpanded = searchQuery.trim() !== '' || expandedCategory === group.label}
@@ -344,7 +357,7 @@
           </div>
           <div class="profile-text">
             <span class="profile-name">{currentUsername}</span>
-            <span class="profile-role">System Admin</span>
+            <span class="profile-role">Linux user</span>
           </div>
         </div>
         <button 
@@ -370,8 +383,7 @@
   </div>
 </aside>
 
-<style>
-  .sidebar {
+<style>.sidebar {
     display: flex;
     flex-direction: column;
     width: 220px;
@@ -388,22 +400,15 @@
     overflow: hidden;
     padding: 12px 8px;
     gap: 0;
-  }
-
-  .sidebar.collapsed {
+  }.sidebar.collapsed {
     width: 52px;
     min-width: 52px;
     padding: 12px 6px;
     overflow: visible;
     z-index: 1000;
-  }
-
-  .sidebar.collapsed .sidebar-nav {
+  }.sidebar.collapsed .sidebar-nav {
     overflow: visible;
-  }
-
-  /* ── Collapsed Category List ───────────────────────────────────────── */
-  .collapsed-categories-list {
+  }/* ── Collapsed Category List ───────────────────────────────────────── */ .collapsed-categories-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -412,26 +417,19 @@
     width: 100%;
     animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-
-  @keyframes sidebarContentFade {
-    from {
+@keyframes sidebarContentFade {from {
       opacity: 0;
       transform: translateX(-4px);
-    }
-    to {
+    }to {
       opacity: 1;
       transform: translateX(0);
     }
-  }
-
-  .collapsed-cat-wrapper {
+}.collapsed-cat-wrapper {
     position: relative;
     width: 100%;
     display: flex;
     justify-content: center;
-  }
-
-  .collapsed-cat-btn {
+  }.collapsed-cat-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -444,20 +442,13 @@
     cursor: pointer;
     position: relative;
     transition: all 0.18s ease;
-  }
-
-  .collapsed-cat-btn:hover {
+  }.collapsed-cat-btn:hover {
     background: rgba(0, 218, 243, 0.08);
     color: var(--color-text-primary);
-  }
-
-  .collapsed-cat-btn.active {
+  }.collapsed-cat-btn.active {
     background: rgba(0, 218, 243, 0.12);
     color: var(--color-accent);
-  }
-
-  /* Left vertical blue pill indicator for active group */
-  .collapsed-cat-btn.active::before {
+  }/* Left vertical blue pill indicator for active group */ .collapsed-cat-btn.active::before {
     content: '';
     position: absolute;
     left: -6px;
@@ -468,24 +459,17 @@
     border-radius: 0 4px 4px 0;
     background: var(--color-accent);
     box-shadow: 0 0 8px var(--color-accent);
-  }
-
-  .collapsed-cat-icon {
+  }.collapsed-cat-icon {
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--color-text-muted);
     transition: color 0.15s ease, transform 0.15s ease;
-  }
-
-  .collapsed-cat-btn:hover .collapsed-cat-icon,
-  .collapsed-cat-icon.active {
+    pointer-events: none;
+  }.collapsed-cat-btn:hover .collapsed-cat-icon, .collapsed-cat-icon.active {
     color: var(--color-accent);
     transform: scale(1.05);
-  }
-
-  /* ── Nested Flyout Menu Panel ─────────────────────────────────────── */
-  .flyout-menu-panel {
+  }/* ── Nested Flyout Menu Panel ─────────────────────────────────────── */ .flyout-menu-panel {
     position: absolute;
     left: calc(100% + 10px);
     top: -4px;
@@ -496,17 +480,18 @@
     border-radius: 10px;
     padding: 6px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 16px var(--color-accent-glow);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    animation: flyout-appear 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: flyout-appear 0.08s ease-out both;
+  }/* Invisible hover bridge to prevent mouseleave when moving across the 10px offset gap */ .flyout-menu-panel::before {
+    content: '';
+    position: absolute;
+    left: -16px;
+    top: -8px;
+    bottom: -8px;
+    width: 18px;
+    background: transparent;
   }
-
-  @keyframes flyout-appear {
-    from { opacity: 0; transform: translateX(-6px) scale(0.97); }
-    to   { opacity: 1; transform: translateX(0) scale(1); }
-  }
-
-  .flyout-arrow {
+@keyframes flyout-appear {from { opacity: 0; }to { opacity: 1; }
+}.flyout-arrow {
     position: absolute;
     left: -6px;
     top: 14px;
@@ -516,30 +501,22 @@
     border-left: 1px solid var(--color-active-border);
     border-bottom: 1px solid var(--color-active-border);
     transform: rotate(45deg);
-  }
-
-  .flyout-header {
+  }.flyout-header {
     padding: 6px 10px 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.07);
     margin-bottom: 4px;
-  }
-
-  .flyout-title {
+  }.flyout-title {
     font-size: 10px;
     font-weight: 700;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     font-family: var(--font-sans);
-  }
-
-  .flyout-items {
+  }.flyout-items {
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-
-  .flyout-item {
+  }.flyout-item {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -553,58 +530,40 @@
     text-align: left;
     transition: all 0.12s ease;
     font-family: var(--font-sans);
-  }
-
-  .flyout-item:hover {
+  }.flyout-item:hover {
     background: rgba(0, 218, 243, 0.08);
     color: var(--color-text-primary);
-  }
-
-  .flyout-item.active {
+  }.flyout-item.active {
     background: rgba(0, 218, 243, 0.14);
     color: var(--color-accent);
     font-weight: 600;
-  }
-
-  .flyout-item-icon {
+  }.flyout-item-icon {
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--color-text-muted);
     transition: color 0.12s ease;
     flex-shrink: 0;
-  }
-
-  .flyout-item:hover .flyout-item-icon,
-  .flyout-item-icon.active {
+  }.flyout-item:hover .flyout-item-icon, .flyout-item-icon.active {
     color: var(--color-accent);
-  }
-
-  .flyout-item-text {
+  }.flyout-item-text {
     display: flex;
     flex-direction: column;
     gap: 1px;
     overflow: hidden;
-  }
-
-  .flyout-item-label {
+  }.flyout-item-label {
     font-size: 12px;
     line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .flyout-item-desc {
+  }.flyout-item-desc {
     font-size: 10px;
     color: var(--color-text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  /* ── Logo ─────────────────────────────────────────────────────────── */
-  .sidebar-logo {
+  }/* ── Logo ─────────────────────────────────────────────────────────── */ .sidebar-logo {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -620,23 +579,18 @@
     outline: none;
     border-radius: 6px;
     transition: background 0.15s ease;
-  }
-  .sidebar-logo:hover {
+  }.sidebar-logo:hover {
     background: rgba(0, 218, 243, 0.04);
-  }
-  .logo-chevron {
+  }.logo-chevron {
     margin-left: auto;
     color: var(--color-text-muted);
     display: flex;
     align-items: center;
     justify-content: center;
     transition: color 0.15s ease, transform 0.2s ease;
-  }
-  .sidebar-logo:hover .logo-chevron {
+  }.sidebar-logo:hover .logo-chevron {
     color: var(--color-accent);
-  }
-
-  .logo-icon {
+  }.logo-icon {
     width: 30px;
     height: 30px;
     display: flex;
@@ -648,53 +602,37 @@
     border: none;
     filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.35));
     transition: transform 0.18s ease, filter 0.18s ease;
-  }
-  .sidebar-logo:hover .logo-icon {
+  }.sidebar-logo:hover .logo-icon {
     transform: scale(1.08);
     filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.65));
-  }
-
-  .logo-img {
+  }.logo-img {
     width: 100%;
     height: 100%;
     object-fit: contain;
-  }
-
-  .logo-text {
+  }.logo-text {
     display: flex;
     flex-direction: column;
     overflow: hidden;
     animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .logo-chevron {
+  }.logo-chevron {
     animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-
-  .logo-title {
+  }.logo-title {
     font-size: 13px;
     font-weight: 700;
     color: var(--color-text-primary);
     letter-spacing: -0.01em;
     line-height: 1.2;
-  }
-
-  .logo-version {
+  }.logo-version {
     font-size: 10px;
     color: var(--color-text-muted);
     font-family: var(--font-mono);
     letter-spacing: 0.04em;
-  }
-
-  .sidebar-divider {
+  }.sidebar-divider {
     height: 1px;
     background: rgba(59, 73, 76, 0.45);
     margin: 0 2px 8px;
     flex-shrink: 0;
-  }
-
-  /* ── Search ───────────────────────────────────────────────────────── */
-  .sidebar-search {
+  }/* ── Search ───────────────────────────────────────────────────────── */ .sidebar-search {
     margin: 4px 6px 12px;
     position: relative;
     display: flex;
@@ -707,18 +645,13 @@
     border: 1px solid var(--color-border);
     transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
     animation: sidebarContentFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-  .sidebar-search:hover {
+  }.sidebar-search:hover {
     border-color: var(--color-border-hover);
-  }
-  .sidebar-search:focus-within {
+  }.sidebar-search:focus-within {
     background: var(--color-bg-card);
     border-color: var(--color-accent);
     box-shadow: 0 0 0 2px var(--color-accent-muted);
-  }
-  .sidebar-search input,
-  .sidebar-search input:focus,
-  .sidebar-search input:hover {
+  }.sidebar-search input, .sidebar-search input:focus, .sidebar-search input:hover {
     width: 100%;
     background: transparent !important;
     border: none !important;
@@ -730,45 +663,32 @@
     font-size: 12px;
     font-weight: 500;
     outline: none !important;
-  }
-  .sidebar-search input::placeholder {
+  }.sidebar-search input::placeholder {
     color: var(--color-text-muted);
     font-weight: 400;
-  }
-  .sidebar-search :global(.search-icon) {
+  }.sidebar-search :global(.search-icon) {
     color: var(--color-text-muted);
     flex-shrink: 0;
-  }
-
-  /* Light Mode Sidebar Search Overrides */
-  :global(html.light-mode) .sidebar-search {
+  }/* Light Mode Sidebar Search Overrides */ :global(html.light-mode) .sidebar-search {
     background: #F1F5F9 !important;
     border: 1px solid #E2E8F0 !important;
     border-radius: 8px !important;
-  }
-  :global(html.light-mode) .sidebar-search:hover {
+  }:global(html.light-mode) .sidebar-search:hover {
     border-color: #CBD5E1 !important;
     background: #E2E8F0 !important;
-  }
-  :global(html.light-mode) .sidebar-search:focus-within {
+  }:global(html.light-mode) .sidebar-search:focus-within {
     background: #FFFFFF !important;
     border-color: #2563EB !important;
     box-shadow: none !important;
-  }
-  :global(html.light-mode) .sidebar-search input {
+  }:global(html.light-mode) .sidebar-search input {
     background: transparent !important;
     border: none !important;
     color: #0F172A !important;
-  }
-  :global(html.light-mode) .sidebar-search input::placeholder {
+  }:global(html.light-mode) .sidebar-search input::placeholder {
     color: #64748B !important;
-  }
-  :global(html.light-mode) .sidebar-search :global(.search-icon) {
+  }:global(html.light-mode) .sidebar-search :global(.search-icon) {
     color: #64748B !important;
-  }
-
-  /* ── Grouped nav ──────────────────────────────────────────────────── */
-  .sidebar-nav {
+  }/* ── Grouped nav ──────────────────────────────────────────────────── */ .sidebar-nav {
     display: flex;
     flex-direction: column;
     gap: 1px;
@@ -776,9 +696,7 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-  }
-
-  .group-label-btn {
+  }.group-label-btn {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -791,28 +709,18 @@
     color: var(--color-text-muted);
     transition: all 0.15s ease;
     flex-shrink: 0;
-  }
-
-  .group-label-btn.active-group {
+  }.group-label-btn.active-group {
     color: var(--color-text-primary);
-  }
-
-  .group-label-btn.active-group .group-label {
+  }.group-label-btn.active-group .group-label {
     font-weight: 800;
     color: var(--color-text-primary);
     text-shadow: 0 0 12px rgba(212, 228, 250, 0.15);
-  }
-
-  .group-label-btn.active-group .group-chevron {
+  }.group-label-btn.active-group .group-chevron {
     color: var(--color-accent) !important;
     opacity: 0.95 !important;
-  }
-
-  .group-label-btn:hover {
+  }.group-label-btn:hover {
     color: var(--color-text-secondary);
-  }
-
-  .group-label {
+  }.group-label {
     /* label-caps typography */
     font-size: 10px;
     font-weight: 700;
@@ -822,47 +730,32 @@
     overflow: hidden;
     flex-shrink: 0;
     font-family: var(--font-sans);
-  }
-
-  .group-chevron {
+  }.group-chevron {
     display: flex;
     align-items: center;
     justify-content: center;
     transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     color: var(--color-text-muted);
     opacity: 0.6;
-  }
-
-  .group-label-btn:hover .group-chevron {
+  }.group-label-btn:hover .group-chevron {
     opacity: 1;
-  }
-
-  .group-chevron.expanded {
+  }.group-chevron.expanded {
     transform: rotate(180deg);
-  }
-
-  .group-items-wrapper {
+  }.group-items-wrapper {
     display: grid;
     grid-template-rows: 1fr;
     transition: grid-template-rows 0.2s cubic-bezier(0.25, 1, 0.5, 1);
-  }
-  .group-items-wrapper.collapsed-anim {
+  }.group-items-wrapper.collapsed-anim {
     grid-template-rows: 0fr;
-  }
-  .group-items {
+  }.group-items {
     display: flex;
     flex-direction: column;
     gap: 1px;
     overflow: hidden;
     flex-shrink: 0;
-  }
-
-  .group-sep {
+  }.group-sep {
     height: 6px;
-  }
-
-  /* ── Nav item ─────────────────────────────────────────────────────── */
-  .nav-item {
+  }/* ── Nav item ─────────────────────────────────────────────────────── */ .nav-item {
     display: flex;
     align-items: center;
     gap: 9px;
@@ -882,9 +775,7 @@
     position: relative;
     min-height: 34px;
     width: 100%;
-  }
-
-  .nav-badge {
+  }.nav-badge {
     margin-left: auto;
     font-size: 10px;
     font-weight: 700;
@@ -896,20 +787,13 @@
     letter-spacing: 0.02em;
     flex-shrink: 0;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  }
-
-  :global(html.light-mode) .nav-badge {
+  }:global(html.light-mode) .nav-badge {
     background: #2563EB;
     color: #FFFFFF !important;
     box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
-  }
-
-  .sidebar.collapsed .nav-item {
+  }.sidebar.collapsed .nav-item {
     padding: 7px 8px 7px 11px; /* Centered padding for collapsed view */
-  }
-
-  /* Left pill indicator for active state */
-  .nav-item::before {
+  }/* Left pill indicator for active state */ .nav-item::before {
     content: '';
     position: absolute;
     left: 0;
@@ -923,36 +807,23 @@
     transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
                 opacity 0.2s ease;
     opacity: 0;
-  }
-
-  .nav-item:hover {
+  }.nav-item:hover {
     background: rgba(0, 218, 243, 0.06);
     color: var(--color-text-secondary);
-  }
-
-  /* Keyboard focus — shown after Tab from search input */
-  .nav-item:focus-visible {
+  }/* Keyboard focus — shown after Tab from search input */ .nav-item:focus-visible {
     outline: none;
     background: rgba(0, 218, 243, 0.1);
     color: var(--color-accent);
     box-shadow: inset 0 0 0 1.5px rgba(0, 218, 243, 0.45);
-  }
-
-  .nav-item:focus-visible .nav-icon {
+  }.nav-item:focus-visible .nav-icon {
     color: var(--color-accent);
-  }
-
-  .nav-item.active {
+  }.nav-item.active {
     background: var(--color-active-bg);
     color: var(--color-accent-soft);
-  }
-
-  .nav-item.active::before {
+  }.nav-item.active::before {
     transform: translateY(-50%) scaleY(1);
     opacity: 1;
-  }
-
-  .nav-icon {
+  }.nav-icon {
     width: 16px;
     height: 16px;
     display: flex;
@@ -961,20 +832,13 @@
     flex-shrink: 0;
     color: var(--color-text-muted);
     transition: color 0.15s ease;
-  }
-
-  .nav-icon.active {
+  }.nav-icon.active {
     color: var(--color-accent);
-  }
-
-  .nav-label {
+  }.nav-label {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  /* ── Bottom Settings Profile & Gear (Always Anchored at Bottom) ───── */
-  .sidebar-settings-anchor {
+  }/* ── Bottom Settings Profile & Gear (Always Anchored at Bottom) ───── */ .sidebar-settings-anchor {
     position: relative;
     width: 100%;
     margin-top: auto;
@@ -984,9 +848,7 @@
     flex-shrink: 0;
     display: flex;
     justify-content: center;
-  }
-
-  .profile-settings-row {
+  }.profile-settings-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -997,23 +859,17 @@
     border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.06));
     cursor: pointer;
     transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  .profile-settings-row:hover {
+  }.profile-settings-row:hover {
     background: var(--color-bg-hover);
     border-color: var(--color-border);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  }
-
-  .profile-info {
+  }.profile-info {
     display: flex;
     align-items: center;
     gap: 10px;
     min-width: 0;
     flex: 1;
-  }
-
-  .avatar-circle {
+  }.avatar-circle {
     position: relative;
     width: 30px;
     height: 30px;
@@ -1027,9 +883,7 @@
     justify-content: center;
     flex-shrink: 0;
     box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
-  }
-
-  .status-dot {
+  }.status-dot {
     position: absolute;
     bottom: -1px;
     right: -1px;
@@ -1038,17 +892,13 @@
     border-radius: 50%;
     background: #10B981;
     border: 2px solid var(--color-sidebar-bg, #0F172A);
-  }
-
-  .profile-text {
+  }.profile-text {
     display: flex;
     flex-direction: column;
     gap: 1px;
     min-width: 0;
     flex: 1;
-  }
-
-  .profile-name {
+  }.profile-name {
     font-size: 12px;
     font-weight: 600;
     color: var(--color-text-primary);
@@ -1057,9 +907,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     text-transform: capitalize;
-  }
-
-  .profile-role {
+  }.profile-role {
     font-size: 10px;
     font-weight: 500;
     color: var(--color-text-muted);
@@ -1067,9 +915,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .gear-btn {
+  }.gear-btn {
     width: 28px;
     height: 28px;
     border-radius: 6px;
@@ -1082,16 +928,11 @@
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     flex-shrink: 0;
-  }
-
-  .profile-settings-row:hover .gear-btn,
-  .gear-btn:hover {
+  }.profile-settings-row:hover .gear-btn, .gear-btn:hover {
     color: var(--color-accent);
     background: rgba(0, 218, 243, 0.1);
     transform: rotate(45deg);
-  }
-
-  .collapsed-settings-anchor-btn {
+  }.collapsed-settings-anchor-btn {
     width: 36px;
     height: 36px;
     border-radius: 8px;
@@ -1103,31 +944,15 @@
     color: var(--color-text-secondary);
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-  .collapsed-settings-anchor-btn:hover {
+  }.collapsed-settings-anchor-btn:hover {
     background: var(--color-bg-hover);
     color: var(--color-accent);
-  }
-
-  .collapsed-cat-divider {
-    width: 24px;
-    height: 1px;
-    background: var(--color-sidebar-border);
-    margin: 6px 0;
-  }
-
-  /* Light Mode Profile Settings Card Overrides */
-  :global(html.light-mode) .profile-settings-row {
+  }/* Light Mode Profile Settings Card Overrides */ :global(html.light-mode) .profile-settings-row {
     background: #F8FAFC !important;
     border: 1px solid #E2E8F0 !important;
-  }
-
-  :global(html.light-mode) .profile-settings-row:hover {
+  }:global(html.light-mode) .profile-settings-row:hover {
     background: #F1F5F9 !important;
     border-color: #CBD5E1 !important;
-  }
-
-  :global(html.light-mode) .status-dot {
+  }:global(html.light-mode) .status-dot {
     border-color: #FFFFFF !important;
-  }
-</style>
+  }</style>

@@ -80,7 +80,7 @@
 <!-- Slide-over / Modal Live Terminal Drawer -->
 {#if dnfStore.showFloatingDrawer}
   <div class="drawer-backdrop" transition:fade={{ duration: 150 }}>
-    <div class="backdrop" onclick={() => dnfStore.closeDrawer()}></div>
+    <div class="backdrop" role="presentation" onclick={() => dnfStore.closeDrawer()}></div>
 
     <div class="drawer-modal" transition:fly={{ y: 20, duration: 250 }}>
       <!-- Header -->
@@ -102,6 +102,12 @@
             <p class="drawer-subtitle">
               {#if dnfStore.isUpgrading}
                 Upgrading {dnfStore.packagesBeingUpgraded.length} selected packages in background
+                {#if dnfStore.upgradeSizes.total}
+                  · {dnfStore.upgradeSizes.total} total
+                  {#if dnfStore.upgradeSizes.download && dnfStore.upgradeSizes.download !== dnfStore.upgradeSizes.total}
+                    · {dnfStore.upgradeSizes.download} to download
+                  {/if}
+                {/if}
               {:else}
                 Background transaction output stream
               {/if}

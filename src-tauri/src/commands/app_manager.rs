@@ -2,6 +2,13 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use crate::utils::privilege::tokio::Command;
+
+/// Is this a Debian based system? The dpkg/dpkg-query tools only exist there —
+/// on Fedora they are missing and every call fails with "No such file or
+/// directory".
+fn is_debian_based() -> bool {
+    crate::utils::distro::detect_distro().pkg_manager == "apt"
+}
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tauri::{AppHandle, Emitter};
 
@@ -118,7 +125,7 @@ pub async fn list_desktop_apps() -> Result<Vec<DesktopApp>, String> {
                             }
                         }
                     }
-                    if !is_native {
+                    if !is_native && is_debian_based() {
                         if let Ok(output) = Command::new("dpkg")
                             .arg("-S")
                             .arg(&path)
@@ -213,14 +220,16 @@ pub async fn get_app_meta(package_id: String, source: String) -> Result<AppMeta,
             }
         }
         // Fallback for dpkg on Debian / Ubuntu
-        if let Ok(output) = Command::new("dpkg-query")
-            .args(["-W", "-f=${Installed-Size}", &package_id])
-            .output().await
-        {
-            if output.status.success() {
-                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Ok(kb) = s.parse::<u64>() {
-                    return Ok(AppMeta { size_bytes: kb * 1024, install_date: 0 });
+        if is_debian_based() {
+            if let Ok(output) = Command::new("dpkg-query")
+                .args(["-W", "-f=${Installed-Size}", &package_id])
+                .output().await
+            {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if let Ok(kb) = s.parse::<u64>() {
+                        return Ok(AppMeta { size_bytes: kb * 1024, install_date: 0 });
+                    }
                 }
             }
         }
@@ -290,7 +299,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
             }
         }
 
-        if version == "Unknown" {
+        if version == "Unknown" && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query").args(["-s", &package_id]).output().await {
                 if output.status.success() {
                     let info = String::from_utf8_lossy(&output.stdout).to_string();
@@ -324,7 +333,7 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
                 }
             }
         }
-        if files.is_empty() {
+        if files.is_empty() && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query").args(["-L", &package_id]).output().await {
                 if output.status.success() {
                     let list = String::from_utf8_lossy(&output.stdout).to_string();
@@ -344,9 +353,22 @@ pub async fn get_app_details(package_id: String, source: String) -> Result<AppDe
 }
 
 #[tauri::command]
-pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: String) -> Result<(), String> {
+pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: String, expected_preview: Option<String>, system_wide: Option<bool>) -> Result<(), String> {
+    if !["Flatpak", "Waydroid", "Local", "RPM"].contains(&source.as_str()) {
+        return Err("Unsupported application source".to_string());
+    }
+    if !crate::commands::flatpak_rpm::is_safe_package_id(&package_id) {
+        return Err("Invalid application package ID".to_string());
+    }
     if source != "Flatpak" && source != "Waydroid" && source != "Local" && crate::commands::flatpak_rpm::is_protected_package(&package_id) {
         return Err(format!("Action blocked: '{}' is a vital system package and cannot be uninstalled.", package_id));
+    }
+    if source == "RPM" {
+        let expected = expected_preview.ok_or_else(|| "Review the package removal preview before continuing".to_string())?;
+        let current = crate::commands::flatpak_rpm::rpm_remove_preview(&package_id).await?;
+        if current != expected {
+            return Err("The removal transaction changed. Review the updated preview and confirm again.".to_string());
+        }
     }
 
     if source == "Local" {
@@ -359,9 +381,13 @@ pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: St
         return Ok(());
     }
 
-    let mut cmd = if source == "Flatpak" {
+    let mut cmd = if source == "Flatpak" && system_wide.unwrap_or(false) {
         let mut c = Command::new("pkexec");
-        c.args(&["flatpak", "uninstall", "-y", &package_id]);
+        c.args(&["/usr/bin/flatpak", "uninstall", "--system", "-y", &package_id]);
+        c
+    } else if source == "Flatpak" {
+        let mut c = Command::new("flatpak");
+        c.args(&["uninstall", "--user", "-y", &package_id]);
         c
     } else if source == "Waydroid" {
         let mut c = Command::new("waydroid");
@@ -407,47 +433,10 @@ pub async fn uninstall_app(app_handle: AppHandle, package_id: String, source: St
         return Err(format!("Uninstallation failed with status: {}", status));
     }
 
-    let _ = app_handle.emit("uninstall-log", "\nUninstallation completed. Running cleanup...");
-
-    let mut cleanup_cmd = if source == "Flatpak" {
-        let mut c = Command::new("pkexec");
-        c.args(&["flatpak", "uninstall", "--unused", "-y"]);
-        c
-    } else if crate::binary_exists("dnf").await {
-        let mut c = Command::new("pkexec");
-        c.args(&["dnf", "autoremove", "-y"]);
-        c
-    } else {
-        let mut c = Command::new("pkexec");
-        c.args(&["apt-get", "autoremove", "-y"]);
-        c
-    };
-
-    cleanup_cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut cleanup_child = cleanup_cmd.spawn().map_err(|e| e.to_string())?;
-
-    let cleanup_stdout = cleanup_child.stdout.take().unwrap();
-    let cleanup_stderr = cleanup_child.stderr.take().unwrap();
-
-    let app_handle_clone3 = app_handle.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(cleanup_stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let _ = app_handle_clone3.emit("uninstall-log", line);
-        }
-    });
-
-    let app_handle_clone4 = app_handle.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(cleanup_stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let _ = app_handle_clone4.emit("uninstall-log", line);
-        }
-    });
-
-    let cleanup_status = cleanup_child.wait().await.map_err(|e| e.to_string())?;
-    let _ = app_handle.emit("uninstall-log", format!("
-Cleanup finished with code {}.", cleanup_status.code().unwrap_or(1)));
+    let _ = app_handle.emit(
+        "uninstall-log",
+        "\nUninstallation completed. Automatic dependency cleanup was skipped to protect other installed software.",
+    );
 
     Ok(())
 }
@@ -679,7 +668,7 @@ pub async fn get_app_dependencies(package_id: String, source: String) -> Result<
                 }
             }
         }
-        if deps.is_empty() {
+        if deps.is_empty() && is_debian_based() {
             if let Ok(output) = Command::new("dpkg-query")
                 .arg("-W")
                 .arg("-f=${Depends}")

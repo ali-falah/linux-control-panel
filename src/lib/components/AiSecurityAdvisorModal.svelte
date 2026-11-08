@@ -33,8 +33,20 @@
         applyingFix = true;
         try {
           await invoke(fix.tauri_command, fix.tauri_args);
-          uiStore.addToast(`Fix applied: ${fix.label}`, 'success');
-          window.dispatchEvent(new CustomEvent('security-audit-run'));
+          try {
+            const freshReport = await invoke<{ findings: { id: string; is_resolved: boolean }[] }>(
+              'security_run_audit', { forceRefresh: true }
+            );
+            window.dispatchEvent(new CustomEvent('security-audit-run', { detail: freshReport }));
+            const updatedFinding = freshReport.findings.find(item => item.id === aiStore.activeFinding?.id);
+            if (updatedFinding?.is_resolved) {
+              uiStore.addToast(`Fix verified: ${fix.label}`, 'success');
+            } else {
+              uiStore.addToast(`The command completed, but the rescan still reports this finding. It may need a reboot or manual review.`, 'warning');
+            }
+          } catch (verifyErr) {
+            uiStore.addToast(`The fix command completed, but its result could not be verified: ${verifyErr}`, 'warning');
+          }
           aiStore.closeModal();
         } catch (err: any) {
           uiStore.addToast(`Fix failed: ${err}`, 'error');
@@ -241,8 +253,6 @@
     inset: 0;
     z-index: 99995;
     background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

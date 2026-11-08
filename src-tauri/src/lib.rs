@@ -10,10 +10,14 @@ use commands::{
         list_cron_jobs, add_cron_job, delete_cron_job,
         cron_list_timers, cron_toggle_timer,
     },
+    admin::{
+        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_status,
+        helper_installed,
+    },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
         dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
-        dnf_check_updates, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
+        dnf_check_updates, dnf_update_advisories, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
     env_manager::{read_env_vars, write_env_vars},
@@ -22,16 +26,11 @@ use commands::{
         firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
         firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
-    flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, remove_flatpak, remove_rpm},
-    grub_manager::{read_grub_config, rebuild_grub, write_grub_config, validate_grub_config, grub_has_backup, grub_restore_backup},
+    flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, preview_rpm_removal, remove_flatpak, remove_rpm},
     hosts_manager::{read_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
-    selinux_manager::{
-        get_selinux_denials, get_selinux_status, set_selinux_state, set_selinux_mode,
-        selinux_get_booleans, selinux_set_boolean, selinux_explain_denial, selinux_apply_policy_override, selinux_apply_audit2allow,
-    },
     service_manager::{
-        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, get_boot_blame,
+        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
         get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
@@ -71,18 +70,18 @@ use commands::{
         network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
         network_test_ping, network_test_download, network_test_upload,
     },
-    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test},
+    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test, device_get_pci_driver, device_set_module_state},
     app_manager::{
         list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
         scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_storage_distribution, open_folder, get_app_version},
-    journal_viewer::{get_journal_logs, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
+    journal_viewer::{get_journal_logs, count_journal_entries, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
     security_auditor::{
         security_run_audit,
         security_fix_root_ssh, security_fix_ssh_param,
-        security_fix_password_policy, security_fix_firewall, security_fix_selinux,
+        security_fix_password_policy, security_fix_firewall, security_firewall_backend,
         security_fix_kernel_param, security_fix_auditd, security_fix_time_sync,
         security_fix_tmp_sticky, security_fix_passwd_perms, security_fix_shadow_perms,
         security_fix_usbguard, security_fix_lock_account, security_fix_pam_faillock,
@@ -118,7 +117,6 @@ use commands::{
         pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
     },
 };
-use utils::privilege::{set_sudo_password, clear_sudo_password, check_sudo_status};
 
 /// Returns the app config directory, creating it if needed.
 pub fn config_dir() -> PathBuf {
@@ -207,8 +205,15 @@ pub fn run() {
             dnf_check,
             dnf_makecache_cmd,
             dnf_check_updates,
+            dnf_update_advisories,
             dnf_run_upgrade,
             dnf_dry_run_upgrade,
+            admin_install_helper,
+            helper_installed,
+            admin_mode_on,
+            admin_mode_off,
+            admin_mode_state,
+            admin_policy_status,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,
@@ -222,6 +227,7 @@ pub fn run() {
             list_flatpaks,
             list_rpms,
             detect_duplicates,
+            preview_rpm_removal,
             remove_flatpak,
             remove_rpm,
             // Startup Manager
@@ -237,6 +243,7 @@ pub fn run() {
             get_service_logs,
             read_unit_file,
             write_unit_file,
+            unit_daemon_reload,
             get_boot_blame,
             get_boot_times,
             get_boot_critical_chain,
@@ -271,23 +278,6 @@ pub fn run() {
             firewall_modify_rich_rule,
             firewall_change_interface_zone,
             firewall_check_port_listener,
-            // GRUB Configurator
-            read_grub_config,
-            write_grub_config,
-            rebuild_grub,
-            validate_grub_config,
-            grub_has_backup,
-            grub_restore_backup,
-            // SELinux Manager
-            get_selinux_status,
-            set_selinux_state,
-            set_selinux_mode,
-            get_selinux_denials,
-            selinux_get_booleans,
-            selinux_set_boolean,
-            selinux_explain_denial,
-            selinux_apply_policy_override,
-            selinux_apply_audit2allow,
             // Cron Manager
             list_cron_jobs,
             add_cron_job,
@@ -366,6 +356,8 @@ pub fn run() {
             device_get_smart_data,
             device_get_topology,
             device_trigger_self_test,
+            device_get_pci_driver,
+            device_set_module_state,
             // App Manager
             list_desktop_apps,
             get_app_meta,
@@ -400,14 +392,12 @@ pub fn run() {
             get_cpu_temperature,
             get_last_system_update,
             get_failed_services_count,
+            get_failed_services,
             open_folder,
             get_app_version,
-            // Privilege Manager
-            set_sudo_password,
-            clear_sudo_password,
-            check_sudo_status,
             // Journal Viewer
             get_journal_logs,
+            count_journal_entries,
             start_journal_live_stream,
             stop_journal_live_stream,
             export_journal_logs_to_file,
@@ -417,7 +407,7 @@ pub fn run() {
             security_fix_ssh_param,
             security_fix_password_policy,
             security_fix_firewall,
-            security_fix_selinux,
+            security_firewall_backend,
             security_fix_kernel_param,
             security_fix_auditd,
             security_fix_time_sync,
@@ -491,6 +481,27 @@ pub fn run() {
             pm2_get_startup_status,
         ])
         .setup(|_app| {
+            // Record which build is running — after an update the log then
+            // shows the exact code that produced an error.
+            log_to_file(
+                "INFO",
+                &format!(
+                    "control panel started (build {} at {})",
+                    env!("CARGO_PKG_VERSION"),
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                ),
+            );
+            if let Err(error) =
+                crate::utils::root_policy::verify_installed_polkit_state()
+            {
+                log_to_file(
+                    "WARN",
+                    &format!(
+                        "PolicyKit policy verification failed: {error}. Privileged actions \
+                         will be refused until the shipped policy is reinstalled."
+                    ),
+                );
+            }
             tauri::async_runtime::spawn(async {
                 let _ = commands::service_manager::get_boot_times(Some(false)).await;
                 let _ = commands::service_manager::get_boot_blame(Some(false)).await;

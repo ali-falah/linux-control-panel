@@ -3,6 +3,7 @@
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
+  import AdminPasswordDialog from './lib/components/AdminPasswordDialog.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
 
   import DnfGlobalUpgradeWidget from './lib/components/DnfGlobalUpgradeWidget.svelte';
@@ -11,13 +12,16 @@
 
   import { onMount } from 'svelte';
   import { uiStore } from './lib/stores/ui.svelte.ts';
-  import { dnfStore } from './lib/stores/dnfStore.svelte.ts';
+  import { dnfStore, refreshHelperInstalled } from './lib/stores/dnfStore.svelte.ts';
 
   onMount(() => {
     uiStore.initTheme();
+    uiStore.initOled();
+    uiStore.initDrawerDock();
     uiStore.initSearchHistory();
     uiStore.initVisibilityListener();
     dnfStore.initGlobalListeners();
+    void refreshHelperInstalled();
     dnfStore.checkLockStatus();
 
     function handleGlobalKeyDown(e: KeyboardEvent) {
@@ -155,24 +159,6 @@
           {:then module}
             <module.default />
           {/await}
-        {:else if uiStore.activeTab === 'grub-manager'}
-          {#await import('./lib/modules/GrubManager.svelte')}
-            <div class="module-lazy-loader">
-              <div class="module-lazy-spinner"></div>
-              <span>Loading GRUB Bootloader…</span>
-            </div>
-          {:then module}
-            <module.default />
-          {/await}
-        {:else if uiStore.activeTab === 'selinux-manager'}
-          {#await import('./lib/modules/SelinuxManager.svelte')}
-            <div class="module-lazy-loader">
-              <div class="module-lazy-spinner"></div>
-              <span>Loading SELinux Manager…</span>
-            </div>
-          {:then module}
-            <module.default />
-          {/await}
         {:else if uiStore.activeTab === 'cron-manager'}
           {#await import('./lib/modules/CronManager.svelte')}
             <div class="module-lazy-loader">
@@ -276,6 +262,7 @@
 
 <ToastContainer />
 <ConfirmDialog />
+<AdminPasswordDialog />
 <SettingsModal />
 <DnfGlobalUpgradeWidget />
 <AiUniversalModal />

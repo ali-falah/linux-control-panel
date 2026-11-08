@@ -3,6 +3,7 @@ let activePortalsCount = 0;
 export function portal(node: HTMLElement) {
   const target = document.body;
   target.appendChild(node);
+  node.classList.add('portal-mounted');
   activePortalsCount++;
 
   if (activePortalsCount === 1) {
@@ -46,6 +47,7 @@ export function portal(node: HTMLElement) {
   return {
     destroy() {
       node.removeEventListener('wheel', handleWheel);
+      node.classList.remove('portal-mounted');
       if (node.parentNode) {
         node.parentNode.removeChild(node);
       }

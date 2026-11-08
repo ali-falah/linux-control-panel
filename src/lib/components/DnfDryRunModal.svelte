@@ -7,6 +7,8 @@
   } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
 
+  let { onConfirm }: { onConfirm?: () => void } = $props();
+
   let searchQuery = $state('');
   let actionFilter = $state<'all' | 'Upgrade' | 'Install' | 'Remove' | 'Downgrade'>('all');
   let showRawOutput = $state(false);
@@ -116,7 +118,10 @@
             <div 
               class="kpi-card" 
               class:active-filter={actionFilter === 'Upgrade'} 
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Upgrade' ? 'all' : 'Upgrade'; } }}
             >
               <div class="kpi-label">Packages Upgrading</div>
               <div class="kpi-val text-accent">{dnfStore.dryRunResult.to_upgrade_count}</div>
@@ -125,7 +130,10 @@
             <div 
               class="kpi-card" 
               class:active-filter={actionFilter === 'Install'} 
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Install' ? 'all' : 'Install'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Install' ? 'all' : 'Install'; } }}
             >
               <div class="kpi-label">New Dependencies</div>
               <div class="kpi-val text-info">{dnfStore.dryRunResult.to_install_count}</div>
@@ -135,7 +143,10 @@
               class="kpi-card" 
               class:danger-card={dnfStore.dryRunResult.to_remove_count > 0}
               class:active-filter={actionFilter === 'Remove'}
+              role="button"
+              tabindex="0"
               onclick={() => actionFilter = actionFilter === 'Remove' ? 'all' : 'Remove'}
+              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); actionFilter = actionFilter === 'Remove' ? 'all' : 'Remove'; } }}
             >
               <div class="kpi-label">Packages Removing</div>
               <div class="kpi-val" class:text-error={dnfStore.dryRunResult.to_remove_count > 0}>
@@ -145,7 +156,14 @@
 
             <div class="kpi-card">
               <div class="kpi-label">Total Download Size</div>
-              <div class="kpi-val">{dnfStore.dryRunResult.total_download_size}</div>
+              <div class="kpi-val">
+                {dnfStore.dryRunResult.total_inbound_size || dnfStore.dryRunResult.total_download_size || '—'}
+              </div>
+              {#if dnfStore.dryRunResult.total_inbound_size && dnfStore.dryRunResult.total_download_size && dnfStore.dryRunResult.total_inbound_size !== dnfStore.dryRunResult.total_download_size}
+                <div class="kpi-hint">
+                  {dnfStore.dryRunResult.total_download_size} left to download — the rest is already cached
+                </div>
+              {/if}
             </div>
           </div>
 
@@ -313,7 +331,7 @@
             type="button" 
             class="btn btn-primary btn-sm" 
             disabled={dnfStore.isDryRunning || !!dnfStore.dryRunError || (dnfStore.dryRunResult?.packages.length ?? 0) === 0}
-            onclick={() => dnfStore.confirmAndExecuteUpgrade()}
+            onclick={() => { onConfirm?.(); dnfStore.confirmAndExecuteUpgrade(); }}
           >
             <Play size={13} />
             <span>Apply Upgrade ({dnfStore.dryRunResult?.packages.length || 0} Packages)</span>
@@ -339,8 +357,6 @@
     position: absolute;
     inset: 0;
     background: rgba(0, 0, 0, 0.72);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
   }
 
   /* Spacious Sizing: width (1120px), height (90vh / max 94vh) */
@@ -619,6 +635,12 @@
     font-weight: 700;
     font-family: var(--font-mono);
     line-height: 1.2;
+  }
+  .kpi-hint {
+    margin-top: 3px;
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--color-text-muted);
   }
 
   .danger-warning-banner {

@@ -153,16 +153,6 @@
       action: () => { uiStore.navigateTo('firewall-manager'); uiStore.closeSearchModal(); }
     },
     {
-      id: 'page-selinux-manager',
-      title: 'SELinux Security Policy & Booleans',
-      description: 'Enforcing / Permissive mode toggle, SELinux booleans, file contexts, and AVC denials',
-      category: 'Pages',
-      icon: Lock,
-      keywords: 'selinux security booleans enforcing permissive context avc denials audit2allow',
-      tabId: 'selinux-manager',
-      action: () => { uiStore.navigateTo('selinux-manager'); uiStore.closeSearchModal(); }
-    },
-    {
       id: 'page-security-auditor',
       title: 'CIS Hardening & Security Auditor',
       description: 'Run automated Linux security benchmark scans, CIS checks, and fix vulnerabilities',
@@ -241,16 +231,6 @@
       keywords: 'ssh ssl tls cert certificate keys authorized_keys vault encryption crypto',
       tabId: 'ssh-cert-manager',
       action: () => { uiStore.navigateTo('ssh-cert-manager'); uiStore.closeSearchModal(); }
-    },
-    {
-      id: 'page-grub-manager',
-      title: 'GRUB Bootloader & Kernels',
-      description: 'Installed kernel boot entries, default boot kernel, timeout, and boot parameters',
-      category: 'Pages',
-      icon: Cpu,
-      keywords: 'grub bootloader kernel boot timeout parameters uefi initrd efiboot',
-      tabId: 'grub-manager',
-      action: () => { uiStore.navigateTo('grub-manager'); uiStore.closeSearchModal(); }
     },
     {
       id: 'page-pm2-manager',
@@ -1123,7 +1103,8 @@
   >
     <div
       class="search-modal"
-      role="document"
+      role="dialog"
+      aria-modal="true"
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
       onkeydown={handleKeyDown}
@@ -1337,14 +1318,12 @@
     right: 0;
     bottom: 0;
     background: rgba(0, 0, 0, 0.72);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     z-index: 99995;
     display: flex;
     align-items: flex-start;
     justify-content: center;
     padding-top: 8vh;
-    animation: fadeIn 0.15s ease-out;
+    animation: fadeIn 0.15s ease-out both;
   }
 
   .search-modal {
@@ -1357,7 +1336,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    animation: slideDown 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: slideDown 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .search-header {

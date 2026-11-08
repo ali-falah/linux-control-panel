@@ -9,19 +9,23 @@
     tabs: TabOption[];
     activeTab: string;
     disabled?: boolean;
+    size?: 'sm' | 'md';
     class?: string;
     style?: string;
     onchange?: (tabId: string) => void;
   }
 
-  let { 
-    tabs, 
-    activeTab = $bindable(), 
+  let {
+    tabs,
+    activeTab = $bindable(),
     disabled = false,
+    size = 'md',
     class: className = '',
     style = '',
     onchange
   }: Props = $props();
+
+  let sizeClass = $derived(size === 'sm' ? 'size-sm' : '');
 
   function selectTab(id: string) {
     activeTab = id;
@@ -29,10 +33,10 @@
   }
 </script>
 
-<div class="tab-bar {className}" {style}>
+<div class="tab-bar {sizeClass} {className}" {style}>
   {#each tabs as tab}
-    <button 
-      class="tab-btn {activeTab === tab.id ? 'active' : ''}" 
+    <button
+      class="tab-btn {sizeClass} {activeTab === tab.id ? 'active' : ''}"
       onclick={() => selectTab(tab.id)}
       {disabled}
     >

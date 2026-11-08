@@ -82,7 +82,7 @@
     cursor: pointer;
     padding: 5px 10px;
     border-radius: 20px;
-    transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: background-color 0.15s ease, border-color 0.15s ease;
     font-family: inherit;
     white-space: nowrap;
   }
@@ -107,7 +107,7 @@
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border);
     color: var(--color-text-muted);
-    transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
     flex-shrink: 0;
   }
 
@@ -115,7 +115,7 @@
     font-size: 12px;
     font-weight: 500;
     color: var(--color-text-muted);
-    transition: color 0.18s ease;
+    transition: color 0.15s ease;
   }
 
   /* ── Active State ── */

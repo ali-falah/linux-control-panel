@@ -538,7 +538,7 @@ pub fn vault_remove_authorized_key(line_number: usize) -> Result<String, String>
 // ─── 5. SSHD Hardening Audit ───────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
+pub async fn vault_get_sshd_hardening(elevated: bool) -> Result<SshdHardeningStatus, String> {
     let config_path = "/etc/ssh/sshd_config";
     let mut status = SshdHardeningStatus {
         permit_root_login: "prohibit-password".to_string(),
@@ -560,10 +560,23 @@ pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
     };
 
     // 1. Try evaluating active sshd daemon config directly (sshd -T)
-    let sshd_t = PrivCommand::new("pkexec")
-        .args([sshd_bin, "-T"])
-        .output()
-        .await;
+    let sshd_t = if elevated {
+        // root reads go through the main privilege chokepoint (policy-checked)
+        let sshd_path = crate::utils::privilege::resolve_root_program("sshd")
+            .unwrap_or_else(|| sshd_bin.to_string());
+        crate::utils::privilege::run_privileged_output(
+            &sshd_path,
+            &["-T".to_string()],
+            &crate::utils::privilege::RootAuth::Polkit,
+        )
+        .await
+    } else {
+        PrivCommand::new(sshd_bin)
+            .args(["-T"])
+            .output()
+            .await
+            .map_err(|e| e.to_string())
+    };
 
     if let Ok(out) = sshd_t {
         if out.status.success() {
@@ -589,10 +602,20 @@ pub async fn vault_get_sshd_hardening() -> Result<SshdHardeningStatus, String> {
     }
 
     // 2. Fallback: Cat config file with root privileges if sshd -T had an issue
-    let cat_res = PrivCommand::new("pkexec")
-        .args(["cat", config_path])
-        .output()
-        .await;
+    let cat_res = if elevated {
+        crate::utils::privilege::run_privileged_output(
+            "/usr/bin/cat",
+            &[config_path.to_string()],
+            &crate::utils::privilege::RootAuth::Polkit,
+        )
+        .await
+    } else {
+        PrivCommand::new("cat")
+            .arg(config_path)
+            .output()
+            .await
+            .map_err(|e| e.to_string())
+    };
 
     if let Ok(out) = cat_res {
         if out.status.success() {

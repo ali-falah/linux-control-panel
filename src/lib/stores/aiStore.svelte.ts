@@ -179,14 +179,6 @@ const SECURITY_FIX_LOOKUP: Record<string, HardcodedFix> = {
     tauri_command: 'security_fix_kernel_param',
     tauri_args: { key: 'net.ipv4.conf.all.log_martians', value: '1', revertValue: '0', enable: true },
   },
-  selinux: {
-    label: 'SELinux Mode',
-    target: '/etc/selinux/config → SELINUX=',
-    current_label: 'SELINUX=permissive  (or disabled)',
-    proposed_label: 'SELINUX=enforcing  (+ filesystem relabel + reboot)',
-    tauri_command: 'security_fix_selinux',
-    tauri_args: { enable: true },
-  },
   auditd: {
     label: 'Audit Daemon (auditd)',
     target: 'systemd unit: auditd',
@@ -217,7 +209,7 @@ const SECURITY_FIX_LOOKUP: Record<string, HardcodedFix> = {
     current_label: 'firewalld / ufw — inactive / disabled',
     proposed_label: 'firewalld — enabled + active (systemctl enable --now firewalld)',
     tauri_command: 'security_fix_firewall',
-    tauri_args: { enable: true },
+    tauri_args: { confirmed: false },
   },
   empty_passwords: {
     label: 'Lock Accounts with Empty Passwords',

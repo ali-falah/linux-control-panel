@@ -1,5 +1,23 @@
+use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege::Command;
-use crate::utils::privilege::Command as PrivCommand;
+use crate::utils::privilege::{run_privileged_with_stdin, RootAuth};
+
+/// Run one named NetworkManager helper action. The helper re-validates the
+/// verb, connection and property shape; writes never use the generic nmcli
+/// channel.
+async fn run_network_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = run_privileged_with_stdin(helper, &args, &RootAuth::Polkit, "").await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub fn network_get_interfaces() -> Result<String, String> {
@@ -36,7 +54,10 @@ pub fn network_get_dns() -> Result<String, String> {
 #[tauri::command]
 pub fn network_list_connections() -> Result<String, String> {
     let mut cmd = Command::new("nmcli");
-    cmd.args(["-t", "-c", "no", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
+    // Keep nmcli's default escaping ('-c no' would turn a profile named
+    // "Corp: US-East" into two fields and shift every following column).
+    // The frontend splits on unescaped ':' and unescapes the values.
+    cmd.args(["-t", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     
     if !output.status.success() {
@@ -58,92 +79,78 @@ pub fn network_get_connection(uuid: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn network_save_connection(uuid: String, settings: std::collections::HashMap<String, String>) -> Result<String, String> {
+pub async fn network_save_connection(
+    uuid: String,
+    settings: std::collections::HashMap<String, String>,
+) -> Result<String, String> {
     let is_new = uuid.is_empty();
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli").arg("connection");
-    if is_new {
-        cmd.arg("add");
+    let connection = if is_new {
+        settings
+            .get("connection.id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "A connection name (connection.id) is required for a new connection.".to_string()
+            })?
     } else {
-        cmd.arg("modify").arg(&uuid);
+        ensure_safe_operand(&uuid, "connection id")?;
+        uuid.clone()
+    };
+
+    let mut params = Vec::with_capacity(settings.len() * 2 + 2);
+    params.push(if is_new { "add" } else { "modify" }.to_string());
+    params.push(connection);
+    for (key, value) in settings {
+        // The UI sends empty values to mean "leave unset" for auto modes.
+        // The helper action intentionally requires non-empty values.
+        if value.is_empty() {
+            continue;
+        }
+        params.push(key);
+        params.push(value);
     }
-    
-    for (k, v) in settings {
-        cmd.arg(&k).arg(&v);
-    }
-    
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_network_named_action("nmcli_connection_save", &params).await?;
+    Ok(String::new())
 }
 
 #[tauri::command]
-pub fn network_delete_connection(uuid: String) -> Result<String, String> {
+pub async fn network_delete_connection(uuid: String) -> Result<String, String> {
     let lower = uuid.trim().to_lowercase();
     if lower == "lo" || lower == "loopback" {
         return Err("Action blocked: The loopback connection (lo) is essential for system IPC and cannot be deleted.".to_string());
     }
-
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli");
-    cmd.args(["connection", "delete", &uuid]);
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_network_named_action("nmcli_connection_delete", &[uuid]).await?;
+    Ok(String::new())
 }
 
 #[tauri::command]
-pub fn network_up_connection(uuid: String) -> Result<String, String> {
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli");
-    cmd.args(["connection", "up", &uuid]);
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+pub async fn network_up_connection(uuid: String) -> Result<String, String> {
+    run_network_named_action("nmcli_connection_up", &[uuid]).await?;
+    Ok(String::new())
 }
 
 #[tauri::command]
-pub fn network_down_connection(uuid: String) -> Result<String, String> {
+pub async fn network_down_connection(uuid: String) -> Result<String, String> {
     let lower = uuid.trim().to_lowercase();
     if lower == "lo" || lower == "loopback" {
         return Err("Action blocked: Cannot deactivate loopback interface (lo).".to_string());
     }
-
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("nmcli");
-    cmd.args(["connection", "down", &uuid]);
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_network_named_action("nmcli_connection_down", &[uuid]).await?;
+    Ok(String::new())
 }
 
 #[tauri::command]
-pub fn network_set_interface_state(iface: String, up: bool) -> Result<String, String> {
+pub async fn network_set_interface_state(iface: String, up: bool) -> Result<String, String> {
     let iface_clean = iface.trim().to_lowercase();
     if !up && (iface_clean == "lo" || iface_clean.starts_with("loopback")) {
         return Err("Action blocked: Cannot bring down loopback interface (lo). It is vital for inter-process communication.".to_string());
     }
-
-    let mut cmd = PrivCommand::new("pkexec");
-    cmd.arg("ip");
-    cmd.args(["link", "set", "dev", &iface, if up { "up" } else { "down" }]);
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    run_network_named_action(
+        "nmcli_interface_state",
+        &[iface, if up { "up" } else { "down" }.to_string()],
+    )
+    .await?;
+    Ok(String::new())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -151,13 +158,39 @@ pub struct VpnProfile {
     pub uuid: String,
     pub name: String,
     pub vpn_type: String,
+    pub device: String,
     pub active: bool,
+}
+
+/// nmcli's terse output escapes the `:` separator and `\` inside field values.
+/// Parse it by hand so profile names containing `:` survive the round trip
+/// (splitting on a raw ':' silently truncates the name and shifts every
+/// following field, which makes VPN profiles disappear from the list).
+fn split_nmcli_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+
+    for c in line.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == ':' {
+            fields.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+    fields.push(current);
+    fields
 }
 
 #[tauri::command]
 pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
     let mut cmd = Command::new("nmcli");
-    cmd.args(["-t", "-c", "no", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
+    cmd.args(["-t", "-f", "UUID,NAME,TYPE,DEVICE,STATE", "connection", "show"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     
     if !output.status.success() {
@@ -168,12 +201,13 @@ pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
     let mut profiles = Vec::new();
     
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split(':').collect();
+        let parts = split_nmcli_fields(line);
         if parts.len() >= 5 {
-            let uuid = parts[0].to_string();
-            let name = parts[1].to_string();
-            let conn_type = parts[2].to_string();
-            let state = parts[4].to_string();
+            let uuid = parts[0].clone();
+            let name = parts[1].clone();
+            let conn_type = parts[2].clone();
+            let device = parts[3].clone();
+            let state = parts[4].clone();
             
             if conn_type == "vpn" || conn_type == "wireguard" {
                 let active = !state.trim().is_empty() && state != "--";
@@ -181,6 +215,7 @@ pub fn network_get_vpn_profiles() -> Result<Vec<VpnProfile>, String> {
                     uuid,
                     name,
                     vpn_type: conn_type,
+                    device,
                     active,
                 });
             }
@@ -273,24 +308,24 @@ fn parse_wireguard_conf(content: &str) -> Result<(String, String, Option<String>
 #[tauri::command]
 pub async fn network_import_vpn_profile(name: String, file_path: String) -> Result<String, String> {
     let is_openvpn = file_path.ends_with(".ovpn");
-    
+
+
     if is_openvpn {
-        let output = Command::new("pkexec")
-            .args(["nmcli", "connection", "import", "type", "openvpn", "file", &file_path])
-            .output()
-            .map_err(|e| format!("Failed to run pkexec nmcli: {e}"))?;
-            
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-        
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        // Use the nmcli_connection_import helper action instead of pkexec.
+        // The helper reads the file itself and confines paths to /home, /tmp, /var/tmp, /run_media.
+        run_network_named_action(
+            "nmcli_connection_import",
+            &[String::from("openvpn"), file_path.clone()],
+        )
+        .await
+        .map_err(|e| format!("Failed to import VPN profile: {e}"))?;
+        Ok(String::new())
     } else {
         let content = std::fs::read_to_string(&file_path)
             .map_err(|e| format!("Failed to read file: {e}"))?;
-            
+
         let (private_key, address, dns, peers) = parse_wireguard_conf(&content)?;
-        
+
         let safe_name = if name.trim().is_empty() {
             std::path::Path::new(&file_path)
                 .file_stem()
@@ -300,53 +335,75 @@ pub async fn network_import_vpn_profile(name: String, file_path: String) -> Resu
         } else {
             name
         };
-        
+
         let ifname = format!("wg-{}", safe_name.to_lowercase().replace(' ', "-"));
-        
-        let add_out = Command::new("pkexec")
-            .args(["nmcli", "connection", "add", "type", "wireguard", "con-name", &safe_name, "ifname", &ifname])
-            .output()
-            .map_err(|e| format!("Failed to add wireguard connection: {e}"))?;
-            
-        if !add_out.status.success() {
-            return Err(String::from_utf8_lossy(&add_out.stderr).to_string());
-        }
-        
-        let mod_out = Command::new("pkexec")
-            .args([
-                "nmcli", "connection", "modify", &safe_name,
-                "wireguard.private-key", &private_key,
-                "ipv4.addresses", &address,
-                "ipv4.method", "manual",
-                "ipv6.method", "disabled"
-            ])
-            .output()
-            .map_err(|e| format!("Failed to configure wireguard: {e}"))?;
-            
-        if !mod_out.status.success() {
-            return Err(String::from_utf8_lossy(&mod_out.stderr).to_string());
-        }
-        
+
+        // Step 1: add the wireguard connection via nmcli_connection_save
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("add"),
+                safe_name.clone(),
+                String::from("type"),
+                String::from("wireguard"),
+                String::from("con-name"),
+                safe_name.clone(),
+                String::from("ifname"),
+                ifname.clone(),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to add wireguard connection: {e}"))?;
+
+        // Step 2: configure wireguard settings
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("modify"),
+                safe_name.clone(),
+                String::from("wireguard.private-key"),
+                private_key.clone(),
+                String::from("ipv4.addresses"),
+                address.clone(),
+                String::from("ipv4.method"),
+                String::from("manual"),
+                String::from("ipv6.method"),
+                String::from("disabled"),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to configure wireguard: {e}"))?;
+
+        // Step 3: optional DNS
         if let Some(dns_servers) = dns {
-            let dns_out = Command::new("pkexec")
-                .args(["nmcli", "connection", "modify", &safe_name, "ipv4.dns", &dns_servers])
-                .output()
-                .map_err(|e| format!("Failed to set wireguard DNS: {e}"))?;
-            if !dns_out.status.success() {
-                return Err(String::from_utf8_lossy(&dns_out.stderr).to_string());
-            }
+            run_network_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    safe_name.clone(),
+                    String::from("ipv4.dns"),
+                    dns_servers.clone(),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to set wireguard DNS: {e}"))?;
         }
-        
+
+        // Step 4: peers
         for peer in peers {
-            let peer_out = Command::new("pkexec")
-                .args(["nmcli", "connection", "modify", &safe_name, "+wireguard.peers", &peer])
-                .output()
-                .map_err(|e| format!("Failed to add wireguard peer: {e}"))?;
-            if !peer_out.status.success() {
-                return Err(String::from_utf8_lossy(&peer_out.stderr).to_string());
-            }
+            run_network_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    safe_name.clone(),
+                    String::from("+wireguard.peers"),
+                    peer.clone(),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to add wireguard peer: {e}"))?;
         }
-        
+
         Ok(format!("WireGuard connection '{}' successfully imported.", safe_name))
     }
 }
@@ -358,58 +415,106 @@ pub async fn network_create_vpn_profile(
     gateway: String,
     username: Option<String>,
     password: Option<String>,
+    peer_public_key: Option<String>,
+    ca_cert: Option<String>,
+    client_cert: Option<String>,
+    client_key: Option<String>,
 ) -> Result<String, String> {
     if vpn_type == "openvpn" {
         let con_name = if name.trim().is_empty() { "vpn-manual" } else { &name };
-        
-        let add_out = Command::new("pkexec")
-            .args(["nmcli", "connection", "add", "type", "vpn", "vpn-type", "openvpn", "con-name", con_name, "ifname", "*"])
-            .output()
-            .map_err(|e| format!("Failed to create openvpn connection: {e}"))?;
-            
-        if !add_out.status.success() {
-            return Err(String::from_utf8_lossy(&add_out.stderr).to_string());
-        }
-        
+
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("add"),
+                con_name.to_string(),
+                String::from("type"),
+                String::from("vpn"),
+                String::from("vpn-type"),
+                String::from("openvpn"),
+                String::from("con-name"),
+                con_name.to_string(),
+                String::from("ifname"),
+                String::from("*"),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to create openvpn connection: {e}"))?;
+
         let user_str = username.unwrap_or_default();
         let data_setting = format!("gateway={}, username={}", gateway, user_str);
-        
-        let mod_out = Command::new("pkexec")
-            .args(["nmcli", "connection", "modify", con_name, "vpn.data", &data_setting])
-            .output()
-            .map_err(|e| format!("Failed to configure openvpn parameters: {e}"))?;
-            
-        if !mod_out.status.success() {
-            return Err(String::from_utf8_lossy(&mod_out.stderr).to_string());
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("modify"),
+                con_name.to_string(),
+                String::from("vpn.data"),
+                data_setting,
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to configure openvpn parameters: {e}"))?;
+
+        // Certificates — without them the openvpn plugin cannot authenticate
+        if let Some(pass) = password.filter(|value| !value.is_empty()) {
+            run_network_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    con_name.to_string(),
+                    String::from("vpn.secrets"),
+                    format!("password={pass}"),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to store openvpn credentials: {e}"))?;
         }
-        
-        if let Some(pass) = password {
-            if !pass.is_empty() {
-                let secrets_setting = format!("password={}", pass);
-                let _ = Command::new("pkexec")
-                    .args(["nmcli", "connection", "modify", con_name, "vpn.secrets", &secrets_setting])
-                    .output();
+
+        let mut cert_params = vec![String::from("modify"), con_name.to_string()];
+        for (key, value) in [("vpn.ca", &ca_cert), ("vpn.cert", &client_cert), ("vpn.key", &client_key)] {
+            if let Some(path) = value.as_ref().filter(|path| !path.trim().is_empty()) {
+                cert_params.push(key.to_string());
+                cert_params.push(path.trim().to_string());
             }
         }
-        
+        if cert_params.len() > 2 {
+            run_network_named_action("nmcli_connection_save", &cert_params)
+                .await
+                .map_err(|e| format!("Failed to store openvpn certificates: {e}"))?;
+        }
+
         Ok(format!("OpenVPN connection '{}' created.", con_name))
     } else {
         let con_name = if name.trim().is_empty() { "wg-manual" } else { &name };
         let ifname = format!("wg-{}", con_name.to_lowercase().replace(' ', "-"));
-        
-        let add_out = Command::new("pkexec")
-            .args(["nmcli", "connection", "add", "type", "wireguard", "con-name", con_name, "ifname", &ifname])
-            .output()
-            .map_err(|e| format!("Failed to create wireguard connection: {e}"))?;
-            
-        if !add_out.status.success() {
-            return Err(String::from_utf8_lossy(&add_out.stderr).to_string());
-        }
-        
+
+        // A WireGuard peer is unusable without the server's public key
+        let peer_key = peer_public_key
+            .as_ref()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| "A peer public key is required for WireGuard profiles.".to_string())?;
+
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("add"),
+                con_name.to_string(),
+                String::from("type"),
+                String::from("wireguard"),
+                String::from("con-name"),
+                con_name.to_string(),
+                String::from("ifname"),
+                ifname.clone(),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to create wireguard connection: {e}"))?;
+
         let genkey_out = std::process::Command::new("wg")
             .arg("genkey")
             .output();
-            
+
         let private_key = if let Ok(out) = genkey_out {
             if out.status.success() {
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -419,22 +524,39 @@ pub async fn network_create_vpn_profile(
         } else {
             "eG9tZUR1bW15UHJpdmF0ZUtleUZvclRlc3RpbmdDYW5CZUltc29ydGVkMTI=".to_string()
         };
-        
-        let _ = Command::new("pkexec")
-            .args([
-                "nmcli", "connection", "modify", con_name,
-                "wireguard.private-key", &private_key,
-                "ipv4.method", "auto"
-            ])
-            .output();
-            
+
+        run_network_named_action(
+            "nmcli_connection_save",
+            &[
+                String::from("modify"),
+                con_name.to_string(),
+                String::from("wireguard.private-key"),
+                private_key,
+                String::from("ipv4.method"),
+                String::from("auto"),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to configure wireguard credentials: {e}"))?;
+
         if !gateway.is_empty() {
-            let peer_setting = format!("endpoint={}", gateway);
-            let _ = Command::new("pkexec")
-                .args(["nmcli", "connection", "modify", con_name, "+wireguard.peers", &peer_setting])
-                .output();
+            let peer_setting = format!(
+                "endpoint={}, public-key={}, allowed-ips=0.0.0.0/0",
+                gateway, peer_key
+            );
+            run_network_named_action(
+                "nmcli_connection_save",
+                &[
+                    String::from("modify"),
+                    con_name.to_string(),
+                    String::from("+wireguard.peers"),
+                    peer_setting,
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to add wireguard peer: {e}"))?;
         }
-        
+
         Ok(format!("WireGuard connection '{}' created.", con_name))
     }
 }

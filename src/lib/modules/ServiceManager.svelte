@@ -28,6 +28,16 @@
   import Select from '../components/ui/Select.svelte';
   import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { loadRecoveryWarning, persistRecoveryWarning, reduceRecoveryWarning } from '../utils/serviceRecovery';
+
+  let recoveryWarning = $state<string | null>(
+    typeof localStorage !== 'undefined' ? loadRecoveryWarning(localStorage) : null
+  );
+
+  function setRecoveryWarning(next: string | null) {
+    recoveryWarning = next;
+    if (typeof localStorage !== 'undefined') persistRecoveryWarning(localStorage, next);
+  }
   import {
     Plus, Folder, Check, Sparkles, FileCode, Trash2
   } from '@lucide/svelte';
@@ -238,6 +248,19 @@
       fullName += '.service';
     }
 
+    if (!userScope) {
+      uiStore.confirm(
+        'Create System Unit as Root',
+        `This will write a root-owned systemd drop-in for "${fullName}" and run daemon-reload.\n\nOnly continue if you trust this unit definition.\n\n${generatedUnitContent}`,
+        () => doCreateUnit(fullName, startImmediately),
+        true
+      );
+      return;
+    }
+    await doCreateUnit(fullName, startImmediately);
+  }
+
+  async function doCreateUnit(fullName: string, startImmediately: boolean) {
     isSubmittingUnit = true;
     try {
       await invoke('write_unit_file', {
@@ -275,20 +298,29 @@
   );
 
   $effect(() => {
-    if (uiStore.targetSubTab === 'boot_analyzer' || uiStore.targetSubTab === 'autostart' || uiStore.targetSubTab === 'services') {
-      mainTab = uiStore.targetSubTab;
+    // Service Manager deep links are one-shot: apply the pending navigation
+    // state, then consume it. Leaving it in the store makes the effect
+    // override the user's own tab/filter/search choices on every change.
+    const pendingSubTab = uiStore.targetSubTab;
+    if (pendingSubTab === 'services' || pendingSubTab === 'autostart' || pendingSubTab === 'boot_analyzer') {
+      mainTab = pendingSubTab;
+      uiStore.targetSubTab = null;
     }
-    if (uiStore.serviceSearchQuery !== undefined && uiStore.serviceSearchQuery !== null) {
-      filter = uiStore.serviceSearchQuery;
-      if (uiStore.serviceSearchQuery !== '') {
-        mainTab = 'services';
-      }
-    }
-    if (uiStore.serviceFilter) {
-      if (uiStore.serviceFilter === 'failed') statusFilter = 'failed';
-      else if (uiStore.serviceFilter === 'active') statusFilter = 'active';
-      else if (uiStore.serviceFilter === 'all') statusFilter = 'all';
+
+    const pendingSearch = uiStore.serviceSearchQuery;
+    if (pendingSearch !== null) {
+      filter = pendingSearch;
       mainTab = 'services';
+      uiStore.serviceSearchQuery = null;
+    }
+
+    const pendingFilter = uiStore.serviceFilter;
+    if (pendingFilter) {
+      statusFilter =
+        pendingFilter === 'failed' ? 'failed' :
+        pendingFilter === 'active' ? 'active' : 'all';
+      mainTab = 'services';
+      uiStore.serviceFilter = null;
     }
   });
 
@@ -664,6 +696,21 @@
     showUnitDiffModal = true;
   }
 
+  async function retryDaemonReload() {
+    try {
+      await invoke<string>('unit_daemon_reload');
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
+      );
+      uiStore.addToast('systemd daemon reloaded successfully', 'success');
+    } catch (e) {
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-failed', error: e })
+      );
+      uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
+    }
+  }
+
   async function saveUnitFile() {
     if (!selectedUnit) return;
     saving = true;
@@ -674,6 +721,9 @@
       uiStore.addToast(`Unit file saved for ${selectedUnit.name}`, 'success');
       unitFileContent = editedContent;
     } catch (e) {
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'write-failed', error: e })
+      );
       uiStore.addToast(`Failed to save: ${e}`, 'error');
       const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
       statusStore.setLastCommand(`echo "..." > ${targetPath}`, 1, false);
@@ -794,7 +844,10 @@
   }
 
   $effect(() => {
-    if (!panelOpen) { activePanel = null; selectedUnit = null; }
+    if (!panelOpen) {
+      if (activePanel !== null) activePanel = null;
+      if (selectedUnit !== null) selectedUnit = null;
+    }
   });
 
   // ─── XDG Autostart state ───────────────────────────────────────────────────
@@ -1061,6 +1114,29 @@
     </div>
   </PageHeader>
 
+  {#if recoveryWarning}
+    <div
+      role="alert"
+      style="display:flex; gap:12px; align-items:flex-start; margin:16px 0; padding:14px 16px; border:1px solid var(--color-error); border-left-width:5px; border-radius:8px; background:var(--color-bg-card);"
+    >
+      <ShieldAlert size={22} color="var(--color-error)" style="flex-shrink:0; margin-top:2px;" />
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:700; color:var(--color-error); font-size:13px;">
+          systemd reload recovery required
+        </div>
+        <div style="font-size:12px; color:var(--color-text-secondary); margin-top:4px;">
+          The unit file on disk was written or rolled back, but systemd could still hold the
+          previous in-memory configuration. Run <strong>Retry daemon-reload</strong> to reload
+          it without rewriting any configuration. This warning stays until that reload is confirmed successful.
+        </div>
+        <pre style="white-space:pre-wrap; word-break:break-word; font-size:11px; margin:8px 0; padding:8px; background:var(--color-bg-base); border-radius:6px; color:var(--color-text-muted);">{recoveryWarning}</pre>
+        <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
+          <RefreshCw size={13} /> Retry daemon-reload
+        </Button>
+      </div>
+    </div>
+  {/if}
+
   {#if mainTab === 'services'}
     <!-- Filter & search row: Search on Left, Tabs & Action on Right -->
     <div class="header-row">
@@ -1206,6 +1282,9 @@
             <FileText size={13} /> Full Journal ↗
           </Button>
         {:else if activePanel === 'editor'}
+          <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
+            Retry daemon-reload
+          </Button>
           <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
             disabled={saving || editedContent === unitFileContent}>
             {saving ? 'Saving…' : 'Save Override'}
@@ -1731,7 +1810,7 @@
                       </td>
                       <td style="text-align:center;">
                         {#if entry.time_ms >= 5000}
-                          <span class="badge badge-danger">CRITICAL</span>
+                          <span class="badge badge-error">CRITICAL</span>
                         {:else if entry.time_ms >= 2000}
                           <span class="badge badge-warning">SLOW</span>
                         {:else}
@@ -2045,7 +2124,7 @@
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showAutostartModal}
   <div use:portal class="modal-backdrop" onclick={() => showAutostartModal = false} role="presentation">
-    <div class="modal-card" style="max-width: 520px;" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="modal-card" style="max-width: 520px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
       <div class="modal-header">
         <div class="modal-title-wrap">
           <Rocket size={18} class="text-accent" />
@@ -2138,6 +2217,7 @@
             onclick={() => autostartForm.enabled = !autostartForm.enabled}
             aria-checked={autostartForm.enabled}
             role="switch"
+            aria-label="Enable autostart"
           >
             <span class="ui-toggle-thumb"></span>
           </button>
@@ -2171,7 +2251,7 @@
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showCreateUnitModal}
   <div use:portal class="modal-backdrop" onclick={() => showCreateUnitModal = false} role="presentation">
-    <div class="modal-card modal-wizard-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="modal-card modal-wizard-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
       <div class="modal-header">
         <div class="modal-title-wrap">
           <FileCode size={18} class="text-accent" />
@@ -2372,7 +2452,7 @@
             <!-- Environment Variables list -->
             <div class="form-group">
               <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
-                <label class="form-label" style="margin:0;">Environment Variables</label>
+                <span class="form-label" style="margin:0;">Environment Variables</span>
                 <button
                   type="button"
                   class="btn-text"
@@ -2408,7 +2488,7 @@
           <!-- ─── STEP 3: DEPENDENCIES & TARGETS ─── -->
           <div class="step-pane">
             <div class="form-group">
-              <label class="form-label">Startup Ordering (After=)</label>
+              <span class="form-label">Startup Ordering (After=)</span>
               <div class="preset-pill-row">
                 {#each ['network.target', 'network-online.target', 'docker.service', 'nginx.service', 'postgresql.service', 'mysqld.service', 'redis.service'] as target}
                   <button
@@ -2431,7 +2511,7 @@
             </div>
 
             <div class="form-group">
-              <label class="form-label">Soft Dependencies (Wants=)</label>
+              <span class="form-label">Soft Dependencies (Wants=)</span>
               <div class="preset-pill-row">
                 {#each ['network-online.target', 'docker.service', 'postgresql.service', 'redis.service'] as target}
                   <button
@@ -2548,32 +2628,20 @@
   </div>
 {/if}
 
-<style>
-  /* ── Header row (tabs + stats + search) ─────────────────────────────── */
-  .header-row {
+<style>/* ── Header row (tabs + stats + search) ─────────────────────────────── */ .header-row {
     display: flex;
     align-items: center;
     gap: 10px;
     margin-bottom: 12px;
     flex-wrap: wrap;
-  }
-
-  .header-spacer {
+  }.header-spacer {
     flex: 1;
-  }
-
-
-
-  /* ── Stats ───────────────────────────────────────────────────────────── */
-  .stats-row {
+  }/* ── Stats ───────────────────────────────────────────────────────────── */ .stats-row {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
     margin-bottom: 12px;
-  }
-
-  /* ── Scope Toggle Button ───────────────────────────────────────────── */
-  .scope-toggle-btn {
+  }/* ── Scope Toggle Button ───────────────────────────────────────────── */ .scope-toggle-btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -2587,20 +2655,16 @@
     color: var(--color-text-secondary);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     transition: all 0.2s ease;
-  }
-  .scope-toggle-btn:hover {
+  }.scope-toggle-btn:hover {
     border-color: var(--color-border-hover);
     color: var(--color-text-primary);
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
-  }
-  .scope-toggle-btn.active {
+  }.scope-toggle-btn.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
     color: #FFFFFF !important;
     box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
-  }
-
-  .stat-chip {
+  }.stat-chip {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -2614,50 +2678,34 @@
     font-size: inherit;
     cursor: pointer;
     transition: all 0.2s ease;
-  }
-
-  .stat-chip:hover {
+  }.stat-chip:hover {
     border-color: var(--color-border-hover);
     box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.10);
-  }
-
-  .stat-chip.active {
+  }.stat-chip.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
     color: #FFFFFF !important;
     box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
-  }
-
-  .stat-chip.active .stat-num,
-  .stat-chip.active .stat-label {
+  }.stat-chip.active :global(.stat-num), .stat-chip.active :global(.stat-label) {
     color: #FFFFFF !important;
     font-weight: 700;
-  }
-
-  .stat-num {
+  }.stat-num {
     font-size: 16px;
     font-weight: 700;
     color: var(--color-text-primary);
     line-height: 1;
-  }
-
-  .stat-label {
+  }.stat-label {
     font-size: 11px;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 600;
-  }
-
-  /* ── Autostart tab layout ────────────────────────────────────────────── */
-  .table-area {
+  }/* ── Autostart tab layout ────────────────────────────────────────────── */ .table-area {
     display: flex;
     flex-direction: column;
     flex: 1;
     min-height: 0;
-  }
-
-  .loading-state {
+  }.loading-state {
     flex: 1;
     display: flex;
     align-items: center;
@@ -2665,32 +2713,23 @@
     gap: 8px;
     color: var(--color-text-muted);
     font-size: 13px;
-  }
-
-  /* Cell helpers */
-  .col-name {
+  }/* Cell helpers */ .col-name {
     font-family: var(--font-mono);
     font-size: 12px;
     color: var(--color-text-primary);
     font-weight: 500;
-  }
-  .col-muted {
+  }.col-muted {
     color: var(--color-text-muted);
     font-size: 12px;
-  }
-  .col-subtext {
+  }.col-subtext {
     font-size: 11px;
     color: var(--color-text-muted);
     margin-top: 2px;
-  }
-  .col-code {
+  }.col-code {
     font-size: 11px;
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
-  }
-
-  /* Toggle switch */
-  .ui-toggle {
+  }/* Toggle switch */ .ui-toggle {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -2703,11 +2742,7 @@
     transition: background 0.2s ease;
     padding: 0;
     flex-shrink: 0;
-  }
-  .ui-toggle.on { background: var(--color-accent); }
-  .ui-toggle:disabled { opacity: 0.35; cursor: not-allowed; }
-
-  .ui-toggle-thumb {
+  }.ui-toggle.on { background: var(--color-accent); }.ui-toggle:disabled { opacity: 0.35; cursor: not-allowed; }.ui-toggle-thumb {
     position: absolute;
     left: 3px;
     width: 14px;
@@ -2716,11 +2751,7 @@
     background: #fff;
     transition: transform 0.2s ease;
     pointer-events: none;
-  }
-  .ui-toggle.on .ui-toggle-thumb { transform: translateX(16px); }
-
-  /* Service tab */
-  .log-output {
+  }.ui-toggle.on .ui-toggle-thumb { transform: translateX(16px); }/* Service tab */ .log-output {
     font-size: 11px;
     flex: 1;
     overflow-y: auto;
@@ -2732,14 +2763,9 @@
     color: var(--color-text-secondary);
     white-space: pre-wrap;
     word-break: break-all;
-  }
-
-  .selected-unit {
+  }.selected-unit {
     background: var(--color-active-bg) !important;
-  }
-
-  /* Header controls optimization */
-  .scope-toggle-btn {
+  }/* Header controls optimization */ .scope-toggle-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -2754,18 +2780,14 @@
     color: var(--color-text-secondary);
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-  .scope-toggle-btn:hover {
+  }.scope-toggle-btn:hover {
     border-color: var(--color-border-hover);
     color: var(--color-text-primary);
-  }
-  .scope-toggle-btn.active {
+  }.scope-toggle-btn.active {
     background: var(--color-accent-muted);
     border-color: var(--color-accent);
     color: var(--color-accent);
-  }
-
-  .header-tab-bar {
+  }.header-tab-bar {
     display: inline-flex;
     align-items: center;
     background: var(--color-tab-bar-bg, rgba(0, 0, 0, 0.2));
@@ -2773,8 +2795,7 @@
     border-radius: 8px;
     padding: 3px;
     gap: 3px;
-  }
-  .header-tab-btn {
+  }.header-tab-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -2789,44 +2810,31 @@
     color: var(--color-text-muted);
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-  .header-tab-btn:hover {
+  }.header-tab-btn:hover {
     color: var(--color-text-primary);
-  }
-  .header-tab-btn.active {
+  }.header-tab-btn.active {
     background: var(--color-accent);
-    color: #FFFFFF;
+    color: var(--color-text-on-accent);
     font-weight: 600;
-  }
-  .header-tab-count {
+  }.header-tab-count {
     font-size: 10px;
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.15);
+    background: color-mix(in srgb, currentColor 18%, transparent);
     color: inherit;
-  }
-  .header-tab-btn.active .header-tab-count {
-    background: rgba(255, 255, 255, 0.25);
-    color: #FFFFFF;
-  }
-
-  .filter-pills {
+  }.header-tab-btn.active .header-tab-count {
+    background: color-mix(in srgb, currentColor 22%, transparent);
+    color: inherit;
+  }.filter-pills {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--color-tab-bar-bg);
     border: 1px solid var(--color-border);
     padding: 3px;
     border-radius: 8px;
-  }
-
-  :global(html.light-mode) .filter-pills {
-    background: #F1F5F9;
-    border-color: #E2E8F0;
-  }
-
-  .pill-btn {
+  }.pill-btn {
     border: none;
     background: transparent;
     padding: 4px 10px;
@@ -2836,25 +2844,13 @@
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
-  }
-
-  .pill-btn:hover {
+  }.pill-btn:hover {
     color: var(--color-text-primary);
-  }
-
-  .pill-btn.active {
+  }.pill-btn.active {
     background: var(--color-accent);
-    color: #000000;
+    color: var(--color-text-on-accent);
     font-weight: 700;
-  }
-
-  :global(html.light-mode) .pill-btn.active {
-    background: #2563EB;
-    color: #FFFFFF;
-  }
-
-  /* ── Custom Context Menu ────────────────────────────────────────── */
-  .custom-context-menu {
+  }/* ── Custom Context Menu ────────────────────────────────────────── */ .custom-context-menu {
     background: var(--color-bg-card, #131b26);
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -2868,9 +2864,7 @@
     max-height: calc(100vh - 24px);
     overflow-y: auto;
     overflow-x: hidden;
-  }
-
-  .context-menu-item {
+  }.context-menu-item {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -2885,25 +2879,16 @@
     text-align: left;
     cursor: pointer;
     transition: all 0.12s ease;
-  }
-
-  .context-menu-item:hover:not(:disabled) {
+  }.context-menu-item:hover:not(:disabled) {
     background: var(--color-bg-hover, rgba(255, 255, 255, 0.08));
     color: var(--color-text-primary);
-  }
-
-  .context-menu-item:disabled {
+  }.context-menu-item:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  .context-menu-item.text-danger:hover:not(:disabled) {
+  }.context-menu-item.text-danger:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.12);
     color: var(--color-error);
-  }
-
-  /* ── Security Protection Badges & Alerts ───────────────────────────── */
-  .protection-badge {
+  }/* ── Security Protection Badges & Alerts ───────────────────────────── */ .protection-badge {
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -2914,55 +2899,41 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     flex-shrink: 0;
-  }
-  .protection-badge.critical {
+  }.protection-badge.critical {
     background: rgba(239, 68, 68, 0.14);
     color: #f87171;
     border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-  .protection-badge.essential {
+  }.protection-badge.essential {
     background: rgba(0, 218, 243, 0.12);
     color: var(--color-accent);
     border: 1px solid rgba(0, 218, 243, 0.3);
-  }
-
-  .drawer-protection-alert {
+  }.drawer-protection-alert {
     display: flex;
     align-items: flex-start;
     gap: 10px;
     padding: 12px 14px;
     border-radius: 8px;
     margin-bottom: 16px;
-  }
-  .drawer-protection-alert.critical {
+  }.drawer-protection-alert.critical {
     background: rgba(239, 68, 68, 0.08);
     border: 1px solid rgba(239, 68, 68, 0.25);
-  }
-  .drawer-protection-alert.essential {
+  }.drawer-protection-alert.essential {
     background: rgba(0, 218, 243, 0.08);
     border: 1px solid rgba(0, 218, 243, 0.25);
-  }
-
-  .protection-alert-icon.critical {
+  }.protection-alert-icon.critical {
     color: var(--color-error);
     margin-top: 2px;
     flex-shrink: 0;
-  }
-  .protection-alert-icon.essential {
+  }.protection-alert-icon.essential {
     color: var(--color-accent);
     margin-top: 2px;
     flex-shrink: 0;
-  }
-
-  .protection-alert-text {
+  }.protection-alert-text {
     display: flex;
     flex-direction: column;
     gap: 3px;
     line-height: 1.4;
-  }
-
-  /* ── Cybernetic Pulse Loading Animation ───────────────────────────── */
-  .cyber-loading-matrix {
+  }/* ── Cybernetic Pulse Loading Animation ───────────────────────────── */ .cyber-loading-matrix {
     display: flex;
     flex-direction: column;
     padding: 16px;
@@ -2970,9 +2941,7 @@
     height: 100%;
     min-height: 380px;
     background: var(--color-bg-base);
-  }
-
-  .cyber-scanner-hero {
+  }.cyber-scanner-hero {
     display: flex;
     align-items: center;
     gap: 14px;
@@ -2981,9 +2950,7 @@
     background: linear-gradient(135deg, rgba(0, 218, 243, 0.07) 0%, rgba(37, 99, 235, 0.04) 100%);
     border: 1px solid rgba(0, 218, 243, 0.22);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), inset 0 0 16px rgba(0, 218, 243, 0.03);
-  }
-
-  .cyber-radar-orb {
+  }.cyber-radar-orb {
     position: relative;
     width: 40px;
     height: 40px;
@@ -2996,54 +2963,37 @@
     flex-shrink: 0;
     box-shadow: 0 0 14px rgba(0, 218, 243, 0.25);
     overflow: hidden;
-  }
-
-  .radar-sweep {
+  }.radar-sweep {
     position: absolute;
     inset: 0;
     border-radius: 50%;
     background: conic-gradient(from 0deg, transparent 0deg, rgba(0, 218, 243, 0.3) 300deg, rgba(0, 218, 243, 0.75) 360deg);
     animation: radar-rotate 1.8s linear infinite;
   }
-
-  @keyframes radar-rotate {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  .radar-core-icon {
+@keyframes radar-rotate {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
+}.radar-core-icon {
     position: relative;
     z-index: 2;
     color: var(--color-accent);
     filter: drop-shadow(0 0 4px var(--color-accent));
-  }
-
-  .cyber-scan-text {
+  }.cyber-scan-text {
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-
-  .cyber-scan-title {
+  }.cyber-scan-title {
     font-size: 13px;
     font-weight: 700;
     color: var(--color-text-primary);
     letter-spacing: -0.01em;
-  }
-
-  .cyber-scan-sub {
+  }.cyber-scan-sub {
     font-size: 11px;
     color: var(--color-text-muted);
-  }
-
-  .cyber-skeleton-rows {
+  }.cyber-skeleton-rows {
     display: flex;
     flex-direction: column;
     gap: 7px;
     flex: 1;
-  }
-
-  .cyber-shimmer-row {
+  }.cyber-shimmer-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -3054,9 +3004,7 @@
     position: relative;
     overflow: hidden;
     gap: 14px;
-  }
-
-  .cyber-shimmer-row::after {
+  }.cyber-shimmer-row::after {
     content: '';
     position: absolute;
     top: 0;
@@ -3066,62 +3014,43 @@
     background: linear-gradient(90deg, transparent 0%, rgba(0, 218, 243, 0.09) 50%, transparent 100%);
     animation: cyber-shimmer 1.6s infinite ease-in-out;
   }
-
-  @keyframes cyber-shimmer {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(200%); }
-  }
-
-  .shimmer-col-name {
+@keyframes cyber-shimmer {0% { transform: translateX(0); }100% { transform: translateX(200%); }
+}.shimmer-col-name {
     display: flex;
     flex-direction: column;
     gap: 5px;
     flex: 1;
-  }
-
-  .shimmer-pill-title {
+  }.shimmer-pill-title {
     width: 140px;
     height: 13px;
     border-radius: 4px;
     background: var(--color-bg-raised);
-  }
-
-  .shimmer-pill-sub {
+  }.shimmer-pill-sub {
     width: 220px;
     height: 9px;
     border-radius: 3px;
     background: var(--color-bg-hover);
-  }
-
-  .shimmer-col-badge {
+  }.shimmer-col-badge {
     width: 54px;
     height: 18px;
     border-radius: 999px;
     background: var(--color-bg-raised);
-  }
-
-  .shimmer-col-state {
+  }.shimmer-col-state {
     width: 50px;
     height: 16px;
     border-radius: 4px;
     background: var(--color-bg-raised);
-  }
-
-  .shimmer-col-actions {
+  }.shimmer-col-actions {
     width: 65px;
     height: 24px;
     border-radius: 6px;
     background: var(--color-bg-raised);
-  }
-
-  .boot-kpi-grid {
+  }.boot-kpi-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 10px;
     margin-bottom: 2px;
-  }
-
-  .header-refresh-btn {
+  }.header-refresh-btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -3136,16 +3065,11 @@
     border: 1px solid var(--color-border);
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  .header-refresh-btn:hover:not(:disabled) {
+  }.header-refresh-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.06);
     color: var(--color-text-primary);
     border-color: rgba(255, 255, 255, 0.18);
-  }
-
-  .header-refresh-btn:disabled,
-  .header-refresh-btn.refreshing {
+  }.header-refresh-btn:disabled, .header-refresh-btn.refreshing {
     pointer-events: none !important;
     cursor: not-allowed !important;
     opacity: 0.8 !important;
@@ -3155,45 +3079,30 @@
     box-shadow: 0 0 16px rgba(0, 218, 243, 0.3) !important;
     animation: cyber-pulse-glow 1.1s ease-in-out infinite alternate !important;
   }
-
-  @keyframes cyber-pulse-glow {
-    0% {
+@keyframes cyber-pulse-glow {0% {
       box-shadow: 0 0 4px rgba(0, 218, 243, 0.2);
       border-color: rgba(0, 218, 243, 0.3);
       transform: scale(0.98);
-    }
-    100% {
+    }100% {
       box-shadow: 0 0 18px rgba(0, 218, 243, 0.5);
       border-color: rgba(0, 218, 243, 0.85);
       transform: scale(1);
     }
-  }
-
-  .spin-refresh {
+}.spin-refresh {
     animation: spin-cw 0.75s linear infinite !important;
     color: var(--color-accent) !important;
   }
-
-  @keyframes spin-cw {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  /* ── Service Creation Wizard Modal Styles ── */
-  .modal-backdrop {
+@keyframes spin-cw {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
+}/* ── Service Creation Wizard Modal Styles ── */ .modal-backdrop {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 99990;
     padding: 20px;
-  }
-
-  .modal-card {
+  }.modal-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 14px;
@@ -3204,16 +3113,12 @@
     flex-direction: column;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
     position: relative;
-  }
-
-  .modal-wizard-card {
+  }.modal-wizard-card {
     width: 920px;
     max-width: calc(100vw - 40px);
     height: 620px;
     max-height: 92vh;
-  }
-
-  .modal-header {
+  }.modal-header {
     padding: 14px 20px;
     display: flex;
     align-items: center;
@@ -3221,52 +3126,38 @@
     border-bottom: 1px solid var(--color-border-subtle);
     border-top-left-radius: 13px;
     border-top-right-radius: 13px;
-  }
-
-  .modal-title-wrap {
+  }.modal-title-wrap {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .modal-title-wrap h3 {
+  }.modal-title-wrap h3 {
     font-size: 15px;
     font-weight: 600;
     margin: 0;
-  }
-
-  .modal-close-btn {
+  }.modal-close-btn {
     background: transparent;
     border: none;
     font-size: 20px;
     color: var(--color-text-muted);
     cursor: pointer;
-  }
-
-  .modal-body {
+  }.modal-body {
     padding: 20px 22px;
     display: flex;
     flex-direction: column;
     gap: 16px;
-  }
-
-  .wizard-body {
+  }.wizard-body {
     flex: 1;
     min-height: 0;
     padding: 18px 20px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-  }
-
-  .step-pane {
+  }.step-pane {
     display: flex;
     flex-direction: column;
     gap: 13px;
     flex: 1;
-  }
-
-  .step-info-card {
+  }.step-info-card {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -3275,27 +3166,19 @@
     border: 1px solid var(--color-border-subtle);
     border-radius: 8px;
     margin-top: auto;
-  }
-
-  .form-group {
+  }.form-group {
     display: flex;
     flex-direction: column;
     gap: 5px;
-  }
-
-  .form-row {
+  }.form-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
-  }
-
-  .form-label {
+  }.form-label {
     font-size: 11.5px;
     font-weight: 600;
     color: var(--color-text-secondary);
-  }
-
-  .form-input {
+  }.form-input {
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border);
     border-radius: 6px;
@@ -3304,50 +3187,34 @@
     color: var(--color-text-primary);
     font-family: inherit;
     outline: none;
-  }
-
-  .form-input:focus {
+  }.form-input:focus {
     border-color: var(--color-accent);
     box-shadow: 0 0 0 2px var(--color-accent-muted);
-  }
-
-  .form-input.input-error {
+  }.form-input.input-error {
     border-color: var(--color-error, #f43f5e) !important;
     box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.18) !important;
-  }
-
-  .form-error-msg {
+  }.form-error-msg {
     font-size: 11px;
     font-weight: 500;
     color: var(--color-error, #f43f5e);
     margin-top: 2px;
-  }
-
-  .form-help {
+  }.form-help {
     font-size: 10.5px;
     color: var(--color-text-muted);
-  }
-
-  .input-browse-wrap {
+  }.input-browse-wrap {
     display: flex;
     gap: 8px;
     align-items: center;
-  }
-
-  .input-browse-wrap .form-input {
+  }.input-browse-wrap .form-input {
     flex: 1;
     min-width: 0;
-  }
-
-  .preset-pill-row {
+  }.preset-pill-row {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
     margin-top: 4px;
-  }
-
-  .preset-pill {
+  }.preset-pill {
     padding: 3px 9px;
     border-radius: 6px;
     font-size: 11px;
@@ -3357,30 +3224,22 @@
     border: 1px solid var(--color-border-subtle);
     cursor: pointer;
     transition: all 0.12s ease;
-  }
-
-  .preset-pill:hover {
+  }.preset-pill:hover {
     color: var(--color-accent);
     border-color: var(--color-accent);
-  }
-
-  .preset-pill.active-pill {
+  }.preset-pill.active-pill {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     color: var(--color-accent, #00daf3);
     border-color: var(--color-accent, #00daf3);
     font-weight: 600;
-  }
-
-  .terminal-preview-card {
+  }.terminal-preview-card {
     background: #08111e;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     padding: 14px;
     max-height: 250px;
     overflow-y: auto;
-  }
-
-  .btn-copy-syntax {
+  }.btn-copy-syntax {
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -3392,13 +3251,9 @@
     border: 1px solid var(--color-border-subtle);
     color: var(--color-text-secondary);
     cursor: pointer;
-  }
-
-  .btn-copy-syntax:hover {
+  }.btn-copy-syntax:hover {
     color: var(--color-text-primary);
-  }
-
-  .modal-footer {
+  }.modal-footer {
     padding: 12px 20px;
     display: flex;
     align-items: center;
@@ -3408,26 +3263,16 @@
     background: var(--color-bg-surface);
     border-bottom-left-radius: 13px;
     border-bottom-right-radius: 13px;
-  }
-
-  :global(html.light-mode) .modal-wizard-card {
+  }:global(html.light-mode) .modal-wizard-card {
     background: #ffffff;
     border-color: #e2e8f0;
     box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
-  }
-
-  :global(html.light-mode) .modal-header,
-  :global(html.light-mode) .modal-footer {
+  }:global(html.light-mode) .modal-header, :global(html.light-mode) .modal-footer {
     background: #f8fafc;
     border-color: #e2e8f0;
-  }
-
-  :global(html.light-mode) .terminal-preview-card {
+  }:global(html.light-mode) .terminal-preview-card {
     background: #f8fafc;
     border-color: #cbd5e1;
-  }
-
-  :global(html.light-mode) .terminal-preview-card pre {
+  }:global(html.light-mode) .terminal-preview-card pre {
     color: #0f172a !important;
-  }
-</style>
+  }</style>

@@ -1,7 +1,36 @@
 use serde::{Deserialize, Serialize};
-use crate::utils::privilege::tokio::Command;
 
-use crate::{binary_exists, log_to_file};
+use crate::log_to_file;
+
+/// Forward a validated Copr/PPA operation to the installed helper. The
+/// helper re-validates the repository and selects dnf or
+/// add-apt-repository authoritatively.
+async fn run_copr_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = crate::utils::privilege::run_privileged_with_stdin(
+        helper,
+        &args,
+        &crate::utils::privilege::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if detail.is_empty() {
+            return Err(format!(
+                "The administrator helper failed while managing the Copr repository (status {:?}).",
+                output.status.code()
+            ));
+        }
+        return Err(detail);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoprProject {
@@ -86,91 +115,27 @@ pub async fn search_copr(query: String) -> Result<Vec<CoprProject>, String> {
 /// Enable a Copr or PPA repo
 #[tauri::command]
 pub async fn enable_copr(repo: String) -> Result<String, String> {
-    if binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "copr", "enable", &repo, "-y"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("enable_copr {repo} failed: {stderr}"));
-            return Err(format!("Failed to enable Copr repo: {stderr}"));
-        }
-
-        log_to_file("INFO", &format!("Enabled Copr repo: {repo}"));
-        return Ok(stdout);
-    }
-
-    if binary_exists("add-apt-repository").await {
-        let repo_arg = if repo.starts_with("ppa:") { repo.clone() } else { format!("ppa:{}", repo) };
-        let output = Command::new("pkexec")
-            .args(["add-apt-repository", "-y", &repo_arg])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run add-apt-repository: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("enable PPA {repo} failed: {stderr}"));
-            return Err(format!("Failed to add PPA repository: {stderr}"));
-        }
-
-        log_to_file("INFO", &format!("Enabled PPA repo: {repo}"));
-        return Ok(stdout);
-    }
-
-    Err("Neither dnf nor add-apt-repository is available on this system".to_string())
+    crate::utils::root_policy::copr_repo_valid(&repo)?;
+    run_copr_named_action(
+        "copr_manage",
+        &[String::from("enable"), repo.clone()],
+    )
+    .await?;
+    log_to_file("INFO", &format!("Enabled Copr repo: {repo}"));
+    Ok(format!("Copr repository '{repo}' enabled."))
 }
 
 /// Disable a Copr or PPA repo
 #[tauri::command]
 pub async fn disable_copr(repo: String) -> Result<String, String> {
-    if binary_exists("dnf").await {
-        let output = Command::new("pkexec")
-            .args(["/usr/bin/dnf", "copr", "disable", &repo, "-y"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run pkexec: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("disable_copr {repo} failed: {stderr}"));
-            return Err(format!("Failed to disable Copr repo: {stderr}"));
-        }
-
-        log_to_file("INFO", &format!("Disabled Copr repo: {repo}"));
-        return Ok(stdout);
-    }
-
-    if binary_exists("add-apt-repository").await {
-        let repo_arg = if repo.starts_with("ppa:") { repo.clone() } else { format!("ppa:{}", repo) };
-        let output = Command::new("pkexec")
-            .args(["add-apt-repository", "--remove", "-y", &repo_arg])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run add-apt-repository --remove: {e}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            log_to_file("ERROR", &format!("disable PPA {repo} failed: {stderr}"));
-            return Err(format!("Failed to disable PPA repo: {stderr}"));
-        }
-
-        log_to_file("INFO", &format!("Disabled PPA repo: {repo}"));
-        return Ok(stdout);
-    }
-
-    Err("Neither dnf nor add-apt-repository is available on this system".to_string())
+    crate::utils::root_policy::copr_repo_valid(&repo)?;
+    run_copr_named_action(
+        "copr_manage",
+        &[String::from("disable"), repo.clone()],
+    )
+    .await?;
+    log_to_file("INFO", &format!("Disabled Copr repo: {repo}"));
+    Ok(format!("Copr repository '{repo}' disabled."))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

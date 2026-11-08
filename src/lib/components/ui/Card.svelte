@@ -26,17 +26,20 @@
   }: Props = $props();
   
   let computedClass = $derived(`card${raised ? '-raised' : ''} ${collapsible ? 'is-collapsible' : ''} ${collapsed ? 'is-collapsed' : ''} ${className}`.trim());
+
 </script>
 
 <div class={computedClass} {...rest}>
   {#if title || Icon}
     <div class="card-header-row">
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <h3 
         class="card-title-header" 
-        onclick={() => { if (collapsible) collapsed = !collapsed; }} 
-        style={collapsible ? 'cursor: pointer; user-select: none; margin-bottom: 0;' : ''}
+        role={collapsible ? 'button' : undefined}
+        tabindex={collapsible ? 0 : undefined}
+        onclick={() => { if (collapsible) collapsed = !collapsed; }}
+        onkeydown={(e) => { if (collapsible && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); collapsed = !collapsed; } }}
+        style={collapsible ? 'cursor: pointer; user-select: none; margin-bottom: 0; flex: 1; min-width: 0;' : ''}
       >
         {#if Icon}
           <Icon size={16} class="card-title-icon" />

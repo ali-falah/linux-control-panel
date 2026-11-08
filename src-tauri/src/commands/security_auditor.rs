@@ -1,3 +1,4 @@
+use crate::utils::privilege as privileged;
 use serde::{Deserialize, Serialize};
 use crate::utils::privilege::tokio::Command;
 use std::sync::Mutex;
@@ -26,6 +27,29 @@ async fn check_sysctl_tampered() -> bool {
         }
     }
     false
+}
+
+
+/// Forward one closed security action to the installed helper. The helper
+/// re-validates the action's operands and owns the privileged execution.
+async fn run_security_named_action(action: &str, params: &[String]) -> Result<(), String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = privileged::run_privileged_with_stdin(
+        helper,
+        &args,
+        &privileged::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 // ─── Data Structures ──────────────────────────────────────────────────────────
@@ -88,23 +112,47 @@ async fn read_cmd(args: &[&str]) -> String {
     }
 }
 
-/// Read a file safely without blocking prompts.
+/// Read a file safely without blocking prompts. The unprivileged read is
+/// tried first (it covers everything world-readable); when that yields
+/// nothing, the read goes through the panel's main privilege chokepoint —
+/// the helper's validated `cat` — instead of a raw `sudo -n` bypass.
+///
+/// The shared policy is consulted before the privileged call: a reader call
+/// the helper would refuse anyway (`/etc/shadow`, `/etc/sudoers`, …) is not
+/// attempted at all, so the audit does not trigger an authentication prompt
+/// just to be told "no" — the caller then reports "could not verify".
 async fn read_privileged_file(path: &str) -> String {
     if let Ok(content) = tokio::fs::read_to_string(path).await {
         if !content.trim().is_empty() {
             return content;
         }
     }
-    let out = read_cmd(&["sudo", "-n", "cat", path]).await;
-    if !out.trim().is_empty() {
-        return out;
+    let args = [path.to_string()];
+    if privileged::ensure_arguments_for_program("/usr/bin/cat", &args).is_err() {
+        return String::new();
     }
-    String::new()
+    match privileged::run_privileged_output("/usr/bin/cat", &args, &privileged::RootAuth::Polkit)
+        .await
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
 }
 
 /// Read a world-readable file directly.
 async fn read_file(path: &str) -> String {
     tokio::fs::read_to_string(path).await.unwrap_or_default()
+}
+
+/// Octal permission string of a path — unprivileged metadata lookups only
+/// (st_mode), the same numbers `stat -c %a` used to report. `""` when the
+/// path can not be looked at at all.
+async fn permissions_of(path: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::metadata(path)
+        .await
+        .map(|meta| format!("{:o}", meta.permissions().mode() & 0o7777))
+        .unwrap_or_default()
 }
 
 /// Read a sysctl value from /proc or sysctl command.
@@ -157,6 +205,128 @@ fn info_finding(id: &str, title: &str, desc: &str, countermeasure: &str, categor
     }
 }
 
+// ─── SELinux status detection (read-only CIS 1.7) ────────────────────────────
+
+/// The SELinux mode reported by `sestatus`. `Unknown` means the value was
+/// missing or not recognised — never a negative answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelinuxMode {
+    Enforcing,
+    Permissive,
+    Disabled,
+    Unknown,
+}
+
+/// The three `sestatus` fields the CIS check evaluates. `enabled` comes from
+/// "SELinux status", the other two from "Current mode" and "Mode from config
+/// file". Missing lines stay `None`/`Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SestatusInfo {
+    enabled: Option<bool>,
+    runtime: SelinuxMode,
+    config: SelinuxMode,
+}
+
+/// Parse `sestatus` output by line labels and trimmed values, not fixed
+/// columns: label/value spacing differs between versions and tabs.
+fn parse_sestatus(output: &str) -> SestatusInfo {
+    let mut info = SestatusInfo {
+        enabled: None,
+        runtime: SelinuxMode::Unknown,
+        config: SelinuxMode::Unknown,
+    };
+    for line in output.lines() {
+        let Some((label, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match label.trim() {
+            "SELinux status" => {
+                info.enabled = match value.to_ascii_lowercase().as_str() {
+                    "enabled" => Some(true),
+                    "disabled" => Some(false),
+                    _ => None,
+                };
+            }
+            "Current mode" => info.runtime = selinux_mode(value),
+            "Mode from config file" => info.config = selinux_mode(value),
+            _ => {}
+        }
+    }
+    info
+}
+
+fn selinux_mode(value: &str) -> SelinuxMode {
+    match value.to_ascii_lowercase().as_str() {
+        "enforcing" => SelinuxMode::Enforcing,
+        "permissive" => SelinuxMode::Permissive,
+        "disabled" => SelinuxMode::Disabled,
+        _ => SelinuxMode::Unknown,
+    }
+}
+
+/// The acknowledged compliance state of the SELinux check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelinuxEvaluation {
+    /// Runtime enforcing and the persistent configuration agrees.
+    Enforcing,
+    /// Runtime enforcing, but the boot configuration will change it.
+    EnforcingNotPersistent(SelinuxMode),
+    Permissive,
+    Disabled,
+    /// AppArmor is the active MAC; SELinux is not applicable here.
+    AppArmor,
+    /// The status could not be determined conclusively.
+    Unknown,
+}
+
+fn evaluate_selinux(
+    info: Option<&SestatusInfo>,
+    apparmor_active: bool,
+) -> SelinuxEvaluation {
+    let Some(info) = info else {
+        return if apparmor_active {
+            SelinuxEvaluation::AppArmor
+        } else {
+            SelinuxEvaluation::Unknown
+        };
+    };
+    // AppArmor is the MAC on this host; SELinux is not the applicable policy
+    // unless it is affirmatively enabled.
+    if apparmor_active && info.enabled != Some(true) {
+        return SelinuxEvaluation::AppArmor;
+    }
+    if info.enabled == Some(false) || info.runtime == SelinuxMode::Disabled {
+        return SelinuxEvaluation::Disabled;
+    }
+    match info.runtime {
+        SelinuxMode::Enforcing => match info.config {
+            SelinuxMode::Enforcing => SelinuxEvaluation::Enforcing,
+            SelinuxMode::Permissive | SelinuxMode::Disabled => {
+                SelinuxEvaluation::EnforcingNotPersistent(info.config)
+            }
+            SelinuxMode::Unknown => SelinuxEvaluation::Unknown,
+        },
+        SelinuxMode::Permissive => SelinuxEvaluation::Permissive,
+        SelinuxMode::Disabled => SelinuxEvaluation::Disabled,
+        SelinuxMode::Unknown => SelinuxEvaluation::Unknown,
+    }
+}
+
+/// Points this check contributes to the System Hygiene category. Only
+/// applicable, conclusive checks enter the denominator (5 points); AppArmor
+/// hosts and unknown/error states contribute nothing so they cannot raise or
+/// lower the score artificially.
+fn selinux_scoring(evaluation: SelinuxEvaluation) -> (u32, u32) {
+    match evaluation {
+        SelinuxEvaluation::Enforcing => (5, 5),
+        SelinuxEvaluation::EnforcingNotPersistent(_)
+        | SelinuxEvaluation::Permissive
+        | SelinuxEvaluation::Disabled => (5, 0),
+        SelinuxEvaluation::AppArmor | SelinuxEvaluation::Unknown => (0, 0),
+    }
+}
+
 // ─── Main Audit Command ───────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -193,17 +363,41 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // CATEGORY 1: SSH HARDENING
         // ═══════════════════════════════════════════════════════════════════════
         let cat_ssh = "SSH Hardening";
-        // Use `sshd -T` or direct config parsing without blocking prompts
-        let sshd_t = read_cmd(&["bash", "-c",
-            "sudo -n sshd -T 2>/dev/null || \
-             sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || \
-             sshd -T 2>/dev/null || \
-             /usr/sbin/sshd -T 2>/dev/null || true"]).await;
+        // Evaluate the active sshd configuration. The privileged shape is a
+        // plain `sshd -T` through the helper (flags only, per the shared
+        // policy) — no bash, no `sudo -n`. When that is not available the
+        // config files are parsed instead.
+        let sshd_cfg_args = ["-T".to_string()];
+        let sshd_t_res = if privileged::ensure_arguments_for_program("/usr/sbin/sshd", &sshd_cfg_args).is_ok() {
+            privileged::run_privileged_output("/usr/sbin/sshd", &sshd_cfg_args, &privileged::RootAuth::Polkit).await
+        } else {
+            Err("sshd is not available for a validated privileged read".to_string())
+        };
+        let sshd_t = match sshd_t_res {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+            _ => String::new(),
+        };
         let ssh_full = if !sshd_t.trim().is_empty() {
             sshd_t
         } else {
             let ssh_cfg = read_privileged_file("/etc/ssh/sshd_config").await;
-            let ssh_cfg_d = read_cmd(&["bash", "-c", "sudo -n cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true"]).await;
+            // the include fragments are enumerated unprivileged and each one
+            // is read through the validated path gate as well
+            let mut ssh_cfg_d = String::new();
+            if let Ok(entries) = std::fs::read_dir("/etc/ssh/sshd_config.d") {
+                let mut names: Vec<_> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                    .collect();
+                names.sort();
+                for path in names {
+                    if let Some(path) = path.to_str() {
+                        ssh_cfg_d.push_str(&read_privileged_file(path).await);
+                        ssh_cfg_d.push('\n');
+                    }
+                }
+            }
             format!("{}\n{}", ssh_cfg, ssh_cfg_d)
         };
 
@@ -432,7 +626,22 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 2g. Disable Unused Filesystem Modules
         kernel_max += 5;
-        let modprobe_conf = read_cmd(&["bash", "-c", "cat /etc/modprobe.d/*.conf 2>/dev/null || true"]).await;
+        // kernel_max/5 - enumerated unprivileged (the .conf files are
+        // world-readable); no shell glob needed
+        let mut modprobe_conf = String::new();
+        if let Ok(entries) = std::fs::read_dir("/etc/modprobe.d") {
+            let mut names: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                .collect();
+            names.sort();
+            for path in names {
+                if let Some(path) = path.to_str() {
+                    modprobe_conf.push_str(&read_file(path).await);
+                }
+            }
+        }
         let fs_disabled = modprobe_conf.contains("cramfs") && modprobe_conf.contains("hfs");
         if fs_disabled {
             kernel_cur += 5;
@@ -512,7 +721,8 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
                 if p[0] == "PASS_MIN_LEN" { pass_min_len = p[1].to_string(); }
             }
         }
-        if good_pass_policy {
+        let good_min_len = pass_min_len.parse::<u32>().is_ok_and(|len| len >= 12);
+        if good_pass_policy && good_min_len {
             user_cur += 5;
             findings.push(good("pass_policy", "Password Aging Policy",
                 &format!("PASS_MAX_DAYS={} (≤90 days). Regular password rotation is enforced.", cur_max),
@@ -527,32 +737,42 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 3b. Users with Empty Passwords
         user_max += 5;
         let shadow = read_privileged_file("/etc/shadow").await;
-        let empty_pw_users: Vec<String> = shadow.lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, ':').collect();
-                if parts.len() >= 2 {
-                    let hash = parts[1];
-                    // Empty or "!" or "*" means no/locked password; "" means empty (insecure)
-                    if hash.is_empty() { Some(parts[0].to_string()) } else { None }
-                } else { None }
-            })
-            .collect();
-        if empty_pw_users.is_empty() {
-            user_cur += 5;
-            findings.push(good("empty_passwords", "No Accounts with Empty Passwords",
-                "All user accounts have a password set or are properly locked.",
-                "Regularly audit user accounts and ensure all have strong passwords.", cat_user, Some("CIS 5.4.2")));
+        // /etc/shadow is on the reader policy's permanent deny list — the
+        // empty output means "could not look", never "none found"
+        if shadow.trim().is_empty() {
+            findings.push(warn("empty_passwords", "Empty Passwords Could Not Be Verified",
+                "The helper refuses to read /etc/shadow (she holds password hashes), so the empty-password accounts could not be checked automatically.",
+                "Check manually: sudo awk -F: '($2 == \"\") {print $1}' /etc/shadow", cat_user, false, None));
         } else {
-            findings.push(crit("empty_passwords", "Accounts with Empty Passwords Found",
-                &format!("The following accounts have no password: {}. Anyone can log in as these users without credentials.", empty_pw_users.join(", ")),
-                "Run 'passwd <username>' to set passwords, or click Apply Fix to lock accounts via 'passwd -l'.", cat_user, true, Some("CIS 5.4.2")));
+            let empty_pw_users: Vec<String> = shadow.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, ':').collect();
+                    if parts.len() >= 2 {
+                        let hash = parts[1];
+                        // Empty or "!" or "*" means no/locked password; "" means empty (insecure)
+                        if hash.is_empty() { Some(parts[0].to_string()) } else { None }
+                    } else { None }
+                })
+                .collect();
+            if empty_pw_users.is_empty() {
+                user_cur += 5;
+                findings.push(good("empty_passwords", "No Accounts with Empty Passwords",
+                    "All user accounts have a password set or are properly locked.",
+                    "Regularly audit user accounts and ensure all have strong passwords.", cat_user, Some("CIS 5.4.2")));
+            } else {
+                findings.push(crit("empty_passwords", "Accounts with Empty Passwords Found",
+                    &format!("The following accounts have no password: {}. Anyone can log in as these users without credentials.", empty_pw_users.join(", ")),
+                    "Run 'passwd <username>' to set passwords, or click Apply Fix to lock accounts via 'passwd -l'.", cat_user, true, Some("CIS 5.4.2")));
+            }
         }
 
         // 3c. NOPASSWD in sudoers
         user_max += 5;
-        let sudoers = read_privileged_file("/etc/sudoers").await;
-        let sudoers_d = read_cmd(&["bash", "-c", "cat /etc/sudoers.d/* 2>/dev/null || true"]).await;
-        let sudoers_full = format!("{}\n{}", sudoers, sudoers_d);
+        // Reading /etc/sudoers (and the root-only sudoers.d) through the
+        // helper is on the reader policy's permanent deny list, so the scan
+        // degrades honestly when the content is unavailable instead of
+        // reporting a false "no NOPASSWD entries".
+        let sudoers_full = read_privileged_file("/etc/sudoers").await;
         let nopasswd_lines: Vec<String> = sudoers_full.lines()
             .filter(|l| {
                 let t = l.trim();
@@ -560,7 +780,11 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
             })
             .map(|l| l.trim().to_string())
             .collect();
-        if nopasswd_lines.is_empty() {
+        if sudoers_full.trim().is_empty() {
+            findings.push(warn("sudo_nopasswd", "NOPASSWD Sudoers Rules Could Not Be Verified",
+                "The helper refuses to read /etc/sudoers (it is the system's privilege policy), so NOPASSWD entries could not be checked automatically.",
+                "Check manually: sudo grep -r NOPASSWD /etc/sudoers /etc/sudoers.d/", cat_user, false, None));
+        } else if nopasswd_lines.is_empty() {
             user_cur += 5;
             findings.push(good("sudo_nopasswd", "No Dangerous NOPASSWD Sudoers Rules",
                 "No sudoers entries grant passwordless ALL privileges. Privilege escalation requires authentication.",
@@ -628,7 +852,22 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 3f. PAM Faillock Lockout Policy
         user_max += 5;
         let faillock_conf = read_privileged_file("/etc/security/faillock.conf").await;
-        let faillock_d = read_cmd(&["bash", "-c", "cat /etc/security/faillock.conf.d/*.conf 2>/dev/null || true"]).await;
+        // the include fragments are enumerated unprivileged; the .conf files
+        // are world-readable
+        let mut faillock_d = String::new();
+        if let Ok(entries) = std::fs::read_dir("/etc/security/faillock.conf.d") {
+            let mut names: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "conf"))
+                .collect();
+            names.sort();
+            for path in names {
+                if let Some(path) = path.to_str() {
+                    faillock_d.push_str(&read_file(path).await);
+                }
+            }
+        }
         let faillock_full = format!("{}\n{}", faillock_conf, faillock_d);
         let has_faillock = faillock_full.lines().any(|l| l.trim().starts_with("deny") && !l.trim().starts_with('#'));
         if has_faillock {
@@ -700,7 +939,8 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4a. /etc/passwd permissions
         fs_max += 5;
-        let passwd_perms = read_cmd(&["stat", "-c", "%a", "/etc/passwd"]).await;
+        // permission metadata is world-readable; no privileged stat needed
+        let passwd_perms = permissions_of("/etc/passwd").await;
         let passwd_perms = passwd_perms.trim();
         // Should be 644
         if passwd_perms == "644" {
@@ -721,7 +961,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4b. /etc/shadow permissions
         fs_max += 5;
-        let shadow_perms = read_cmd(&["stat", "-c", "%a", "/etc/shadow"]).await;
+        let shadow_perms = permissions_of("/etc/shadow").await;
         let shadow_perms = shadow_perms.trim();
         // Should be 000 or 640
         let shadow_ok = matches!(shadow_perms, "0" | "000" | "640" | "400");
@@ -738,7 +978,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4c. /tmp sticky bit
         fs_max += 5;
-        let tmp_perms = read_cmd(&["stat", "-c", "%a", "/tmp"]).await;
+        let tmp_perms = permissions_of("/tmp").await;
         let tmp_perms = tmp_perms.trim();
         // Sticky bit = leading 1 (e.g. 1777)
         let tmp_sticky = tmp_perms.starts_with('1');
@@ -756,7 +996,7 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // 4d. World-writable files in /etc
         fs_max += 5;
         let ww_etc = read_cmd(&["find", "/etc", "-maxdepth", "2", "-type", "f",
-            "-perm", "-o+w", "-not", "-path", "/etc/passwd", "2>/dev/null"]).await;
+            "-perm", "-o+w", "-not", "-path", "/etc/passwd"]).await;
         let ww_files: Vec<&str> = ww_etc.lines().filter(|l| !l.trim().is_empty()).collect();
         if ww_files.is_empty() {
             fs_cur += 5;
@@ -812,8 +1052,12 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4f. World-Writable Files in Temp Partitions
         fs_max += 5;
-        let ww_output = read_cmd(&["bash", "-c", "find /tmp /var/tmp /dev/shm -maxdepth 2 -type f -perm -0002 2>/dev/null | head -5"]).await;
-        let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        // a direct find over the shared temp directories, truncated here —
+        // no shell pipe needed
+        let ww_output = read_cmd(&["find", "/tmp", "/var/tmp", "/dev/shm",
+            "-maxdepth", "2", "-type", "f", "-perm", "-0002"]).await;
+        let ww_files: Vec<String> = ww_output.lines().map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()).take(5).collect();
         if ww_files.is_empty() {
             fs_cur += 5;
             findings.push(good("fs_world_writable", "No World-Writable Files Found in Key Paths",
@@ -827,8 +1071,10 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
 
         // 4g. Unowned Files / Groups in Temp Partitions
         fs_max += 5;
-        let unowned_out = read_cmd(&["bash", "-c", "find /tmp /var/tmp -maxdepth 2 \\( -nouser -o -nogroup \\) 2>/dev/null | head -5"]).await;
-        let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        let unowned_out = read_cmd(&["find", "/tmp", "/var/tmp", "-maxdepth", "2",
+            "(", "-nouser", "-o", "-nogroup", ")"]).await;
+        let unowned_files: Vec<String> = unowned_out.lines().map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()).take(5).collect();
         if unowned_files.is_empty() {
             fs_cur += 5;
             findings.push(good("fs_unowned_files", "No Unowned Files Detected",
@@ -961,28 +1207,65 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // ═══════════════════════════════════════════════════════════════════════
         let cat_sys = "System Hygiene";
 
-        // 6a. SELinux Status
-        system_max += 5;
-        let mut selinux_enforcing = false;
+        // 6a. SELinux Status (read-only; no remediation)
+        let distro = crate::utils::distro::detect_distro();
+        let apparmor_active = distro.mac_type == "apparmor";
+        let mut sestatus_info = None;
         if crate::binary_exists("sestatus").await {
-            let se_out = tokio::time::timeout(tokio::time::Duration::from_secs(5),
-                Command::new("sestatus").output()).await;
-            if let Ok(Ok(o)) = se_out {
-                let text = String::from_utf8_lossy(&o.stdout);
-                if text.contains("SELinux status:                 enabled") && text.contains("Current mode:                   enforcing") {
-                    selinux_enforcing = true;
+            let se_out = tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                Command::new("sestatus").output(),
+            )
+            .await;
+            if let Ok(Ok(output)) = se_out {
+                if output.status.success() {
+                    sestatus_info = Some(parse_sestatus(&String::from_utf8_lossy(&output.stdout)));
                 }
             }
         }
-        if selinux_enforcing {
-            system_cur += 5;
-            findings.push(good("selinux", "SELinux Enforcing",
-                "SELinux is enabled and in enforcing mode — mandatory access controls are active.",
-                "Maintain enforcing mode. Avoid setting to permissive unless actively debugging.", cat_sys, Some("CIS 1.7")));
-        } else {
-            findings.push(crit("selinux", "SELinux Disabled or Permissive",
-                "SELinux is not enforcing policies. This removes a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
-                "Enable SELinux and set to enforcing. A reboot is required after enabling.", cat_sys, true, Some("CIS 1.7")));
+        let selinux = evaluate_selinux(sestatus_info.as_ref(), apparmor_active);
+        let (selinux_max, selinux_cur) = selinux_scoring(selinux);
+        system_max += selinux_max;
+        system_cur += selinux_cur;
+        match selinux {
+            SelinuxEvaluation::Enforcing => {
+                let mut finding = good("selinux", "SELinux Enforcing",
+                    "SELinux is enabled, enforcing, and the boot configuration keeps it enforcing — mandatory access controls are active and persistent.",
+                    "Maintain enforcing mode. Avoid setting to permissive unless actively debugging.", cat_sys, Some("CIS 1.7"));
+                finding.has_auto_fix = false;
+                findings.push(finding);
+            }
+            SelinuxEvaluation::EnforcingNotPersistent(config) => {
+                let config = match config {
+                    SelinuxMode::Permissive => "permissive",
+                    SelinuxMode::Disabled => "disabled",
+                    _ => "not enforcing",
+                };
+                findings.push(warn("selinux", "SELinux Enforcing Not Persistent",
+                    &format!("SELinux is enforcing at runtime, but the boot configuration ({config}) will not keep it enforcing after the next reboot."),
+                    &format!("Set SELINUX=enforcing in /etc/selinux/config manually; the boot configuration is currently {config}."),
+                    cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::Permissive => {
+                findings.push(crit("selinux", "SELinux Permissive",
+                    "SELinux is enabled but permissive: it logs violations without blocking them, removing a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
+                    "Set SELinux to enforcing manually (runtime and persistent configuration). A reboot is required after enabling.", cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::Disabled => {
+                findings.push(crit("selinux", "SELinux Disabled",
+                    "SELinux is disabled. This removes a critical layer of defense against privilege escalation and zero-day vulnerabilities.",
+                    "Enable SELinux and set it to enforcing manually. A reboot is required after enabling.", cat_sys, false, Some("CIS 1.7")));
+            }
+            SelinuxEvaluation::AppArmor => {
+                findings.push(info_finding("selinux", "SELinux Not Applicable (AppArmor Active)",
+                    "SELinux is not the active mandatory access control system on this host; AppArmor is. The SELinux check is excluded from the compliance score.",
+                    "No action required for SELinux on this host. Manage AppArmor with the distribution's tooling.", cat_sys, false));
+            }
+            SelinuxEvaluation::Unknown => {
+                findings.push(info_finding("selinux", "SELinux Status Unknown",
+                    "SELinux status could not be determined conclusively (sestatus is unavailable, failed, or returned unrecognised output). The check is excluded from the compliance score rather than reported as a false failure.",
+                    "Verify that SELinux is installed and that sestatus runs successfully on this host.", cat_sys, false));
+            }
         }
 
         // 6b. Audit Daemon (auditd)
@@ -1313,40 +1596,13 @@ pub async fn security_fix_root_ssh(enable: bool) -> Result<String, String> {
 #[tauri::command]
 pub async fn security_fix_ssh_param(param: String, value: String, revert_value: String, enable: bool) -> Result<String, String> {
     let target_value = if enable { &value } else { &revert_value };
-
-    // Sanitise: only allow safe characters in param and value
-    if !param.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-        return Err("Invalid SSH parameter name.".to_string());
-    }
-    if !target_value.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ' ') {
-        return Err("Invalid SSH parameter value.".to_string());
-    }
-
-    let config_file = "/etc/ssh/sshd_config";
-    // If the key exists (commented or not), replace it. Otherwise append.
-    let script = format!(
-        r#"
-if grep -qiE '^#?{param}\s' {cfg}; then
-    sed -i "s|^#\\?{param}.*|{param} {val}|gI" {cfg}
-else
-    echo "{param} {val}" >> {cfg}
-fi
-(systemctl is-active --quiet sshd && systemctl reload sshd) || (systemctl is-active --quiet ssh && systemctl reload ssh) || true
-"#,
-        param = param,
-        val = target_value,
-        cfg = config_file
-    );
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        Ok(format!("SSH {} set to '{}'.", param, target_value))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    crate::utils::root_policy::security_ssh_param_valid(&param, target_value)?;
+    run_security_named_action(
+        "security_ssh_param",
+        &[param.clone(), target_value.clone()],
+    )
+    .await?;
+    Ok(format!("SSH {} set to '{}'.", param, target_value))
 }
 
 /// Apply/revert a kernel sysctl parameter persistently.
@@ -1357,155 +1613,138 @@ fi
 #[tauri::command]
 pub async fn security_fix_kernel_param(key: String, value: String, revert_value: String, enable: bool) -> Result<String, String> {
     let target = if enable { &value } else { &revert_value };
-
-    // Input validation — only allow safe sysctl key/value characters
-    if !key.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_') {
-        return Err("Invalid sysctl key.".to_string());
+    crate::utils::root_policy::security_kernel_param_valid(&key, target)?;
+    run_security_named_action(
+        "security_kernel_param",
+        &[key.clone(), target.clone()],
+    )
+    .await?;
+    if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
+        *guard = Some(SystemTime::now());
     }
-    if !target.trim().chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ') {
-        return Err("Invalid sysctl value (only digits and dash allowed).".to_string());
-    }
+    Ok(format!(
+        "{} = {} — written to /etc/sysctl.d/99-hardening.conf and applied immediately",
+        key, target
+    ))
+}
 
-    // Single consistent filename — matches the countermeasure descriptions shown in the UI.
-    let conf_file = "/etc/sysctl.d/99-hardening.conf";
-
-    // Robust script that:
-    //   1. Uses `set -e` so ANY step failure aborts the whole script (no silent partial success).
-    //   2. Builds the new file content in a temp file in /tmp (always writable, no SELinux issue).
-    //   3. Uses `install` to atomically copy to destination with correct ownership/mode.
-    //   4. Writes the file BEFORE running sysctl -w, so on any failure the live value
-    //      is not changed either.
-    //   5. Verifies the write with `sysctl -p` (reloads from the file).
-    let script = format!(
-        "set -e\n\
-         mkdir -p /etc/sysctl.d\n\
-         TMP=$(mktemp /tmp/sysctl_harden_XXXXXX)\n\
-         trap 'rm -f \"$TMP\"' EXIT\n\
-         if [ -f '{cfg}' ]; then grep -v '^{key}' '{cfg}' > \"$TMP\" 2>/dev/null || true; fi\n\
-         printf '%s = %s\\n' '{key}' '{val}' >> \"$TMP\"\n\
-         install -m 0644 -o root -g root \"$TMP\" '{cfg}'\n\
-         sysctl -w '{key}={val}'\n\
-         sysctl -p '{cfg}'",
-        key = key, val = target, cfg = conf_file
-    );
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .stderr(std::process::Stdio::piped())
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if let Ok(mut guard) = LAST_SYSCTL_FIX_TIME.lock() {
-            *guard = Some(SystemTime::now());
-        }
-        Ok(format!(
-            "{} = {} — written to {} and applied immediately",
-            key, target, conf_file
-        ))
+/// Choose the firewall backend to harden. The caller names one backend
+/// explicitly; "both installed" prefers firewalld (documented), "none"
+/// is refused rather than guessed.
+fn hardening_backend_from(firewalld: bool, ufw: bool) -> Result<&'static str, String> {
+    if firewalld {
+        Ok("firewalld")
+    } else if ufw {
+        Ok("ufw")
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        Err(if stderr.is_empty() {
-            format!("Failed to apply {} — script exited with error (check system logs)", key)
-        } else {
-            stderr
-        })
+        Err("Neither firewalld nor ufw is installed on this system.".to_string())
     }
 }
 
-/// Enable/disable firewall.
+/// Resolve the backend for one hardening operation. A pinned backend is only
+/// ever one of the two literals; availability is still enforced by the
+/// helper, so a pinned-but-removed backend is refused there. With no pin the
+/// backend is derived from the installed tools.
+fn hardening_backend_selected(
+    selected: Option<&str>,
+    firewalld: bool,
+    ufw: bool,
+) -> Result<&'static str, String> {
+    match selected {
+        Some("firewalld") => Ok("firewalld"),
+        Some("ufw") => Ok("ufw"),
+        Some(other) => Err(format!(
+            "The firewall backend must be firewalld or ufw, got: {other}"
+        )),
+        None => hardening_backend_from(firewalld, ufw),
+    }
+}
+
+/// The firewall backend the hardening action would target on this host. The
+/// Security Auditor pins this value across the confirmation retry so the
+/// retried operation always targets the backend the user was shown.
 #[tauri::command]
-pub async fn security_fix_firewall() -> Result<String, String> {
-    let has_firewalld = crate::binary_exists("firewall-cmd").await;
-    if has_firewalld {
-        let _ = Command::new("pkexec").args(["systemctl", "enable", "--now", "firewalld"]).output().await;
-        let out = Command::new("pkexec").args(["firewall-cmd", "--set-default-zone=drop"])
-            .output().await.map_err(|e| e.to_string())?;
-        if out.status.success() { return Ok("Firewalld enabled with default drop zone.".to_string()); }
-    }
-    let has_ufw = crate::binary_exists("ufw").await;
-    if has_ufw {
-        let _ = Command::new("pkexec").args(["ufw", "--force", "enable"]).output().await;
-        let out = Command::new("pkexec").args(["ufw", "default", "deny", "incoming"])
-            .output().await.map_err(|e| e.to_string())?;
-        if out.status.success() { return Ok("UFW enabled with default deny incoming.".to_string()); }
-    }
-    Err("Neither firewalld nor ufw could be configured.".to_string())
+pub async fn security_firewall_backend() -> Result<String, String> {
+    hardening_backend_from(
+        crate::binary_exists("firewall-cmd").await,
+        crate::binary_exists("ufw").await,
+    )
+    .map(|backend| backend.to_string())
+}
+
+/// Enable the firewall backend with a deny-by-default posture. The privileged
+/// helper owns the actual operations; confirmation is mandatory there and the
+/// frontend retries with `confirmed: true` after showing the backend's
+/// `CONFIRMATION_REQUIRED:` message verbatim. When `backend` is present it is
+/// the value pinned before the confirmation dialog.
+#[tauri::command]
+pub async fn security_fix_firewall(
+    backend: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<String, String> {
+    let backend = hardening_backend_selected(
+        backend.as_deref(),
+        crate::binary_exists("firewall-cmd").await,
+        crate::binary_exists("ufw").await,
+    )?;
+    crate::commands::firewall_manager::run_firewall_named_action(
+        "firewall_enable_hardened",
+        &[backend.to_string()],
+        confirmed.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        crate::commands::firewall_manager::firewall_helper_error_context(
+            "Failed to enable the firewall: ",
+            e,
+        )
+    })?;
+    Ok(format!(
+        "{backend} is enabled with a deny-by-default policy."
+    ))
 }
 
 /// Fix password aging policy.
 #[tauri::command]
 pub async fn security_fix_password_policy() -> Result<String, String> {
-    let script = "sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/g' /etc/login.defs && \
-                  sed -i 's/^PASS_MIN_LEN.*/PASS_MIN_LEN    12/g' /etc/login.defs";
-    let out = Command::new("pkexec").args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("Password policy: PASS_MAX_DAYS=90, PASS_MIN_LEN=12 applied.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
-}
-
-/// Enable/disable SELinux.
-#[tauri::command]
-pub async fn security_fix_selinux(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "sed -i 's/^SELINUX=.*/SELINUX=enforcing/g' /etc/selinux/config && touch /.autorelabel"
-    } else {
-        "sed -i 's/^SELINUX=.*/SELINUX=permissive/g' /etc/selinux/config"
-    };
-
-    let out = Command::new("pkexec").args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if enable {
-            Ok("SELinux set to enforcing. A system reboot is required to relabel the filesystem.".to_string())
-        } else {
-            Ok("SELinux set to permissive (not disabled — still logs violations). A reboot is required.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_apply",
+        &[String::from("password_policy")],
+    )
+    .await?;
+    Ok("Password policy: PASS_MAX_DAYS=90, PASS_MIN_LEN=12 applied.".to_string())
 }
 
 /// Enable/disable auditd.
 #[tauri::command]
 pub async fn security_fix_auditd(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "auditd"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("auditd {}d successfully.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_service_toggle",
+        &[String::from("auditd"), action.to_string()],
+    )
+    .await?;
+    Ok(format!("auditd {}d successfully.", action))
 }
 
 /// Enable time synchronization (chronyd preferred, fallback to systemd-timesyncd).
 #[tauri::command]
 pub async fn security_fix_time_sync(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-
-    if crate::binary_exists("chronyd").await || crate::binary_exists("chronyc").await {
-        let out = Command::new("pkexec")
-            .args(["systemctl", action, "--now", "chronyd"])
-            .output().await.map_err(|e| e.to_string())?;
-        if out.status.success() {
-            return Ok(format!("chronyd {}d successfully.", action));
-        }
-    }
-
-    // fallback: systemd-timesyncd
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "systemd-timesyncd"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("systemd-timesyncd {}d successfully.", action))
+    // Backend choice is a UX preference; the helper still restricts the unit
+    // to its closed allow-list. A failed primary unit is an error (no silent
+    // fallback to a different time daemon).
+    let unit = if crate::binary_exists("chronyd").await || crate::binary_exists("chronyc").await {
+        "chronyd"
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+        "systemd-timesyncd"
+    };
+    run_security_named_action(
+        "security_service_toggle",
+        &[unit.to_string(), action.to_string()],
+    )
+    .await?;
+    Ok(format!("{unit} {}d successfully.", action))
 }
 
 /// Fix /tmp sticky bit — with tmpfiles.d persistence.
@@ -1515,33 +1754,12 @@ pub async fn security_fix_time_sync(enable: bool) -> Result<String, String> {
 /// resets the correct permissions at every boot.
 #[tauri::command]
 pub async fn security_fix_tmp_sticky(enable: bool) -> Result<String, String> {
-    // The `D` type in tmpfiles.d: create or adjust directory permissions at boot.
-    let script = if enable {
-        // Set sticky bit now AND persist via tmpfiles.d
-        "set -e\n\
-         chmod 1777 /tmp\n\
-         mkdir -p /etc/tmpfiles.d\n\
-         printf 'D /tmp 1777 root root -\\n' > /etc/tmpfiles.d/tmp-sticky.conf"
+    let op = if enable { "tmp_sticky_on" } else { "tmp_sticky_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    if enable {
+        Ok("/tmp permissions set to 1777 (sticky). Persisted via /etc/tmpfiles.d/tmp-sticky.conf — survives reboots.".to_string())
     } else {
-        // Remove sticky bit and clean up the tmpfiles.d entry
-        "set -e\n\
-         chmod 777 /tmp\n\
-         rm -f /etc/tmpfiles.d/tmp-sticky.conf"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .stderr(std::process::Stdio::piped())
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        if enable {
-            Ok("/tmp permissions set to 1777 (sticky). Persisted via /etc/tmpfiles.d/tmp-sticky.conf — survives reboots.".to_string())
-        } else {
-            Ok("/tmp sticky bit removed. /etc/tmpfiles.d/tmp-sticky.conf deleted.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("/tmp sticky bit removed. /etc/tmpfiles.d/tmp-sticky.conf deleted.".to_string())
     }
 }
 
@@ -1616,180 +1834,93 @@ pub async fn security_log_fix(
 /// Fix /etc/passwd permissions.
 #[tauri::command]
 pub async fn security_fix_passwd_perms() -> Result<String, String> {
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", "chmod 644 /etc/passwd && chown root:root /etc/passwd"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("/etc/passwd permissions set to 644, owner root:root.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_apply", &[String::from("passwd_perms")]).await?;
+    Ok("/etc/passwd permissions set to 644, owner root:root.".to_string())
 }
 
 /// Fix /etc/shadow permissions.
 #[tauri::command]
 pub async fn security_fix_shadow_perms() -> Result<String, String> {
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", "chmod 000 /etc/shadow && chown root:root /etc/shadow"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok("/etc/shadow permissions set to 000, owner root:root.".to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_apply", &[String::from("shadow_perms")]).await?;
+    Ok("/etc/shadow permissions set to 000, owner root:root.".to_string())
 }
 
 /// Enable/disable USBGuard.
 #[tauri::command]
 pub async fn security_fix_usbguard(enable: bool) -> Result<String, String> {
     let action = if enable { "enable" } else { "disable" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "--now", "usbguard"])
-        .output().await.map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("USBGuard {}d.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action(
+        "security_service_toggle",
+        &[String::from("usbguard"), action.to_string()],
+    )
+    .await?;
+    Ok(format!("USBGuard {}d.", action))
 }
 
 /// Lock user account with empty password (passwd -l <user>).
 #[tauri::command]
 pub async fn security_fix_lock_account(user: Option<String>) -> Result<String, String> {
-    let username = match user {
-        Some(u) if !u.trim().is_empty() => u,
-        _ => {
-            let shadow = read_privileged_file("/etc/shadow").await;
-            shadow.lines()
-                .find_map(|line| {
-                    let parts: Vec<&str> = line.splitn(3, ':').collect();
-                    if parts.len() >= 2 && parts[1].is_empty() {
-                        Some(parts[0].to_string())
-                    } else { None }
-                })
-                .ok_or_else(|| "No accounts with empty passwords found.".to_string())?
-        }
-    };
-
-    let out = Command::new("pkexec")
-        .args(["passwd", "-l", &username])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        Ok(format!("Account '{username}' has been locked (passwd -l {username})."))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    let username = user.filter(|name| !name.trim().is_empty()).unwrap_or_default();
+    let mut params = Vec::new();
+    if !username.is_empty() {
+        crate::utils::root_policy::user_account_name_valid(&username)?;
+        params.push(username.clone());
     }
+    run_security_named_action("security_lock_account", &params).await?;
+    invalidate_audit_cache();
+    let detail = if username.is_empty() { "all accounts with empty passwords" } else { "the selected account" };
+    Ok(format!("Locked {detail}."))
 }
 
 /// Configure PAM faillock lockout policy (deny = 5, unlock_time = 900).
 #[tauri::command]
 pub async fn security_fix_pam_faillock(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/security/faillock.conf.d\n\
-         printf 'deny = 5\\nunlock_time = 900\\nfail_interval = 900\\n' > /etc/security/faillock.conf.d/50-hardening.conf\n\
-         if command -v authselect >/dev/null 2>&1; then authselect enable-feature with-faillock 2>/dev/null || true; fi"
+    let op = if enable { "pam_faillock_on" } else { "pam_faillock_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("PAM faillock configured: deny = 5, unlock_time = 900s via /etc/security/faillock.conf.d/50-hardening.conf.".to_string())
     } else {
-        "rm -f /etc/security/faillock.conf.d/50-hardening.conf"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("PAM faillock configured: deny = 5, unlock_time = 900s via /etc/security/faillock.conf.d/50-hardening.conf.".to_string())
-        } else {
-            Ok("PAM faillock hardening configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("PAM faillock hardening configuration removed.".to_string())
     }
 }
 
 /// Set default system umask 027 in /etc/login.defs.
 #[tauri::command]
 pub async fn security_fix_umask(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "if grep -qE '^\\s*UMASK' /etc/login.defs; then sed -i 's/^\\s*UMASK.*/UMASK 027/g' /etc/login.defs; else echo 'UMASK 027' >> /etc/login.defs; fi"
+    let op = if enable { "umask_on" } else { "umask_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Default system UMASK set to 027 in /etc/login.defs.".to_string())
     } else {
-        "sed -i 's/^\\s*UMASK.*/UMASK 022/g' /etc/login.defs"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Default system UMASK set to 027 in /etc/login.defs.".to_string())
-        } else {
-            Ok("Default system UMASK set to 022 in /etc/login.defs.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("Default system UMASK set to 022 in /etc/login.defs.".to_string())
     }
 }
 
 /// Set SSH idle timeout parameters (ClientAliveInterval 300, ClientAliveCountMax 3).
 #[tauri::command]
 pub async fn security_fix_ssh_idle_timeout(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/ssh/sshd_config.d\n\
-         printf 'ClientAliveInterval 300\\nClientAliveCountMax 3\\n' > /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    let op = if enable { "ssh_idle_on" } else { "ssh_idle_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("SSH idle timeout set: ClientAliveInterval=300, ClientAliveCountMax=3.".to_string())
     } else {
-        "set -e\n\
-         rm -f /etc/ssh/sshd_config.d/50-idle-timeout.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("SSH idle timeout set: ClientAliveInterval=300, ClientAliveCountMax=3.".to_string())
-        } else {
-            Ok("SSH idle timeout configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("SSH idle timeout configuration removed.".to_string())
     }
 }
 
 /// Blacklist legacy unused filesystem kernel modules via modprobe.d.
 #[tauri::command]
 pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         mkdir -p /etc/modprobe.d\n\
-         printf 'install cramfs /bin/true\\ninstall freevxfs /bin/true\\ninstall hfs /bin/true\\ninstall hfsplus /bin/true\\ninstall jffs2 /bin/true\\ninstall udf /bin/true\\n' > /etc/modprobe.d/disable-unused-fs.conf"
+    let op = if enable { "blacklist_fs_on" } else { "blacklist_fs_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Unused filesystem kernel modules (cramfs, hfs, udf, etc.) disabled via /etc/modprobe.d/disable-unused-fs.conf.".to_string())
     } else {
-        "rm -f /etc/modprobe.d/disable-unused-fs.conf"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Unused filesystem kernel modules (cramfs, hfs, udf, etc.) disabled via /etc/modprobe.d/disable-unused-fs.conf.".to_string())
-        } else {
-            Ok("Modprobe blacklist for unused filesystem modules removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("Modprobe blacklist for unused filesystem modules removed.".to_string())
     }
 }
 
@@ -1797,48 +1928,247 @@ pub async fn security_fix_blacklist_fs_modules(enable: bool) -> Result<String, S
 #[tauri::command]
 pub async fn security_fix_mask_ctrl_alt_del(enable: bool) -> Result<String, String> {
     let action = if enable { "mask" } else { "unmask" };
-    let out = Command::new("pkexec")
-        .args(["systemctl", action, "ctrl-alt-del.target"])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        Ok(format!("ctrl-alt-del.target {}ed successfully.", action))
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+    run_security_named_action("security_ctrl_alt_del", &[action.to_string()]).await?;
+    invalidate_audit_cache();
+    Ok(format!("ctrl-alt-del.target {}ed successfully.", action))
 }
 
 /// Configure legal access warning banner (/etc/issue, /etc/issue.net, sshd Banner).
 #[tauri::command]
 pub async fn security_fix_legal_banner(enable: bool) -> Result<String, String> {
-    let script = if enable {
-        "set -e\n\
-         BANNER='Authorized uses only. All activity may be monitored and reported.'\n\
-         printf \"$BANNER\\n\" > /etc/issue\n\
-         printf \"$BANNER\\n\" > /etc/issue.net\n\
-         mkdir -p /etc/ssh/sshd_config.d\n\
-         printf 'Banner /etc/issue.net\\n' > /etc/ssh/sshd_config.d/50-banner.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
+    let op = if enable { "legal_banner_on" } else { "legal_banner_off" };
+    run_security_named_action("security_apply", &[op.to_string()]).await?;
+    invalidate_audit_cache();
+    if enable {
+        Ok("Legal access warning banner configured in /etc/issue and /etc/ssh/sshd_config.".to_string())
     } else {
-        "set -e\n\
-         rm -f /etc/ssh/sshd_config.d/50-banner.conf\n\
-         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true"
-    };
-
-    let out = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .output().await.map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        invalidate_audit_cache();
-        if enable {
-            Ok("Legal access warning banner configured in /etc/issue and /etc/ssh/sshd_config.".to_string())
-        } else {
-            Ok("SSH legal warning banner configuration removed.".to_string())
-        }
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        Ok("SSH legal warning banner configuration removed.".to_string())
     }
 }
 
+#[cfg(test)]
+mod security_fix_firewall_tests {
+    use super::{hardening_backend_from, hardening_backend_selected};
+
+    #[test]
+    fn hardening_backend_prefers_firewalld_when_installed() {
+        assert_eq!(hardening_backend_from(true, false).unwrap(), "firewalld");
+        assert_eq!(hardening_backend_from(true, true).unwrap(), "firewalld");
+    }
+
+    #[test]
+    fn hardening_backend_uses_ufw_when_only_ufw_is_installed() {
+        assert_eq!(hardening_backend_from(false, true).unwrap(), "ufw");
+    }
+
+    #[test]
+    fn hardening_backend_refuses_an_ambiguous_or_empty_host() {
+        let err = hardening_backend_from(false, false).unwrap_err();
+        assert!(err.contains("Neither firewalld nor ufw"), "{err}");
+    }
+
+    #[test]
+    fn a_pinned_backend_is_used_verbatim_and_never_replaced() {
+        // the pin wins even when derivation would prefer firewalld
+        assert_eq!(
+            hardening_backend_selected(Some("ufw"), true, true).unwrap(),
+            "ufw"
+        );
+        assert_eq!(
+            hardening_backend_selected(Some("firewalld"), false, true).unwrap(),
+            "firewalld"
+        );
+    }
+
+    #[test]
+    fn an_unknown_pinned_backend_is_refused() {
+        for bogus in ["nftables", "Firewalld", "", "auto"] {
+            assert!(
+                hardening_backend_selected(Some(bogus), true, true).is_err(),
+                "{bogus:?} must be refused"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selinux_status_tests {
+    use super::{
+        evaluate_selinux, parse_sestatus, selinux_scoring, SelinuxEvaluation, SelinuxMode,
+        SestatusInfo,
+    };
+
+    fn info(
+        enabled: Option<bool>,
+        runtime: SelinuxMode,
+        config: SelinuxMode,
+    ) -> SestatusInfo {
+        SestatusInfo {
+            enabled,
+            runtime,
+            config,
+        }
+    }
+
+    #[test]
+    fn sestatus_parses_the_standard_output() {
+        let output = "\
+SELinux status:                 enabled
+SELinuxfs mount:                /sys/fs/selinux
+Current mode:                   enforcing
+Mode from config file:          enforcing
+Policy MLS status:              enabled
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_permissive_runtime_and_config() {
+        let output = "\
+SELinux status:                 enabled
+Current mode:                   permissive
+Mode from config file:          permissive
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Permissive, SelinuxMode::Permissive)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_a_disabled_host() {
+        let output = "SELinux status:                 disabled\n";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+    }
+
+    #[test]
+    fn sestatus_parses_a_runtime_config_mismatch() {
+        let output = "\
+SELinux status:          enabled
+Current mode:            enforcing
+Mode from config file:   disabled
+";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Disabled)
+        );
+    }
+
+    #[test]
+    fn sestatus_tolerates_tabs_crlf_and_irregular_spacing() {
+        let output = "SELinux status:\tenabled\r\nCurrent mode:   permissive\r\nMode from config file:\tenforcing\r\n";
+        assert_eq!(
+            parse_sestatus(output),
+            info(Some(true), SelinuxMode::Permissive, SelinuxMode::Enforcing)
+        );
+    }
+
+    #[test]
+    fn sestatus_unknown_labels_and_values_stay_unknown() {
+        assert_eq!(
+            parse_sestatus(""),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+        assert_eq!(
+            parse_sestatus("SELinux status: maybe\nCurrent mode: relaxed\n"),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+        assert_eq!(
+            parse_sestatus("unrelated line without a colon\nSELinux status enabled\n"),
+            info(None, SelinuxMode::Unknown, SelinuxMode::Unknown)
+        );
+    }
+
+    #[test]
+    fn enforcing_with_enforcing_config_is_compliant() {
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Enforcing
+        );
+    }
+
+    #[test]
+    fn enforcing_with_a_non_persistent_config_is_flagged() {
+        for (config, expected) in [
+            (SelinuxMode::Permissive, SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Permissive)),
+            (SelinuxMode::Disabled, SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Disabled)),
+        ] {
+            let parsed = info(Some(true), SelinuxMode::Enforcing, config);
+            assert_eq!(evaluate_selinux(Some(&parsed), false), expected);
+        }
+    }
+
+    #[test]
+    fn enforcing_with_an_unknown_config_is_inconclusive() {
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Unknown
+        );
+    }
+
+    #[test]
+    fn permissive_runtime_is_never_reported_as_enforcing() {
+        let parsed = info(Some(true), SelinuxMode::Permissive, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Permissive
+        );
+    }
+
+    #[test]
+    fn disabled_runtime_is_disabled_not_unknown() {
+        let parsed = info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Disabled
+        );
+    }
+
+    #[test]
+    fn apparmor_hosts_are_not_evaluated_as_selinux_failures() {
+        // missing sestatus / no usable output
+        assert_eq!(evaluate_selinux(None, true), SelinuxEvaluation::AppArmor);
+        let parsed = info(Some(false), SelinuxMode::Unknown, SelinuxMode::Unknown);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), true),
+            SelinuxEvaluation::AppArmor
+        );
+        // a host that does report SELinux enabled is still evaluated as SELinux
+        let parsed = info(Some(true), SelinuxMode::Enforcing, SelinuxMode::Enforcing);
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), true),
+            SelinuxEvaluation::Enforcing
+        );
+    }
+
+    #[test]
+    fn missing_or_unusable_sestatus_on_a_non_apparmor_host_is_unknown() {
+        assert_eq!(evaluate_selinux(None, false), SelinuxEvaluation::Unknown);
+        let parsed = parse_sestatus("");
+        assert_eq!(
+            evaluate_selinux(Some(&parsed), false),
+            SelinuxEvaluation::Unknown
+        );
+    }
+
+    #[test]
+    fn scoring_counts_only_applicable_conclusive_checks() {
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Enforcing), (5, 5));
+        assert_eq!(
+            selinux_scoring(SelinuxEvaluation::EnforcingNotPersistent(SelinuxMode::Disabled)),
+            (5, 0)
+        );
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Permissive), (5, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Disabled), (5, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::AppArmor), (0, 0));
+        assert_eq!(selinux_scoring(SelinuxEvaluation::Unknown), (0, 0));
+    }
+}

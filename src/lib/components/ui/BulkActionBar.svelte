@@ -27,7 +27,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if selectedCount > 0}
-  <aside 
+  <div 
     use:portal
     class="floating-bulk-bar" 
     role="toolbar" 
@@ -61,7 +61,7 @@
         {@render children()}
       {/if}
     </div>
-  </aside>
+  </div>
 {/if}
 
 <style>

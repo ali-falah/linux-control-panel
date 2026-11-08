@@ -1,4 +1,5 @@
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
+export type AccentColor = 'cyan' | 'emerald' | 'sapphire' | 'mint' | 'purple' | 'amber' | 'rose' | 'indigo' | 'slate';
 
 export interface Toast {
   id: string;
@@ -21,8 +22,6 @@ export type TabId =
   | 'hosts-manager'
   | 'user-manager'
   | 'firewall-manager'
-  | 'grub-manager'
-  | 'selinux-manager'
   | 'cron-manager'
   | 'env-manager'
   | 'nginx-manager'
@@ -52,6 +51,7 @@ class UIStore {
   sidebarCollapsed = $state(true);
   toasts = $state<Toast[]>([]);
   theme = $state<'dark' | 'light'>('dark');
+  accentColor = $state<AccentColor>('sapphire');
   tableDensity = $state<'compact' | 'normal' | 'spacious'>('normal');
   settingsModalOpen = $state(false);
   searchModalOpen = $state(false);
@@ -66,6 +66,10 @@ class UIStore {
   version = $state<string>(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0');
   isWindowFocused = $state(true);
   isDocumentVisible = $state(true);
+  /** OLED pure-black mode — only applies while the dark theme is active */
+  isOled = $state(false);
+  /** Drawer docked as a side-by-side split view (only on wide screens) */
+  isDrawerDocked = $state(false);
 
   initVisibilityListener() {
     if (typeof window !== 'undefined') {
@@ -130,7 +134,17 @@ class UIStore {
         const rawVisited = localStorage.getItem('app_recent_visited_items');
         if (rawVisited) {
           const parsed = JSON.parse(rawVisited);
-          if (Array.isArray(parsed)) this.recentVisitedItems = parsed;
+          if (Array.isArray(parsed)) {
+            // Drop entries for management tabs that no longer exist, then
+            // persist the cleaned list so the stale entries cannot return.
+            this.recentVisitedItems = parsed.filter((item: any) =>
+              item && typeof item === 'object' &&
+              item.tabId !== 'grub-manager' && item.tabId !== 'selinux-manager'
+            );
+            try {
+              localStorage.setItem('app_recent_visited_items', JSON.stringify(this.recentVisitedItems));
+            } catch {}
+          }
         }
       } catch {
         this.recentSearches = [];
@@ -206,6 +220,15 @@ class UIStore {
   preAppliedJournalPriority = $state<string>('all');
   preAppliedJournalSearch = $state<string>('');
   preAppliedJournalUnit = $state<string>('');
+  /**
+   * Deep-link context that is currently applied to the Journal view.
+   *
+   * The `preAppliedJournal*` fields above are *consumed* (cleared) by the
+   * Journal viewer as soon as it applies them, so they cannot be used to show
+   * where the user came from. This field keeps the applied context around
+   * until the Journal view is left again.
+   */
+  journalDeepLinkContext = $state<{ unit: string; search: string } | null>(null);
   availableUpdatesCount = $state<number>(0);
 
   jumpToJournalService(serviceName: string) {
@@ -215,7 +238,7 @@ class UIStore {
   }
 
   serviceFilter = $state<string | null>(null);
-  serviceSearchQuery = $state<string>('');
+  serviceSearchQuery = $state<string | null>(null);
   processSearchQuery = $state<string>('');
   appSourceFilter = $state<'All' | 'RPM' | 'Flatpak' | 'AppImage' | 'Duplicates' | null>(null);
   securitySeverityFilter = $state<'Critical' | 'Warning' | 'Good' | 'all' | null>(null);
@@ -245,7 +268,26 @@ class UIStore {
       } else {
         this.theme = 'dark';
       }
+      const savedAccent = localStorage.getItem('app_accent_color') as AccentColor | null;
+      if (savedAccent && ['cyan', 'emerald', 'sapphire', 'mint', 'purple', 'amber', 'rose', 'indigo', 'slate'].includes(savedAccent)) {
+        this.accentColor = savedAccent;
+      }
       this.applyTheme();
+      this.applyAccentColor();
+    }
+  }
+
+  setAccentColor(color: AccentColor) {
+    this.accentColor = color;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_accent_color', color);
+      this.applyAccentColor();
+    }
+  }
+
+  private applyAccentColor() {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-accent', this.accentColor);
     }
   }
 
@@ -266,6 +308,46 @@ class UIStore {
         document.documentElement.classList.remove('light-mode');
         document.documentElement.setAttribute('data-theme', 'dark');
       }
+    }
+  }
+
+  initOled() {
+    if (typeof window !== 'undefined') {
+      this.isOled = localStorage.getItem('app_oled') === 'true';
+      this.applyOled();
+    }
+  }
+
+  /** Toggle OLED mode, or force it on/off when `force` is provided. */
+  toggleOled(force?: boolean) {
+    this.isOled = force ?? !this.isOled;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_oled', String(this.isOled));
+    }
+    this.applyOled();
+  }
+
+  private applyOled() {
+    if (typeof document !== 'undefined') {
+      if (this.isOled) {
+        document.documentElement.setAttribute('data-oled', 'true');
+      } else {
+        document.documentElement.removeAttribute('data-oled');
+      }
+    }
+  }
+
+  initDrawerDock() {
+    if (typeof window !== 'undefined') {
+      this.isDrawerDocked = localStorage.getItem('app_drawer_docked') === 'true';
+    }
+  }
+
+  /** Dock the side drawer as a split view, or undock it back to an overlay. */
+  toggleDrawerDocked() {
+    this.isDrawerDocked = !this.isDrawerDocked;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('app_drawer_docked', String(this.isDrawerDocked));
     }
   }
 
@@ -350,6 +432,40 @@ class UIStore {
 
   removeToast(id: string) {
     this.toasts = this.toasts.filter((t) => t.id !== id);
+  }
+
+  /**
+   * Dialog that asks the user for the administrator password.
+   *
+   * The password is never stored in the store — it is handed straight to the
+   * caller, which pipes it into the privileged program.
+   */
+  passwordDialog = $state<{ isOpen: boolean; title: string; message: string }>({
+    isOpen: false,
+    title: '',
+    message: ''
+  });
+  private passwordResolver: ((value: string | null) => void) | null = null;
+
+  requestAdminPassword(title: string, message: string): Promise<string | null> {
+    this.passwordDialog = { isOpen: true, title, message };
+    return new Promise((resolve) => {
+      this.passwordResolver = resolve;
+    });
+  }
+
+  submitAdminPassword(value: string) {
+    const resolver = this.passwordResolver;
+    this.passwordResolver = null;
+    this.passwordDialog = { isOpen: false, title: '', message: '' };
+    resolver?.(value);
+  }
+
+  cancelAdminPassword() {
+    const resolver = this.passwordResolver;
+    this.passwordResolver = null;
+    this.passwordDialog = { isOpen: false, title: '', message: '' };
+    resolver?.(null);
   }
 
   confirm(title: string, message: string, onConfirm: () => void | Promise<void>, danger = false) {

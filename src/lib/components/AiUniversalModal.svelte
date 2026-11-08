@@ -40,8 +40,20 @@
             action: 'apply',
             outcome: `${fix.proposed_label} (via AI Advisor)`,
           }).catch(() => {});
-          uiStore.addToast(`Fix applied: ${fix.label}`, 'success');
-          window.dispatchEvent(new CustomEvent('security-audit-run'));
+          try {
+            const freshReport = await invoke<{ findings: { id: string; is_resolved: boolean }[] }>(
+              'security_run_audit', { forceRefresh: true }
+            );
+            window.dispatchEvent(new CustomEvent('security-audit-run', { detail: freshReport }));
+            const updatedFinding = freshReport.findings.find(item => item.id === finding?.id);
+            if (updatedFinding?.is_resolved) {
+              uiStore.addToast(`Fix verified: ${fix.label}`, 'success');
+            } else {
+              uiStore.addToast('The command completed, but the rescan still reports this finding. It may need a reboot or manual review.', 'warning');
+            }
+          } catch (verifyErr) {
+            uiStore.addToast(`The fix command completed, but its result could not be verified: ${verifyErr}`, 'warning');
+          }
           aiStore.closeModal();
         } catch (err: any) {
           uiStore.addToast(`Fix failed: ${err}`, 'error');
@@ -87,7 +99,8 @@
   >
     <div
       class="ai-modal-content"
-      role="document"
+      role="dialog"
+      aria-modal="true"
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.stopPropagation()}
@@ -414,8 +427,6 @@
     inset: 0;
     z-index: 99995;
     background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

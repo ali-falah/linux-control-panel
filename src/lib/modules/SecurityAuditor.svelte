@@ -240,8 +240,18 @@
     } catch {}
   }
 
+  function applyReport(res: SecurityReport) {
+    const sanitized = sanitizeReport(res);
+    report = sanitized;
+    if (sanitized) {
+      saveCache(sanitized);
+      saveHistory(effectiveScore);
+    }
+    statusStore.setLastCommand('security_audit_executed', 0, true);
+  }
+
   // ── Audit ──────────────────────────────────────────────────────────────────
-  async function runAudit(forceRefresh: boolean | MouseEvent = true, isBackground = false) {
+  async function runAudit(forceRefresh: boolean | MouseEvent = true, isBackground = false): Promise<SecurityReport | null> {
     if (!isBackground) {
       loading = true;
     }
@@ -249,11 +259,8 @@
     try {
       const res = await invoke<SecurityReport>('security_run_audit', { forceRefresh: shouldForce });
       if (res && res.findings) {
-        const sanitized = sanitizeReport(res);
-        report = sanitized;
-        if (sanitized) saveCache(sanitized);
-        saveHistory(effectiveScore);
-        statusStore.setLastCommand('security_audit_executed', 0, true);
+        applyReport(res);
+        return res;
       }
     } catch (e) {
       uiStore.addToast(`Audit scan error: ${e}`, 'error');
@@ -261,6 +268,7 @@
     } finally {
       loading = false;
     }
+    return null;
   }
 
   onMount(() => {
@@ -271,12 +279,33 @@
     const hasCache = !!report;
     runAudit(false, hasCache);
 
-    const handleReaudit = () => runAudit(true, false);
+    const handleReaudit = (event: Event) => {
+      const freshReport = (event as CustomEvent<SecurityReport>).detail;
+      if (freshReport?.findings) applyReport(freshReport);
+      else runAudit(true, false);
+    };
     window.addEventListener('security-audit-run', handleReaudit);
     return () => window.removeEventListener('security-audit-run', handleReaudit);
   });
 
   // ── Fix handlers ───────────────────────────────────────────────────────────
+
+  /** Apply firewall hardening (named helper action) and refresh the audit.
+   *  The backend is pinned before the first attempt so the confirmation
+   *  retry targets exactly the backend the user was shown. */
+  async function applyFirewallHardening(backend: string, confirmed: boolean) {
+    const message = await invoke<string>('security_fix_firewall', { backend, confirmed });
+    invoke('security_log_fix', {
+      findingId: 'firewall',
+      findingTitle: 'System Firewall Service',
+      action: 'apply',
+      outcome: message,
+    }).catch(() => {});
+    const freshReport = await runAudit(true);
+    const verified = freshReport?.findings.find(item => item.id === 'firewall')?.is_resolved;
+    if (verified) uiStore.addToast(`Fix verified: ${message}`, 'success');
+    else uiStore.addToast('The command completed, but the rescan still reports this finding. It may need a reboot or manual review.', 'warning');
+  }
 
   /** Generic kernel param fix/revert helper */
   async function fixKernelParam(finding: SecurityFinding, key: string, secureValue: string, defaultValue: string) {
@@ -396,6 +425,51 @@
         break;
       }
 
+      // ── Network & Firewall ───────────────────────────────────────────────
+      case 'firewall': {
+        const runFix = async (backend: string, confirmed: boolean) => {
+          fixingId = finding.id;
+          try {
+            await applyFirewallHardening(backend, confirmed);
+          } finally {
+            fixingId = null;
+          }
+        };
+        let backend: string;
+        try {
+          backend = await invoke<string>('security_firewall_backend');
+        } catch (e) {
+          uiStore.addToast(`Failed: ${e}`, 'error');
+          break;
+        }
+        try {
+          await runFix(backend, false);
+        } catch (e) {
+          const message = String(e);
+          if (message.startsWith('CONFIRMATION_REQUIRED:')) {
+            // The backend requires an explicit acknowledgement because the
+            // change can cut network access. Show its message verbatim and
+            // retry the same operation with the pinned backend and the
+            // confirmation value.
+            uiStore.confirm(
+              'Enable Firewall Hardening',
+              message,
+              async () => {
+                try {
+                  await runFix(backend, true);
+                } catch (err) {
+                  uiStore.addToast(`Failed: ${err}`, 'error');
+                }
+              },
+              true
+            );
+          } else {
+            uiStore.addToast(`Failed: ${e}`, 'error');
+          }
+        }
+        break;
+      }
+
       // ── Kernel Hardening ─────────────────────────────────────────────────
       case 'kernel_aslr':
         await fixKernelParam(finding, 'kernel.randomize_va_space', '2', '0');
@@ -480,32 +554,6 @@
         break;
 
       // ── System Hygiene ───────────────────────────────────────────────────
-      case 'selinux': {
-        const enable = !finding.is_resolved;
-        uiStore.confirm(
-          enable ? 'Enable SELinux Enforcing' : 'Set SELinux Permissive',
-          enable
-            ? 'SELinux will be set to enforcing mode. A filesystem relabel and reboot are required. The system will reboot automatically in 5 seconds after confirming.'
-            : 'SELinux will be set to permissive (still logs violations but does not block). A reboot is required.',
-          async () => {
-            fixingId = finding.id;
-            try {
-              const msg = await invoke<string>('security_fix_selinux', { enable });
-              uiStore.addToast(msg, 'success');
-              if (enable) {
-                uiStore.addToast('System will reboot in 5 seconds to apply SELinux changes...', 'warning', 8000);
-                setTimeout(() => {
-                  invoke('shell_run_command', { command: 'reboot' }).catch(() => {});
-                }, 5000);
-              }
-            } catch (e) {
-              uiStore.addToast(`Failed: ${e}`, 'error');
-              fixingId = null;
-            }
-          }, true
-        );
-        break;
-      }
 
       case 'auditd': {
         const enable = !finding.is_resolved;
@@ -568,7 +616,38 @@
       }
 
       default:
-        uiStore.addToast('No auto-fix available for this check. Please remediate manually.', 'info');
+        {
+          const fix = getHardcodedFix(finding.id);
+          if (!fix) {
+            uiStore.addToast('No auto-fix available for this check. Please remediate manually.', 'info');
+            break;
+          }
+          uiStore.confirm(
+            `Apply Hardening: ${fix.label}`,
+            `This will apply the following change:\n\n${fix.current_label}  →  ${fix.proposed_label}\n\nTarget: ${fix.target}`,
+            async () => {
+              fixingId = finding.id;
+              try {
+                const message = await invoke<string>(fix.tauri_command, fix.tauri_args);
+                invoke('security_log_fix', {
+                  findingId: finding.id,
+                  findingTitle: finding.title,
+                  action: 'apply',
+                  outcome: message,
+                }).catch(() => {});
+                const freshReport = await runAudit(true);
+                const verified = freshReport?.findings.find(item => item.id === finding.id)?.is_resolved;
+                if (verified) uiStore.addToast(`Fix verified: ${fix.label}`, 'success');
+                else uiStore.addToast('The command completed, but the rescan still reports this finding. It may need a reboot or manual review.', 'warning');
+              } catch (e) {
+                uiStore.addToast(`Failed: ${e}`, 'error');
+              } finally {
+                fixingId = null;
+              }
+            },
+            false
+          );
+        }
     }
   }
 
@@ -619,7 +698,7 @@
             'kernel_dmesg','kernel_icmp_redirect',
             'pass_policy','fs_tmp_sticky','fs_coredump',
             'net_src_route','net_bogus_icmp','net_martians',
-            'selinux','auditd','time_sync','usbguard'].includes(finding.id);
+            'auditd','time_sync','usbguard'].includes(finding.id);
   }
 
   // Export report as JSON
@@ -668,23 +747,7 @@
 <head>
   <meta charset="utf-8"/>
   <title>Linux Security Audit Report - ${dateStr}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
-    .container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }
-    .score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: var(--color-accent-muted); color: var(--color-accent); border: 1px solid var(--color-accent); }
-    .finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }
-    .finding-card.Critical { border-left-color: #ef4444; }
-    .finding-card.Warning { border-left-color: #f59e0b; }
-    .finding-card.Good { border-left-color: #10b981; }
-    .title { font-weight: bold; font-size: 16px; margin-bottom: 6px; display: flex; justify-content: space-between; }
-    .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; font-weight: bold; }
-    .badge.Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
-    .badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
-    .badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-    .desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }
-    .remediation { background: var(--color-accent-muted); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--color-accent); font-family: monospace; }
-  </style>
+  <style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }.container { max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }:global(.header) { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }.score-badge { font-size: 24px; font-weight: bold; padding: 8px 20px; border-radius: 30px; background: var(--color-accent-muted); color: var(--color-accent); border: 1px solid var(--color-accent); }.finding-card { background: #0f172a; border-radius: 8px; padding: 16px; margin-bottom: 12px; border-left: 4px solid #94a3b8; }.finding-card.Critical { border-left-color: #ef4444; }.finding-card.Warning { border-left-color: #f59e0b; }.finding-card.Good { border-left-color: #10b981; }.title { font-weight: bold; font-size: 16px; margin-bottom: 6px; display: flex; justify-content: space-between; }.badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; font-weight: bold; }.badge.Critical { background: rgba(239, 68, 68, 0.2); color: #ef4444; }.badge.Warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }.badge.Good { background: rgba(16, 185, 129, 0.2); color: #10b981; }.desc { color: #cbd5e1; font-size: 13px; margin-bottom: 8px; }.remediation { background: var(--color-accent-muted); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--color-accent); font-family: monospace; }</style>
 </head>
 <body>
   <div class="container">
@@ -1269,28 +1332,6 @@
   }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(2, 6, 23, 0.6);
-    backdrop-filter: blur(12px);
-    flex-shrink: 0;
-  }
-
-  .header-title {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .header-title h2 {
-    margin: 0;
-    font-size: 17px;
-    font-weight: 600;
-  }
 
   .header-score-pill {
     font-size: 12px;
@@ -1299,12 +1340,6 @@
     border-radius: 20px;
     border: 1px solid;
     letter-spacing: 0.3px;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
 
   /* ── Content Scroll Container ────────────────────────────────────────────── */
@@ -1824,13 +1859,6 @@
   }
 
   /* ── Findings Section ────────────────────────────────────────────────────── */
-  .findings-section {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    flex: 1;
-    min-height: 0;
-  }
 
   .findings-header {
     position: sticky;
@@ -1927,18 +1955,6 @@
     border-left-color: var(--color-text-muted) !important;
   }
 
-  .std-tag {
-    font-size: 10px;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: rgba(168, 85, 247, 0.15);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.3);
-    white-space: nowrap;
-  }
-
   .finding-card.expanded {
     border-color: rgba(255, 255, 255, 0.1);
     border-left-color: var(--sev-color);
@@ -1986,13 +2002,6 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--color-text-primary);
-  }
-
-  .finding-badges {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
   }
 
   .sev-badge {
@@ -2216,11 +2225,6 @@
     background: #F3F4F6 !important;
     color: #374151 !important;
     border: 1px solid #E5E7EB !important;
-  }
-  :global(html.light-mode) .std-tag {
-    background: rgba(37, 99, 235, 0.08) !important;
-    color: #1D4ED8 !important;
-    border: 1px solid rgba(37, 99, 235, 0.20) !important;
   }
   :global(html.light-mode) .issue-badge {
     background: #F3F4F6 !important;

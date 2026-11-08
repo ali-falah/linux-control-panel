@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { Command } from '@tauri-apps/plugin-shell';
   import { 
     AppWindow, Search, RefreshCw, Trash2, LayoutGrid, Terminal, X, Clock, 
     HardDrive, Database, Code2, AlertTriangle, CheckCircle, Layers,
@@ -118,13 +117,25 @@
     if (selectedAppNames.size === 0) return;
     const list = apps.filter(a => selectedAppNames.has(a.name));
     const count = list.length;
+    const removalPreviews = new Map<string, string>();
+    try {
+      for (const app of list) {
+        if (app.source === 'RPM' && app.package_id) {
+          const preview = await invoke<string>('preview_rpm_removal', { name: app.package_id });
+          removalPreviews.set(app.package_id, preview);
+        }
+      }
+    } catch (e) {
+      uiStore.addToast(`Could not prepare package removal previews: ${e}`, 'error');
+      return;
+    }
     uiStore.confirm(
       'Batch Uninstall Applications',
-      `Are you sure you want to uninstall ${count} selected applications?\n\n${list.map(a => `• ${a.name} (${a.source})`).join('\n')}`,
+      `Review these selected applications and package transactions before continuing:\n\n${list.map(a => `• ${a.name} (${a.source})${a.source === 'RPM' && a.package_id ? `\n${removalPreviews.get(a.package_id) || ''}` : ''}`).join('\n\n')}`,
       async () => {
         uiStore.addToast(`Starting batch uninstall of ${count} applications…`, 'info');
         for (const app of list) {
-          await executeUninstall(app);
+          await performUninstall(app, app.package_id ? removalPreviews.get(app.package_id) : undefined);
         }
         selectedAppNames = new Set();
       },
@@ -439,7 +450,7 @@
     }
   }
 
-    async function performUninstall(app: DesktopApp) {
+    async function performUninstall(app: DesktopApp, expectedPreview?: string) {
     if (!app.package_id) {
       uiStore.addToast('Cannot uninstall: Unknown package ID', 'error');
       return;
@@ -455,8 +466,13 @@
         ? `flatpak uninstall -y ${app.package_id}`
         : `dnf remove -y ${app.package_id}`;
       
-      await invoke('uninstall_app', { packageId: app.package_id, source: app.source });
-      appendLog(`\nSuccessfully uninstalled ${app.name} and cleaned dependencies.`);
+      await invoke('uninstall_app', {
+        packageId: app.package_id,
+        source: app.source,
+        expectedPreview,
+        systemWide: app.source === 'Flatpak' && app.file_path.includes('/var/lib/flatpak/'),
+      });
+      appendLog(`\nSuccessfully uninstalled ${app.name}. Automatic dependency cleanup was skipped.`);
       statusStore.setLastCommand(cmdString, 0, true);
       uiStore.addToast(`Removed ${app.name}`, 'success');
       loadApps();
@@ -471,16 +487,25 @@
     }
   }
 
-  function confirmUninstall(app: DesktopApp) {
+  async function confirmUninstall(app: DesktopApp) {
     if (!app.package_id) {
       uiStore.addToast('Cannot uninstall: Unknown package ID', 'error');
       return;
     }
     
+    let expectedPreview: string | undefined;
+    if (app.source === 'RPM') {
+      try {
+        expectedPreview = await invoke<string>('preview_rpm_removal', { name: app.package_id });
+      } catch (e) {
+        uiStore.addToast(`Could not prepare a safe removal preview: ${e}`, 'error');
+        return;
+      }
+    }
     uiStore.confirm(
       'Uninstall Application',
-      `Are you sure you want to uninstall ${app.name}?\nSource: ${app.source}\nPackage: ${app.package_id}`,
-      () => performUninstall(app),
+      `Review before uninstalling ${app.name}.\nSource: ${app.source}\nPackage: ${app.package_id}${expectedPreview ? `\n\nPackage transaction:\n${expectedPreview}` : ''}`,
+      () => performUninstall(app, expectedPreview),
       true
     );
   }
@@ -510,14 +535,21 @@
     );
   }
 
-  function confirmRemoveRpm(pkg: RpmPackage) {
+  async function confirmRemoveRpm(pkg: RpmPackage) {
+    let expectedPreview: string;
+    try {
+      expectedPreview = await invoke<string>('preview_rpm_removal', { name: pkg.name });
+    } catch (e) {
+      uiStore.addToast(`Could not prepare a safe removal preview: ${e}`, 'error');
+      return;
+    }
     uiStore.confirm(
       'Remove RPM Package',
-      `Remove "${pkg.name}" (${pkg.version})?\n\nThis may affect other packages that depend on it.`,
+      `Review the package manager transaction before removing "${pkg.name}" (${pkg.version}):\n\n${expectedPreview}\n\nOnly the displayed transaction will be applied.`,
       async () => {
         statusStore.setBusy(`Removing RPM: ${pkg.name}...`);
         try {
-          await invoke('remove_rpm', { name: pkg.name });
+          await invoke('remove_rpm', { name: pkg.name, expectedPreview });
           uiStore.addToast(`Removed RPM: ${pkg.name}`, 'success');
           statusStore.setLastCommand(`dnf remove -y ${pkg.name}`, 0, true);
           await loadApps();
@@ -1086,16 +1118,13 @@
   </button>
 </BulkActionBar>
 
-<style>
-  .module-page {
+<style>.module-page {
     display: flex;
     flex-direction: column;
     height: 100%;
     position: relative;
     overflow: hidden;
-  }
-
-  .controls-row {
+  }.controls-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1103,83 +1132,57 @@
     border-bottom: 1px solid var(--color-border);
     background: var(--color-bg-base);
     flex-shrink: 0;
-  }
-
-  .content {
+  }.content {
     flex: 1;
     overflow-y: auto;
     padding: 12px 16px;
     background: var(--color-bg-subtle);
-  }
-
-  .app-grid {
+  }.app-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 8px;
-  }
-
-  .app-card:hover {
+  }:global(.app-card):hover {
     border-color: var(--color-accent) !important;
     transform: translateY(-2px);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  }
-
-  .badge {
+  }.badge {
     font-size: 10px;
     font-weight: 700;
     padding: 2px 6px;
     border-radius: 4px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-  }
-
-  .badge.flatpak {
+  }.badge.flatpak {
     background: rgba(188, 199, 222, 0.1);
     color: var(--color-text-secondary);
     border: 1px solid rgba(188, 199, 222, 0.2);
-  }
-
-  .badge.rpm {
+  }.badge.rpm {
     background: rgba(0, 218, 243, 0.1);
     color: var(--color-accent);
     border: 1px solid rgba(0, 218, 243, 0.2);
-  }
-
-  .badge.waydroid {
+  }.badge.waydroid {
     background: rgba(34, 197, 94, 0.1);
     color: #4ade80;
     border: 1px solid rgba(34, 197, 94, 0.25);
-  }
-
-  .badge.local {
+  }.badge.local {
     background: rgba(168, 85, 247, 0.1);
     color: #c084fc;
     border: 1px solid rgba(168, 85, 247, 0.25);
-  }
-
-  .badge.appimage {
+  }.badge.appimage {
     background: rgba(234, 179, 8, 0.1);
     color: #facc15;
     border: 1px solid rgba(234, 179, 8, 0.25);
-  }
-
-  .app-actions {
+  }.app-actions {
     display: flex;
     align-items: center;
-  }
-
-  :global(.trash-action-btn) {
+  }:global(.trash-action-btn) {
     border: none !important;
     background: transparent !important;
-  }
-
-  :global(.trash-action-btn:hover) {
+  }:global(.trash-action-btn:hover) {
     color: var(--color-error) !important;
     background: rgba(255, 180, 171, 0.08) !important;
     border: none !important;
-  }
-
-  .terminal-log {
+  }.terminal-log {
     background: #0f111a;
     border: 1px solid var(--color-border);
     border-radius: 8px;
@@ -1190,14 +1193,10 @@
     font-size: 12px;
     color: #a6accd;
     line-height: 1.5;
-  }
-
-  .log-line {
+  }.log-line {
     white-space: pre-wrap;
     word-break: break-all;
-  }
-
-  .empty-state {
+  }.empty-state {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1205,10 +1204,7 @@
     height: 300px;
     color: var(--color-text-muted);
     font-size: 14px;
-  }
-
-  /* Tooltip */
-  .custom-tooltip {
+  }/* Tooltip */ .custom-tooltip {
     position: fixed;
     background: var(--color-bg-elevated);
     border: 1px solid var(--color-border);
@@ -1222,23 +1218,14 @@
     font-family: var(--font-mono);
     max-width: 300px;
     word-break: break-all;
-  }
-
-  /* Skeleton Loading */
-  .skeleton-text {
+  }/* Skeleton Loading */ .skeleton-text {
     background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.05) 75%);
     background-size: 200% 100%;
     animation: skeleton-loading 1.5s infinite;
     border-radius: 4px;
   }
-
-  @keyframes skeleton-loading {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-  }
-
-  /* Side Panel */
-  .panel-backdrop {
+@keyframes skeleton-loading {0% { background-position: 200% 0; }100% { background-position: -200% 0; }
+}/* Side Panel */ .panel-backdrop {
     position: fixed;
     top: 0;
     left: 0;
@@ -1246,12 +1233,8 @@
     bottom: 0;
     background: rgba(0, 0, 0, 0.45);
     z-index: 9998;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    animation: fade-in 0.2s ease-out forwards;
-  }
-
-  .side-panel {
+    animation: fade-in 0.2s ease-out both;
+  }.side-panel {
     position: fixed;
     top: 0;
     right: 0;
@@ -1264,28 +1247,22 @@
     display: flex;
     flex-direction: column;
     box-shadow: -12px 0 36px rgba(0, 0, 0, 0.4);
-    animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  }
-
-  .panel-header {
+    animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }.panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 16px 20px;
     border-bottom: 1px solid var(--color-border);
     background: var(--color-bg-card, var(--color-bg-raised));
-  }
-
-  .panel-title {
+  }.panel-title {
     font-size: 16px;
     font-weight: 700;
     color: var(--color-text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .panel-close-btn {
+  }.panel-close-btn {
     background: transparent;
     border: none;
     color: var(--color-text-muted);
@@ -1294,70 +1271,50 @@
     border-radius: 4px;
     display: flex;
     transition: all 0.2s;
-  }
-
-  .panel-close-btn:hover {
+  }.panel-close-btn:hover {
     color: var(--color-text-primary);
     background: rgba(255,255,255,0.05);
-  }
-
-  .panel-content {
+  }.panel-content {
     flex: 1;
     overflow-y: auto;
     padding: 20px;
     display: flex;
     flex-direction: column;
-  }
-
-  .panel-footer {
+  }.panel-footer {
     padding: 14px 20px;
     border-top: 1px solid var(--color-border);
     background: var(--color-bg-card, var(--color-bg-raised));
     display: flex;
     align-items: center;
-  }
-
-  .panel-section {
+  }.panel-section {
     margin-bottom: 20px;
-  }
-
-  .detail-label {
+  }.detail-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 700;
     color: var(--color-text-muted);
     margin-bottom: 6px;
-  }
-
-  .detail-value {
+  }.detail-value {
     font-size: 13px;
     color: var(--color-text-primary);
-  }
-
-  .files-list {
+  }.files-list {
     background: var(--color-surface, rgba(0,0,0,0.2));
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 8px 0;
     max-height: 220px;
     overflow-y: auto;
-  }
-
-  .file-item {
+  }.file-item {
     padding: 4px 12px;
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--color-text-secondary);
     word-break: break-all;
-  }
-
-  .file-item:hover {
+  }.file-item:hover {
     background: rgba(255,255,255,0.03);
     color: var(--color-text-primary);
-  }
-
-  .panel-tab-btn {
+  }.panel-tab-btn {
     padding: 12px 16px;
     background: transparent;
     border: none;
@@ -1367,45 +1324,32 @@
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s;
-  }
-  .panel-tab-btn:hover {
+  }.panel-tab-btn:hover {
     color: var(--color-text-primary);
-  }
-  .panel-tab-btn.active {
+  }.panel-tab-btn.active {
     color: var(--color-accent);
     border-bottom-color: var(--color-accent);
-  }
-
-  .badge.appimage {
+  }.badge.appimage {
     background: rgba(16, 185, 129, 0.1);
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.2);
-  }
-
-  /* ── Custom Context Menu ────────────────────────────────────────── */
-  .custom-context-menu {
+  }/* ── Custom Context Menu ────────────────────────────────────────── */ .custom-context-menu {
     background: var(--color-bg-card, #131b26);
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 6px;
     min-width: 220px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
     display: flex;
     flex-direction: column;
     gap: 2px;
-  }
-
-  .context-menu-header {
+  }.context-menu-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 6px 8px;
     gap: 8px;
-  }
-
-  .context-menu-title {
+  }.context-menu-title {
     font-size: 12px;
     font-weight: 700;
     color: var(--color-text-primary);
@@ -1413,9 +1357,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 130px;
-  }
-
-  .context-menu-badge {
+  }.context-menu-badge {
     font-size: 9.5px;
     font-weight: 600;
     padding: 1px 5px;
@@ -1423,15 +1365,11 @@
     background: rgba(0, 218, 243, 0.12);
     color: var(--color-accent);
     text-transform: uppercase;
-  }
-
-  .context-menu-divider {
+  }.context-menu-divider {
     height: 1px;
     background: var(--color-border);
     margin: 4px 0;
-  }
-
-  .context-menu-item {
+  }.context-menu-item {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1446,50 +1384,30 @@
     text-align: left;
     cursor: pointer;
     transition: all 0.12s ease;
-  }
-
-  .context-menu-item:hover:not(:disabled) {
+  }.context-menu-item:hover:not(:disabled) {
     background: var(--color-bg-hover, rgba(255, 255, 255, 0.08));
     color: var(--color-text-primary);
-  }
-
-  .context-menu-item:disabled {
+  }.context-menu-item:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  .context-menu-item.text-danger:hover:not(:disabled) {
+  }.context-menu-item.text-danger:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.12);
     color: var(--color-error);
-  }
-
-  :global(html.light-mode) .side-panel {
+  }:global(html.light-mode) .side-panel {
     background: #FFFFFF !important;
-  }
-  :global(html.light-mode) .panel-header,
-  :global(html.light-mode) .panel-footer {
+  }:global(html.light-mode) .panel-header, :global(html.light-mode) .panel-footer {
     background: #F8FAFC !important;
     border-color: #E2E8F0 !important;
-  }
-  :global(html.light-mode) .files-list {
+  }:global(html.light-mode) .files-list {
     background: #F1F5F9 !important;
     border-color: #CBD5E1 !important;
-  }
-  :global(html.light-mode) .file-item {
+  }:global(html.light-mode) .file-item {
     color: #334155 !important;
-  }
-  :global(html.light-mode) .file-item:hover {
+  }:global(html.light-mode) .file-item:hover {
     background: #E2E8F0 !important;
     color: #0F172A !important;
   }
-
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-
-  @keyframes slide-in {
-    from { transform: translateX(100%); }
-    to { transform: translateX(0); }
-  }
-</style>
+@keyframes fade-in {from { opacity: 0; }to { opacity: 1; }
+}
+@keyframes slide-in {from { transform: translateX(100%); }to { transform: translateX(0); }
+}</style>
