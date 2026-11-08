@@ -8898,6 +8898,12 @@ mod polkit_policy_tests {
     }
 
     #[test]
+    fn the_packaged_rule_file_matches_the_helper_text() {
+        let packaged = include_str!("../../polkit/50-linux-control-panel.rules");
+        assert_eq!(packaged, super::POLKIT_RULE_TEXT);
+    }
+
+    #[test]
     fn the_installed_rule_must_match_the_shipped_text() {
         use super::{verify_polkit_rule_text, POLKIT_RULE_TEXT};
         verify_polkit_rule_text(POLKIT_RULE_TEXT).expect("the shipped rule text must be valid");
