@@ -28,6 +28,16 @@
   import Select from '../components/ui/Select.svelte';
   import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { loadRecoveryWarning, persistRecoveryWarning, reduceRecoveryWarning } from '../utils/serviceRecovery';
+
+  let recoveryWarning = $state<string | null>(
+    typeof localStorage !== 'undefined' ? loadRecoveryWarning(localStorage) : null
+  );
+
+  function setRecoveryWarning(next: string | null) {
+    recoveryWarning = next;
+    if (typeof localStorage !== 'undefined') persistRecoveryWarning(localStorage, next);
+  }
   import {
     Plus, Folder, Check, Sparkles, FileCode, Trash2
   } from '@lucide/svelte';
@@ -689,8 +699,14 @@
   async function retryDaemonReload() {
     try {
       await invoke<string>('unit_daemon_reload');
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
+      );
       uiStore.addToast('systemd daemon reloaded successfully', 'success');
     } catch (e) {
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-failed', error: e })
+      );
       uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
     }
   }
@@ -705,6 +721,9 @@
       uiStore.addToast(`Unit file saved for ${selectedUnit.name}`, 'success');
       unitFileContent = editedContent;
     } catch (e) {
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'write-failed', error: e })
+      );
       uiStore.addToast(`Failed to save: ${e}`, 'error');
       const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
       statusStore.setLastCommand(`echo "..." > ${targetPath}`, 1, false);
@@ -1094,6 +1113,29 @@
       </button>
     </div>
   </PageHeader>
+
+  {#if recoveryWarning}
+    <div
+      role="alert"
+      style="display:flex; gap:12px; align-items:flex-start; margin:16px 0; padding:14px 16px; border:1px solid var(--color-error); border-left-width:5px; border-radius:8px; background:var(--color-bg-card);"
+    >
+      <ShieldAlert size={22} color="var(--color-error)" style="flex-shrink:0; margin-top:2px;" />
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:700; color:var(--color-error); font-size:13px;">
+          systemd reload recovery required
+        </div>
+        <div style="font-size:12px; color:var(--color-text-secondary); margin-top:4px;">
+          The unit file on disk was written or rolled back, but systemd could still hold the
+          previous in-memory configuration. Run <strong>Retry daemon-reload</strong> to reload
+          it without rewriting any configuration. This warning stays until that reload is confirmed successful.
+        </div>
+        <pre style="white-space:pre-wrap; word-break:break-word; font-size:11px; margin:8px 0; padding:8px; background:var(--color-bg-base); border-radius:6px; color:var(--color-text-muted);">{recoveryWarning}</pre>
+        <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
+          <RefreshCw size={13} /> Retry daemon-reload
+        </Button>
+      </div>
+    </div>
+  {/if}
 
   {#if mainTab === 'services'}
     <!-- Filter & search row: Search on Left, Tabs & Action on Right -->

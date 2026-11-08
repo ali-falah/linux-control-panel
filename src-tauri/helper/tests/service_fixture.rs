@@ -59,6 +59,7 @@ fn fixture() -> MutexGuard<'static, ()> {
 LOG="/tmp/lcp-admin-test-fixture/log/calls.log"
 CTL="/tmp/lcp-admin-test-fixture/ctl"
 printf '%s\n' "$*" >> "$LOG"
+if [ -e "$CTL/fail-once" ]; then rm -f "$CTL/fail-once"; echo 'BY-STUB: injected one-shot failure' >&2; exit 9; fi
 if [ -e "$CTL/fail" ]; then echo 'BY-STUB: injected failure' >&2; exit 9; fi
 exit 0
 "#;
@@ -216,6 +217,7 @@ fn daemon_reload_failure_rolls_back_and_is_reported() {
     );
     assert_ne!(run.code, 0, "reload failure must fail the action: {run:?}");
     assert!(run.stderr.contains("BY-STUB: injected failure"), "{run:?}");
+    assert!(run.stderr.starts_with("RECOVERY_REQUIRED:"), "{run:?}");
     assert!(run.stderr.contains("previous override was restored on disk"), "{run:?}");
     assert!(run.stderr.contains("systemd was NOT reloaded by the retry"), "{run:?}");
     assert_eq!(
@@ -235,6 +237,7 @@ fn daemon_reload_failure_without_previous_override_removes_the_file() {
         !std::path::Path::new(&format!("{SYSTEMD_ROOT}/nginx.service.d/override.conf")).exists(),
         "a fresh override must be removed by the rollback"
     );
+    assert!(run.stderr.starts_with("RECOVERY_REQUIRED:"), "{run:?}");
     assert!(run.stderr.contains("newly written override was removed from disk"), "{run:?}");
     assert!(run.stderr.contains("systemd was NOT reloaded by the retry"), "{run:?}");
 }
@@ -292,4 +295,25 @@ fn daemon_reload_recovery_refuses_bad_shapes() {
     let run = run_helper(&["unit_daemon_reload"]);
     assert_ne!(run.code, 0, "missing systemctl must fail: {run:?}");
     assert!(run.stderr.contains("systemctl is not available"), "{run:?}");
+}
+
+#[test]
+fn rollback_with_successful_retry_does_not_require_recovery() {
+    let _guard = fixture();
+    let dir = format!("{SYSTEMD_ROOT}/nginx.service.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = format!("{dir}/override.conf");
+    std::fs::write(&path, "[Service]\nEnvironment=OLD=1\n").unwrap();
+    std::fs::write(format!("{FIXTURE_ROOT}/ctl/fail-once"), "1").unwrap();
+    let run = run_helper_with_stdin(
+        &["unit_dropin_write", "nginx.service"],
+        "[Service]\nEnvironment=NEW=1\n",
+    );
+    assert_ne!(run.code, 0, "the write still fails after reload failure: {run:?}");
+    assert!(!run.stderr.starts_with("RECOVERY_REQUIRED:"), "{run:?}");
+    assert!(run.stderr.contains("a follow-up daemon-reload succeeded"), "{run:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[Service]\nEnvironment=OLD=1\n"
+    );
 }

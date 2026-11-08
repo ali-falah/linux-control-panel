@@ -2162,9 +2162,12 @@ fn unit_dropin_write_action(unit: &str) -> Result<(), String> {
                 "systemd was NOT reloaded by the retry ({e}); run the unit_daemon_reload recovery action to retry without rewriting configuration"
             ),
         };
-        return Err(format!(
-            "lcp-admin: {reload_error}; {disk_state}; {reload_state}"
-        ));
+        let prefix = if retry.is_err() {
+            "RECOVERY_REQUIRED: "
+        } else {
+            "lcp-admin: "
+        };
+        return Err(format!("{prefix}{reload_error}; {disk_state}; {reload_state}"));
     }
     Ok(())
 }
@@ -2734,7 +2737,9 @@ fn main() {
                 // policy errors arrive without the helper's own prefix;
                 // CONFIRMATION_REQUIRED must reach the app with its exact
                 // prefix intact — the caller retries on that literal.
-                let line = if message.starts_with("CONFIRMATION_REQUIRED:") {
+                let line = if message.starts_with("CONFIRMATION_REQUIRED:")
+                    || message.starts_with("RECOVERY_REQUIRED:")
+                {
                     message.clone()
                 } else if let Some(rest) = message.strip_prefix("lcp-admin: ") {
                     format!("lcp-admin: {rest}")
