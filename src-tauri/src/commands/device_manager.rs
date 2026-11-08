@@ -2,6 +2,29 @@ use crate::utils::privilege::ensure_safe_operand;
 use crate::utils::privilege::Command;
 use serde::Serialize;
 
+/// Run one named SMART helper action and return its stdout. The helper is
+/// authoritative; SMART tooling is no longer reachable through the generic
+/// privileged program channel.
+async fn run_smart_named_action(action: &str, params: &[String]) -> Result<String, String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = crate::utils::privilege::run_privileged_with_stdin(
+        helper,
+        &args,
+        &crate::utils::privilege::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[derive(Debug, Serialize)]
 pub struct PciDevice {
     pub slot: String,
@@ -54,34 +77,13 @@ pub fn device_get_smart_drives() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn device_get_smart_data(device: String) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["smartctl", "-a", "-j", &device])
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    // smartctl returns non-zero exit codes even on successful run (e.g. if some SMART attributes are warnings)
-    // exit status bits 0 and 1 indicate fatal errors, others are just info/warnings
-    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-    if stdout_str.trim().is_empty() && !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    Ok(stdout_str)
+pub async fn device_get_smart_data(device: String) -> Result<String, String> {
+    run_smart_named_action("smart_data", &[device]).await
 }
 
 #[tauri::command]
-pub fn device_trigger_self_test(device: String, test_type: String) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["smartctl", "-t", &test_type, &device])
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+pub async fn device_trigger_self_test(device: String, test_type: String) -> Result<String, String> {
+    run_smart_named_action("smart_self_test", &[device, test_type]).await
 }
 
 #[tauri::command]

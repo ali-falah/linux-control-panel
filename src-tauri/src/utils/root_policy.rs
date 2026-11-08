@@ -40,9 +40,9 @@ pub const ALLOWED_ROOT_PROGRAMS: &[&str] = &[
     "systemctl", "journalctl", "loginctl", "ss", "ip", "ping", "dig", "host", "resolvectl",
     // users and groups (query + basic management; membership and passwords go
     // through named actions instead)
-    "useradd", "userdel", "groupadd", "groupmod", "groupdel", "id", "getent", "renice",
+    "useradd", "userdel", "groupadd", "groupmod", "groupdel", "id", "getent",
     // firewall and network
-    "nmcli", "route", "resurrect", "connection", "smartctl",
+    "nmcli", "route", "resurrect", "connection",
     // files and text (pure readers and filters only — anything that can create,
     // overwrite, replace or relabel a file belongs to a named action)
     "cat", "ls", "stat", "grep", "tail", "head", "zcat", "cut", "sort", "wc", "tr",
@@ -90,6 +90,12 @@ pub const MIGRATING_ROOT_PROGRAMS: &[&str] = &[
     // repository trust decisions: repo_add and copr_manage are the only
     // validated paths; the generic program channel must not add repositories
     "add-apt-repository",
+    // process scheduling is a named action; the generic channel must not
+    // renice arbitrary processes as root
+    "renice",
+    // SMART operations are named actions; the generic channel must not run
+    // smartctl as root
+    "smartctl",
 ];
 
 /// Test-only serialization between the root-policy path-pin tests and the
@@ -3273,6 +3279,71 @@ fn check_smartctl(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `process_renice <pid> <priority>`: the privileged renice action. It is only
+/// for the negative-niceness case (the app keeps positive renicing
+/// unprivileged) and refuses protected system PIDs.
+pub fn process_renice_valid(pid: u32, priority: i32) -> Result<(), String> {
+    if pid <= 100 {
+        return Err(format!(
+            "PID {pid} is reserved for critical system processes and cannot be reniced"
+        ));
+    }
+    if !(-20..=-1).contains(&priority) {
+        return Err(format!(
+            "the privileged renice action only accepts a priority between -20 and -1, got: {priority}"
+        ));
+    }
+    Ok(())
+}
+
+/// `smart_health <device>`: one block device under /dev. The path has exactly
+/// one safe name component and is not a symlink; production also requires a
+/// real block device. The fixture build uses a regular file under its own
+/// device directory so tests never touch a real disk.
+pub fn smart_device_valid(device: &str) -> Result<(), String> {
+    #[cfg(feature = "test-fixture")]
+    let prefix = "/tmp/lcp-admin-test-fixture/dev/";
+    #[cfg(not(feature = "test-fixture"))]
+    let prefix = "/dev/";
+
+    let name = device.strip_prefix(prefix).ok_or_else(|| {
+        format!("the SMART device must be a direct {prefix}<name> path, got: {device}")
+    })?;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(format!(
+            "the SMART device name must contain only alphanumeric, '-' or '_' characters, got: {device}"
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(device)
+        .map_err(|e| format!("the SMART device {device} could not be inspected: {e}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("the SMART device {device} must not be a symlink"));
+    }
+    #[cfg(not(feature = "test-fixture"))]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if !metadata.file_type().is_block_device() {
+            return Err(format!("the SMART device {device} is not a block device"));
+        }
+    }
+    Ok(())
+}
+
+/// SMART self-test types accepted by the Device Manager UI and smartctl.
+pub fn smart_test_type_valid(test_type: &str) -> Result<(), String> {
+    if matches!(test_type, "short" | "long" | "offline" | "conveyance") {
+        Ok(())
+    } else {
+        Err(format!(
+            "the SMART self-test type must be short|long|offline|conveyance, got: {test_type}"
+        ))
+    }
+}
+
 fn check_module_tools(program: &str, args: &[String]) -> Result<(), String> {
     for arg in args {
         if arg.starts_with('-') {
@@ -3845,6 +3916,10 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
+    "process_renice",
+    "smart_health",
+    "smart_data",
+    "smart_self_test",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -4048,6 +4123,10 @@ const HELPER_UNIT_DROPIN_ACTIONS: &[&str] = &["unit_dropin_write"];
 const HELPER_UNIT_RECOVERY_ACTIONS: &[&str] = &["unit_daemon_reload"];
 const HELPER_COPR_ACTIONS: &[&str] = &["copr_manage"];
 const HELPER_NMCLI_INTERFACE_STATE_ACTIONS: &[&str] = &["nmcli_interface_state"];
+const HELPER_PROCESS_RENICE_ACTIONS: &[&str] = &["process_renice"];
+const HELPER_SMART_HEALTH_ACTIONS: &[&str] = &["smart_health"];
+const HELPER_SMART_DATA_ACTIONS: &[&str] = &["smart_data"];
+const HELPER_SMART_SELF_TEST_ACTIONS: &[&str] = &["smart_self_test"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -4760,6 +4839,57 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
                 "the backend must be firewalld or ufw",
             ));
         }
+        return Ok(());
+    }
+    if HELPER_PROCESS_RENICE_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a pid and a priority",
+            ));
+        }
+        let pid = args[1].parse::<u32>().map_err(|_| {
+            operand_not_allowed("lcp-admin", &args[1], "the pid must be numeric")
+        })?;
+        let priority = args[2].parse::<i32>().map_err(|_| {
+            operand_not_allowed("lcp-admin", &args[2], "the priority must be numeric")
+        })?;
+        process_renice_valid(pid, priority)?;
+        return Ok(());
+    }
+    if HELPER_SMART_HEALTH_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one device path",
+            ));
+        }
+        smart_device_valid(&args[1])?;
+        return Ok(());
+    }
+    if HELPER_SMART_DATA_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one device path",
+            ));
+        }
+        smart_device_valid(&args[1])?;
+        return Ok(());
+    }
+    if HELPER_SMART_SELF_TEST_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a device path and a test type",
+            ));
+        }
+        smart_device_valid(&args[1])?;
+        smart_test_type_valid(&args[2])?;
         return Ok(());
     }
     if HELPER_NMCLI_INTERFACE_STATE_ACTIONS.contains(&action.as_str()) {
@@ -5921,6 +6051,22 @@ mod argument_policy_tests {
     };
 
     #[test]
+    fn privileged_smartctl_is_not_on_the_generic_allow_list() {
+        assert!(
+            ensure_program_allowed("/usr/bin/smartctl").is_err(),
+            "the generic smartctl channel must be closed; SMART named actions are the only root path"
+        );
+    }
+
+    #[test]
+    fn privileged_renice_is_not_on_the_generic_allow_list() {
+        assert!(
+            ensure_program_allowed("/usr/bin/renice").is_err(),
+            "the generic renice channel must be closed; process_renice is the only root path"
+        );
+    }
+
+    #[test]
     fn add_apt_repository_is_not_on_the_generic_allow_list() {
         // The only repository trust paths are the named repo_add and
         // copr_manage actions. The generic program channel must refuse the
@@ -6276,10 +6422,18 @@ mod argument_policy_tests {
         refused("nmcli", &["--bogus"]);
         refused("nmcli", &["-f", "this-field-list-is-deliberately-well-over-the-sixty-four-character-limit-for-test-purposes"]);
 
+        // The generic renice program policy still exists for defence in depth,
+        // but ensure_program_allowed refuses the generic root channel.
         ok("renice", &["-n", "5", "-p", "4421"]);
         ok("renice", &["-n", "-5", "-p", "4421"]);
         refused("renice", &["-n", "25", "-p", "4421"]);
         refused("renice", &["-n", "5", "-p", "4421$", "x"]);
+
+        ok("lcp-admin", &["process_renice", "4242", "-5"]);
+        refused("lcp-admin", &["process_renice", "50", "-5"]);
+        refused("lcp-admin", &["process_renice", "4242", "5"]);
+        refused("lcp-admin", &["process_renice", "4242", "-21"]);
+        refused("lcp-admin", &["process_renice", "not-a-pid", "-5"]);
 
         ok("loginctl", &["kill-session", "42"]);
         refused("loginctl", &["terminate", "42"]);
@@ -8875,5 +9029,88 @@ mod polkit_policy_tests {
         )
         .expect_err("a missing policy must be refused");
         assert!(error.contains("could not be read"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod system_info_validator_tests {
+    use super::{
+        ensure_arguments_for_program as check, process_renice_valid, smart_device_valid,
+    };
+
+    fn check_lcp(args: &[&str]) -> Result<(), String> {
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        check("lcp-admin", &argv)
+    }
+
+    #[test]
+    fn process_renice_only_accepts_negative_priority_and_unprotected_pids() {
+        process_renice_valid(4242, -1).expect("negative priority");
+        process_renice_valid(4242, -20).expect("minimum priority");
+        assert!(process_renice_valid(4242, 0).is_err());
+        assert!(process_renice_valid(4242, 5).is_err());
+        assert!(process_renice_valid(4242, -21).is_err());
+        assert!(process_renice_valid(1, -5).is_err());
+        assert!(process_renice_valid(100, -5).is_err());
+        assert!(process_renice_valid(101, -5).is_ok());
+
+        check_lcp(&["process_renice", "4242", "-5"]).expect("valid gate shape");
+        assert!(check_lcp(&["process_renice", "50", "-5"]).is_err());
+        assert!(check_lcp(&["process_renice", "4242", "5"]).is_err());
+        assert!(check_lcp(&["process_renice", "4242"]).is_err());
+        assert!(check_lcp(&["process_renice", "x", "-5"]).is_err());
+    }
+
+    #[test]
+    fn smart_test_type_is_closed() {
+        use super::smart_test_type_valid;
+        for test_type in ["short", "long", "offline", "conveyance"] {
+            smart_test_type_valid(test_type).expect("valid self-test type");
+        }
+        for test_type in ["", "extended", "SHORT", "short;reboot"] {
+            assert!(smart_test_type_valid(test_type).is_err(), "{test_type:?}");
+        }
+    }
+
+    #[test]
+    fn smart_device_only_accepts_a_direct_non_symlink_device_path() {
+        assert!(smart_device_valid("/etc/passwd").is_err());
+        assert!(smart_device_valid("/dev/../etc/passwd").is_err());
+        assert!(smart_device_valid("/dev/disk/by-id/foo").is_err());
+        assert!(check_lcp(&["smart_data", "/etc/passwd"]).is_err());
+        assert!(check_lcp(&["smart_self_test", "/etc/passwd", "long"]).is_err());
+        assert!(check_lcp(&["smart_self_test", "/etc/passwd", "bad"]).is_err());
+
+        #[cfg(not(feature = "test-fixture"))]
+        {
+            // /dev/null exists but is a character device, not a block device.
+            assert!(smart_device_valid("/dev/null").is_err());
+        }
+
+        #[cfg(feature = "test-fixture")]
+        {
+            let _guard = super::FIXTURE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dev_dir = std::path::Path::new("/tmp/lcp-admin-test-fixture/dev");
+            std::fs::create_dir_all(dev_dir).unwrap();
+            let device = dev_dir.join("validator-sda");
+            std::fs::write(&device, b"fixture device").unwrap();
+            let device_str = device.to_str().unwrap().to_string();
+            smart_device_valid(&device_str).expect("fixture regular file is allowed");
+            check_lcp(&["smart_health", &device_str]).expect("valid health gate shape");
+            check_lcp(&["smart_data", &device_str]).expect("valid data gate shape");
+            check_lcp(&["smart_self_test", &device_str, "long"])
+                .expect("valid self-test gate shape");
+
+            let link = dev_dir.join("validator-link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&device, &link).unwrap();
+            assert!(smart_device_valid(link.to_str().unwrap()).is_err());
+            assert!(check_lcp(&["smart_health", link.to_str().unwrap()]).is_err());
+
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_file(&device);
+        }
     }
 }

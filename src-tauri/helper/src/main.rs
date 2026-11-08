@@ -28,7 +28,8 @@ use root_policy::{
     firewall_rich_rule_valid, firewall_port_value_valid, firewall_service_name_valid,
     firewall_zone_name_valid, firewall_interface_name_valid, FirewallRichRule,
     FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
-    check_nmcli_interface_state,
+    check_nmcli_interface_state, process_renice_valid, smart_device_valid,
+    smart_test_type_valid,
     var_www_path_valid, NGINX_BACKUPS_DIR, NGINX_CONFIG_CONTENT_MAX, NGINX_SITES_AVAILABLE,
     NGINX_SITES_ENABLED, NGINX_WWW_INSTALL_MAX, PROFILE_CONTENT_MAX, POLKIT_RULE_FILE,
     POLKIT_RULE_TEXT, PROFILE_D_DIR, REPO_CONTENT_MAX, VAR_WWW_DIR,
@@ -2409,6 +2410,134 @@ fn copr_manage_action(verb: &str, repo: &str) -> Result<(), String> {
     Err("lcp-admin: neither dnf nor add-apt-repository is available".to_string())
 }
 
+/// Parse the real UID from `/proc/<pid>/status` content. The first `Uid:`
+/// field is the real UID; a missing or malformed line is refused.
+fn process_owner_uid_from_status(text: &str) -> Result<u32, String> {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .ok_or_else(|| "lcp-admin: the process status has no Uid line".to_string())?;
+    let real_uid = line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "lcp-admin: the process status has no real UID".to_string())?;
+    real_uid
+        .parse::<u32>()
+        .map_err(|_| "lcp-admin: the process real UID is not numeric".to_string())
+}
+
+/// Verify that a process status document belongs to the invoking user.
+fn process_owner_is_invoking_user(text: &str, invoking_uid: u32) -> Result<(), String> {
+    let owner = process_owner_uid_from_status(text)?;
+    if owner != invoking_uid {
+        return Err(format!(
+            "lcp-admin: the process belongs to another user (owner {owner}, invoking {invoking_uid})"
+        ));
+    }
+    Ok(())
+}
+
+fn process_owner_uid(pid: u32) -> Result<u32, String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|e| format!("lcp-admin: the process {pid} status could not be read ({e})"))?;
+    process_owner_uid_from_status(&status)
+}
+
+/// `process_renice <pid> <priority>`: the privileged negative-niceness action.
+fn process_renice_action(pid: &str, priority: &str) -> Result<(), String> {
+    let pid: u32 = pid
+        .parse()
+        .map_err(|_| "lcp-admin: the pid must be numeric".to_string())?;
+    let priority: i32 = priority
+        .parse()
+        .map_err(|_| "lcp-admin: the priority must be numeric".to_string())?;
+    process_renice_valid(pid, priority)?;
+    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        return Err(format!("lcp-admin: process {pid} no longer exists"));
+    }
+    let invoking_uid = invoking_uid().ok_or_else(|| {
+        "lcp-admin: the invoking user could not be determined; refusing to renice".to_string()
+    })?;
+    let owner = process_owner_uid(pid)?;
+    if owner != invoking_uid {
+        return Err(format!(
+            "lcp-admin: process {pid} belongs to another user; refusing to renice"
+        ));
+    }
+    let priority_text = priority.to_string();
+    let pid_text = pid.to_string();
+    let renice = resolve_trusted_program("renice")?;
+    run_firewall_program(
+        &renice,
+        &["-n", &priority_text, "-p", &pid_text],
+        "renice",
+    )
+}
+
+/// `smart_health <device>`: read-only SMART health/identity output. The app
+/// parses stdout, so the action writes the verified smartctl stdout through.
+fn smart_health_action(device: &str) -> Result<(), String> {
+    smart_device_valid(device)?;
+    let smartctl = resolve_trusted_program("smartctl")?;
+    let output = std::process::Command::new(smartctl)
+        .args(["-H", "-i", device])
+        .output()
+        .map_err(|e| format!("lcp-admin: smartctl could not be started ({e})"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(if detail.is_empty() {
+            format!("lcp-admin: smartctl failed with exit status {}", output.status)
+        } else {
+            format!("lcp-admin: smartctl failed: {detail}")
+        });
+    }
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|e| format!("lcp-admin: could not write smartctl output ({e})"))?;
+    Ok(())
+}
+
+/// `smart_data <device>`: `smartctl -a -j`, preserving JSON even when
+/// smartctl exits non-zero for a warning.
+fn smart_data_action(device: &str) -> Result<(), String> {
+    smart_device_valid(device)?;
+    let smartctl = resolve_trusted_program("smartctl")?;
+    let output = std::process::Command::new(smartctl)
+        .args(["-a", "-j", device])
+        .output()
+        .map_err(|_| "lcp-admin: smartctl could not be started".to_string())?;
+    if !output.stdout.is_empty() {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&output.stdout)
+            .map_err(|_| "lcp-admin: could not write smartctl output".to_string())?;
+        return Ok(());
+    }
+    Err("lcp-admin: SMART data could not be read".to_string())
+}
+
+/// `smart_self_test <device> <type>`: start one SMART self-test.
+fn smart_self_test_action(device: &str, test_type: &str) -> Result<(), String> {
+    smart_device_valid(device)?;
+    smart_test_type_valid(test_type)?;
+    let smartctl = resolve_trusted_program("smartctl")?;
+    let output = std::process::Command::new(smartctl)
+        .args(["-t", test_type, device])
+        .output()
+        .map_err(|_| "lcp-admin: smartctl could not be started".to_string())?;
+    if !output.status.success() {
+        return Err("lcp-admin: SMART self-test could not be started".to_string());
+    }
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|_| "lcp-admin: could not write smartctl output".to_string())?;
+    Ok(())
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -2466,6 +2595,10 @@ const ROOT_ACTIONS: &[&str] = &[
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
+    "process_renice",
+    "smart_health",
+    "smart_data",
+    "smart_self_test",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -2746,6 +2879,38 @@ fn main() {
                     firewall_enable_hardened_action(&args[1], confirmed)
                 }
                 Err(error) => Err(error),
+            }
+        } else if requested == "process_renice" {
+            if args.len() == 3 {
+                process_renice_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a pid and a priority."
+                ))
+            }
+        } else if requested == "smart_health" {
+            if args.len() == 2 {
+                smart_health_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one device path."
+                ))
+            }
+        } else if requested == "smart_data" {
+            if args.len() == 2 {
+                smart_data_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one device path."
+                ))
+            }
+        } else if requested == "smart_self_test" {
+            if args.len() == 3 {
+                smart_self_test_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a device path and a test type."
+                ))
             }
         } else if requested == "nmcli_interface_state" {
             if args.len() == 3 {
@@ -6016,6 +6181,38 @@ mod firewall_ssh_guard_tests {
     fn ss_empty_output_means_no_sessions() {
         assert!(parse_ss_sessions("").is_empty());
         assert!(parse_ss_sessions("\n\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod process_ownership_tests {
+    use super::{process_owner_is_invoking_user, process_owner_uid, process_owner_uid_from_status};
+
+    const OWN: &str = "Name:\ttest\nUid:\t1000\t1000\t1000\t1000\n";
+    const OTHER: &str = "Name:\tother\nUid:\t0\t0\t0\t0\n";
+
+    #[test]
+    fn own_process_is_accepted() {
+        process_owner_uid_from_status(OWN).expect("valid status");
+        process_owner_is_invoking_user(OWN, 1000).expect("own process");
+    }
+
+    #[test]
+    fn foreign_process_is_refused() {
+        let error = process_owner_is_invoking_user(OTHER, 1000)
+            .expect_err("foreign process must be refused");
+        assert!(error.contains("another user"), "{error}");
+    }
+
+    #[test]
+    fn missing_or_malformed_status_is_refused() {
+        assert!(process_owner_uid_from_status("Name:\ttest\n").is_err());
+        assert!(process_owner_uid_from_status("Uid:\tnot-a-number\t0\t0\t0\n").is_err());
+        assert!(process_owner_uid_from_status("Uid:\n").is_err());
+        assert!(
+            process_owner_uid(u32::MAX).is_err(),
+            "a missing process status must fail closed"
+        );
     }
 }
 

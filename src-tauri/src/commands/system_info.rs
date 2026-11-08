@@ -7,6 +7,28 @@ use std::sync::Mutex;
 static TELEMETRY_HISTORY: Mutex<Option<VecDeque<SystemStats>>> = Mutex::new(None);
 const MAX_TELEMETRY_SAMPLES: usize = 60;
 
+/// Run one named System Info helper action. The helper is authoritative and
+/// returns its stdout for the read-only SMART action.
+async fn run_system_named_action(action: &str, params: &[String]) -> Result<String, String> {
+    let helper = crate::commands::admin::installed_helper_path().ok_or_else(|| {
+        "The administrator helper is not installed; the action was not executed.".to_string()
+    })?;
+    let mut args = Vec::with_capacity(params.len() + 1);
+    args.push(action.to_string());
+    args.extend_from_slice(params);
+    let output = crate::utils::privilege::run_privileged_with_stdin(
+        helper,
+        &args,
+        &crate::utils::privilege::RootAuth::Polkit,
+        "",
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkInterface {
@@ -635,21 +657,24 @@ pub async fn renice_process(pid: u32, priority: i32) -> Result<String, String> {
         return Err(format!("Cannot change priority for PID {pid} (protected system process)."));
     }
 
-    let output = if priority < 0 {
-        // Lowering the priority of another user's process needs root rights —
-        // the hardened wrapper validates the program before it is executed.
-        crate::utils::privilege::tokio::Command::new("pkexec")
-            .args(["renice", "-n", &priority.to_string(), "-p", &pid.to_string()])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to renice process: {e}"))?
-    } else {
-        tokio::process::Command::new("renice")
-            .args(["-n", &priority.to_string(), "-p", &pid.to_string()])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to renice process: {e}"))?
-    };
+    if priority < 0 {
+        // Lowering the niceness of another user's process needs root rights.
+        // The named helper action validates the pid, the negative range and
+        // the protected-PID guard before running the fixed renice argv.
+        run_system_named_action(
+            "process_renice",
+            &[pid.to_string(), priority.to_string()],
+        )
+        .await
+        .map_err(|e| format!("Failed to set process priority: {e}"))?;
+        return Ok(format!("Successfully adjusted PID {pid} priority to {priority}"));
+    }
+
+    let output = tokio::process::Command::new("renice")
+        .args(["-n", &priority.to_string(), "-p", &pid.to_string()])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to renice process: {e}"))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -673,6 +698,70 @@ pub struct SmartHealth {
     pub health_status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartHealthIssue {
+    pub disk_path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartHealthReport {
+    pub disks: Vec<SmartHealth>,
+    pub errors: Vec<SmartHealthIssue>,
+}
+
+/// Keep frontend-visible SMART failures actionable but free of command paths
+/// and raw tool output.
+fn smart_health_failure(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("administrator helper is not installed") {
+        "Administrator helper is not installed".to_string()
+    } else if lower.contains("not a block device") || lower.contains("symlink") {
+        "Not a valid block device".to_string()
+    } else if lower.contains("no longer exists") || lower.contains("could not be inspected") {
+        "Device is no longer available".to_string()
+    } else if lower.contains("permission") || lower.contains("not authorized") {
+        "Permission denied while reading SMART data".to_string()
+    } else {
+        "SMART data could not be read".to_string()
+    }
+}
+
+fn parse_smart_health_output(device: &str, stdout: &str) -> Result<SmartHealth, String> {
+    let mut health_status = "UNKNOWN".to_string();
+    let mut model = "Unknown Device".to_string();
+    for line in stdout.lines() {
+        if line.starts_with("SMART overall-health self-assessment test result:")
+            || line.starts_with("SMART Health Status:")
+        {
+            health_status = line
+                .split(':')
+                .nth(1)
+                .unwrap_or("UNKNOWN")
+                .trim()
+                .to_string();
+        } else if line.starts_with("Device Model:")
+            || line.starts_with("Model Number:")
+            || line.starts_with("Model Family:")
+        {
+            model = line
+                .split(':')
+                .nth(1)
+                .unwrap_or("Unknown")
+                .trim()
+                .to_string();
+        }
+    }
+    if health_status == "UNKNOWN" && model == "Unknown Device" {
+        return Err("No SMART health data returned".to_string());
+    }
+    Ok(SmartHealth {
+        disk_path: device.to_string(),
+        model,
+        health_status,
+    })
+}
+
 #[tauri::command]
 pub async fn get_network_traffic() -> Result<Vec<NetworkTraffic>, String> {
     let content = fs::read_to_string("/proc/net/dev").map_err(|e| e.to_string())?;
@@ -692,7 +781,7 @@ pub async fn get_network_traffic() -> Result<Vec<NetworkTraffic>, String> {
 }
 
 #[tauri::command]
-pub async fn get_smart_health() -> Result<Vec<SmartHealth>, String> {
+pub async fn get_smart_health() -> Result<SmartHealthReport, String> {
     let lsblk = crate::utils::privilege::tokio::Command::new("lsblk")
         .args(["-d", "-n", "-o", "NAME,TYPE"])
         .output()
@@ -700,7 +789,10 @@ pub async fn get_smart_health() -> Result<Vec<SmartHealth>, String> {
         .map_err(|e| e.to_string())?;
 
     let out = String::from_utf8_lossy(&lsblk.stdout);
-    let mut results = Vec::new();
+    let mut report = SmartHealthReport {
+        disks: Vec::new(),
+        errors: Vec::new(),
+    };
 
     for line in out.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -710,40 +802,23 @@ pub async fn get_smart_health() -> Result<Vec<SmartHealth>, String> {
                 continue;
             }
             let dev = format!("/dev/{}", dev_name);
-            
-            let mut cmd = crate::utils::privilege::tokio::Command::new("pkexec");
-            cmd.args(["smartctl", "-H", "-i", &dev]);
-            cmd.stdout(std::process::Stdio::piped());
-            let smart = cmd.output().await;
-                
-            if let Ok(smart_out) = smart {
-                let stdout = String::from_utf8_lossy(&smart_out.stdout);
-                
-                let mut health_status = "UNKNOWN".to_string();
-                let mut model = "Unknown Device".to_string();
-                
-                for s_line in stdout.lines() {
-                    if s_line.starts_with("SMART overall-health self-assessment test result:") || s_line.starts_with("SMART Health Status:") {
-                        health_status = s_line.split(':').nth(1).unwrap_or("UNKNOWN").trim().to_string();
-                    } else if s_line.starts_with("Device Model:") || s_line.starts_with("Model Number:") || s_line.starts_with("Model Family:") {
-                        model = s_line.split(':').nth(1).unwrap_or("Unknown").trim().to_string();
-                    }
-                }
-                
-                // If it is just an empty return or failed authentication, we might default to UNKNOWN.
-                // We only add if we successfully got some real info, or at least we skip if it's completely empty.
-                if health_status != "UNKNOWN" || model != "Unknown Device" {
-                    results.push(SmartHealth {
+            match run_system_named_action("smart_health", &[dev.clone()]).await {
+                Ok(stdout) => match parse_smart_health_output(&dev, &stdout) {
+                    Ok(disk) => report.disks.push(disk),
+                    Err(error) => report.errors.push(SmartHealthIssue {
                         disk_path: dev,
-                        model,
-                        health_status,
-                    });
-                }
+                        error,
+                    }),
+                },
+                Err(error) => report.errors.push(SmartHealthIssue {
+                    disk_path: dev,
+                    error: smart_health_failure(&error),
+                }),
             }
         }
     }
 
-    Ok(results)
+    Ok(report)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1364,3 +1439,38 @@ pub fn get_app_version() -> String {
 }
 
 
+
+
+#[cfg(test)]
+mod smart_health_tests {
+    use super::{parse_smart_health_output, smart_health_failure};
+
+    #[test]
+    fn successful_output_is_parsed() {
+        let disk = parse_smart_health_output(
+            "/dev/sda",
+            "Device Model: Test Disk\nSMART overall-health self-assessment test result: PASSED\n",
+        )
+        .expect("valid SMART output");
+        assert_eq!(disk.disk_path, "/dev/sda");
+        assert_eq!(disk.model, "Test Disk");
+        assert_eq!(disk.health_status, "PASSED");
+    }
+
+    #[test]
+    fn empty_output_is_a_per_device_error() {
+        let error = parse_smart_health_output("/dev/sda", "garbage\n").expect_err("no data");
+        assert!(error.contains("No SMART health data"), "{error}");
+    }
+
+    #[test]
+    fn failures_do_not_leak_command_details() {
+        let message = smart_health_failure(
+            "lcp-admin: smartctl failed: /usr/sbin/smartctl -H -i /dev/sda: exit 4",
+        );
+        assert_eq!(message, "SMART data could not be read");
+        assert!(!message.contains("smartctl"));
+        assert!(!message.contains("/usr/sbin"));
+        assert!(!message.contains("/dev/sda"));
+    }
+}

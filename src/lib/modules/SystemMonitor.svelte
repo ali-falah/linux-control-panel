@@ -13,6 +13,18 @@
   import Table from '../components/ui/Table.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
+  import {
+    PROCESS_PRIORITY_MAX,
+    PROCESS_PRIORITY_MIN,
+    canReniceProcess,
+    isValidProcessPriority,
+    processPriorityLabel,
+  } from '../utils/processPriority';
+  import {
+    smartHealthIssueLabel,
+    smartHealthTone,
+    type SmartHealthReport,
+  } from '../utils/smartHealth';
 
   let currentTab = $state<'overview' | 'processes'>(
     uiStore.targetSubTab === 'processes' ? 'processes' : 'overview'
@@ -33,6 +45,7 @@
 
   // Overview Stats
   let stats = $state<any>(null);
+  let smartReport = $state<SmartHealthReport | null>(null);
   let cpuTemp = $state<number | null>(null);
   let cpuHistory = $state<number[]>(Array(40).fill(0));
   let ramHistory = $state<number[]>(Array(40).fill(0));
@@ -126,9 +139,21 @@
 
   async function applyRenice() {
     if (!inspectedProcess) return;
+    if (!canReniceProcess(inspectedProcess.user ?? '', currentUser)) {
+      uiStore.addToast('You can only change the priority of your own processes.', 'error');
+      return;
+    }
+    const priority = Number(inspectedProcessPriority);
+    if (!isValidProcessPriority(priority)) {
+      uiStore.addToast(
+        `Priority must be an integer between ${PROCESS_PRIORITY_MIN} and ${PROCESS_PRIORITY_MAX}.`,
+        'error'
+      );
+      return;
+    }
     renicing = true;
     try {
-      await invoke('renice_process', { pid: inspectedProcess.pid, priority: Number(inspectedProcessPriority) });
+      await invoke('renice_process', { pid: inspectedProcess.pid, priority });
       uiStore.addToast(`Adjusted priority for ${inspectedProcess.name} (PID ${inspectedProcess.pid}) to ${inspectedProcessPriority}`, 'success');
       statusStore.setLastCommand(`renice -n ${inspectedProcessPriority} -p ${inspectedProcess.pid}`, 0, true);
     } catch (e: any) {
@@ -489,6 +514,15 @@
       }
     } catch(e) {
       console.error(e);
+    }
+    // SMART probing can be slow, so it must not delay the initial stats/history.
+    try {
+      smartReport = await invoke<SmartHealthReport>('get_smart_health');
+    } catch {
+      smartReport = {
+        disks: [],
+        errors: [{ disk_path: 'SMART scan', error: 'SMART health could not be loaded' }],
+      };
     }
   });
 
@@ -981,6 +1015,28 @@
                 {/if}
               </div>
             </Card>
+
+            {#if smartReport && (smartReport.disks.length > 0 || smartReport.errors.length > 0)}
+              <Card title="SMART Health" icon={HardDrive} class="monitor-panel">
+                <div class="panel-scroll" style="gap:8px;">
+                  {#each smartReport.disks as disk}
+                    {@const tone = smartHealthTone(disk.health_status)}
+                    <div style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; display:flex; flex-direction:column; gap:4px;">
+                      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                        <span style="font-weight:600; font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary);">{disk.disk_path}</span>
+                        <span class="badge" style="font-size:10px; color:{tone === 'success' ? 'var(--color-success)' : tone === 'error' ? 'var(--color-error)' : 'var(--color-warning)'};">{disk.health_status}</span>
+                      </div>
+                      <span class="text-muted" style="font-size:11px;">{disk.model}</span>
+                    </div>
+                  {/each}
+                  {#each smartReport.errors as issue}
+                    <div role="alert" style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-left: 3px solid var(--color-warning); border-radius: 8px; padding: 10px 12px; font-size:11px; color:var(--color-warning);">
+                      {smartHealthIssueLabel(issue)}
+                    </div>
+                  {/each}
+                </div>
+              </Card>
+            {/if}
           </div>
           {/if}
 
@@ -1742,14 +1798,14 @@
       <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
         <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
           <span>Process Scheduling Priority (Niceness)</span>
-          <span class="badge" style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary);">{inspectedProcessPriority} ({inspectedProcessPriority < 0 ? 'High Priority' : (inspectedProcessPriority === 0 ? 'Normal Priority' : 'Low Priority')})</span>
+          <span class="badge" style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary);">{inspectedProcessPriority} ({processPriorityLabel(Number(inspectedProcessPriority))})</span>
         </div>
         <div style="display:flex; align-items:center; gap:12px;">
           <span style="font-size:11px; color:var(--color-text-muted);">-20 (Max)</span>
           <input 
             type="range" 
-            min="-20" 
-            max="19" 
+            min={PROCESS_PRIORITY_MIN}
+            max={PROCESS_PRIORITY_MAX}
             bind:value={inspectedProcessPriority} 
             style="flex:1; accent-color:var(--color-accent); cursor:pointer;"
           />
