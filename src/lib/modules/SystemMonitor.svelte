@@ -21,6 +21,7 @@
     processPriorityLabel,
   } from '../utils/processPriority';
   import {
+    smartHealthGate,
     smartHealthIssueLabel,
     smartHealthTone,
     type SmartHealthReport,
@@ -46,6 +47,9 @@
   // Overview Stats
   let stats = $state<any>(null);
   let smartReport = $state<SmartHealthReport | null>(null);
+  let smartHealthLoaded = $state(false);
+  let smartHealthLoading = $state(false);
+  let smartFetchGeneration = 0;
   let cpuTemp = $state<number | null>(null);
   let cpuHistory = $state<number[]>(Array(40).fill(0));
   let ramHistory = $state<number[]>(Array(40).fill(0));
@@ -496,6 +500,40 @@
     restartTimers();
   });
 
+  $effect(() => {
+    const adminOn = statusStore.adminMode.on;
+    const decision = smartHealthGate(adminOn, smartHealthLoaded);
+    smartHealthLoaded = decision.loaded;
+    if (!adminOn) {
+      // Invalidate any in-flight request and hide stale results.
+      smartFetchGeneration += 1;
+      smartHealthLoading = false;
+      smartReport = null;
+      return;
+    }
+    if (decision.fetch) {
+      void loadSmartHealth();
+    }
+  });
+
+  async function loadSmartHealth() {
+    const generation = ++smartFetchGeneration;
+    smartHealthLoading = true;
+    try {
+      const report = await invoke<SmartHealthReport>('get_smart_health');
+      if (generation !== smartFetchGeneration || !statusStore.adminMode.on) return;
+      smartReport = report;
+    } catch {
+      if (generation !== smartFetchGeneration || !statusStore.adminMode.on) return;
+      smartReport = {
+        disks: [],
+        errors: [{ disk_path: 'SMART scan', error: 'SMART health could not be loaded' }],
+      };
+    } finally {
+      if (generation === smartFetchGeneration) smartHealthLoading = false;
+    }
+  }
+
   onMount(async () => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     try {
@@ -514,15 +552,6 @@
       }
     } catch(e) {
       console.error(e);
-    }
-    // SMART probing can be slow, so it must not delay the initial stats/history.
-    try {
-      smartReport = await invoke<SmartHealthReport>('get_smart_health');
-    } catch {
-      smartReport = {
-        disks: [],
-        errors: [{ disk_path: 'SMART scan', error: 'SMART health could not be loaded' }],
-      };
     }
   });
 
@@ -1016,9 +1045,15 @@
               </div>
             </Card>
 
-            {#if smartReport && (smartReport.disks.length > 0 || smartReport.errors.length > 0)}
-              <Card title="SMART Health" icon={HardDrive} class="monitor-panel">
-                <div class="panel-scroll" style="gap:8px;">
+            <Card title="SMART Health" icon={HardDrive} class="monitor-panel">
+              <div class="panel-scroll" style="gap:8px;">
+                {#if !statusStore.adminMode.on}
+                  <span class="text-muted" style="font-size:11px;">
+                    Admin mode is required to scan SMART health. Enable it in the status bar.
+                  </span>
+                {:else if smartHealthLoading}
+                  <span class="text-muted">Scanning SMART health…</span>
+                {:else if smartReport && (smartReport.disks.length > 0 || smartReport.errors.length > 0)}
                   {#each smartReport.disks as disk}
                     {@const tone = smartHealthTone(disk.health_status)}
                     <div style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; display:flex; flex-direction:column; gap:4px;">
@@ -1034,9 +1069,11 @@
                       {smartHealthIssueLabel(issue)}
                     </div>
                   {/each}
-                </div>
-              </Card>
-            {/if}
+                {:else}
+                  <span class="text-muted">No SMART devices reported.</span>
+                {/if}
+              </div>
+            </Card>
           </div>
           {/if}
 

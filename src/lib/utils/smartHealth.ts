@@ -26,3 +26,18 @@ export function smartHealthTone(status: string): SmartHealthTone {
   if (normalized.includes('FAIL') || normalized.includes('BAD')) return 'error';
   return 'warning';
 }
+
+export interface SmartHealthGateDecision {
+  fetch: boolean;
+  loaded: boolean;
+}
+
+/** Gate SMART fetches on admin mode and fetch only once per admin session. */
+export function smartHealthGate(
+  adminModeOn: boolean,
+  loaded: boolean,
+): SmartHealthGateDecision {
+  if (!adminModeOn) return { fetch: false, loaded: false };
+  if (loaded) return { fetch: false, loaded: true };
+  return { fetch: true, loaded: true };
+}
