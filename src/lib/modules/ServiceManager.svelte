@@ -1064,7 +1064,7 @@
 
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
-    <div style="display:flex; align-items:center; gap:10px;">
+    <div class="service-header-actions">
       {#if mainTab === 'services'}
         <!-- Single Toggleable Scope Button -->
         <button 
@@ -1074,10 +1074,10 @@
           title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
         >
           {#if userScope}
-            <User size={12} />
+            <User size={11} />
             <span>User Scope</span>
           {:else}
-            <Server size={12} />
+            <Server size={11} />
             <span>System Scope</span>
           {/if}
         </button>
@@ -1085,15 +1085,15 @@
 
       <div class="header-tab-bar">
         <button class="header-tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
-          <Settings size={12} /> Services
+          <Settings size={11} /> Services
           <span class="header-tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
         </button>
         <button class="header-tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
-          <Rocket size={12} /> Autostart
+          <Rocket size={11} /> Autostart
           <span class="header-tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
         </button>
         <button class="header-tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
-          <Activity size={12} /> Boot Analyzer
+          <Activity size={11} /> Boot Analyzer
           {#if blameEntries.length > 0}
             <span class="header-tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
           {/if}
@@ -1108,7 +1108,7 @@
         onclick={handleRefresh}
         title={(isRefreshing || loading || autostartLoading || loadingBlame) ? "Refreshing data…" : "Refresh"}
       >
-        <RefreshCw size={13} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
+        <RefreshCw size={12} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
         <span>{(isRefreshing || loading || autostartLoading || loadingBlame) ? 'Refreshing…' : 'Refresh'}</span>
       </button>
     </div>
@@ -1520,10 +1520,10 @@
                         <RefreshCw size={13} class="animate-spin-slow" style="color:var(--color-accent)" />
                       </button>
                     {:else if unit.active_state !== 'active'}
-                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={!!actionInProgress}><Play size={14}/></button>
+                      <button class="action-btn action-start" onclick={() => confirmDoAction(unit, 'start')} title="Start" disabled={!!actionInProgress}><Play size={14}/></button>
                     {:else}
                       <button 
-                        class="action-btn" 
+                        class="action-btn action-stop"
                         onclick={() => confirmDoAction(unit, 'stop')} 
                         title={unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : 'Stop'} 
                         disabled={unit.protection_level === 'critical' || !!actionInProgress}
@@ -1531,28 +1531,28 @@
                       >
                         <Square size={14}/>
                       </button>
-                      <button class="action-btn" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={!!actionInProgress}><RotateCcw size={14}/></button>
+                      <button class="action-btn action-restart" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={!!actionInProgress}><RotateCcw size={14}/></button>
                     {/if}
                     <KebabMenu align="right">
-                      <button class="menu-item" onclick={() => confirmDoAction(unit, 'restart')} disabled={!!actionInProgress}>
+                      <button class="menu-item text-warning" onclick={() => confirmDoAction(unit, 'restart')} disabled={!!actionInProgress}>
                         <RotateCcw size={14} /> Restart
                       </button>
-                      <button class="menu-item" onclick={() => openLogs(unit)}>
+                      <button class="menu-item text-info" onclick={() => openLogs(unit)}>
                         <FileText size={14} /> View Inline Logs
                       </button>
-                      <button class="menu-item" onclick={() => uiStore.jumpToJournalService(unit.name)}>
+                      <button class="menu-item text-info" onclick={() => uiStore.jumpToJournalService(unit.name)}>
                         <FileText size={14} /> Open in Journal Logs ↗
                       </button>
-                      <button class="menu-item" onclick={() => openDependencies(unit)}>
+                      <button class="menu-item text-accent" onclick={() => openDependencies(unit)}>
                         <GitFork size={14} /> Inspect Dependencies
                       </button>
-                      <button class="menu-item" onclick={() => openEditor(unit)}>
+                      <button class="menu-item text-warning" onclick={() => openEditor(unit)}>
                         <Settings size={14} /> Edit Unit File
                       </button>
                       <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
                       {#if unit.unit_file_state !== 'enabled'}
                         <button 
-                          class="menu-item" 
+                          class="menu-item text-success"
                           onclick={() => confirmDoAction(unit, 'enable')}
                           disabled={unit.is_protected || !!actionInProgress}
                           title={unit.is_protected ? 'Protected system service cannot be modified' : ''}
@@ -1561,7 +1561,7 @@
                         </button>
                       {:else}
                         <button 
-                          class="menu-item text-error" 
+                          class="menu-item text-warning"
                           onclick={() => confirmDoAction(unit, 'disable')}
                           disabled={unit.is_protected || !!actionInProgress}
                           title={unit.is_protected ? 'Protected system service cannot be disabled' : ''}
@@ -1571,7 +1571,7 @@
                       {/if}
                       {#if unit.unit_file_state === 'masked'}
                         <button 
-                          class="menu-item" 
+                          class="menu-item text-success"
                           onclick={() => confirmDoAction(unit, 'unmask')}
                           disabled={!!actionInProgress}
                         >
@@ -1579,7 +1579,7 @@
                         </button>
                       {:else}
                         <button 
-                          class="menu-item text-error" 
+                          class="menu-item danger"
                           onclick={() => confirmDoAction(unit, 'mask')}
                           disabled={unit.is_protected || !!actionInProgress}
                           title={unit.is_protected ? 'Protected system service cannot be masked' : ''}
@@ -2636,7 +2636,18 @@
     flex-wrap: wrap;
   }.header-spacer {
     flex: 1;
-  }/* ── Stats ───────────────────────────────────────────────────────────── */ .stats-row {
+  }/* ── Action icon hover colors ───────────────────────────────────────── */ .action-btn.action-start:hover:not(:disabled) {
+    background: var(--color-success-muted);
+    color: var(--color-success);
+  }.action-btn.action-stop:hover:not(:disabled) {
+    background: var(--color-error-muted);
+    color: var(--color-error);
+  }.action-btn.action-restart:hover:not(:disabled) {
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+  }
+
+/* ── Stats ───────────────────────────────────────────────────────────── */ .stats-row {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
@@ -2765,16 +2776,20 @@
     word-break: break-all;
   }.selected-unit {
     background: var(--color-active-bg) !important;
-  }/* Header controls optimization */ .scope-toggle-btn {
+  }/* Header controls optimization */ .service-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }.scope-toggle-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 10px;
-    font-size: 11px;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    font-size: 10.5px;
     font-weight: 600;
     white-space: nowrap;
-    border-radius: 6px;
+    border-radius: 5px;
     border: 1px solid var(--color-border);
     background: var(--color-bg-card);
     color: var(--color-text-secondary);
@@ -2792,19 +2807,19 @@
     align-items: center;
     background: var(--color-tab-bar-bg, rgba(0, 0, 0, 0.2));
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 3px;
-    gap: 3px;
+    border-radius: 6px;
+    padding: 2px;
+    gap: 2px;
   }.header-tab-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 26px;
-    padding: 0 10px;
-    font-size: 11.5px;
+    gap: 4px;
+    height: 22px;
+    padding: 0 7px;
+    font-size: 10.5px;
     font-weight: 500;
     white-space: nowrap;
-    border-radius: 6px;
+    border-radius: 5px;
     border: none;
     background: transparent;
     color: var(--color-text-muted);
@@ -2817,10 +2832,10 @@
     color: var(--color-text-on-accent);
     font-weight: 600;
   }.header-tab-count {
-    font-size: 10px;
+    font-size: 9.5px;
     font-weight: 600;
-    padding: 1px 5px;
-    border-radius: 8px;
+    padding: 1px 4px;
+    border-radius: 7px;
     background: color-mix(in srgb, currentColor 18%, transparent);
     color: inherit;
   }.header-tab-btn.active .header-tab-count {
@@ -3053,11 +3068,11 @@
   }.header-refresh-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 5px 12px;
-    height: 30px;
-    border-radius: var(--radius-md, 6px);
-    font-size: 12px;
+    gap: 4px;
+    padding: 4px 9px;
+    height: 26px;
+    border-radius: var(--radius-md, 5px);
+    font-size: 11px;
     font-family: var(--font-sans);
     font-weight: 600;
     color: var(--color-text-secondary);

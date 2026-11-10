@@ -179,6 +179,7 @@
     background: var(--color-bg-hover);
     color: var(--color-text-primary);
   }
+
   
   :global(.menu-dropdown .menu-item.danger),
   :global(.menu-dropdown .menu-item.text-danger) {
@@ -189,5 +190,42 @@
   :global(.menu-dropdown .menu-item.text-danger:hover) {
     background: rgba(244, 63, 94, 0.12);
     color: var(--color-error);
+  }
+
+  :global(.menu-dropdown .menu-item.text-success) {
+    color: var(--color-success);
+  }
+  :global(.menu-dropdown .menu-item.text-success:hover) {
+    background: var(--color-success-muted);
+    color: var(--color-success);
+  }
+  :global(.menu-dropdown .menu-item.text-warning) {
+    color: var(--color-warning);
+  }
+  :global(.menu-dropdown .menu-item.text-warning:hover) {
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+  }
+  :global(.menu-dropdown .menu-item.text-info) {
+    color: var(--color-info);
+  }
+  :global(.menu-dropdown .menu-item.text-info:hover) {
+    background: var(--color-info-muted);
+    color: var(--color-info);
+  }
+  :global(.menu-dropdown .menu-item.text-accent) {
+    color: var(--color-accent);
+  }
+  :global(.menu-dropdown .menu-item.text-accent:hover) {
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+  }
+
+  :global(.menu-dropdown .menu-item:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  :global(.menu-dropdown .menu-item:disabled:hover) {
+    background: transparent;
   }
 </style>
