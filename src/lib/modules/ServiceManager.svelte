@@ -14,7 +14,6 @@
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
-  import CodeEditor from '../components/CodeEditor.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
@@ -24,12 +23,9 @@
   import Card from '../components/ui/Card.svelte';
   import KpiCard from '../components/ui/KpiCard.svelte';
   import BulkActionBar from '../components/ui/BulkActionBar.svelte';
-  import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
-  import Stepper from '../components/ui/Stepper.svelte';
-  import TabGroup from '../components/ui/TabGroup.svelte';
-  import Select from '../components/ui/Select.svelte';
-  import { portal } from '../actions/portal.ts';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import ServiceManagerModals from './service-manager/ServiceManagerModals.svelte';
+  import ServiceDrawer from './service-manager/ServiceDrawer.svelte';
+  import type { AutostartEntry, ServiceAction, ServiceUnit } from './service-manager/types';
   import { loadRecoveryWarning, persistRecoveryWarning, reduceRecoveryWarning } from '../utils/serviceRecovery';
   import { bootEnableState } from '../utils/serviceUnits';
 
@@ -41,8 +37,23 @@
     recoveryWarning = next;
     if (typeof localStorage !== 'undefined') persistRecoveryWarning(localStorage, next);
   }
+
+  async function retryDaemonReload() {
+    try {
+      await invoke<string>('unit_daemon_reload');
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
+      );
+      uiStore.addToast('systemd daemon reloaded successfully', 'success');
+    } catch (e) {
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-failed', error: e })
+      );
+      uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
+    }
+  }
   import {
-    Plus, Folder, Check, Sparkles, FileCode, Trash2
+    Plus, Trash2
   } from '@lucide/svelte';
 
   // ─── Tab ──────────────────────────────────────────────────────────────────
@@ -54,302 +65,8 @@
   );
 
   // ─── Service Manager state ─────────────────────────────────────────────────
-  interface ServiceUnit {
-    name: string;
-    load_state: string;
-    active_state: string;
-    sub_state: string;
-    description: string;
-    unit_file_state: string;
-    is_protected?: boolean;
-    protection_level?: string;
-    protection_reason?: string;
-  }
-
-  type ServiceAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'mask' | 'unmask' | 'reload';
-
-  // ─── New Unit Creation Wizard State ──────────────────────────────────────────
   let showCreateUnitModal = $state(false);
-  let createUnitStep = $state(1);
-  let unitForm = $state({
-    name: '',
-    description: '',
-    execStart: '',
-    workingDir: '',
-    user: 'root',
-    group: 'root',
-    type: 'simple',
-    restartPolicy: 'on-failure',
-    restartSec: '5s',
-    timeoutSec: '30s',
-    afterTargets: ['network.target', 'network-online.target'],
-    wantsTargets: ['network-online.target'],
-    wantedBy: 'multi-user.target',
-    envVars: [{ key: 'NODE_ENV', value: 'production' }]
-  });
-  let isSubmittingUnit = $state(false);
-  let copiedUnitCode = $state(false);
-
-  let unitFormTouched = $state({
-    name: false,
-    execStart: false,
-    workingDir: false,
-    user: false,
-    restartSec: false,
-    timeoutSec: false
-  });
-
-  let unitFormErrors = $derived.by(() => {
-    const errors: Record<string, string> = {};
-
-    // Unit Name
-    const rawName = unitForm.name.trim();
-    if (!rawName) {
-      errors.name = 'Unit name is required.';
-    } else if (/\s/.test(rawName)) {
-      errors.name = 'Unit name cannot contain whitespace.';
-    } else if (!/^[a-zA-Z0-9_\-@\.]+$/.test(rawName)) {
-      errors.name = 'Invalid characters (only letters, numbers, -, _, @, . allowed).';
-    }
-
-    // ExecStart
-    const exec = unitForm.execStart.trim();
-    if (!exec) {
-      errors.execStart = 'ExecStart command / binary path is required.';
-    } else if (!exec.startsWith('/') && !exec.startsWith('@') && !exec.startsWith('-') && !exec.startsWith(':')) {
-      errors.execStart = 'ExecStart should start with an absolute path (e.g. /usr/bin/node ...).';
-    }
-
-    // Working Directory
-    const cwd = unitForm.workingDir.trim();
-    if (cwd && !cwd.startsWith('/') && !cwd.startsWith('~')) {
-      errors.workingDir = 'Working directory must be an absolute path (starts with /).';
-    }
-
-    // Execution User
-    const usr = unitForm.user.trim();
-    if (usr && !/^[a-z_][a-z0-9_-]*[$]?$/i.test(usr)) {
-      errors.user = 'Invalid username format (alphanumeric and dashes only).';
-    }
-
-    // RestartSec
-    const rsec = unitForm.restartSec.trim();
-    if (rsec && !/^\d+(\.\d+)?(ms|s|min|h|d|w)?$/.test(rsec)) {
-      errors.restartSec = 'Invalid time span (e.g. 5s, 500ms, 2min).';
-    }
-
-    // TimeoutSec
-    const tsec = unitForm.timeoutSec.trim();
-    if (tsec && !/^\d+(\.\d+)?(ms|s|min|h|d|w)?$/.test(tsec)) {
-      errors.timeoutSec = 'Invalid time span (e.g. 30s, 1min).';
-    }
-
-    // Env vars
-    for (const ev of unitForm.envVars) {
-      const k = ev.key.trim();
-      if (k && !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) {
-        errors.envVars = `Invalid environment variable name "${k}". Must be a valid identifier.`;
-        break;
-      }
-    }
-
-    return errors;
-  });
-
-  let isStep1Valid = $derived(!unitFormErrors.name && !unitFormErrors.execStart && !unitFormErrors.workingDir && !unitFormErrors.user);
-  let isStep2Valid = $derived(!unitFormErrors.restartSec && !unitFormErrors.timeoutSec && !unitFormErrors.envVars);
-
-  // Generate standard systemd .service unit content
-  let generatedUnitContent = $derived.by(() => {
-    const lines: string[] = [];
-    lines.push('[Unit]');
-    lines.push(`Description=${unitForm.description || unitForm.name || 'Custom Systemd Service'}`);
-    if (unitForm.afterTargets.length > 0) {
-      lines.push(`After=${unitForm.afterTargets.join(' ')}`);
-    }
-    if (unitForm.wantsTargets.length > 0) {
-      lines.push(`Wants=${unitForm.wantsTargets.join(' ')}`);
-    }
-    lines.push('');
-    lines.push('[Service]');
-    lines.push(`Type=${unitForm.type}`);
-    if (unitForm.user && !userScope) lines.push(`User=${unitForm.user}`);
-    if (unitForm.group && !userScope) lines.push(`Group=${unitForm.group}`);
-    if (unitForm.workingDir) lines.push(`WorkingDirectory=${unitForm.workingDir}`);
-    lines.push(`ExecStart=${unitForm.execStart || '/usr/bin/executable'}`);
-    lines.push(`Restart=${unitForm.restartPolicy}`);
-    if (unitForm.restartPolicy !== 'no') {
-      lines.push(`RestartSec=${unitForm.restartSec || '5s'}`);
-    }
-    if (unitForm.timeoutSec) {
-      lines.push(`TimeoutSec=${unitForm.timeoutSec}`);
-    }
-    for (const ev of unitForm.envVars) {
-      if (ev.key.trim()) {
-        const escaped = ev.value.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        lines.push(`Environment="${ev.key.trim()}=${escaped}"`);
-      }
-    }
-    lines.push('');
-    lines.push('[Install]');
-    lines.push(`WantedBy=${unitForm.wantedBy || 'multi-user.target'}`);
-    lines.push('');
-    return lines.join('\n');
-  });
-
-  async function browseExecStartBinary() {
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: false,
-        title: 'Select Executable Binary / Script'
-      });
-      if (selected && typeof selected === 'string') {
-        unitForm.execStart = selected;
-        if (!unitForm.name.trim()) {
-          const base = selected.split('/').pop()?.replace(/\.[^/.]+$/, '') || '';
-          if (base) unitForm.name = base;
-        }
-        if (!unitForm.workingDir.trim()) {
-          const dir = selected.substring(0, selected.lastIndexOf('/'));
-          if (dir) unitForm.workingDir = dir;
-        }
-      }
-    } catch (err) {
-      console.warn('Dialog error:', err);
-    }
-  }
-
-  async function browseUnitWorkingDir() {
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        title: 'Select Working Directory'
-      });
-      if (selected && typeof selected === 'string') {
-        unitForm.workingDir = selected;
-      }
-    } catch (err) {
-      console.warn('Dialog error:', err);
-    }
-  }
-
-  function resetUnitForm() {
-    unitForm = {
-      name: '',
-      description: '',
-      execStart: '',
-      workingDir: '',
-      user: 'root',
-      group: 'root',
-      type: 'simple',
-      restartPolicy: 'on-failure',
-      restartSec: '5s',
-      timeoutSec: '30s',
-      afterTargets: ['network.target', 'network-online.target'],
-      wantsTargets: ['network-online.target'],
-      wantedBy: 'multi-user.target',
-      envVars: [{ key: 'NODE_ENV', value: 'production' }],
-    };
-    unitFormTouched = {
-      name: false,
-      execStart: false,
-      workingDir: false,
-      user: false,
-      restartSec: false,
-      timeoutSec: false,
-    };
-    copiedUnitCode = false;
-    createUnitStep = 1;
-  }
-
-  async function handleCreateUnit(startImmediately = false) {
-    if (Object.keys(unitFormErrors).length > 0) {
-      unitFormTouched = {
-        name: true,
-        execStart: true,
-        workingDir: true,
-        user: true,
-        restartSec: true,
-        timeoutSec: true,
-      };
-      uiStore.addToast(Object.values(unitFormErrors)[0] ?? 'Fix the highlighted fields first.', 'warning');
-      createUnitStep = 1;
-      return;
-    }
-    if (!unitForm.name.trim()) {
-      uiStore.addToast('Please specify a unit name (e.g. my-app.service)', 'warning');
-      createUnitStep = 1;
-      return;
-    }
-    if (!unitForm.execStart.trim()) {
-      uiStore.addToast('Please specify the ExecStart command', 'warning');
-      createUnitStep = 1;
-      return;
-    }
-
-    let fullName = unitForm.name.trim();
-    if (!fullName.endsWith('.service')) {
-      fullName += '.service';
-    }
-
-    try {
-      const exists = await invoke<boolean>('unit_file_exists', { name: fullName, userMode: userScope });
-      if (exists) {
-        uiStore.addToast(
-          `A unit file named "${fullName}" already exists. Edit its override instead.`,
-          'error'
-        );
-        createUnitStep = 1;
-        return;
-      }
-    } catch (e) {
-      uiStore.addToast(`Could not check whether ${fullName} exists: ${e}`, 'error');
-      return;
-    }
-
-    if (!userScope) {
-      uiStore.confirm(
-        'Create System Unit as Root',
-        `This will write a root-owned systemd unit file for "${fullName}" and run daemon-reload.\n\nOnly continue if you trust this unit definition.\n\n${generatedUnitContent}`,
-        () => doCreateUnit(fullName, startImmediately),
-        true
-      );
-      return;
-    }
-    await doCreateUnit(fullName, startImmediately);
-  }
-
-  async function doCreateUnit(fullName: string, startImmediately: boolean) {
-    isSubmittingUnit = true;
-    try {
-      await invoke('create_unit_file', {
-        name: fullName,
-        content: generatedUnitContent,
-        userMode: userScope
-      });
-
-      uiStore.addToast(`Unit "${fullName}" created successfully!`, 'success');
-      showCreateUnitModal = false;
-
-      if (startImmediately) {
-        try {
-          await invoke('unit_action', { name: fullName, action: 'start', userMode: userScope });
-          uiStore.addToast(`Started "${fullName}"`, 'success');
-        } catch (err) {
-          uiStore.addToast(`Failed to start unit: ${err}`, 'warning');
-        }
-      }
-
-      await load();
-      jumpToService(fullName);
-    } catch (e: any) {
-      uiStore.addToast(`Failed to create unit file: ${e}`, 'error');
-    } finally {
-      isSubmittingUnit = false;
-    }
-  }
+  let autostartModalEntry = $state<AutostartEntry | null | undefined>(undefined);
 
   let units = $state<ServiceUnit[]>([]);
   let loading = $state(false);
@@ -387,24 +104,12 @@
 
   let selectedUnit = $state<ServiceUnit | null>(null);
   let panelScope = $state(false);
-  let panelRequestId = 0;
   let highlightedUnit = $state<string | null>(null);
   let activePanel = $state<'logs' | 'editor' | 'dependencies' | null>(null);
   let panelOpen = $state(false);
-  let logs = $state('');
-  let logsLoading = $state(false);
-  let unitFileContent = $state('');
-  let unitFileLoading = $state(false);
-  let editorTab = $state<'override' | 'effective'>('override');
-  let effectiveUnitContent = $state('');
-  let effectiveUnitLoading = $state(false);
-  let effectiveUnitError = $state<string | null>(null);
   let actionInProgress = $state<string | null>(null);
   let bulkInProgress = $state(false);
-  let editedContent = $state('');
-  let saving = $state(false);
   let selectedUnitNames = $state<Set<string>>(new Set());
-  let showUnitDiffModal = $state(false);
 
   // Context Menu State for Services
   let contextMenu = $state<{
@@ -545,15 +250,6 @@
   }
 
   // Service Dependencies State
-  interface UnitDeps {
-    requires: string[];
-    wants: string[];
-    after: string[];
-    before: string[];
-  }
-  let unitDeps = $state<UnitDeps | null>(null);
-  let depsLoading = $state(false);
-  let depsError = $state<string | null>(null);
 
   // System vs User scope
   let userScope = $state(false);
@@ -848,107 +544,16 @@
     }
   }
 
-  async function openLogs(unit: ServiceUnit) {
-    const requestId = ++panelRequestId;
-    const name = unit.name;
-    const scope = userScope;
-    panelScope = scope;
+  function openPanel(unit: ServiceUnit, panel: 'logs' | 'editor' | 'dependencies') {
+    panelScope = userScope;
     selectedUnit = unit;
-    activePanel = 'logs';
+    activePanel = panel;
     panelOpen = true;
-    logsLoading = true;
-    logs = '';
-    try {
-      const content = await invoke<string>('get_service_logs', { name, lines: 100, userMode: scope });
-      if (requestId !== panelRequestId) return;
-      logs = content;
-      statusStore.setLastCommand(`journalctl ${scope ? '--user' : ''} -u ${name} -n 100`, 0, true);
-    } catch (e) {
-      if (requestId !== panelRequestId) return;
-      logs = `Failed to load logs: ${e}`;
-      uiStore.addToast(`Failed to load logs: ${e}`, 'error');
-      statusStore.setLastCommand(`journalctl ${scope ? '--user' : ''} -u ${name} -n 100`, 1, false);
-    } finally {
-      if (requestId === panelRequestId) logsLoading = false;
-    }
   }
 
-  async function openEditor(unit: ServiceUnit) {
-    const requestId = ++panelRequestId;
-    const name = unit.name;
-    const scope = userScope;
-    panelScope = scope;
-    selectedUnit = unit;
-    activePanel = 'editor';
-    panelOpen = true;
-    unitFileLoading = true;
-    unitFileContent = '';
-    editorTab = 'override';
-    effectiveUnitContent = '';
-    effectiveUnitError = null;
-    effectiveUnitLoading = false;
-    try {
-      const content = await invoke<string>('read_unit_override', { name, userMode: scope });
-      if (requestId !== panelRequestId) return;
-      unitFileContent = content;
-      editedContent = content;
-      statusStore.setLastCommand(`cat ${scope ? '~/.config/systemd/user' : '/etc/systemd/system'}/${name}.d/override.conf`, 0, true);
-    } catch (e) {
-      if (requestId !== panelRequestId) return;
-      unitFileContent = '';
-      editedContent = '';
-      uiStore.addToast(`Failed to read override for ${name}: ${e}`, 'error');
-      statusStore.setLastCommand(`cat ${scope ? '~/.config/systemd/user' : '/etc/systemd/system'}/${name}.d/override.conf`, 1, false);
-    } finally {
-      if (requestId === panelRequestId) unitFileLoading = false;
-    }
-  }
-
-  async function loadEffectiveUnit() {
-    if (!selectedUnit || effectiveUnitLoading) return;
-    const name = selectedUnit.name;
-    const scope = panelScope;
-    effectiveUnitLoading = true;
-    effectiveUnitError = null;
-    try {
-      const content = await invoke<string>('read_unit_file', { name, userMode: scope });
-      if (selectedUnit?.name !== name) return;
-      effectiveUnitContent = content;
-      statusStore.setLastCommand(`systemctl ${scope ? '--user ' : ''}cat ${name}`, 0, true);
-    } catch (e) {
-      if (selectedUnit?.name !== name) return;
-      effectiveUnitError = `Failed to read effective unit: ${e}`;
-      statusStore.setLastCommand(`systemctl ${scope ? '--user ' : ''}cat ${name}`, 1, false);
-    } finally {
-      effectiveUnitLoading = false;
-    }
-  }
-
-  async function openDependencies(unit: ServiceUnit) {
-    const requestId = ++panelRequestId;
-    const name = unit.name;
-    const scope = userScope;
-    panelScope = scope;
-    selectedUnit = unit;
-    activePanel = 'dependencies';
-    panelOpen = true;
-    depsLoading = true;
-    unitDeps = null;
-    depsError = null;
-    try {
-      const deps = await invoke<UnitDeps>('get_unit_dependencies', { name, userMode: scope });
-      if (requestId !== panelRequestId) return;
-      unitDeps = deps;
-      statusStore.setLastCommand(`systemctl show ${name} --property=Requires,Wants,After,Before`, 0, true);
-    } catch (e) {
-      if (requestId !== panelRequestId) return;
-      depsError = `Failed to load dependencies: ${e}`;
-      uiStore.addToast(depsError, 'error');
-      statusStore.setLastCommand(`systemctl show ${name} --property=Requires,Wants,After,Before`, 1, false);
-    } finally {
-      if (requestId === panelRequestId) depsLoading = false;
-    }
-  }
+  function openLogs(unit: ServiceUnit) { openPanel(unit, 'logs'); }
+  function openEditor(unit: ServiceUnit) { openPanel(unit, 'editor'); }
+  function openDependencies(unit: ServiceUnit) { openPanel(unit, 'dependencies'); }
 
   function toggleUnitSelection(name: string) {
     if (selectedUnitNames.has(name)) {
@@ -1016,59 +621,6 @@
     } finally {
       actionInProgress = null;
       bulkInProgress = false;
-    }
-  }
-
-  function confirmSaveUnitFile() {
-    showUnitDiffModal = true;
-  }
-
-  async function retryDaemonReload() {
-    try {
-      await invoke<string>('unit_daemon_reload');
-      setRecoveryWarning(
-        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
-      );
-      uiStore.addToast('systemd daemon reloaded successfully', 'success');
-    } catch (e) {
-      setRecoveryWarning(
-        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-failed', error: e })
-      );
-      uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
-    }
-  }
-
-  function overridePath(name: string, scope: boolean): string {
-    return scope
-      ? `~/.config/systemd/user/${name}.d/override.conf`
-      : `/etc/systemd/system/${name}.d/override.conf`;
-  }
-
-  async function saveUnitFile() {
-    if (!selectedUnit) return;
-    saving = true;
-    try {
-      await invoke('write_unit_file', {
-        name: selectedUnit.name,
-        content: editedContent,
-        userMode: panelScope,
-      });
-      const targetPath = overridePath(selectedUnit.name, panelScope);
-      statusStore.setLastCommand(`echo "..." > ${targetPath} && systemctl ${panelScope ? '--user' : ''} daemon-reload`, 0, true);
-      uiStore.addToast(`Unit override saved for ${selectedUnit.name}`, 'success');
-      setRecoveryWarning(
-        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
-      );
-      unitFileContent = editedContent;
-      effectiveUnitContent = '';
-    } catch (e) {
-      setRecoveryWarning(
-        reduceRecoveryWarning(recoveryWarning, { kind: 'write-failed', error: e })
-      );
-      uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand(`echo "..." > ${overridePath(selectedUnit.name, panelScope)}`, 1, false);
-    } finally {
-      saving = false;
     }
   }
 
@@ -1176,12 +728,6 @@
     return totalMs;
   }
 
-  function closePanel() {
-    panelOpen = false;
-    activePanel = null;
-    selectedUnit = null;
-  }
-
   $effect(() => {
     if (!panelOpen) {
       if (activePanel !== null) activePanel = null;
@@ -1193,15 +739,6 @@
   });
 
   // ─── XDG Autostart state ───────────────────────────────────────────────────
-  interface AutostartEntry {
-    name: string;
-    exec: string;
-    comment: string;
-    enabled: boolean;
-    file_path: string;
-    icon: string | null;
-  }
-
   let autostartEntries = $state<AutostartEntry[]>([]);
   let autostartLoading = $state(false);
   let autostartFilter = $state('');
@@ -1247,6 +784,11 @@
     if (autostartCurrentPage > autostartTotalPages) autostartCurrentPage = autostartTotalPages;
   });
 
+  async function handleUnitCreated(name: string) {
+    await load();
+    jumpToService(name);
+  }
+
   async function loadAutostart() {
     autostartLoading = true;
     statusStore.setBusy('Loading XDG autostart entries…');
@@ -1281,126 +823,6 @@
   }
 
   // ─── Autostart Add / Edit Modal State & Actions ────────────────────────────
-  let showAutostartModal = $state(false);
-  let isEditingAutostart = $state(false);
-  let autostartSaving = $state(false);
-  let autostartOriginalFilePath = $state<string | null>(null);
-
-  let autostartForm = $state({
-    name: '',
-    exec: '',
-    comment: '',
-    enabled: true
-  });
-
-  let autostartFormTouched = $state({
-    name: false,
-    exec: false
-  });
-
-  let autostartFormErrors = $derived.by(() => {
-    const errors: Record<string, string> = {};
-    const name = autostartForm.name.trim();
-    if (!name) {
-      errors.name = 'Application name is required.';
-    } else if (name.includes('\n') || name.includes('\r')) {
-      errors.name = 'Application name cannot contain newline characters.';
-    }
-
-    const exec = autostartForm.exec.trim();
-    if (!exec) {
-      errors.exec = 'Command / Executable path is required.';
-    } else if (exec.includes('\n') || exec.includes('\r')) {
-      errors.exec = 'Command cannot contain newline characters.';
-    }
-
-    if (autostartForm.comment.includes('\n') || autostartForm.comment.includes('\r')) {
-      errors.comment = 'Comment cannot contain newline characters.';
-    }
-
-    return errors;
-  });
-
-  let isAutostartFormValid = $derived(!autostartFormErrors.name && !autostartFormErrors.exec && !autostartFormErrors.comment);
-
-  function openAddAutostartModal() {
-    isEditingAutostart = false;
-    autostartOriginalFilePath = null;
-    autostartForm = {
-      name: '',
-      exec: '',
-      comment: '',
-      enabled: true
-    };
-    autostartFormTouched = { name: false, exec: false };
-    showAutostartModal = true;
-  }
-
-  function openEditAutostartModal(entry: AutostartEntry) {
-    isEditingAutostart = true;
-    autostartOriginalFilePath = entry.file_path;
-    autostartForm = {
-      name: entry.name,
-      exec: entry.exec,
-      comment: entry.comment || '',
-      enabled: entry.enabled
-    };
-    autostartFormTouched = { name: false, exec: false };
-    showAutostartModal = true;
-  }
-
-  async function browseAutostartExecBinary() {
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: false,
-        title: 'Select Executable Binary / Script'
-      });
-      if (selected && typeof selected === 'string') {
-        autostartForm.exec = selected;
-        autostartFormTouched.exec = true;
-        if (!autostartForm.name.trim()) {
-          const base = selected.split('/').pop()?.replace(/\.[^/.]+$/, '') || '';
-          if (base) {
-            autostartForm.name = base;
-            autostartFormTouched.name = true;
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('Autostart browse dialog error:', err);
-    }
-  }
-
-  async function saveAutostart() {
-    autostartFormTouched.name = true;
-    autostartFormTouched.exec = true;
-    if (!isAutostartFormValid) return;
-
-    autostartSaving = true;
-    try {
-      await invoke('save_autostart_entry', {
-        originalFilePath: autostartOriginalFilePath,
-        name: autostartForm.name.trim(),
-        exec: autostartForm.exec.trim(),
-        comment: autostartForm.comment.trim(),
-        enabled: autostartForm.enabled
-      });
-      uiStore.addToast(
-        isEditingAutostart
-          ? `Autostart "${autostartForm.name.trim()}" updated successfully`
-          : `Autostart "${autostartForm.name.trim()}" created successfully`,
-        'success'
-      );
-      showAutostartModal = false;
-      await loadAutostart();
-    } catch (e) {
-      uiStore.addToast(`Failed to save autostart entry: ${e}`, 'error');
-    } finally {
-      autostartSaving = false;
-    }
-  }
-
   function deleteAutostart(entry: AutostartEntry) {
     uiStore.confirm(
       'Delete Autostart Entry',
@@ -1436,29 +858,23 @@
   });
 </script>
 
+{#snippet refreshButton()}
+  <button
+    type="button"
+    class="header-refresh-btn"
+    class:refreshing={isRefreshing || loading || autostartLoading || loadingBlame}
+    disabled={isRefreshing || loading || autostartLoading || loadingBlame}
+    onclick={handleRefresh}
+    title={(isRefreshing || loading || autostartLoading || loadingBlame) ? "Refreshing data…" : "Refresh"}
+  >
+    <RefreshCw size={12} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
+    <span>{(isRefreshing || loading || autostartLoading || loadingBlame) ? 'Refreshing…' : 'Refresh'}</span>
+  </button>
+{/snippet}
+
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
     <div class="service-header-actions">
-      <div class="scope-slot" class:is-services={mainTab === 'services'}>
-      {#if mainTab === 'services'}
-        <!-- Single Toggleable Scope Button -->
-        <button 
-          class="scope-toggle-btn"
-          class:active={userScope}
-          onclick={() => { userScope = !userScope; }}
-          title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
-        >
-          {#if userScope}
-            <User size={11} />
-            <span>User Scope</span>
-          {:else}
-            <Server size={11} />
-            <span>System Scope</span>
-          {/if}
-        </button>
-      {/if}
-      </div>
-
       <div class="header-tab-bar">
         <button class="header-tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
           <Settings size={11} /> Services
@@ -1473,18 +889,6 @@
           <span class="header-tab-count">{blameEntries.length}</span>
         </button>
       </div>
-
-      <button 
-        type="button"
-        class="header-refresh-btn" 
-        class:refreshing={isRefreshing || loading || autostartLoading || loadingBlame}
-        disabled={isRefreshing || loading || autostartLoading || loadingBlame}
-        onclick={handleRefresh}
-        title={(isRefreshing || loading || autostartLoading || loadingBlame) ? "Refreshing data…" : "Refresh"}
-      >
-        <RefreshCw size={12} class={(isRefreshing || loading || autostartLoading || loadingBlame) ? 'spin-refresh' : ''} />
-        <span>{(isRefreshing || loading || autostartLoading || loadingBlame) ? 'Refreshing…' : 'Refresh'}</span>
-      </button>
     </div>
   </PageHeader>
 
@@ -1514,6 +918,21 @@
   {#if mainTab === 'services'}
     <!-- Filter & search row: Search on Left, Tabs & Action on Right -->
     <div class="header-row">
+      <button
+        class="scope-toggle-btn"
+        class:active={userScope}
+        onclick={() => { userScope = !userScope; }}
+        title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
+      >
+        {#if userScope}
+          <User size={11} />
+          <span>User Scope</span>
+        {:else}
+          <Server size={11} />
+          <span>System Scope</span>
+        {/if}
+      </button>
+
       <SearchBar 
         bind:value={filter} 
         count={filteredUnits.length} 
@@ -1546,10 +965,12 @@
           </button>
         </div>
 
+        {@render refreshButton()}
+
         <Button
           variant="primary"
           size="sm"
-          onclick={() => { resetUnitForm(); showCreateUnitModal = true; }}
+          onclick={() => showCreateUnitModal = true}
           title="Create a new systemd service unit file"
         >
           <Plus size={14} />
@@ -1567,10 +988,11 @@
         style="min-width:260px; max-width:380px; margin:0;" 
       />
       <div class="header-spacer"></div>
+      {@render refreshButton()}
       <Button
         variant="primary"
         size="sm"
-        onclick={openAddAutostartModal}
+        onclick={() => autostartModalEntry = null}
         title="Add new autostart application"
       >
         <Plus size={14} />
@@ -1640,189 +1062,21 @@
           style="min-width:240px; max-width:340px; margin:0;" 
         />
       {/if}
+      {@render refreshButton()}
     </div>
   {/if}
 
   {#if mainTab === 'services'}
     <!-- Side panel: Logs, Editor, or Dependencies -->
-    <SideDrawer
-      bind:isOpen={panelOpen}
-      title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : (activePanel === 'dependencies' ? `Dependencies — ${selectedUnit?.name}` : `Unit — ${selectedUnit?.name}`)}
-      width="640px"
-    >
-      {#snippet headerActions()}
-        {#if activePanel === 'logs' && selectedUnit}
-          <Button variant="outline" class="btn-sm" onclick={() => uiStore.jumpToJournalService(selectedUnit!.name)}>
-            <FileText size={13} /> Full Journal ↗
-          </Button>
-        {:else if activePanel === 'editor'}
-          {#if editorTab === 'override'}
-            <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
-              Retry daemon-reload
-            </Button>
-            <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
-              disabled={saving || editedContent === unitFileContent}>
-              {saving ? 'Saving…' : 'Save Override'}
-            </Button>
-          {:else}
-            <span class="badge badge-muted">Read-only</span>
-          {/if}
-        {/if}
-      {/snippet}
-
-      {#if selectedUnit?.is_protected}
-        <div class="drawer-protection-alert {selectedUnit.protection_level}">
-          {#if selectedUnit.protection_level === 'critical'}
-            <ShieldAlert size={18} class="protection-alert-icon critical" />
-            <div class="protection-alert-text">
-              <strong style="color: var(--color-error); font-size: 12.5px;">Critical Operating System Core</strong>
-              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit is critical for operating system integrity. Masking, disabling, or stopping is strictly locked.'}</span>
-            </div>
-          {:else}
-            <ShieldCheck size={18} class="protection-alert-icon essential" />
-            <div class="protection-alert-text">
-              <strong style="color: var(--color-accent); font-size: 12.5px;">Protected Infrastructure Service</strong>
-              <span style="font-size: 11.5px; color: var(--color-text-secondary);">{selectedUnit.protection_reason || 'This unit provides essential security, network, or display services. Guarded against accidental masking or disablement.'}</span>
-            </div>
-          {/if}
-        </div>
-      {/if}
-
-      {#if activePanel === 'logs'}
-        {#if logsLoading}
-          <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-            <RefreshCw size={14} class="animate-spin-slow" /> Loading logs…
-          </div>
-        {:else}
-          <pre class="log-output">{logs || 'No log output found.'}</pre>
-        {/if}
-      {:else if activePanel === 'dependencies'}
-        {#if depsLoading}
-          <div style="padding:24px;color:var(--color-text-muted);display:flex;align-items:center;justify-content:center;gap:8px">
-            <RefreshCw size={18} class="animate-spin-slow" /> Querying systemd dependency tree…
-          </div>
-        {:else if depsError}
-          <div class="empty-state" role="alert" style="padding:32px; color:var(--color-error);">{depsError}</div>
-        {:else if unitDeps}
-          <div style="display:flex; flex-direction:column; gap:16px; padding:4px 0;">
-            <!-- Requires -->
-            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
-                  <ShieldCheck size={14} style="color:var(--color-error);" /> Requires (Hard Dependencies)
-                </span>
-                <span class="badge badge-muted">{unitDeps.requires.length}</span>
-              </div>
-              {#if unitDeps.requires.length === 0}
-                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
-              {:else}
-                <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                  {#each unitDeps.requires as req}
-                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{req}</code>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-
-            <!-- Wants -->
-            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
-                  <Activity size={14} style="color:var(--color-warning);" /> Wants (Weak Dependencies)
-                </span>
-                <span class="badge badge-muted">{unitDeps.wants.length}</span>
-              </div>
-              {#if unitDeps.wants.length === 0}
-                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
-              {:else}
-                <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                  {#each unitDeps.wants as want}
-                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{want}</code>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-
-            <!-- After -->
-            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
-                  <ChevronRight size={14} style="color:var(--color-accent);" /> Starts After (Order)
-                </span>
-                <span class="badge badge-muted">{unitDeps.after.length}</span>
-              </div>
-              {#if unitDeps.after.length === 0}
-                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
-              {:else}
-                <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                  {#each unitDeps.after as aft}
-                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{aft}</code>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-
-            <!-- Before -->
-            <div class="card" style="padding:12px; background:var(--color-bg-base); border:1px solid var(--color-border);">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:12.5px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;">
-                  <ChevronRight size={14} style="color:var(--color-success);" /> Starts Before (Order)
-                </span>
-                <span class="badge badge-muted">{unitDeps.before.length}</span>
-              </div>
-              {#if unitDeps.before.length === 0}
-                <span style="font-size:11.5px; color:var(--color-text-muted);">None declared</span>
-              {:else}
-                <div style="display:flex; flex-wrap:wrap; gap:6px;">
-                  {#each unitDeps.before as bef}
-                    <code style="font-size:11px; background:var(--color-bg-card); padding:2px 8px; border-radius:4px; border:1px solid var(--color-border); font-family:var(--font-mono);">{bef}</code>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </div>
-        {/if}
-      {:else if activePanel === 'editor'}
-        <div style="display:flex; flex-direction:column; height:100%; min-height:0; gap:10px;">
-          <TabGroup
-            tabs={[
-              { id: 'override', label: 'Editable Override' },
-              { id: 'effective', label: 'Effective Unit (read-only)' },
-            ]}
-            bind:activeTab={editorTab}
-            size="sm"
-            onchange={(tab) => {
-              if (tab === 'effective' && effectiveUnitContent === '' && !effectiveUnitError) {
-                loadEffectiveUnit();
-              }
-            }}
-          />
-
-          {#if editorTab === 'override'}
-            {#if unitFileLoading}
-              <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-                <RefreshCw size={14} class="animate-spin-slow" /> Loading override…
-              </div>
-            {:else}
-              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
-                <CodeEditor value={unitFileContent} height="100%" onchange={(v) => editedContent = v} />
-              </div>
-            {/if}
-          {:else if effectiveUnitLoading}
-            <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-              <RefreshCw size={14} class="animate-spin-slow" /> Loading effective unit…
-            </div>
-          {:else if effectiveUnitError}
-            <div class="empty-state" role="alert" style="padding:24px; color:var(--color-error); gap:10px;">
-              <span>{effectiveUnitError}</span>
-              <Button variant="outline" size="sm" onclick={loadEffectiveUnit}>Retry</Button>
-            </div>
-          {:else}
-            <pre class="log-output" style="flex:1; min-height:0;">{effectiveUnitContent || 'No unit content returned.'}</pre>
-          {/if}
-        </div>
-      {/if}
-    </SideDrawer>
+    <ServiceDrawer
+      bind:open={panelOpen}
+      unit={selectedUnit}
+      panel={activePanel}
+      scope={panelScope}
+      recoveryWarning={recoveryWarning}
+      onwarning={setRecoveryWarning}
+      onretry={retryDaemonReload}
+    />
 
     <!-- Service List -->
     <div class="card" style="padding:0; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden;">
@@ -2093,7 +1347,7 @@
                     <Button
                       variant="ghost"
                       size="sm"
-                      onclick={() => openEditAutostartModal(entry)}
+                      onclick={() => autostartModalEntry = entry}
                       title="Edit autostart entry"
                       style="padding:4px 6px;"
                     >
@@ -2381,514 +1635,13 @@
   />
 {/if}
 
-<!-- MODAL: ADD / EDIT AUTOSTART APPLICATION -->
-<!-- ═════════════════════════════════════════════════════════════════════════ -->
-{#if showAutostartModal}
-  <div use:portal class="modal-backdrop" onclick={() => { if (!autostartSaving) showAutostartModal = false; }} role="presentation">
-    <div class="modal-card" style="max-width: 520px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
-      <div class="modal-header">
-        <div class="modal-title-wrap">
-          <Rocket size={18} class="text-accent" />
-          <h3>{isEditingAutostart ? 'Edit Autostart Application' : 'Add Autostart Application'}</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => { if (!autostartSaving) showAutostartModal = false; }}>×</button>
-      </div>
-
-      <div class="modal-body">
-        <!-- Application Name -->
-        <div class="form-group">
-          <label for="autostart-name-input" class="form-label">
-            Application Name <span class="text-rose">*</span>
-          </label>
-          <input
-            id="autostart-name-input"
-            type="text"
-            placeholder="e.g. Discord or Custom Script"
-            bind:value={autostartForm.name}
-            oninput={() => autostartFormTouched.name = true}
-            class="form-input"
-            class:input-error={autostartFormTouched.name && autostartFormErrors.name}
-          />
-          {#if autostartFormTouched.name && autostartFormErrors.name}
-            <span class="form-error-msg">{autostartFormErrors.name}</span>
-          {/if}
-        </div>
-
-        <!-- Command / Executable -->
-        <div class="form-group">
-          <label for="autostart-exec-input" class="form-label">
-            Command / Executable <span class="text-rose">*</span>
-          </label>
-          <div class="input-browse-wrap">
-            <input
-              id="autostart-exec-input"
-              type="text"
-              placeholder="e.g. /usr/bin/discord or custom-daemon.sh"
-              bind:value={autostartForm.exec}
-              oninput={() => autostartFormTouched.exec = true}
-              class="form-input font-mono"
-              class:input-error={autostartFormTouched.exec && autostartFormErrors.exec}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onclick={browseAutostartExecBinary}
-              title="Browse for executable binary or script"
-              type="button"
-            >
-              <Folder size={13} />
-              <span>Browse…</span>
-            </Button>
-          </div>
-          {#if autostartFormTouched.exec && autostartFormErrors.exec}
-            <span class="form-error-msg">{autostartFormErrors.exec}</span>
-          {:else}
-            <span class="form-help">Absolute path to executable binary, script, or command</span>
-          {/if}
-        </div>
-
-        <!-- Comment / Description -->
-        <div class="form-group">
-          <label for="autostart-comment-input" class="form-label">
-            Comment / Description <span class="text-muted" style="font-weight: normal;">(Optional)</span>
-          </label>
-          <input
-            id="autostart-comment-input"
-            type="text"
-            placeholder="e.g. Automatically launch on session login"
-            bind:value={autostartForm.comment}
-            class="form-input"
-            class:input-error={autostartFormErrors.comment}
-          />
-          {#if autostartFormErrors.comment}
-            <span class="form-error-msg">{autostartFormErrors.comment}</span>
-          {/if}
-        </div>
-
-        <!-- Enable Autostart Toggle -->
-        <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:var(--color-bg-surface); border:1px solid var(--color-border-subtle); border-radius:8px; margin-top:4px;">
-          <div style="display:flex; flex-direction:column; gap:2px;">
-            <span style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Enable Autostart</span>
-            <span style="font-size:11px; color:var(--color-text-muted);">Launch this application automatically when you log in</span>
-          </div>
-          <button
-            type="button"
-            class="ui-toggle"
-            class:on={autostartForm.enabled}
-            onclick={() => autostartForm.enabled = !autostartForm.enabled}
-            aria-checked={autostartForm.enabled}
-            role="switch"
-            aria-label="Enable autostart"
-          >
-            <span class="ui-toggle-thumb"></span>
-          </button>
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <Button
-          variant="outline"
-          onclick={() => showAutostartModal = false}
-          disabled={autostartSaving}
-        >
-          Cancel
-        </Button>
-        <Button
-          variant="primary"
-          onclick={saveAutostart}
-          disabled={!isAutostartFormValid || autostartSaving}
-          loading={autostartSaving}
-        >
-          <Check size={14} />
-          <span>{isEditingAutostart ? 'Save Changes' : 'Add Application'}</span>
-        </Button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- ═════════════════════════════════════════════════════════════════════════ -->
-<!-- MODAL: NEW SYSTEMD UNIT FILE WIZARD -->
-<!-- ═════════════════════════════════════════════════════════════════════════ -->
-{#if showCreateUnitModal}
-  <div use:portal class="modal-backdrop" onclick={() => { if (!isSubmittingUnit) showCreateUnitModal = false; }} role="presentation">
-    <div class="modal-card modal-wizard-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
-      <div class="modal-header">
-        <div class="modal-title-wrap">
-          <FileCode size={18} class="text-accent" />
-          <h3>Create Systemd Service Unit</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => { if (!isSubmittingUnit) showCreateUnitModal = false; }}>×</button>
-      </div>
-
-      <!-- Stepper Progress Bar -->
-      <Stepper
-        bind:currentStep={createUnitStep}
-        allowClick={false}
-        steps={[
-          { label: 'Unit Identity' },
-          { label: 'Lifecycle & Exec' },
-          { label: 'Dependencies' },
-          { label: 'Pre-flight Preview' }
-        ]}
-        onchange={(s) => {
-          if (s > 1 && !unitForm.name.trim()) {
-            uiStore.addToast('Please specify a unit name first', 'warning');
-            createUnitStep = 1;
-          }
-        }}
-      />
-
-      <div class="modal-body wizard-body">
-        {#if createUnitStep === 1}
-          <!-- ─── STEP 1: UNIT IDENTITY & EXECUTABLE ─── -->
-          <div class="step-pane">
-            <div class="form-row">
-              <div class="form-group">
-                <label for="unit-name-input" class="form-label">Service Unit Name <span class="text-rose">*</span></label>
-                <input
-                  id="unit-name-input"
-                  type="text"
-                  placeholder="e.g. api-service or worker"
-                  bind:value={unitForm.name}
-                  oninput={() => unitFormTouched.name = true}
-                  class="form-input font-mono"
-                  class:input-error={unitFormTouched.name && unitFormErrors.name}
-                />
-                {#if unitFormTouched.name && unitFormErrors.name}
-                  <small class="form-error-msg">{unitFormErrors.name}</small>
-                {:else}
-                  <small class="form-help">Will be saved as <code>{unitForm.name.trim() ? (unitForm.name.endsWith('.service') ? unitForm.name : unitForm.name + '.service') : 'name.service'}</code></small>
-                {/if}
-              </div>
-
-              <div class="form-group">
-                <label for="unit-desc-input" class="form-label">Description</label>
-                <input
-                  id="unit-desc-input"
-                  type="text"
-                  placeholder="e.g. My Production Backend Daemon"
-                  bind:value={unitForm.description}
-                  class="form-input"
-                />
-                <small class="form-help">Readable summary displayed in systemctl status</small>
-              </div>
-            </div>
-
-            <div class="form-group">
-              <label for="unit-exec-input" class="form-label">ExecStart Command <span class="text-rose">*</span></label>
-              <div class="input-browse-wrap">
-                <input
-                  id="unit-exec-input"
-                  type="text"
-                  placeholder="/usr/bin/node /var/www/app/dist/main.js or /usr/bin/python3 main.py"
-                  bind:value={unitForm.execStart}
-                  oninput={() => unitFormTouched.execStart = true}
-                  class="form-input font-mono"
-                  class:input-error={unitFormTouched.execStart && unitFormErrors.execStart}
-                />
-                <Button variant="outline" onclick={browseExecStartBinary} title="Browse for executable file">
-                  <Folder size={14} class="text-accent" />
-                  <span>Browse...</span>
-                </Button>
-              </div>
-              {#if unitFormTouched.execStart && unitFormErrors.execStart}
-                <small class="form-error-msg">{unitFormErrors.execStart}</small>
-              {:else}
-                <small class="form-help">Absolute binary path with launch arguments</small>
-              {/if}
-            </div>
-
-            <div class="form-row">
-              <div class="form-group">
-                <label for="unit-cwd-input" class="form-label">Working Directory (WorkingDirectory)</label>
-                <div class="input-browse-wrap">
-                  <input
-                    id="unit-cwd-input"
-                    type="text"
-                    placeholder="/var/www/my-app"
-                    bind:value={unitForm.workingDir}
-                    oninput={() => unitFormTouched.workingDir = true}
-                    class="form-input font-mono"
-                    class:input-error={unitFormTouched.workingDir && unitFormErrors.workingDir}
-                  />
-                  <Button variant="outline" onclick={browseUnitWorkingDir} title="Browse working directory">
-                    <Folder size={14} />
-                  </Button>
-                </div>
-                {#if unitFormTouched.workingDir && unitFormErrors.workingDir}
-                  <small class="form-error-msg">{unitFormErrors.workingDir}</small>
-                {:else}
-                  <small class="form-help">Working folder for the daemon process</small>
-                {/if}
-              </div>
-
-              <div class="form-group">
-                <label for="unit-user-input" class="form-label">Execution User & Group</label>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                  <input
-                    id="unit-user-input"
-                    type="text"
-                    placeholder="User (e.g. root, node)"
-                    bind:value={unitForm.user}
-                    disabled={userScope}
-                    oninput={() => unitFormTouched.user = true}
-                    class="form-input"
-                    class:input-error={unitFormTouched.user && unitFormErrors.user}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Group (e.g. root, node)"
-                    bind:value={unitForm.group}
-                    disabled={userScope}
-                    class="form-input"
-                  />
-                </div>
-                {#if unitFormTouched.user && unitFormErrors.user}
-                  <small class="form-error-msg">{unitFormErrors.user}</small>
-                {:else}
-                  <small class="form-help">{userScope ? 'User mode inherits current user' : 'Run daemon under non-root account for security'}</small>
-                {/if}
-              </div>
-            </div>
-          </div>
-
-        {:else if createUnitStep === 2}
-          <!-- ─── STEP 2: LIFECYCLE & EXECUTION ─── -->
-          <div class="step-pane">
-            <div class="form-row">
-              <div class="form-group">
-                <label for="unit-type-select" class="form-label">Service Type (Type=)</label>
-                <Select id="unit-type-select" bind:value={unitForm.type}>
-                  <option value="simple">simple — Standard daemon process (Default)</option>
-                  <option value="forking">forking — Process calls fork() (e.g. traditional daemons)</option>
-                  <option value="oneshot">oneshot — Short-lived batch script/task</option>
-                  <option value="notify">notify — Daemon sends readiness signal with sd_notify()</option>
-                </Select>
-              </div>
-
-              <div class="form-group">
-                <label for="unit-restart-select" class="form-label">Restart Policy (Restart=)</label>
-                <Select id="unit-restart-select" bind:value={unitForm.restartPolicy}>
-                  <option value="on-failure">on-failure — Restart only on crash / non-zero exit (Recommended)</option>
-                  <option value="always">always — Always restart unconditionally</option>
-                  <option value="on-abort">on-abort — Restart on uncaught signal / abort</option>
-                  <option value="no">no — Never restart automatically</option>
-                </Select>
-              </div>
-            </div>
-
-            <div class="form-row">
-              <div class="form-group">
-                <label for="unit-restart-sec" class="form-label">Restart Delay (RestartSec=)</label>
-                <input
-                  id="unit-restart-sec"
-                  type="text"
-                  placeholder="5s"
-                  bind:value={unitForm.restartSec}
-                  oninput={() => unitFormTouched.restartSec = true}
-                  class="form-input font-mono"
-                  class:input-error={unitFormTouched.restartSec && unitFormErrors.restartSec}
-                />
-                {#if unitFormTouched.restartSec && unitFormErrors.restartSec}
-                  <small class="form-error-msg">{unitFormErrors.restartSec}</small>
-                {/if}
-              </div>
-              <div class="form-group">
-                <label for="unit-timeout-sec" class="form-label">Stop Timeout (TimeoutSec=)</label>
-                <input
-                  id="unit-timeout-sec"
-                  type="text"
-                  placeholder="30s"
-                  bind:value={unitForm.timeoutSec}
-                  oninput={() => unitFormTouched.timeoutSec = true}
-                  class="form-input font-mono"
-                  class:input-error={unitFormTouched.timeoutSec && unitFormErrors.timeoutSec}
-                />
-                {#if unitFormTouched.timeoutSec && unitFormErrors.timeoutSec}
-                  <small class="form-error-msg">{unitFormErrors.timeoutSec}</small>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Environment Variables list -->
-            <div class="form-group">
-              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
-                <span class="form-label" style="margin:0;">Environment Variables</span>
-                <button
-                  type="button"
-                  class="btn-text"
-                  onclick={() => unitForm.envVars = [...unitForm.envVars, { key: '', value: '' }]}
-                  style="font-size:11.5px; color:var(--color-accent); display:flex; align-items:center; gap:4px; background:transparent; border:none; cursor:pointer;"
-                >
-                  <Plus size={12} /> Add Variable
-                </button>
-              </div>
-              {#if unitFormErrors.envVars}
-                <small class="form-error-msg" style="margin-bottom:6px;">{unitFormErrors.envVars}</small>
-              {/if}
-              <div style="display:flex; flex-direction:column; gap:6px; max-height:130px; overflow-y:auto; padding-right:2px;">
-                {#each unitForm.envVars as ev, idx}
-                  <div style="display:grid; grid-template-columns:1fr 1fr 28px; gap:8px; align-items:center;">
-                    <input type="text" placeholder="KEY (e.g. PORT)" bind:value={ev.key} class="form-input font-mono" />
-                    <input type="text" placeholder="VALUE (e.g. 3000)" bind:value={ev.value} class="form-input font-mono" />
-                    <button
-                      type="button"
-                      onclick={() => unitForm.envVars = unitForm.envVars.filter((_, i) => i !== idx)}
-                      style="background:transparent; border:none; color:var(--color-error); cursor:pointer; display:flex; align-items:center; justify-content:center;"
-                      title="Remove variable"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            </div>
-          </div>
-
-        {:else if createUnitStep === 3}
-          <!-- ─── STEP 3: DEPENDENCIES & TARGETS ─── -->
-          <div class="step-pane">
-            <div class="form-group">
-              <span class="form-label">Startup Ordering (After=)</span>
-              <div class="preset-pill-row">
-                {#each ['network.target', 'network-online.target', 'docker.service', 'nginx.service', 'postgresql.service', 'mysqld.service', 'redis.service'] as target}
-                  <button
-                    type="button"
-                    class="preset-pill"
-                    class:active-pill={unitForm.afterTargets.includes(target)}
-                    onclick={() => {
-                      if (unitForm.afterTargets.includes(target)) {
-                        unitForm.afterTargets = unitForm.afterTargets.filter(t => t !== target);
-                      } else {
-                        unitForm.afterTargets = [...unitForm.afterTargets, target];
-                      }
-                    }}
-                  >
-                    {target}
-                  </button>
-                {/each}
-              </div>
-              <small class="form-help">Selected services must finish starting before this unit begins execution</small>
-            </div>
-
-            <div class="form-group">
-              <span class="form-label">Soft Dependencies (Wants=)</span>
-              <div class="preset-pill-row">
-                {#each ['network-online.target', 'docker.service', 'postgresql.service', 'redis.service'] as target}
-                  <button
-                    type="button"
-                    class="preset-pill"
-                    class:active-pill={unitForm.wantsTargets.includes(target)}
-                    onclick={() => {
-                      if (unitForm.wantsTargets.includes(target)) {
-                        unitForm.wantsTargets = unitForm.wantsTargets.filter(t => t !== target);
-                      } else {
-                        unitForm.wantsTargets = [...unitForm.wantsTargets, target];
-                      }
-                    }}
-                  >
-                    {target}
-                  </button>
-                {/each}
-              </div>
-              <small class="form-help">Services started alongside this unit without hard failure dependencies</small>
-            </div>
-
-            <div class="form-group">
-              <label for="wanted-by-select" class="form-label">Install Target (WantedBy=)</label>
-              <Select id="wanted-by-select" bind:value={unitForm.wantedBy}>
-                <option value="multi-user.target">multi-user.target — Normal boot / non-graphical runlevel (Standard)</option>
-                <option value="graphical.target">graphical.target — Full graphical desktop environment</option>
-                <option value="default.target">default.target — Current system default target</option>
-              </Select>
-            </div>
-          </div>
-
-        {:else if createUnitStep === 4}
-          <!-- ─── STEP 4: PRE-FLIGHT SYNTAX PREVIEW ─── -->
-          <div class="step-pane">
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Generated Systemd Unit File Syntax</span>
-              <button
-                type="button"
-                class="btn-copy-syntax"
-                onclick={() => {
-                  navigator.clipboard.writeText(generatedUnitContent);
-                  copiedUnitCode = true;
-                  setTimeout(() => copiedUnitCode = false, 1800);
-                }}
-              >
-                {#if copiedUnitCode}
-                  <Check size={12} style="color:var(--color-success);" />
-                  <span>Copied!</span>
-                {:else}
-                  <Copy size={12} />
-                  <span>Copy Syntax</span>
-                {/if}
-              </button>
-            </div>
-
-            <div class="terminal-preview-card font-mono">
-              <pre style="margin:0; font-size:11.5px; line-height:1.5; color:#f1f5f9; white-space:pre-wrap; word-break:break-all;">{generatedUnitContent}</pre>
-            </div>
-
-            <div class="step-info-card">
-              <Sparkles size={16} class="text-accent flex-shrink-0" />
-              <div class="text-xs text-secondary">
-                This unit file will be written to <code>{userScope ? '~/.config/systemd/user/' : '/etc/systemd/system/'}{unitForm.name.endsWith('.service') ? unitForm.name : unitForm.name + '.service'}</code> and systemd will automatically reload daemon.
-              </div>
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <!-- Modal Footer -->
-      <div class="modal-footer">
-        {#if createUnitStep > 1}
-          <Button variant="outline" onclick={() => createUnitStep--} disabled={isSubmittingUnit}>Back</Button>
-        {:else}
-          <Button variant="outline" onclick={() => showCreateUnitModal = false} disabled={isSubmittingUnit}>Cancel</Button>
-        {/if}
-
-        {#if createUnitStep < 4}
-          <Button variant="primary" onclick={() => {
-            if (createUnitStep === 1) {
-              unitFormTouched.name = true;
-              unitFormTouched.execStart = true;
-              unitFormTouched.workingDir = true;
-              unitFormTouched.user = true;
-              if (!isStep1Valid) {
-                uiStore.addToast(unitFormErrors.name || unitFormErrors.execStart || unitFormErrors.workingDir || 'Please fix step errors', 'warning');
-                return;
-              }
-            } else if (createUnitStep === 2) {
-              unitFormTouched.restartSec = true;
-              unitFormTouched.timeoutSec = true;
-              if (!isStep2Valid) {
-                uiStore.addToast(unitFormErrors.restartSec || unitFormErrors.timeoutSec || unitFormErrors.envVars || 'Please fix step errors', 'warning');
-                return;
-              }
-            }
-            createUnitStep++;
-          }}>
-            <span>Next</span>
-            <ChevronRight size={13} />
-          </Button>
-        {:else}
-          <Button variant="outline" onclick={() => handleCreateUnit(false)} disabled={isSubmittingUnit}>
-            <FileCode size={13} />
-            <span>Create Unit File</span>
-          </Button>
-          <Button variant="primary" onclick={() => handleCreateUnit(true)} disabled={isSubmittingUnit}>
-            <Play size={13} />
-            <span>Create &amp; Start</span>
-          </Button>
-        {/if}
-      </div>
-    </div>
-  </div>
-{/if}
+<ServiceManagerModals
+  bind:createOpen={showCreateUnitModal}
+  bind:autostartEntry={autostartModalEntry}
+  userScope={userScope}
+  oncreated={handleUnitCreated}
+  onautostartsaved={loadAutostart}
+/>
 
 <style>/* ── Header row (tabs + stats + search) ─────────────────────────────── */ .header-row {
     display: flex;
@@ -3001,29 +1754,12 @@
     background: #fff;
     transition: transform 0.2s ease;
     pointer-events: none;
-  }.ui-toggle.on .ui-toggle-thumb { transform: translateX(16px); }/* Service tab */ .log-output {
-    font-size: 11px;
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px;
-    margin: 0;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: rgba(0,0,0,0.2);
-    color: var(--color-text-secondary);
-    white-space: pre-wrap;
-    word-break: break-all;
-  }.selected-unit {
+  }.ui-toggle.on .ui-toggle-thumb { transform: translateX(16px); }.selected-unit {
     background: var(--color-active-bg) !important;
   }/* Header controls optimization */ .service-header-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-  }.scope-slot {
-    display: flex;
-    align-items: center;
-  }.scope-slot.is-services {
-    min-width: 104px;
   }.scope-toggle-btn {
     display: inline-flex;
     align-items: center;
@@ -3128,32 +1864,6 @@
     background: rgba(0, 218, 243, 0.12);
     color: var(--color-accent);
     border: 1px solid rgba(0, 218, 243, 0.3);
-  }.drawer-protection-alert {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px 14px;
-    border-radius: 8px;
-    margin-bottom: 16px;
-  }.drawer-protection-alert.critical {
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-  }.drawer-protection-alert.essential {
-    background: rgba(0, 218, 243, 0.08);
-    border: 1px solid rgba(0, 218, 243, 0.25);
-  }.protection-alert-icon.critical {
-    color: var(--color-error);
-    margin-top: 2px;
-    flex-shrink: 0;
-  }.protection-alert-icon.essential {
-    color: var(--color-accent);
-    margin-top: 2px;
-    flex-shrink: 0;
-  }.protection-alert-text {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    line-height: 1.4;
   }/* ── Cybernetic Pulse Loading Animation ───────────────────────────── */ .cyber-loading-matrix {
     display: flex;
     flex-direction: column;
@@ -3323,191 +2033,7 @@
     color: var(--color-accent) !important;
   }
 @keyframes spin-cw {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
-}/* ── Service Creation Wizard Modal Styles ── */ .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.75);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 99990;
-    padding: 20px;
-  }.modal-card {
-    background: var(--color-bg-card);
-    border: 1px solid var(--color-border);
-    border-radius: 14px;
-    width: 100%;
-    max-width: 580px;
-    max-height: 90vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    position: relative;
-  }.modal-wizard-card {
-    width: 920px;
-    max-width: calc(100vw - 40px);
-    height: 620px;
-    max-height: 92vh;
-  }.modal-header {
-    padding: 14px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--color-border-subtle);
-    border-top-left-radius: 13px;
-    border-top-right-radius: 13px;
-  }.modal-title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }.modal-title-wrap h3 {
-    font-size: 15px;
-    font-weight: 600;
-    margin: 0;
-  }.modal-close-btn {
-    background: transparent;
-    border: none;
-    font-size: 20px;
-    color: var(--color-text-muted);
-    cursor: pointer;
-  }.modal-body {
-    padding: 20px 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }.wizard-body {
-    flex: 1;
-    min-height: 0;
-    padding: 18px 20px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-  }.step-pane {
-    display: flex;
-    flex-direction: column;
-    gap: 13px;
-    flex: 1;
-  }.step-info-card {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background: var(--color-bg-surface);
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 8px;
-    margin-top: auto;
-  }.form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }.form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }.form-label {
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-  }.form-input {
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    padding: 8px 10px;
-    font-size: 12.5px;
-    color: var(--color-text-primary);
-    font-family: inherit;
-    outline: none;
-  }.form-input:focus {
-    border-color: var(--color-accent);
-    box-shadow: 0 0 0 2px var(--color-accent-muted);
-  }.form-input.input-error {
-    border-color: var(--color-error, #f43f5e) !important;
-    box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.18) !important;
-  }.form-error-msg {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--color-error, #f43f5e);
-    margin-top: 2px;
-  }.form-help {
-    font-size: 10.5px;
-    color: var(--color-text-muted);
-  }.input-browse-wrap {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }.input-browse-wrap .form-input {
-    flex: 1;
-    min-width: 0;
-  }.preset-pill-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 4px;
-  }.preset-pill {
-    padding: 3px 9px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 500;
-    background: var(--color-bg-surface);
-    color: var(--color-text-secondary);
-    border: 1px solid var(--color-border-subtle);
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }.preset-pill:hover {
-    color: var(--color-accent);
-    border-color: var(--color-accent);
-  }.preset-pill.active-pill {
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
-    color: var(--color-accent, #00daf3);
-    border-color: var(--color-accent, #00daf3);
-    font-weight: 600;
-  }.terminal-preview-card {
-    background: #08111e;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 14px;
-    max-height: 250px;
-    overflow-y: auto;
-  }.btn-copy-syntax {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    background: var(--color-bg-surface);
-    border: 1px solid var(--color-border-subtle);
-    color: var(--color-text-secondary);
-    cursor: pointer;
-  }.btn-copy-syntax:hover {
-    color: var(--color-text-primary);
-  }.modal-footer {
-    padding: 12px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-    border-top: 1px solid var(--color-border-subtle);
-    background: var(--color-bg-surface);
-    border-bottom-left-radius: 13px;
-    border-bottom-right-radius: 13px;
-  }:global(html.light-mode) .modal-wizard-card {
-    background: #ffffff;
-    border-color: #e2e8f0;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
-  }:global(html.light-mode) .modal-header, :global(html.light-mode) .modal-footer {
-    background: #f8fafc;
-    border-color: #e2e8f0;
-  }:global(html.light-mode) .terminal-preview-card {
-    background: #f8fafc;
-    border-color: #cbd5e1;
-  }:global(html.light-mode) .terminal-preview-card pre {
-    color: #0f172a !important;
-  }
-  .text-rose { color: var(--color-error); }
-  .text-secondary { color: var(--color-text-secondary); }
+}  .text-secondary { color: var(--color-text-secondary); }
   .empty-state {
     display: flex;
     flex-direction: column;
