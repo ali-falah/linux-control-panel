@@ -24,7 +24,13 @@ async fn run_service_named_action(
     )
     .await?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.contains(&format!("the program '{action}' was not found")) {
+            return Err(format!(
+                "The installed administrator helper does not support '{action}'. Rebuild and reinstall the helper                  (cd src-tauri/helper && cargo build --release, then sudo install -m 0755 -o root -g root                  target/release/lcp-admin /usr/local/libexec/lcp-admin). Helper said: {stderr}"
+            ));
+        }
+        return Err(stderr);
     }
     Ok(())
 }

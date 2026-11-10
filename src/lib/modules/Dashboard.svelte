@@ -256,6 +256,73 @@
     }
   }
 
+  async function doAllServicesAction(action: 'start' | 'stop') {
+    if (serviceActionRunning) return;
+
+    const targets = displayServices.filter(svc =>
+      action === 'start'
+        ? svc.status !== 'active'
+        : svc.status === 'active' && !isCriticalService(svc.name)
+    );
+    const skipped = action === 'stop'
+      ? displayServices.filter(svc => svc.status === 'active' && isCriticalService(svc.name)).length
+      : 0;
+
+    if (targets.length === 0) {
+      uiStore.addToast(`No services to ${action}`, 'info');
+      return;
+    }
+
+    serviceActionRunning = 'bulk';
+    const failures: string[] = [];
+    try {
+      for (const svc of targets) {
+        try {
+          await invoke('unit_action', { name: svc.name, action, userMode: false });
+        } catch (e) {
+          failures.push(`${svc.name}: ${e}`);
+        }
+      }
+
+      const succeeded = targets.length - failures.length;
+      const skippedNote = skipped > 0
+        ? ` (${skipped} critical service${skipped === 1 ? '' : 's'} skipped)`
+        : '';
+      const verb = action === 'start' ? 'Started' : 'Stopped';
+
+      if (failures.length === 0) {
+        uiStore.addToast(`${verb} ${succeeded}/${targets.length} services${skippedNote}`, 'success');
+      } else {
+        const detail = failures.slice(0, 3).join('; ');
+        const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+        uiStore.addToast(
+          `${verb} ${succeeded}/${targets.length}; failed: ${detail}${more}${skippedNote}`,
+          'warning'
+        );
+      }
+
+      await fetchServicesWatchdog();
+    } finally {
+      serviceActionRunning = null;
+    }
+  }
+
+  function confirmStopAllServices() {
+    const running = displayServices.filter(
+      svc => svc.status === 'active' && !isCriticalService(svc.name)
+    );
+    if (running.length === 0) {
+      uiStore.addToast('No running services to stop', 'info');
+      return;
+    }
+    uiStore.confirm(
+      'Stop All Services',
+      `Stop ${running.length} running pinned service${running.length === 1 ? '' : 's'}? Critical core services are skipped.`,
+      () => doAllServicesAction('stop'),
+      true
+    );
+  }
+
   function confirmStopService(svc: ServiceDaemon) {
     closeAllContextMenus();
     if (isCriticalService(svc.name)) {
@@ -1550,6 +1617,28 @@
           {#snippet headerActions()}
             {#if failedServicesCount > 0}
               <Badge variant="error">{failedServicesCount} failed</Badge>
+            {/if}
+            {#if displayServices.length > 0}
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={() => doAllServicesAction('start')}
+                disabled={!!serviceActionRunning}
+                title="Start all pinned services"
+              >
+                <Play size={12} />
+                <span>Start All</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={confirmStopAllServices}
+                disabled={!!serviceActionRunning}
+                title="Stop all running pinned services"
+              >
+                <Square size={12} />
+                <span>Stop All</span>
+              </Button>
             {/if}
             <button
               type="button"
@@ -3127,7 +3216,7 @@
     padding: 16px 24px 24px 24px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 11px;
     box-sizing: border-box;
   }
 
@@ -3223,7 +3312,7 @@
   .metric-strip-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 24px;
+    gap: 17px;
     width: 100%;
     box-sizing: border-box;
   }
@@ -3344,10 +3433,10 @@
     flex-shrink: 0;
   }
 
-  /* ── Two-Column Grids (24px gutter, with strict minmax for responsiveness) ── */
+  /* ── Two-Column Grids (17px gutter, with strict minmax for responsiveness) ── */
   .two-col-grid {
     display: grid;
-    gap: 24px;
+    gap: 17px;
     align-items: stretch;
     width: 100%;
     max-width: 100%;
@@ -3739,7 +3828,7 @@
   .details-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 24px;
+    gap: 17px;
     padding: 8px 0 4px 0;
   }
 
@@ -3753,17 +3842,17 @@
 
   @media (max-width: 1050px) {
     .dashboard-content { padding: 14px 16px 20px; }
-    .metric-strip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .metric-strip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .two-col-grid.col-1-1,
-    .two-col-grid.col-3-2 { grid-template-columns: minmax(0, 1fr); gap: 14px; }
-    .details-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .two-col-grid.col-3-2 { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .details-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   }
 
   @media (max-width: 620px) {
     .dashboard-header-fixed { padding: 12px 14px; }
     .dashboard-header-row { align-items: flex-start; flex-direction: column; gap: 10px; }
     .header-actions-group { width: 100%; flex-wrap: wrap; gap: 6px; }
-    .dashboard-content { padding: 12px; gap: 12px; }
+    .dashboard-content { padding: 12px; gap: 8px; }
     .metric-strip-grid { gap: 8px; }
     .metric-tile { padding: 10px; }
     .metric-tile-num { font-size: 16px; }
