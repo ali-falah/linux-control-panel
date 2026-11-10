@@ -3,6 +3,7 @@
     id: string;
     label: string;
     count?: number;
+    icon?: any;
   }
 
   interface Props {
@@ -35,11 +36,15 @@
 
 <div class="tab-bar {sizeClass} {className}" {style}>
   {#each tabs as tab}
+    {@const TabIcon = tab.icon}
     <button
       class="tab-btn {sizeClass} {activeTab === tab.id ? 'active' : ''}"
       onclick={() => selectTab(tab.id)}
       {disabled}
     >
+      {#if TabIcon}
+        <TabIcon size={13} />
+      {/if}
       {tab.label}
       {#if tab.count !== undefined && tab.count > 0}
         <span class="tab-count" class:active-count={activeTab === tab.id}>{tab.count}</span>

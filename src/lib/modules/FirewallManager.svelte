@@ -94,7 +94,7 @@
     ports: string[];
   }
 
-  let state = $state<FirewallState | null>(null);
+  let firewallState = $state<FirewallState | null>(null);
   let loading = $state(true);
   
   let activeZone = $state<string>('');
@@ -189,12 +189,12 @@
     loading = true;
     statusStore.setBusy('Loading firewalld state…');
     try {
-      state = await invoke<FirewallState>('get_firewall_state');
+      firewallState = await invoke<FirewallState>('get_firewall_state');
       statusStore.setLastCommand('firewall-cmd --state', 0, true);
       
-      if (state.is_running && state.active_zones.length > 0) {
-        if (!activeZone || !state.active_zones.includes(activeZone)) {
-          activeZone = state.default_zone || state.active_zones[0];
+      if (firewallState.is_running && firewallState.active_zones.length > 0) {
+        if (!activeZone || !firewallState.active_zones.includes(activeZone)) {
+          activeZone = firewallState.default_zone || firewallState.active_zones[0];
         }
         await loadRules(activeZone);
       }
@@ -226,7 +226,7 @@
   }
 
   function confirmTogglePanic() {
-    const enable = !state?.is_panic;
+    const enable = !firewallState?.is_panic;
     if (!enable) {
       // Disabling restores normal firewall rules: not a destructive change,
       // so no dialog; the backend requires no confirmation either.
@@ -428,12 +428,12 @@
     <Button variant="ghost" class="" onclick={loadState} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
     </Button>
-    {#if state?.is_running}
+    {#if firewallState?.is_running}
       <Button 
-        variant={state.is_panic ? 'primary' : 'danger'}
+        variant={firewallState.is_panic ? 'primary' : 'danger'}
         onclick={confirmTogglePanic}
       >
-        <Power size={14} /> {state.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
+        <Power size={14} /> {firewallState.is_panic ? 'Disable Panic Mode' : 'Panic Mode'}
       </Button>
     {/if}
   </PageHeader>
@@ -461,14 +461,14 @@
     </div>
   {/if}
 
-  {#if loading && !state}
+  {#if loading && !firewallState}
     <div style="padding:48px 32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--color-text-muted)">
       <div style="position:relative; width:48px; height:48px; display:flex; align-items:center; justify-content:center; border-radius:50%; background:var(--color-bg-raised);">
         <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
       </div>
       <span style="font-weight:500">Loading Firewall State…</span>
     </div>
-  {:else if state && !state.is_running}
+  {:else if firewallState && !firewallState.is_running}
     <div class="empty-state" style="padding: 64px 32px;">
       <div style="width:64px; height:64px; border-radius:50%; background:rgba(255,71,87,0.1); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
         <ShieldAlert size={32} class="empty-state-icon" style="color:var(--color-danger); margin:0;" />
@@ -480,7 +480,7 @@
         firewalld is not currently running. You can start it from the Service Manager.
       </span>
     </div>
-  {:else if state}
+  {:else if firewallState}
     <GuideBanner
       icon={Shield}
       title="Dynamic Zone Management"
@@ -489,7 +489,7 @@
       style="margin-bottom: -4px;"
     />
 
-    {#if state.is_panic}
+    {#if firewallState.is_panic}
       <div style="margin-bottom:16px; padding:16px; border-radius:12px; background:rgba(255, 71, 87, 0.1); border:1px solid rgba(255, 71, 87, 0.3); display:flex; align-items:center; gap:12px">
         <ShieldAlert size={24} style="color:var(--color-danger)" />
         <div>
@@ -503,14 +503,14 @@
       <!-- Zones Sidebar -->
       <div class="card" style="width: 250px; display:flex; flex-direction:column; gap:8px">
         <h3 style="margin-top:0; color:var(--color-text-primary); font-size:14px">Active Zones</h3>
-        {#each state.active_zones as zone}
+        {#each firewallState.active_zones as zone}
           <Button 
             class="zone-btn {activeZone === zone ? 'active' : ''}"
             onclick={() => { activeZone = zone; loadRules(zone); }}
           >
             <ShieldCheck size={16} />
             {zone}
-            {#if zone === state.default_zone}
+            {#if zone === firewallState.default_zone}
               <span class="badge badge-info" style="margin-left:auto; font-size:10px; padding:2px 6px">Default</span>
             {/if}
           </Button>

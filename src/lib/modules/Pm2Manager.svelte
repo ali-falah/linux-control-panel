@@ -734,6 +734,23 @@
     }
   }
 
+  async function saveEcosystemFile(): Promise<boolean> {
+    const file = selectedEcosystemFile;
+    if (!file) return false;
+    try {
+      await invoke<string>('pm2_write_ecosystem_file', {
+        path: file.path,
+        content: ecosystemContent,
+      });
+      originalEcosystemContent = ecosystemContent;
+      uiStore.showToast(`Saved ${file.name}`, 'success');
+      return true;
+    } catch (err: any) {
+      uiStore.showToast(err || 'Failed to save ecosystem file', 'error');
+      return false;
+    }
+  }
+
   function openSaveEcosystemModal() {
     if (!selectedEcosystemFile) return;
     showEcosystemDiffModal = true;
@@ -2535,8 +2552,7 @@
     newContent={ecosystemContent}
     warningMessage="Ensure module export syntax and process names are valid before saving."
     onconfirm={async () => {
-      await saveEcosystemFile();
-      showEcosystemDiffModal = false;
+      if (await saveEcosystemFile()) showEcosystemDiffModal = false;
     }}
     oncancel={() => showEcosystemDiffModal = false}
   />

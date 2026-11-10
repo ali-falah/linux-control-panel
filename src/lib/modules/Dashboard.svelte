@@ -439,7 +439,7 @@
         try {
           const res = await invoke<string>('kill_process', { pid: proc.pid, signal });
           uiStore.addToast(res || `Process ${proc.name} (PID ${proc.pid}) terminated`, 'success');
-          await fetchSystemStats();
+          await fetchFastData();
         } catch (e) {
           uiStore.addToast(`Failed to terminate process: ${e}`, 'error');
         }
@@ -908,7 +908,7 @@
       const [os, disks, ifaces, lastUpdate, failedSvc, temp] = await Promise.all([
         invoke('get_os_info').catch(() => null),
         invoke('get_disk_usage').catch(() => null),
-        invoke('get_network_interfaces').catch(() => null),
+        invoke<any[]>('get_network_interfaces').catch(() => null),
         invoke<string>('get_last_system_update').catch(() => ''),
         invoke<number>('get_failed_services_count').then(count => {
           failedServicesCountLoaded = true;
@@ -1742,8 +1742,8 @@
                   <span class="data-row-label">{proc.name}</span>
                 </div>
                 <div class="data-row-right">
-                  <span class="proc-stat mono" title="CPU usage">CPU {proc.cpu_percent.toFixed(1)}%</span>
-                  <span class="proc-stat mono text-muted" title="Memory usage">RAM {proc.mem_percent !== undefined || proc.memory_percent !== undefined ? `${(proc.mem_percent ?? proc.memory_percent).toFixed(1)}%` : '—'}</span>
+                  <span class="proc-stat mono" title="CPU usage">CPU {(proc.cpu_percent ?? 0).toFixed(1)}%</span>
+                  <span class="proc-stat mono text-muted" title="Memory usage">RAM {proc.mem_percent !== undefined || proc.memory_percent !== undefined ? `${((proc.mem_percent ?? proc.memory_percent) ?? 0).toFixed(1)}%` : '—'}</span>
                   <button
                     type="button"
                     class="row-kebab-trigger"

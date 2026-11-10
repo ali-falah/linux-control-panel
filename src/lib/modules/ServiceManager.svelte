@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
@@ -18,6 +18,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Card from '../components/ui/Card.svelte';
@@ -25,10 +26,12 @@
   import BulkActionBar from '../components/ui/BulkActionBar.svelte';
   import ConfigDiffModal from '../components/ConfigDiffModal.svelte';
   import Stepper from '../components/ui/Stepper.svelte';
+  import TabGroup from '../components/ui/TabGroup.svelte';
   import Select from '../components/ui/Select.svelte';
   import { portal } from '../actions/portal.ts';
   import { open } from '@tauri-apps/plugin-dialog';
   import { loadRecoveryWarning, persistRecoveryWarning, reduceRecoveryWarning } from '../utils/serviceRecovery';
+  import { bootEnableState } from '../utils/serviceUnits';
 
   let recoveryWarning = $state<string | null>(
     typeof localStorage !== 'undefined' ? loadRecoveryWarning(localStorage) : null
@@ -183,7 +186,8 @@
     }
     for (const ev of unitForm.envVars) {
       if (ev.key.trim()) {
-        lines.push(`Environment="${ev.key.trim()}=${ev.value.trim()}"`);
+        const escaped = ev.value.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        lines.push(`Environment="${ev.key.trim()}=${escaped}"`);
       }
     }
     lines.push('');
@@ -231,7 +235,49 @@
     }
   }
 
+  function resetUnitForm() {
+    unitForm = {
+      name: '',
+      description: '',
+      execStart: '',
+      workingDir: '',
+      user: 'root',
+      group: 'root',
+      type: 'simple',
+      restartPolicy: 'on-failure',
+      restartSec: '5s',
+      timeoutSec: '30s',
+      afterTargets: ['network.target', 'network-online.target'],
+      wantsTargets: ['network-online.target'],
+      wantedBy: 'multi-user.target',
+      envVars: [{ key: 'NODE_ENV', value: 'production' }],
+    };
+    unitFormTouched = {
+      name: false,
+      execStart: false,
+      workingDir: false,
+      user: false,
+      restartSec: false,
+      timeoutSec: false,
+    };
+    copiedUnitCode = false;
+    createUnitStep = 1;
+  }
+
   async function handleCreateUnit(startImmediately = false) {
+    if (Object.keys(unitFormErrors).length > 0) {
+      unitFormTouched = {
+        name: true,
+        execStart: true,
+        workingDir: true,
+        user: true,
+        restartSec: true,
+        timeoutSec: true,
+      };
+      uiStore.addToast(Object.values(unitFormErrors)[0] ?? 'Fix the highlighted fields first.', 'warning');
+      createUnitStep = 1;
+      return;
+    }
     if (!unitForm.name.trim()) {
       uiStore.addToast('Please specify a unit name (e.g. my-app.service)', 'warning');
       createUnitStep = 1;
@@ -248,10 +294,25 @@
       fullName += '.service';
     }
 
+    try {
+      const exists = await invoke<boolean>('unit_file_exists', { name: fullName, userMode: userScope });
+      if (exists) {
+        uiStore.addToast(
+          `A unit file named "${fullName}" already exists. Edit its override instead.`,
+          'error'
+        );
+        createUnitStep = 1;
+        return;
+      }
+    } catch (e) {
+      uiStore.addToast(`Could not check whether ${fullName} exists: ${e}`, 'error');
+      return;
+    }
+
     if (!userScope) {
       uiStore.confirm(
         'Create System Unit as Root',
-        `This will write a root-owned systemd drop-in for "${fullName}" and run daemon-reload.\n\nOnly continue if you trust this unit definition.\n\n${generatedUnitContent}`,
+        `This will write a root-owned systemd unit file for "${fullName}" and run daemon-reload.\n\nOnly continue if you trust this unit definition.\n\n${generatedUnitContent}`,
         () => doCreateUnit(fullName, startImmediately),
         true
       );
@@ -263,7 +324,7 @@
   async function doCreateUnit(fullName: string, startImmediately: boolean) {
     isSubmittingUnit = true;
     try {
-      await invoke('write_unit_file', {
+      await invoke('create_unit_file', {
         name: fullName,
         content: generatedUnitContent,
         userMode: userScope
@@ -325,13 +386,21 @@
   });
 
   let selectedUnit = $state<ServiceUnit | null>(null);
+  let panelScope = $state(false);
+  let panelRequestId = 0;
+  let highlightedUnit = $state<string | null>(null);
   let activePanel = $state<'logs' | 'editor' | 'dependencies' | null>(null);
   let panelOpen = $state(false);
   let logs = $state('');
   let logsLoading = $state(false);
   let unitFileContent = $state('');
   let unitFileLoading = $state(false);
+  let editorTab = $state<'override' | 'effective'>('override');
+  let effectiveUnitContent = $state('');
+  let effectiveUnitLoading = $state(false);
+  let effectiveUnitError = $state<string | null>(null);
   let actionInProgress = $state<string | null>(null);
+  let bulkInProgress = $state(false);
   let editedContent = $state('');
   let saving = $state(false);
   let selectedUnitNames = $state<Set<string>>(new Set());
@@ -348,14 +417,127 @@
   function handleServiceContextMenu(e: MouseEvent, unit: ServiceUnit) {
     e.preventDefault();
     e.stopPropagation();
-    const menuWidth = 260;
-    const menuHeight = 440;
-    contextMenu = {
-      x: Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 10)),
-      y: Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 10)),
-      show: true,
-      unit
-    };
+    contextMenu = { x: e.clientX, y: e.clientY, show: true, unit };
+  }
+
+  function serviceContextItems(unit: ServiceUnit): Array<{
+    label: string;
+    icon?: any;
+    action?: () => void;
+    danger?: boolean;
+    disabled?: boolean;
+    divider?: boolean;
+    color?: string;
+  }> {
+    const items = [];
+    items.push({
+      label: 'Restart Service',
+      icon: RotateCcw,
+      color: 'var(--color-warning)',
+      disabled: !!actionInProgress,
+      action: () => confirmDoAction(unit, 'restart'),
+    });
+    if (unit.active_state !== 'active') {
+      items.push({
+        label: 'Start Service',
+        icon: Play,
+        color: 'var(--color-success)',
+        disabled: !!actionInProgress,
+        action: () => confirmDoAction(unit, 'start'),
+      });
+    } else {
+      const locked = unit.protection_level === 'critical';
+      items.push({
+        label: locked ? 'Stop Service (Locked)' : 'Stop Service',
+        icon: Square,
+        danger: true,
+        disabled: locked || !!actionInProgress,
+        action: () => confirmDoAction(unit, 'stop'),
+      });
+    }
+    const masked = unit.unit_file_state === 'masked' || unit.unit_file_state === 'masked-runtime';
+    const bootState = bootEnableState(unit.unit_file_state);
+    if (bootState === 'unavailable') {
+      items.push({
+        label: masked ? 'Unmask First to Enable at Boot' : 'Boot Autostart Unavailable',
+        icon: ShieldBan,
+        color: 'var(--color-text-muted)',
+        disabled: true,
+      });
+    } else if (bootState === 'enabled-runtime') {
+      items.push({
+        label: 'Enabled for This Boot Only',
+        icon: Clock,
+        color: 'var(--color-info)',
+        disabled: true,
+      });
+    } else {
+      const bootLocked = bootState === 'enabled' && unit.is_protected;
+      items.push({
+        label: bootLocked ? 'Disable at Boot (Locked)' : (bootState === 'enabled' ? 'Disable at Boot' : 'Enable at Boot'),
+        icon: ShieldCheck,
+        color: bootLocked ? 'var(--color-text-muted)' : 'var(--color-accent)',
+        disabled: bootLocked || !!actionInProgress,
+        action: () => confirmDoAction(unit, bootState === 'enabled' ? 'disable' : 'enable'),
+      });
+    }
+    items.push({
+      label: 'View Service Logs (Journalctl)',
+      icon: Activity,
+      color: 'var(--color-info)',
+      action: () => { uiStore.jumpToJournalService(unit.name); uiStore.setActiveTab('journal-logs'); },
+    });
+    items.push({ label: '', divider: true });
+    items.push({
+      label: 'Edit Unit Override',
+      icon: Edit3,
+      action: () => openEditor(unit),
+    });
+    items.push({
+      label: 'Inspect Dependencies',
+      icon: GitFork,
+      action: () => openDependencies(unit),
+    });
+    items.push({
+      label: masked ? 'Unmask Service' : (unit.is_protected ? 'Mask Service (Locked)' : 'Mask Service Unit'),
+      icon: masked ? Unlock : Lock,
+      color: masked ? 'var(--color-success)' : 'var(--color-warning)',
+      danger: !masked,
+      disabled: (!masked && unit.is_protected) || !!actionInProgress,
+      action: () => confirmDoAction(unit, masked ? 'unmask' : 'mask'),
+    });
+    items.push({
+      label: 'Copy Unit Name',
+      icon: Copy,
+      action: () => {
+        navigator.clipboard.writeText(unit.name);
+        uiStore.addToast(`Copied unit name: ${unit.name}`, 'info');
+      },
+    });
+    return items;
+  }
+
+  function serviceContextBadges(unit: ServiceUnit): Array<{
+    text: string;
+    variant: 'success' | 'error' | 'warning' | 'muted';
+  }> {
+    const badges: Array<{ text: string; variant: 'success' | 'error' | 'warning' | 'muted' }> = [];
+    if (unit.is_protected) {
+      badges.push({
+        text: unit.protection_level === 'critical' ? 'Core' : 'Protected',
+        variant: unit.protection_level === 'critical' ? 'error' : 'warning',
+      });
+    }
+    badges.push({
+      text: unit.active_state,
+      variant:
+        unit.active_state === 'active'
+          ? 'success'
+          : unit.active_state === 'failed'
+            ? 'error'
+            : 'muted',
+    });
+    return badges;
   }
 
   function closeContextMenu() {
@@ -371,6 +553,7 @@
   }
   let unitDeps = $state<UnitDeps | null>(null);
   let depsLoading = $state(false);
+  let depsError = $state<string | null>(null);
 
   // System vs User scope
   let userScope = $state(false);
@@ -445,13 +628,38 @@
 
   let blamePage = $state(1);
   const blameItemsPerPage = 30;
-  const blameTotalPages = $derived(Math.ceil(filteredBlame.length / blameItemsPerPage) || 1);
-  const paginatedBlame = $derived(filteredBlame.slice((blamePage - 1) * blameItemsPerPage, blamePage * blameItemsPerPage));
+  let blameSortKey = $state<'time' | 'unit'>('time');
+  let blameSortAsc = $state(false);
+  const sortedBlame = $derived.by(() => {
+    const list = [...filteredBlame];
+    const dir = blameSortAsc ? 1 : -1;
+    list.sort((a, b) =>
+      blameSortKey === 'time'
+        ? (a.time_ms - b.time_ms) * dir
+        : a.name.localeCompare(b.name) * dir,
+    );
+    return list;
+  });
+  const blameTotalPages = $derived(Math.ceil(sortedBlame.length / blameItemsPerPage) || 1);
+  const paginatedBlame = $derived(sortedBlame.slice((blamePage - 1) * blameItemsPerPage, blamePage * blameItemsPerPage));
+
+  function sortBlame(key: 'time' | 'unit') {
+    if (blameSortKey === key) {
+      blameSortAsc = !blameSortAsc;
+    } else {
+      blameSortKey = key;
+      blameSortAsc = key === 'unit';
+    }
+    blamePage = 1;
+  }
 
   $effect(() => {
     blameSearch;
     blameFilter;
     blamePage = 1;
+  });
+  $effect(() => {
+    if (blamePage > blameTotalPages) blamePage = blameTotalPages;
   });
 
   const filteredUnits = $derived(
@@ -465,10 +673,50 @@
 
   let currentPage = $state(1);
   const itemsPerPage = 30;
-  const totalPages = $derived(Math.ceil(filteredUnits.length / itemsPerPage) || 1);
-  const paginatedUnits = $derived(filteredUnits.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage));
+  let serviceSortKey = $state<'name' | 'state' | 'file'>('name');
+  let serviceSortAsc = $state(true);
+  const sortedUnits = $derived.by(() => {
+    const list = [...filteredUnits];
+    const dir = serviceSortAsc ? 1 : -1;
+    const value = (unit: ServiceUnit) =>
+      serviceSortKey === 'name'
+        ? unit.name
+        : serviceSortKey === 'state'
+          ? unit.active_state
+          : unit.unit_file_state;
+    list.sort((a, b) => String(value(a)).localeCompare(String(value(b))) * dir);
+    return list;
+  });
+  const totalPages = $derived(Math.ceil(sortedUnits.length / itemsPerPage) || 1);
+  const paginatedUnits = $derived(sortedUnits.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage));
 
-  $effect(() => { filter; statusFilter; currentPage = 1; });
+  function sortServices(key: 'name' | 'state' | 'file') {
+    if (serviceSortKey === key) {
+      serviceSortAsc = !serviceSortAsc;
+    } else {
+      serviceSortKey = key;
+      serviceSortAsc = true;
+    }
+    currentPage = 1;
+  }
+
+  function sortIndicator(key: string, active: string, asc: boolean): string {
+    return key === active ? (asc ? '↑' : '↓') : '↕';
+  }
+
+  function ariaSort(key: string, active: string, asc: boolean): 'ascending' | 'descending' | 'none' {
+    if (key !== active) return 'none';
+    return asc ? 'ascending' : 'descending';
+  }
+
+  $effect(() => { filter; statusFilter; currentPage = 1; selectedUnitNames = new Set(); });
+  $effect(() => {
+    if (currentPage > totalPages) currentPage = totalPages;
+  });
+  $effect(() => {
+    currentPage;
+    selectedUnitNames = new Set();
+  });
 
   function activeStateBadge(state: string): string {
     switch (state) {
@@ -480,6 +728,8 @@
   }
 
   async function load() {
+    selectedUnitNames = new Set();
+    highlightedUnit = null;
     loading = true;
     statusStore.setBusy(`Loading ${userScope ? 'user' : 'system'} service units…`);
     try {
@@ -494,11 +744,26 @@
     }
   }
 
+  const ACTION_CONFIRM_LABELS: Record<string, string> = {
+    start: 'Start',
+    stop: 'Stop',
+    restart: 'Restart',
+    enable: 'Enable',
+    disable: 'Disable',
+    mask: 'Mask',
+    unmask: 'Unmask',
+    reload: 'Reload',
+  };
+
   function confirmDoAction(unit: ServiceUnit, action: ServiceAction) {
-    if (!userScope && (action === 'stop' || action === 'restart')) {
+    if (!userScope && (action === 'stop' || action === 'restart' || action === 'mask' || action === 'disable')) {
+      const label = ACTION_CONFIRM_LABELS[action] ?? action;
+      const warning = unit.is_protected
+        ? `\n\nWARNING: ${unit.name} is a protected ${unit.protection_level === 'critical' ? 'core' : 'infrastructure'} system service. This action can cause instability or loss of functionality.`
+        : '';
       uiStore.confirm(
-        `Confirm ${action === 'stop' ? 'Stop' : 'Restart'}`,
-        `Are you sure you want to ${action} ${unit.name}?\n\nWARNING: Modifying critical system services can cause system instability or loss of network connectivity.`,
+        `Confirm ${label}`,
+        `Are you sure you want to ${action} ${unit.name}?${warning}`,
         () => doAction(unit, action),
         true
       );
@@ -584,54 +849,104 @@
   }
 
   async function openLogs(unit: ServiceUnit) {
+    const requestId = ++panelRequestId;
+    const name = unit.name;
+    const scope = userScope;
+    panelScope = scope;
     selectedUnit = unit;
     activePanel = 'logs';
     panelOpen = true;
     logsLoading = true;
     logs = '';
     try {
-      logs = await invoke<string>('get_service_logs', { name: unit.name, lines: 100, userMode: userScope });
-      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 0, true);
+      const content = await invoke<string>('get_service_logs', { name, lines: 100, userMode: scope });
+      if (requestId !== panelRequestId) return;
+      logs = content;
+      statusStore.setLastCommand(`journalctl ${scope ? '--user' : ''} -u ${name} -n 100`, 0, true);
     } catch (e) {
+      if (requestId !== panelRequestId) return;
+      logs = `Failed to load logs: ${e}`;
       uiStore.addToast(`Failed to load logs: ${e}`, 'error');
-      statusStore.setLastCommand(`journalctl ${userScope ? '--user' : ''} -u ${unit.name} -n 100`, 1, false);
+      statusStore.setLastCommand(`journalctl ${scope ? '--user' : ''} -u ${name} -n 100`, 1, false);
     } finally {
-      logsLoading = false;
+      if (requestId === panelRequestId) logsLoading = false;
     }
   }
 
   async function openEditor(unit: ServiceUnit) {
+    const requestId = ++panelRequestId;
+    const name = unit.name;
+    const scope = userScope;
+    panelScope = scope;
     selectedUnit = unit;
     activePanel = 'editor';
     panelOpen = true;
     unitFileLoading = true;
     unitFileContent = '';
+    editorTab = 'override';
+    effectiveUnitContent = '';
+    effectiveUnitError = null;
+    effectiveUnitLoading = false;
     try {
-      unitFileContent = await invoke<string>('read_unit_file', { name: unit.name, userMode: userScope });
-      editedContent = unitFileContent;
-      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} cat ${unit.name}`, 0, true);
+      const content = await invoke<string>('read_unit_override', { name, userMode: scope });
+      if (requestId !== panelRequestId) return;
+      unitFileContent = content;
+      editedContent = content;
+      statusStore.setLastCommand(`cat ${scope ? '~/.config/systemd/user' : '/etc/systemd/system'}/${name}.d/override.conf`, 0, true);
     } catch (e) {
-      unitFileContent = `# Error reading unit file: ${e}`;
-      editedContent = unitFileContent;
-      statusStore.setLastCommand(`systemctl ${userScope ? '--user' : ''} cat ${unit.name}`, 1, false);
+      if (requestId !== panelRequestId) return;
+      unitFileContent = '';
+      editedContent = '';
+      uiStore.addToast(`Failed to read override for ${name}: ${e}`, 'error');
+      statusStore.setLastCommand(`cat ${scope ? '~/.config/systemd/user' : '/etc/systemd/system'}/${name}.d/override.conf`, 1, false);
     } finally {
-      unitFileLoading = false;
+      if (requestId === panelRequestId) unitFileLoading = false;
+    }
+  }
+
+  async function loadEffectiveUnit() {
+    if (!selectedUnit || effectiveUnitLoading) return;
+    const name = selectedUnit.name;
+    const scope = panelScope;
+    effectiveUnitLoading = true;
+    effectiveUnitError = null;
+    try {
+      const content = await invoke<string>('read_unit_file', { name, userMode: scope });
+      if (selectedUnit?.name !== name) return;
+      effectiveUnitContent = content;
+      statusStore.setLastCommand(`systemctl ${scope ? '--user ' : ''}cat ${name}`, 0, true);
+    } catch (e) {
+      if (selectedUnit?.name !== name) return;
+      effectiveUnitError = `Failed to read effective unit: ${e}`;
+      statusStore.setLastCommand(`systemctl ${scope ? '--user ' : ''}cat ${name}`, 1, false);
+    } finally {
+      effectiveUnitLoading = false;
     }
   }
 
   async function openDependencies(unit: ServiceUnit) {
+    const requestId = ++panelRequestId;
+    const name = unit.name;
+    const scope = userScope;
+    panelScope = scope;
     selectedUnit = unit;
     activePanel = 'dependencies';
     panelOpen = true;
     depsLoading = true;
     unitDeps = null;
+    depsError = null;
     try {
-      unitDeps = await invoke<UnitDeps>('get_unit_dependencies', { name: unit.name, userMode: userScope });
-      statusStore.setLastCommand(`systemctl show ${unit.name} --property=Requires,Wants,After,Before`, 0, true);
+      const deps = await invoke<UnitDeps>('get_unit_dependencies', { name, userMode: scope });
+      if (requestId !== panelRequestId) return;
+      unitDeps = deps;
+      statusStore.setLastCommand(`systemctl show ${name} --property=Requires,Wants,After,Before`, 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load dependencies: ${e}`, 'error');
+      if (requestId !== panelRequestId) return;
+      depsError = `Failed to load dependencies: ${e}`;
+      uiStore.addToast(depsError, 'error');
+      statusStore.setLastCommand(`systemctl show ${name} --property=Requires,Wants,After,Before`, 1, false);
     } finally {
-      depsLoading = false;
+      if (requestId === panelRequestId) depsLoading = false;
     }
   }
 
@@ -658,7 +973,7 @@
     const count = names.length;
     const protectedCount = units.filter(u => selectedUnitNames.has(u.name) && u.is_protected).length;
 
-    if (action === 'stop' || action === 'mask') {
+    if (action === 'stop' || action === 'mask' || (action === 'restart' && !userScope)) {
       let warning = `Are you sure you want to ${action} ${count} selected systemd service${count > 1 ? 's' : ''}?\n\n${names.map(n => `• ${n}`).join('\n')}`;
       if (protectedCount > 0) {
         warning += `\n\n⚠️ CAUTION: ${protectedCount} of the selected units are protected core services. Modifying them may affect system stability.`;
@@ -677,19 +992,31 @@
   async function doExecuteBulkServiceAction(action: ServiceAction) {
     const names = Array.from(selectedUnitNames);
     const count = names.length;
+    const failures: string[] = [];
+    bulkInProgress = true;
+    actionInProgress = 'bulk';
     uiStore.addToast(`Executing ${action} on ${count} services…`, 'info');
-    let successCount = 0;
-    for (const name of names) {
-      try {
-        await invoke('service_action', { name, action, userMode: userScope });
-        successCount++;
-      } catch (e) {
-        console.error(`Failed ${action} on ${name}:`, e);
+    try {
+      for (const name of names) {
+        try {
+          await invoke('unit_action', { name, action, userMode: userScope });
+        } catch (e) {
+          failures.push(`${name}: ${e}`);
+        }
       }
+      const successCount = count - failures.length;
+      const detail = failures.slice(0, 3).join('; ');
+      const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+      const message = failures.length === 0
+        ? `Completed ${action}: ${successCount}/${count} succeeded`
+        : `Completed ${action}: ${successCount}/${count} succeeded; failed: ${detail}${more}`;
+      uiStore.addToast(message, failures.length === 0 ? 'success' : 'warning');
+      selectedUnitNames = new Set();
+      await load();
+    } finally {
+      actionInProgress = null;
+      bulkInProgress = false;
     }
-    uiStore.addToast(`Completed ${action}: ${successCount}/${count} succeeded`, successCount === count ? 'success' : 'warning');
-    selectedUnitNames = new Set();
-    await load();
   }
 
   function confirmSaveUnitFile() {
@@ -711,22 +1038,35 @@
     }
   }
 
+  function overridePath(name: string, scope: boolean): string {
+    return scope
+      ? `~/.config/systemd/user/${name}.d/override.conf`
+      : `/etc/systemd/system/${name}.d/override.conf`;
+  }
+
   async function saveUnitFile() {
     if (!selectedUnit) return;
     saving = true;
     try {
-      await invoke('write_unit_file', { name: selectedUnit.name, content: editedContent, userMode: userScope });
-      const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
-      statusStore.setLastCommand(`echo "..." > ${targetPath} && systemctl ${userScope ? '--user' : ''} daemon-reload`, 0, true);
-      uiStore.addToast(`Unit file saved for ${selectedUnit.name}`, 'success');
+      await invoke('write_unit_file', {
+        name: selectedUnit.name,
+        content: editedContent,
+        userMode: panelScope,
+      });
+      const targetPath = overridePath(selectedUnit.name, panelScope);
+      statusStore.setLastCommand(`echo "..." > ${targetPath} && systemctl ${panelScope ? '--user' : ''} daemon-reload`, 0, true);
+      uiStore.addToast(`Unit override saved for ${selectedUnit.name}`, 'success');
+      setRecoveryWarning(
+        reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-succeeded' })
+      );
       unitFileContent = editedContent;
+      effectiveUnitContent = '';
     } catch (e) {
       setRecoveryWarning(
         reduceRecoveryWarning(recoveryWarning, { kind: 'write-failed', error: e })
       );
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      const targetPath = userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`;
-      statusStore.setLastCommand(`echo "..." > ${targetPath}`, 1, false);
+      statusStore.setLastCommand(`echo "..." > ${overridePath(selectedUnit.name, panelScope)}`, 1, false);
     } finally {
       saving = false;
     }
@@ -751,7 +1091,7 @@
   }
 
   async function loadBlame(force = false) {
-    if (blameEntries.length === 0 || force) {
+    if (untrack(() => blameEntries.length) === 0 || force) {
       loadingBlame = true;
     }
     if (force) {
@@ -792,6 +1132,7 @@
       await Promise.allSettled([blamePromise, chainPromise]);
     } finally {
       loadingBlame = false;
+      if (force) statusStore.clearBusy();
     }
   }
 
@@ -801,7 +1142,7 @@
     bootLogsLoading = true;
     bootLogsContent = '';
     try {
-      bootLogsContent = await invoke<string>('get_service_logs', { name: unitName, lines: 150, userMode: false });
+      bootLogsContent = await invoke<string>('get_service_logs', { name: unitName, lines: 150, userMode: false, boot: true });
       statusStore.setLastCommand(`journalctl -b -u ${unitName} -n 150`, 0, true);
     } catch (e) {
       bootLogsContent = `Failed to load logs: ${e}`;
@@ -812,11 +1153,9 @@
 
   function jumpToService(unitName: string) {
     mainTab = 'services';
+    statusFilter = 'all';
     filter = unitName;
-    const found = units.find(u => u.name === unitName);
-    if (found) {
-      selectedUnit = found;
-    }
+    highlightedUnit = unitName;
   }
 
   function parseBlameTime(s: string): number {
@@ -849,6 +1188,9 @@
       if (selectedUnit !== null) selectedUnit = null;
     }
   });
+  $effect(() => {
+    if (mainTab !== 'services') panelOpen = false;
+  });
 
   // ─── XDG Autostart state ───────────────────────────────────────────────────
   interface AutostartEntry {
@@ -873,17 +1215,44 @@
     })
   );
   let autostartCurrentPage = $state(1);
+  let autostartSortKey = $state<'name' | 'exec' | 'comment' | 'enabled'>('name');
+  let autostartSortAsc = $state(true);
   const autostartItemsPerPage = 30;
-  const autostartTotalPages = $derived(Math.ceil(filteredAutostart.length / autostartItemsPerPage) || 1);
-  const paginatedAutostart = $derived(filteredAutostart.slice((autostartCurrentPage - 1) * autostartItemsPerPage, autostartCurrentPage * autostartItemsPerPage));
+  const sortedAutostart = $derived.by(() => {
+    const list = [...filteredAutostart];
+    list.sort((a, b) => {
+      const dir = autostartSortAsc ? 1 : -1;
+      if (autostartSortKey === 'enabled') {
+        return (Number(a.enabled) - Number(b.enabled)) * dir;
+      }
+      return String(a[autostartSortKey] ?? '').localeCompare(String(b[autostartSortKey] ?? '')) * dir;
+    });
+    return list;
+  });
+  const autostartTotalPages = $derived(Math.ceil(sortedAutostart.length / autostartItemsPerPage) || 1);
+  const paginatedAutostart = $derived(sortedAutostart.slice((autostartCurrentPage - 1) * autostartItemsPerPage, autostartCurrentPage * autostartItemsPerPage));
+
+  function sortAutostart(key: 'name' | 'exec' | 'comment' | 'enabled') {
+    if (autostartSortKey === key) {
+      autostartSortAsc = !autostartSortAsc;
+    } else {
+      autostartSortKey = key;
+      autostartSortAsc = true;
+    }
+    autostartCurrentPage = 1;
+  }
 
   $effect(() => { autostartFilter; autostartCurrentPage = 1; });
+  $effect(() => {
+    if (autostartCurrentPage > autostartTotalPages) autostartCurrentPage = autostartTotalPages;
+  });
 
   async function loadAutostart() {
     autostartLoading = true;
     statusStore.setBusy('Loading XDG autostart entries…');
     try {
-      autostartEntries = await invoke<AutostartEntry[]>('list_autostart_entries');
+      autostartEntries = (await invoke<AutostartEntry[]>('list_autostart_entries'))
+        .sort((a, b) => a.name.localeCompare(b.name));
       statusStore.setLastCommand('ls ~/.config/autostart', 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to load autostart entries: ${e}`, 'error');
@@ -1052,9 +1421,14 @@
   // ─── Init ──────────────────────────────────────────────────────────────────
 
   $effect(() => {
+    if (mainTab !== 'services') {
+      selectedUnitNames = new Set();
+      highlightedUnit = null;
+    }
     if (mainTab === 'services') {
       load();
     } else if (mainTab === 'autostart') {
+      selectedUnitNames = new Set();
       loadAutostart();
     } else if (mainTab === 'boot_analyzer') {
       loadBlame();
@@ -1065,12 +1439,13 @@
 <div class="module-page">
   <PageHeader title="Service Manager" subtitle="Browse, control, and inspect systemd service units" icon={Settings}>
     <div class="service-header-actions">
+      <div class="scope-slot" class:is-services={mainTab === 'services'}>
       {#if mainTab === 'services'}
         <!-- Single Toggleable Scope Button -->
         <button 
           class="scope-toggle-btn"
           class:active={userScope}
-          onclick={() => { userScope = !userScope; load(); }}
+          onclick={() => { userScope = !userScope; }}
           title={userScope ? "Viewing User Services (--user). Click to switch to System Services." : "Viewing System Services. Click to switch to User Services."}
         >
           {#if userScope}
@@ -1082,21 +1457,20 @@
           {/if}
         </button>
       {/if}
+      </div>
 
       <div class="header-tab-bar">
         <button class="header-tab-btn" class:active={mainTab === 'services'} onclick={() => mainTab = 'services'}>
           <Settings size={11} /> Services
-          <span class="header-tab-count" class:active-count={mainTab === 'services'}>{units.length}</span>
+          <span class="header-tab-count">{units.length}</span>
         </button>
         <button class="header-tab-btn" class:active={mainTab === 'autostart'} onclick={() => mainTab = 'autostart'}>
           <Rocket size={11} /> Autostart
-          <span class="header-tab-count" class:active-count={mainTab === 'autostart'}>{autostartEntries.length}</span>
+          <span class="header-tab-count">{autostartEntries.length}</span>
         </button>
         <button class="header-tab-btn" class:active={mainTab === 'boot_analyzer'} onclick={() => mainTab = 'boot_analyzer'}>
           <Activity size={11} /> Boot Analyzer
-          {#if blameEntries.length > 0}
-            <span class="header-tab-count" class:active-count={mainTab === 'boot_analyzer'}>{blameEntries.length}</span>
-          {/if}
+          <span class="header-tab-count">{blameEntries.length}</span>
         </button>
       </div>
 
@@ -1175,7 +1549,7 @@
         <Button
           variant="primary"
           size="sm"
-          onclick={() => { showCreateUnitModal = true; createUnitStep = 1; }}
+          onclick={() => { resetUnitForm(); showCreateUnitModal = true; }}
           title="Create a new systemd service unit file"
         >
           <Plus size={14} />
@@ -1273,7 +1647,7 @@
     <!-- Side panel: Logs, Editor, or Dependencies -->
     <SideDrawer
       bind:isOpen={panelOpen}
-      title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : (activePanel === 'dependencies' ? `Dependencies — ${selectedUnit?.name}` : `Unit File — ${selectedUnit?.name}`)}
+      title={activePanel === 'logs' ? `Logs — ${selectedUnit?.name}` : (activePanel === 'dependencies' ? `Dependencies — ${selectedUnit?.name}` : `Unit — ${selectedUnit?.name}`)}
       width="640px"
     >
       {#snippet headerActions()}
@@ -1282,13 +1656,17 @@
             <FileText size={13} /> Full Journal ↗
           </Button>
         {:else if activePanel === 'editor'}
-          <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
-            Retry daemon-reload
-          </Button>
-          <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
-            disabled={saving || editedContent === unitFileContent}>
-            {saving ? 'Saving…' : 'Save Override'}
-          </Button>
+          {#if editorTab === 'override'}
+            <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
+              Retry daemon-reload
+            </Button>
+            <Button variant="primary" class="btn-sm" onclick={confirmSaveUnitFile}
+              disabled={saving || editedContent === unitFileContent}>
+              {saving ? 'Saving…' : 'Save Override'}
+            </Button>
+          {:else}
+            <span class="badge badge-muted">Read-only</span>
+          {/if}
         {/if}
       {/snippet}
 
@@ -1323,6 +1701,8 @@
           <div style="padding:24px;color:var(--color-text-muted);display:flex;align-items:center;justify-content:center;gap:8px">
             <RefreshCw size={18} class="animate-spin-slow" /> Querying systemd dependency tree…
           </div>
+        {:else if depsError}
+          <div class="empty-state" role="alert" style="padding:32px; color:var(--color-error);">{depsError}</div>
         {:else if unitDeps}
           <div style="display:flex; flex-direction:column; gap:16px; padding:4px 0;">
             <!-- Requires -->
@@ -1403,15 +1783,44 @@
           </div>
         {/if}
       {:else if activePanel === 'editor'}
-        {#if unitFileLoading}
-          <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
-            <RefreshCw size={14} class="animate-spin-slow" /> Loading unit file…
-          </div>
-        {:else}
-          <div style="display:flex; flex-direction:column; height: 100%;">
-            <CodeEditor value={unitFileContent} height="100%" onchange={(v) => editedContent = v} />
-          </div>
-        {/if}
+        <div style="display:flex; flex-direction:column; height:100%; min-height:0; gap:10px;">
+          <TabGroup
+            tabs={[
+              { id: 'override', label: 'Editable Override' },
+              { id: 'effective', label: 'Effective Unit (read-only)' },
+            ]}
+            bind:activeTab={editorTab}
+            size="sm"
+            onchange={(tab) => {
+              if (tab === 'effective' && effectiveUnitContent === '' && !effectiveUnitError) {
+                loadEffectiveUnit();
+              }
+            }}
+          />
+
+          {#if editorTab === 'override'}
+            {#if unitFileLoading}
+              <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
+                <RefreshCw size={14} class="animate-spin-slow" /> Loading override…
+              </div>
+            {:else}
+              <div style="display:flex; flex-direction:column; flex:1; min-height:0;">
+                <CodeEditor value={unitFileContent} height="100%" onchange={(v) => editedContent = v} />
+              </div>
+            {/if}
+          {:else if effectiveUnitLoading}
+            <div style="padding:16px;color:var(--color-text-muted);display:flex;align-items:center;gap:8px">
+              <RefreshCw size={14} class="animate-spin-slow" /> Loading effective unit…
+            </div>
+          {:else if effectiveUnitError}
+            <div class="empty-state" role="alert" style="padding:24px; color:var(--color-error); gap:10px;">
+              <span>{effectiveUnitError}</span>
+              <Button variant="outline" size="sm" onclick={loadEffectiveUnit}>Retry</Button>
+            </div>
+          {:else}
+            <pre class="log-output" style="flex:1; min-height:0;">{effectiveUnitContent || 'No unit content returned.'}</pre>
+          {/if}
+        </div>
       {/if}
     </SideDrawer>
 
@@ -1453,26 +1862,39 @@
           <span style="color:var(--color-text-muted); margin-top:8px;">Try adjusting your search criteria.</span>
         </div>
       {:else}
-        <Table tableAction={tableFeatures}>
+        <Table tableAction={tableFeatures} actionParams={{ sortable: false }}>
           <thead>
             <tr>
               <th style="width: 40px; text-align: center;">
                 <input
                   type="checkbox"
                   class="form-checkbox"
+                  aria-label="Select all services on this page"
                   checked={paginatedUnits.length > 0 && selectedUnitNames.size === paginatedUnits.length}
                   onclick={toggleSelectAllUnits}
                 />
               </th>
-              <th>Service</th>
-              <th>State</th>
-              <th>Unit File</th>
+              <th aria-sort={ariaSort('name', serviceSortKey, serviceSortAsc)}>
+                <button type="button" class="th-sort-btn" onclick={() => sortServices('name')}>
+                  Service {sortIndicator('name', serviceSortKey, serviceSortAsc)}
+                </button>
+              </th>
+              <th aria-sort={ariaSort('state', serviceSortKey, serviceSortAsc)}>
+                <button type="button" class="th-sort-btn" onclick={() => sortServices('state')}>
+                  State {sortIndicator('state', serviceSortKey, serviceSortAsc)}
+                </button>
+              </th>
+              <th aria-sort={ariaSort('file', serviceSortKey, serviceSortAsc)}>
+                <button type="button" class="th-sort-btn" onclick={() => sortServices('file')}>
+                  Unit File {sortIndicator('file', serviceSortKey, serviceSortAsc)}
+                </button>
+              </th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {#each paginatedUnits as unit (unit.name)}
-              <tr class:selected-unit={selectedUnit?.name === unit.name || selectedUnitNames.has(unit.name)} oncontextmenu={(e) => handleServiceContextMenu(e, unit)}>
+              <tr class:selected-unit={highlightedUnit === unit.name || selectedUnit?.name === unit.name || selectedUnitNames.has(unit.name)} oncontextmenu={(e) => handleServiceContextMenu(e, unit)}>
                 <td style="text-align: center;" onclick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
@@ -1506,7 +1928,7 @@
                 </td>
                 <td>
                   {#if unit.unit_file_state}
-                    <span class="badge {unit.unit_file_state === 'enabled' ? 'badge-success' : unit.unit_file_state === 'masked' ? 'badge-error' : 'badge-muted'}">
+                    <span class="badge {(unit.unit_file_state === 'enabled' || unit.unit_file_state === 'enabled-runtime') ? 'badge-success' : (unit.unit_file_state === 'masked' || unit.unit_file_state === 'masked-runtime') ? 'badge-error' : 'badge-muted'}">
                       {unit.unit_file_state}
                     </span>
                   {:else}
@@ -1515,7 +1937,7 @@
                 </td>
                 <td style="width: 140px;">
                   <div style="display:flex;gap:8px; align-items:center">
-                    {#if actionInProgress === `${unit.name}-start` || actionInProgress === `${unit.name}-stop` || actionInProgress === `${unit.name}-restart`}
+                    {#if actionInProgress?.startsWith(`${unit.name}-`)}
                       <button class="action-btn" disabled title="Processing action…">
                         <RefreshCw size={13} class="animate-spin-slow" style="color:var(--color-accent)" />
                       </button>
@@ -1534,43 +1956,60 @@
                       <button class="action-btn action-restart" onclick={() => confirmDoAction(unit, 'restart')} title="Restart" disabled={!!actionInProgress}><RotateCcw size={14}/></button>
                     {/if}
                     <KebabMenu align="right">
-                      <button class="menu-item text-warning" onclick={() => confirmDoAction(unit, 'restart')} disabled={!!actionInProgress}>
-                        <RotateCcw size={14} /> Restart
-                      </button>
-                      <button class="menu-item text-info" onclick={() => openLogs(unit)}>
+                      <button role="menuitem" class="menu-item text-info" onclick={() => openLogs(unit)}>
                         <FileText size={14} /> View Inline Logs
                       </button>
-                      <button class="menu-item text-info" onclick={() => uiStore.jumpToJournalService(unit.name)}>
+                      <button role="menuitem" class="menu-item text-info" onclick={() => uiStore.jumpToJournalService(unit.name)}>
                         <FileText size={14} /> Open in Journal Logs ↗
                       </button>
-                      <button class="menu-item text-accent" onclick={() => openDependencies(unit)}>
+                      <button role="menuitem" class="menu-item text-accent" onclick={() => openDependencies(unit)}>
                         <GitFork size={14} /> Inspect Dependencies
                       </button>
-                      <button class="menu-item text-warning" onclick={() => openEditor(unit)}>
-                        <Settings size={14} /> Edit Unit File
+                      <button role="menuitem" class="menu-item text-warning" onclick={() => openEditor(unit)}>
+                        <Settings size={14} /> Edit Unit Override
                       </button>
-                      <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
-                      {#if unit.unit_file_state !== 'enabled'}
-                        <button 
-                          class="menu-item text-success"
-                          onclick={() => confirmDoAction(unit, 'enable')}
-                          disabled={unit.is_protected || !!actionInProgress}
-                          title={unit.is_protected ? 'Protected system service cannot be modified' : ''}
+                      <div style="height:1px; background:color-mix(in srgb, var(--color-text-muted) 35%, transparent); margin:4px 0;"></div>
+                      {#if bootEnableState(unit.unit_file_state) === 'unavailable'}
+                        <button
+                          role="menuitem"
+                          class="menu-item"
+                          disabled
+                          title="This unit cannot be enabled at boot (masked, static, generated, or indirect)"
                         >
-                          <ShieldCheck size={14} /> Enable (Autostart)
+                          <ShieldBan size={14} /> {(unit.unit_file_state === 'masked' || unit.unit_file_state === 'masked-runtime') ? 'Unmask First to Enable at Boot' : 'Boot Autostart Unavailable'}
                         </button>
-                      {:else}
+                      {:else if bootEnableState(unit.unit_file_state) === 'enabled-runtime'}
+                        <button
+                          role="menuitem"
+                          class="menu-item"
+                          disabled
+                          title="This unit is enabled for the current boot only; it will not start automatically after a reboot"
+                        >
+                          <Clock size={14} /> Enabled for This Boot Only
+                        </button>
+                      {:else if bootEnableState(unit.unit_file_state) === 'enabled'}
                         <button 
+                          role="menuitem"
                           class="menu-item text-warning"
                           onclick={() => confirmDoAction(unit, 'disable')}
                           disabled={unit.is_protected || !!actionInProgress}
                           title={unit.is_protected ? 'Protected system service cannot be disabled' : ''}
                         >
-                          <ShieldBan size={14} /> Disable (Autostart)
+                          <ShieldBan size={14} /> {unit.is_protected ? 'Disable at Boot (locked)' : 'Disable at Boot'}
+                        </button>
+                      {:else}
+                        <button
+                          role="menuitem"
+                          class="menu-item text-success"
+                          onclick={() => confirmDoAction(unit, 'enable')}
+                          disabled={!!actionInProgress}
+                        >
+                          <ShieldCheck size={14} /> Enable at Boot
                         </button>
                       {/if}
-                      {#if unit.unit_file_state === 'masked'}
+                      {#if unit.unit_file_state === 'masked' || unit.unit_file_state === 'masked-runtime'}
                         <button 
+                          role="menuitem"
                           class="menu-item text-success"
                           onclick={() => confirmDoAction(unit, 'unmask')}
                           disabled={!!actionInProgress}
@@ -1579,12 +2018,13 @@
                         </button>
                       {:else}
                         <button 
+                          role="menuitem"
                           class="menu-item danger"
                           onclick={() => confirmDoAction(unit, 'mask')}
                           disabled={unit.is_protected || !!actionInProgress}
                           title={unit.is_protected ? 'Protected system service cannot be masked' : ''}
                         >
-                          <Lock size={14} /> Mask Service
+                          <Lock size={14} /> {unit.is_protected ? 'Mask Service (locked)' : 'Mask Service Unit'}
                         </button>
                       {/if}
                     </KebabMenu>
@@ -1616,13 +2056,13 @@
       {:else if filteredAutostart.length === 0}
         <div class="empty-state">No XDG autostart entries in ~/.config/autostart/</div>
       {:else}
-        <Table tableAction={tableFeatures}>
+        <Table tableAction={tableFeatures} actionParams={{ sortable: false }}>
           <thead>
             <tr>
-              <th>Application</th>
-              <th>Command</th>
-              <th>Comment</th>
-              <th style="text-align:center">Enabled</th>
+              <th aria-sort={ariaSort('name', autostartSortKey, autostartSortAsc)}><button type="button" class="th-sort-btn" onclick={() => sortAutostart('name')}>Application {sortIndicator('name', autostartSortKey, autostartSortAsc)}</button></th>
+              <th aria-sort={ariaSort('exec', autostartSortKey, autostartSortAsc)}><button type="button" class="th-sort-btn" onclick={() => sortAutostart('exec')}>Command {sortIndicator('exec', autostartSortKey, autostartSortAsc)}</button></th>
+              <th aria-sort={ariaSort('comment', autostartSortKey, autostartSortAsc)}><button type="button" class="th-sort-btn" onclick={() => sortAutostart('comment')}>Comment {sortIndicator('comment', autostartSortKey, autostartSortAsc)}</button></th>
+              <th style="text-align:center" aria-sort={ariaSort('enabled', autostartSortKey, autostartSortAsc)}><button type="button" class="th-sort-btn" style="text-align:center" onclick={() => sortAutostart('enabled')}>Enabled {sortIndicator('enabled', autostartSortKey, autostartSortAsc)}</button></th>
               <th style="text-align:right">Actions</th>
             </tr>
           </thead>
@@ -1776,11 +2216,15 @@
                 <span style="color:var(--color-text-muted); font-size:12px; margin-top:4px;">Try clearing your search query or filter.</span>
               </div>
             {:else}
-              <Table tableAction={tableFeatures} style="overflow-y:auto; border:none; border-radius:0;">
+              <Table tableAction={tableFeatures} actionParams={{ sortable: false }} style="overflow-y:auto; border:none; border-radius:0;">
                 <thead>
                   <tr>
-                    <th style="width:130px;">Startup Time</th>
-                    <th>Unit / Service</th>
+                    <th style="width:130px;" aria-sort={ariaSort('time', blameSortKey, blameSortAsc)}>
+                      <button type="button" class="th-sort-btn" onclick={() => sortBlame('time')}>Startup Time {sortIndicator('time', blameSortKey, blameSortAsc)}</button>
+                    </th>
+                    <th aria-sort={ariaSort('unit', blameSortKey, blameSortAsc)}>
+                      <button type="button" class="th-sort-btn" onclick={() => sortBlame('unit')}>Unit / Service {sortIndicator('unit', blameSortKey, blameSortAsc)}</button>
+                    </th>
                     <th style="width:100px; text-align:center;">Severity</th>
                     <th style="width:180px; text-align:right;">Actions</th>
                   </tr>
@@ -1871,7 +2315,7 @@
           {:else}
             <div style="display:flex; flex-direction:column; gap:4px; font-family:var(--font-mono); font-size:12px;">
               {#each criticalChain as node}
-                <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:6px; background:rgba(0,0,0,0.15); border:1px solid var(--color-border);">
+                <div style="display:flex; align-items:center; gap:8px; padding:6px 10px 6px {10 + (node.depth || 0) * 12}px; border-radius:6px; background:rgba(0,0,0,0.15); border:1px solid var(--color-border);">
                   <span style="color:var(--color-text-muted);">{node.line.replace(node.unit, '').replace(`@${node.active_at}`, '').replace(`+${node.duration}`, '')}</span>
                   <span style="font-weight:600; color:var(--color-text-primary); flex:1;">{node.unit}</span>
                   {#if node.active_at}
@@ -1922,215 +2366,32 @@
   {/if}
 </SideDrawer>
 
-<svelte:window onclick={closeContextMenu} oncontextmenu={closeContextMenu} />
-
-{#if contextMenu.show && contextMenu.unit}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div 
-    class="custom-context-menu" 
-    style="position: fixed; left: {contextMenu.x}px; top: {contextMenu.y}px; z-index: 10000; min-width: 240px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;" title={contextMenu.unit.name}>
-          {contextMenu.unit.name}
-        </span>
-        {#if contextMenu.unit.is_protected}
-          <span class="protection-badge {contextMenu.unit.protection_level}" style="font-size: 9px; padding: 1px 4px;">
-            {contextMenu.unit.protection_level === 'critical' ? 'Core' : 'Protected'}
-          </span>
-        {/if}
-      </div>
-      <span class="badge {activeStateBadge(contextMenu.unit.active_state)}" style="font-size: 9.5px; padding: 1px 5px;">
-        {contextMenu.unit.active_state}
-      </span>
-    </div>
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'restart'); }}
-      disabled={!!actionInProgress}
-    >
-      <RotateCcw size={14} style="color: var(--color-warning);" />
-      <span>Restart Service</span>
-    </button>
-
-    {#if contextMenu.unit.active_state !== 'active'}
-      <button 
-        type="button"
-        class="context-menu-item"
-        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'start'); }}
-        disabled={!!actionInProgress}
-      >
-        <Play size={14} style="color: var(--color-success);" />
-        <span>Start Service</span>
-      </button>
-    {:else}
-      <button 
-        type="button"
-        class="context-menu-item text-danger"
-        onclick={() => { const u = contextMenu.unit!; closeContextMenu(); confirmDoAction(u, 'stop'); }}
-        disabled={contextMenu.unit.protection_level === 'critical' || !!actionInProgress}
-        title={contextMenu.unit.protection_level === 'critical' ? 'Cannot stop critical system unit' : ''}
-      >
-        <Square size={14} style="color: var(--color-error);" />
-        <span>{contextMenu.unit.protection_level === 'critical' ? 'Stop Service (Locked)' : 'Stop Service'}</span>
-      </button>
-    {/if}
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { 
-        const u = contextMenu.unit!; 
-        closeContextMenu(); 
-        const nextAction = u.unit_file_state === 'enabled' ? 'disable' : 'enable';
-        confirmDoAction(u, nextAction); 
-      }}
-      disabled={contextMenu.unit.is_protected || !!actionInProgress}
-      title={contextMenu.unit.is_protected ? 'Protected system service cannot be modified' : ''}
-    >
-      <ShieldCheck size={14} style="color: var(--color-accent);" />
-      <span>{contextMenu.unit.is_protected ? 'Boot Autostart (Locked)' : (contextMenu.unit.unit_file_state === 'enabled' ? 'Disable at Boot' : 'Enable at Boot')}</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const u = contextMenu.unit!;
-        closeContextMenu();
-        uiStore.jumpToJournalService(u.name);
-        uiStore.setActiveTab('journal-logs');
-      }}
-    >
-      <Activity size={14} style="color: var(--color-info);" />
-      <span>View Service Logs (Journalctl)</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openEditor(u); }}
-    >
-      <Edit3 size={14} />
-      <span>Edit Service File</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => { const u = contextMenu.unit!; closeContextMenu(); openDependencies(u); }}
-    >
-      <GitFork size={14} />
-      <span>Inspect Dependencies</span>
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const u = contextMenu.unit!;
-        closeContextMenu();
-        const maskAction = u.unit_file_state === 'masked' ? 'unmask' : 'mask';
-        confirmDoAction(u, maskAction);
-      }}
-      disabled={contextMenu.unit.is_protected || !!actionInProgress}
-      title={contextMenu.unit.is_protected ? 'Protected system service cannot be masked' : ''}
-    >
-      {#if contextMenu.unit.unit_file_state === 'masked'}
-        <Unlock size={14} style="color: var(--color-success);" />
-        <span>Unmask Service</span>
-      {:else}
-        <Lock size={14} style="color: var(--color-warning);" />
-        <span>{contextMenu.unit.is_protected ? 'Mask Service (Locked)' : 'Mask Service Unit'}</span>
-      {/if}
-    </button>
-
-    <button 
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = contextMenu.unit!.name;
-        navigator.clipboard.writeText(name);
-        uiStore.addToast(`Copied unit name: ${name}`, 'info');
-        closeContextMenu();
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Unit Name</span>
-    </button>
-  </div>
-{/if}
-
-<!-- Bulk Action Bar for Systemd Services -->
-<BulkActionBar
-  selectedCount={selectedUnitNames.size}
-  itemLabel="services"
-  onclear={() => selectedUnitNames = new Set()}
->
-  <button
-    type="button"
-    class="btn-bulk-action btn-bulk-primary"
-    onclick={() => executeBulkServiceAction('restart')}
-  >
-    <RotateCcw size={12} />
-    <span>Restart ({selectedUnitNames.size})</span>
-  </button>
-  <button
-    type="button"
-    class="btn-bulk-action btn-bulk-outline"
-    onclick={() => executeBulkServiceAction('start')}
-  >
-    <Play size={12} />
-    <span>Start</span>
-  </button>
-  <button
-    type="button"
-    class="btn-bulk-action btn-bulk-danger"
-    onclick={() => executeBulkServiceAction('stop')}
-  >
-    <Square size={12} />
-    <span>Stop</span>
-  </button>
-</BulkActionBar>
-
-<!-- Universal Config Diff Modal for Systemd Unit Files -->
-{#if selectedUnit}
-  <ConfigDiffModal
-    bind:show={showUnitDiffModal}
-    filePath={userScope ? `~/.config/systemd/user/${selectedUnit.name}` : `/etc/systemd/system/${selectedUnit.name}`}
-    title={`Review ${selectedUnit.name} Unit File Changes`}
-    oldContent={unitFileContent}
-    newContent={editedContent}
-    warningMessage={selectedUnit.is_protected ? 'CAUTION: This is a protected system unit. Changes may affect operating system services.' : 'Ensure systemd directives and ExecStart paths are valid before saving.'}
-    isSaving={saving}
-    onconfirm={async () => {
-      await saveUnitFile();
-      showUnitDiffModal = false;
-    }}
-    oncancel={() => showUnitDiffModal = false}
+{#if contextMenu.unit}
+  <ContextMenu
+    bind:isOpen={contextMenu.show}
+    x={contextMenu.x}
+    y={contextMenu.y}
+    title={contextMenu.unit.name}
+    subtitle={contextMenu.unit.is_protected
+      ? (contextMenu.unit.protection_reason || 'Protected system service')
+      : ''}
+    badges={serviceContextBadges(contextMenu.unit)}
+    items={serviceContextItems(contextMenu.unit)}
+    onclose={() => { contextMenu.show = false; }}
   />
 {/if}
 
-<!-- ═════════════════════════════════════════════════════════════════════════ -->
 <!-- MODAL: ADD / EDIT AUTOSTART APPLICATION -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showAutostartModal}
-  <div use:portal class="modal-backdrop" onclick={() => showAutostartModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => { if (!autostartSaving) showAutostartModal = false; }} role="presentation">
     <div class="modal-card" style="max-width: 520px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
       <div class="modal-header">
         <div class="modal-title-wrap">
           <Rocket size={18} class="text-accent" />
           <h3>{isEditingAutostart ? 'Edit Autostart Application' : 'Add Autostart Application'}</h3>
         </div>
-        <button class="modal-close-btn" onclick={() => showAutostartModal = false}>×</button>
+        <button class="modal-close-btn" onclick={() => { if (!autostartSaving) showAutostartModal = false; }}>×</button>
       </div>
 
       <div class="modal-body">
@@ -2250,19 +2511,20 @@
 <!-- MODAL: NEW SYSTEMD UNIT FILE WIZARD -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showCreateUnitModal}
-  <div use:portal class="modal-backdrop" onclick={() => showCreateUnitModal = false} role="presentation">
+  <div use:portal class="modal-backdrop" onclick={() => { if (!isSubmittingUnit) showCreateUnitModal = false; }} role="presentation">
     <div class="modal-card modal-wizard-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1" aria-modal="true">
       <div class="modal-header">
         <div class="modal-title-wrap">
           <FileCode size={18} class="text-accent" />
           <h3>Create Systemd Service Unit</h3>
         </div>
-        <button class="modal-close-btn" onclick={() => showCreateUnitModal = false}>×</button>
+        <button class="modal-close-btn" onclick={() => { if (!isSubmittingUnit) showCreateUnitModal = false; }}>×</button>
       </div>
 
       <!-- Stepper Progress Bar -->
       <Stepper
         bind:currentStep={createUnitStep}
+        allowClick={false}
         steps={[
           { label: 'Unit Identity' },
           { label: 'Lifecycle & Exec' },
@@ -2652,29 +2914,6 @@
     gap: 10px;
     flex-wrap: wrap;
     margin-bottom: 12px;
-  }/* ── Scope Toggle Button ───────────────────────────────────────────── */ .scope-toggle-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    background: var(--color-bg-card, #FFFFFF);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-    transition: all 0.2s ease;
-  }.scope-toggle-btn:hover {
-    border-color: var(--color-border-hover);
-    color: var(--color-text-primary);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
-  }.scope-toggle-btn.active {
-    background: var(--color-accent) !important;
-    border-color: var(--color-accent) !important;
-    color: #FFFFFF !important;
-    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
   }.stat-chip {
     display: flex;
     align-items: center;
@@ -2779,17 +3018,22 @@
   }/* Header controls optimization */ .service-header-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+  }.scope-slot {
+    display: flex;
+    align-items: center;
+  }.scope-slot.is-services {
+    min-width: 104px;
   }.scope-toggle-btn {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    height: 24px;
-    padding: 0 8px;
-    font-size: 10.5px;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
-    border-radius: 5px;
+    border-radius: 6px;
     border: 1px solid var(--color-border);
     background: var(--color-bg-card);
     color: var(--color-text-secondary);
@@ -2813,10 +3057,10 @@
   }.header-tab-btn {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    height: 22px;
-    padding: 0 7px;
-    font-size: 10.5px;
+    gap: 5px;
+    height: 24px;
+    padding: 0 10px;
+    font-size: 11px;
     font-weight: 500;
     white-space: nowrap;
     border-radius: 5px;
@@ -2832,10 +3076,10 @@
     color: var(--color-text-on-accent);
     font-weight: 600;
   }.header-tab-count {
-    font-size: 9.5px;
+    font-size: 9px;
     font-weight: 600;
-    padding: 1px 4px;
-    border-radius: 7px;
+    padding: 1px 5px;
+    border-radius: 8px;
     background: color-mix(in srgb, currentColor 18%, transparent);
     color: inherit;
   }.header-tab-btn.active .header-tab-count {
@@ -2865,44 +3109,6 @@
     background: var(--color-accent);
     color: var(--color-text-on-accent);
     font-weight: 700;
-  }/* ── Custom Context Menu ────────────────────────────────────────── */ .custom-context-menu {
-    background: var(--color-bg-card, #131b26);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-height: calc(100vh - 24px);
-    overflow-y: auto;
-    overflow-x: hidden;
-  }.context-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 8px;
-    border: none;
-    border-radius: 5px;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 12px;
-    font-weight: 500;
-    text-align: left;
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }.context-menu-item:hover:not(:disabled) {
-    background: var(--color-bg-hover, rgba(255, 255, 255, 0.08));
-    color: var(--color-text-primary);
-  }.context-menu-item:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }.context-menu-item.text-danger:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.12);
-    color: var(--color-error);
   }/* ── Security Protection Badges & Alerts ───────────────────────────── */ .protection-badge {
     display: inline-flex;
     align-items: center;
@@ -3068,10 +3274,10 @@
   }.header-refresh-btn {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 4px 9px;
-    height: 26px;
-    border-radius: var(--radius-md, 5px);
+    gap: 5px;
+    padding: 4px 10px;
+    height: 28px;
+    border-radius: var(--radius-md, 6px);
     font-size: 11px;
     font-family: var(--font-sans);
     font-weight: 600;
@@ -3081,29 +3287,38 @@
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }.header-refresh-btn:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--color-bg-hover);
     color: var(--color-text-primary);
-    border-color: rgba(255, 255, 255, 0.18);
+    border-color: var(--color-border-hover);
   }.header-refresh-btn:disabled, .header-refresh-btn.refreshing {
-    pointer-events: none !important;
     cursor: not-allowed !important;
     opacity: 0.8 !important;
-    background: rgba(0, 218, 243, 0.1) !important;
-    border-color: rgba(0, 218, 243, 0.45) !important;
+    background: var(--color-accent-muted) !important;
+    border-color: var(--color-accent-glow) !important;
     color: var(--color-accent) !important;
-    box-shadow: 0 0 16px rgba(0, 218, 243, 0.3) !important;
+    box-shadow: 0 0 16px var(--color-accent-glow) !important;
     animation: cyber-pulse-glow 1.1s ease-in-out infinite alternate !important;
   }
 @keyframes cyber-pulse-glow {0% {
-      box-shadow: 0 0 4px rgba(0, 218, 243, 0.2);
-      border-color: rgba(0, 218, 243, 0.3);
+      box-shadow: 0 0 4px var(--color-accent-glow);
+      border-color: var(--color-accent-glow);
       transform: scale(0.98);
     }100% {
-      box-shadow: 0 0 18px rgba(0, 218, 243, 0.5);
-      border-color: rgba(0, 218, 243, 0.85);
+      box-shadow: 0 0 18px var(--color-accent-glow);
+      border-color: var(--color-accent);
       transform: scale(1);
     }
-}.spin-refresh {
+}.scope-toggle-btn:focus-visible, .header-tab-btn:focus-visible,
+  .header-refresh-btn:focus-visible, .trigger-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+@media (max-width: 1100px) {
+    .service-header-actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+  }.spin-refresh {
     animation: spin-cw 0.75s linear infinite !important;
     color: var(--color-accent) !important;
   }
@@ -3290,4 +3505,40 @@
     border-color: #cbd5e1;
   }:global(html.light-mode) .terminal-preview-card pre {
     color: #0f172a !important;
-  }</style>
+  }
+  .text-rose { color: var(--color-error); }
+  .text-secondary { color: var(--color-text-secondary); }
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: 12px;
+  }
+  .empty-state-icon { color: var(--color-text-muted); margin-bottom: 8px; }
+  .btn-text {
+    background: transparent;
+    border: none;
+    color: var(--color-accent);
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .th-sort-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: inherit;
+    gap: 4px;
+    width: 100%;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: inherit;
+    cursor: pointer;
+  }
+  .th-sort-btn:hover { color: var(--color-text-primary); }
+</style>

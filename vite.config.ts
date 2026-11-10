@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
 import { compile, preprocess } from "svelte/compiler";
@@ -103,6 +103,17 @@ export default defineConfig(async () => ({
     tailwindcss(),
     svelte(),
   ],
+
+  // Svelte 5 ships browser and server entry points; component tests must load
+  // the browser build, not the server build.
+  resolve: {
+    conditions: ["browser"],
+  },
+
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./vitest-setup.ts"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   // prevent vite from obscuring rust errors

@@ -1115,7 +1115,7 @@
                     <button
                       type="button"
                       class="reference-row"
-                      onclick={() => openReference(finding.reference, finding.title)}
+                      onclick={() => openReference(finding.reference ?? '', finding.title)}
                       title="Open Reference in Browser"
                     >
                       <ExternalLink size={12} />

@@ -285,7 +285,7 @@
       await loadVarGroups();
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand(`echo "export ${addVarForm.name}=..." >> ${addVarForm.targetFile}`, 1, false);
+      statusStore.setLastCommand(`echo "export ${addVarForm?.name ?? ''}=..." >> ${addVarForm?.targetFile ?? ''}`, 1, false);
     } finally {
       savingVar = false;
       statusStore.clearBusy();
@@ -304,12 +304,12 @@
         oldLine: editingVar.v.raw_line,
       });
       uiStore.addToast(`Updated ${editingVar.newName} ✓`, 'success');
-      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar.file}`, 0, true);
+      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar?.v.source_path ?? ''}`, 0, true);
       editingVar = null;
       await loadVarGroups();
     } catch (e) {
       uiStore.addToast(`Failed to save: ${e}`, 'error');
-      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar.file}`, 1, false);
+      statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar?.v.source_path ?? ''}`, 1, false);
     } finally {
       savingVar = false;
       statusStore.clearBusy();
@@ -368,7 +368,7 @@
       await loadPathEntries();
     } catch (e) {
       uiStore.addToast(`Failed to add PATH entry: ${e}`, 'error');
-      statusStore.setLastCommand(`echo 'export PATH="$PATH:${addPathForm.directory}"' >> ${addPathForm.profile_path}`, 1, false);
+      statusStore.setLastCommand(`echo 'export PATH="$PATH:${addPathForm?.directory ?? ''}"' >> ${addPathForm?.profile_path ?? ''}`, 1, false);
     }
   }
 
@@ -615,10 +615,10 @@
           <div style="font-family: var(--font-mono); font-size: 12.5px; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; color: var(--color-accent); word-break: break-all; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
             <code>{aiResponse.generated_command}</code>
             <div style="display: flex; gap: 6px;">
-              <button type="button" class="btn btn-outline btn-xs" onclick={() => copyCommand(aiResponse.generated_command)} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
+              <button type="button" class="btn btn-outline btn-xs" onclick={() => copyCommand(aiResponse?.generated_command ?? '')} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
                 {#if copiedCommand}<Check size={12} />{:else}<Copy size={12} />{/if} Copy
               </button>
-              <button type="button" class="btn btn-primary btn-xs" onclick={() => executeCommand(aiResponse.generated_command)} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
+              <button type="button" class="btn btn-primary btn-xs" onclick={() => executeCommand(aiResponse?.generated_command ?? '')} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
                 <Play size={12} /> Dispatch
               </button>
             </div>
@@ -1553,9 +1553,9 @@
   }.var-count {
     font-size: 12px;
     color: var(--color-text-muted);
-  }.sg-content {
-    /* the raised header's own bottom rule already separates title from content */
-  }.sg-table-header {
+  }
+  /* the raised header's own bottom rule already separates title from content */
+  .sg-table-header {
     display: flex;
     padding: 10px 20px;
     background: var(--color-bg-base);

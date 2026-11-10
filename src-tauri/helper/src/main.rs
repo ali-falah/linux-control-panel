@@ -2237,6 +2237,80 @@ fn write_systemd_override(path: &str, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `unit_create <unit>`: create `/etc/systemd/system/<unit>` with content
+/// from stdin. A new unit is never allowed to overwrite an existing unit or a
+/// symlink; failure to reload rolls the new file back.
+fn unit_create_action(unit: &str) -> Result<(), String> {
+    root_policy::service_unit_name_valid(unit)?;
+    let content = read_stdin_content(64 * 1024, "unit file")?;
+    if content.trim().is_empty() {
+        return Err("lcp-admin: a new unit file must not be empty".to_string());
+    }
+    if content.contains('\0') {
+        return Err("lcp-admin: the unit file must not contain NUL bytes".to_string());
+    }
+    let root = std::path::Path::new(SYSTEMD_UNIT_ROOT);
+    if root
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing a symlinked systemd unit root".to_string());
+    }
+    let path = format!("{SYSTEMD_UNIT_ROOT}/{unit}");
+    if let Ok(metadata) = std::path::Path::new(&path).symlink_metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("lcp-admin: refusing to replace a symlinked unit: {path}"));
+        }
+        return Err(format!(
+            "lcp-admin: the unit {path} already exists; use the override editor instead"
+        ));
+    }
+    // Write a temporary file and hard-link it into place: link(2) fails if the
+    // target already exists, which closes the check-then-rename race.
+    let tmp = format!("{path}.tmp.{}", std::process::id());
+    std::fs::write(&tmp, &content)
+        .map_err(|e| format!("lcp-admin: could not write {tmp} ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
+    }
+    if let Err(error) = std::fs::hard_link(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(format!(
+                "lcp-admin: the unit {path} already exists; use the override editor instead"
+            ));
+        }
+        return Err(format!("lcp-admin: could not create {path} ({error})"));
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        let _ = std::fs::remove_file(&path);
+        return Err("lcp-admin: the unit was not created because systemctl is not available".to_string());
+    }
+    if let Err(reload_error) = run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl") {
+        let removed = std::fs::remove_file(&path);
+        let retry = if removed.is_ok() {
+            run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl")
+        } else {
+            Err("lcp-admin: retry reload skipped because the new unit could not be removed".to_string())
+        };
+        let prefix = if retry.is_err() {
+            "RECOVERY_REQUIRED: "
+        } else {
+            "lcp-admin: "
+        };
+        let removal_note = if removed.is_ok() {
+            "the new unit was removed from disk and daemon-reload was retried"
+        } else {
+            "the new unit could NOT be removed from disk"
+        };
+        return Err(format!("{prefix}{reload_error}; {removal_note}"));
+    }
+    Ok(())
+}
+
 /// `unit_dropin_write <unit>`: write the fixed `<unit>.d/override.conf`
 /// drop-in with content from stdin, then daemon-reload. The unit name is
 /// validated, the drop-in tree is symlink-checked, and the content is bounded.
@@ -2592,6 +2666,7 @@ const ROOT_ACTIONS: &[&str] = &[
     "security_lock_account",
     "unit_action",
     "unit_dropin_write",
+    "unit_create",
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
@@ -2942,6 +3017,14 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes a verb and a unit name."
+                ))
+            }
+        } else if requested == "unit_create" {
+            if args.len() == 2 {
+                unit_create_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one unit name."
                 ))
             }
         } else if requested == "unit_dropin_write" {

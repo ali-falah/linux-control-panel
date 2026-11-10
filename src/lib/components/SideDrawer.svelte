@@ -26,10 +26,71 @@
   } = $props();
 
   let isWideScreen = $state(typeof window !== 'undefined' ? window.innerWidth >= 1100 : false);
+  let drawerEl = $state<HTMLElement | null>(null);
+  let previouslyFocused: HTMLElement | null = null;
 
   function close() {
     isOpen = false;
   }
+
+  // A dialog opened on top of the drawer (confirm, diff, password…) must own
+  // Escape. Closing both layers at once would discard the user's context.
+  function hasOpenDialogAbove(): boolean {
+    if (typeof document === 'undefined' || !drawerEl) return false;
+    if (
+      uiStore.confirmDialog.isOpen ||
+      uiStore.passwordDialog.isOpen ||
+      uiStore.settingsModalOpen ||
+      uiStore.searchModalOpen
+    ) {
+      return true;
+    }
+    return Array.from(
+      document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]'),
+    ).some(
+      (el) => el !== drawerEl && !drawerEl?.contains(el) && el.getClientRects().length > 0,
+    );
+  }
+
+  function handleDrawerKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      if (!hasOpenDialogAbove()) close();
+      return;
+    }
+    // A docked drawer is a side-by-side panel, not a modal: never trap Tab.
+    if (event.key !== 'Tab' || !drawerEl || isDockedActive) return;
+    const focusables = Array.from(
+      drawerEl.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusables.length === 0) {
+      event.preventDefault();
+      drawerEl.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  $effect(() => {
+    if (isOpen && !isDockedActive) {
+      if (!previouslyFocused) {
+        previouslyFocused = document.activeElement as HTMLElement | null;
+      }
+      setTimeout(() => drawerEl?.focus(), 0);
+    } else if (!isOpen && previouslyFocused) {
+      previouslyFocused.focus();
+      previouslyFocused = null;
+    }
+  });
 
   $effect(() => {
     if (typeof window !== 'undefined') {
@@ -102,6 +163,12 @@
       style="width: {width || '500px'}; max-width: 100vw;"
       transition:fly={{ x: 500, duration: 250, easing: cubicOut }}
       onwheel={(e) => e.stopPropagation()}
+      onkeydown={handleDrawerKeydown}
+      bind:this={drawerEl}
+      tabindex="-1"
+      role={isDockedActive ? 'region' : 'dialog'}
+      aria-modal={isDockedActive ? undefined : 'true'}
+      aria-label={title}
     >
       <div class="drawer-header">
         <div class="drawer-title-group" title={subtitle ? `${title} — ${subtitle}` : title}>

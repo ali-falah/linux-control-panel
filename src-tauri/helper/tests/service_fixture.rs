@@ -317,3 +317,26 @@ fn rollback_with_successful_retry_does_not_require_recovery() {
         "[Service]\nEnvironment=OLD=1\n"
     );
 }
+
+#[test]
+fn unit_create_writes_a_new_unit_and_refuses_overwrite() {
+    let _guard = fixture();
+    let content = "[Unit]\nDescription=Fixture Service\n[Service]\nExecStart=/bin/true\n";
+    let run = run_helper_with_stdin(&["unit_create", "demo.service"], content);
+    assert_eq!(run.code, 0, "new unit must be created: {run:?}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{SYSTEMD_ROOT}/demo.service")).unwrap(),
+        content
+    );
+    assert_eq!(calls(), vec!["daemon-reload"]);
+
+    let again = run_helper_with_stdin(&["unit_create", "demo.service"], content);
+    assert_eq!(again.code, 2, "an existing unit must not be overwritten: {again:?}");
+    assert!(again.stderr.contains("already exists"), "{again:?}");
+    assert_eq!(calls(), vec!["daemon-reload"]);
+
+    let invalid = run_helper_with_stdin(&["unit_create", "-bad.service"], content);
+    assert_eq!(invalid.code, 2, "invalid unit name must be refused: {invalid:?}");
+    let empty = run_helper_with_stdin(&["unit_create", "empty.service"], "");
+    assert_eq!(empty.code, 2, "an empty unit must be refused: {empty:?}");
+}

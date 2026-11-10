@@ -25,7 +25,7 @@
       onclick={() => uiStore.closeConfirm()}
     ></div>
     
-    <div class="modal" style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 100001" transition:fly={{ y: 20, duration: 250 }}>
+    <div class="modal" style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 100001" transition:fly={{ y: 20, duration: 250 }} role="dialog" aria-modal="true" aria-labelledby="confirm-title">
       <div class="dialog-header">
         {#if uiStore.confirmDialog.danger}
           <div class="dialog-icon danger">

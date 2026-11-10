@@ -10,6 +10,7 @@
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -229,6 +230,17 @@
   let testResult = $state<NginxTestResult | null>(null);
   let stats = $state<NginxStats | null>(null);
   let serviceLoading = $state(false);
+  const nginxServiceActions: Array<{
+    action: 'start' | 'stop' | 'restart' | 'reload';
+    label: string;
+    danger: boolean;
+    icon: any;
+  }> = [
+    { action: 'start', label: 'Start', danger: false, icon: Play },
+    { action: 'stop', label: 'Stop', danger: true, icon: Square },
+    { action: 'restart', label: 'Restart', danger: false, icon: RotateCcw },
+    { action: 'reload', label: 'Reload', danger: false, icon: RefreshCw },
+  ];
   let testLoading = $state(false);
 
   // Sites
@@ -1254,8 +1266,8 @@
     }
 
     uiStore.confirm(
-      `Delete ${entry.isDir ? 'Folder' : 'File'}`,
-      `Are you sure you want to permanently delete "${entry.path}"${entry.isDir ? ' and all files within it? This will remove all web content permanently.' : '? This action cannot be undone.'}`,
+      `Delete ${entry.is_dir ? 'Folder' : 'File'}`,
+      `Are you sure you want to permanently delete "${entry.path}"${entry.is_dir ? ' and all files within it? This will remove all web content permanently.' : '? This action cannot be undone.'}`,
       async () => {
         try {
           await invoke('nginx_delete_www_entry', { path: entry.path });
@@ -1273,18 +1285,19 @@
   }
 
   async function doRename() {
-    if (!renamingEntry || !renameValue.trim()) return;
-    const parentDir = renamingEntry.path.substring(0, renamingEntry.path.lastIndexOf('/'));
+    const entry = renamingEntry;
+    if (!entry || !renameValue.trim()) return;
+    const parentDir = entry.path.substring(0, entry.path.lastIndexOf('/'));
     const newPath = `${parentDir}/${renameValue}`;
     try {
-      await invoke('nginx_rename_www_entry', { oldPath: renamingEntry.path, newPath });
-      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 0, true);
+      await invoke('nginx_rename_www_entry', { oldPath: entry.path, newPath });
+      statusStore.setLastCommand(`mv ${entry.path} ${newPath}`, 0, true);
       uiStore.addToast('Renamed ✓', 'success');
       renamingEntry = null;
       await loadWww();
     } catch (e) {
       uiStore.addToast(`Rename failed: ${e}`, 'error');
-      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 1, false);
+      statusStore.setLastCommand(`mv ${entry.path} ${newPath}`, 1, false);
     }
   }
 
@@ -1304,7 +1317,17 @@
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
-  // ─── WWW Context Menu ──────────────────────────────────────────────────────
+  // ─── Context Menus ────────────────────────────────────────────────────────
+  interface NginxContextItem {
+    label: string;
+    icon?: any;
+    action?: () => void;
+    danger?: boolean;
+    disabled?: boolean;
+    divider?: boolean;
+    color?: string;
+  }
+
   let wwwContextMenu = $state<{
     visible: boolean;
     x: number;
@@ -1312,26 +1335,6 @@
     entry: WwwEntry | null;
   }>({ visible: false, x: 0, y: 0, entry: null });
 
-  function handleWwwContextMenu(e: MouseEvent, entry: WwwEntry | null) {
-    e.preventDefault();
-    e.stopPropagation();
-    const menuWidth = 210;
-    const menuHeight = 260;
-    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
-    wwwContextMenu = {
-      visible: true,
-      x,
-      y,
-      entry,
-    };
-  }
-
-  function closeWwwContextMenu() {
-    wwwContextMenu.visible = false;
-  }
-
-  // Right-click Site Context Menu
   let siteContextMenu = $state<{
     visible: boolean;
     x: number;
@@ -1339,34 +1342,135 @@
     site: NginxSite | null;
   }>({ visible: false, x: 0, y: 0, site: null });
 
+  function handleWwwContextMenu(e: MouseEvent, entry: WwwEntry | null) {
+    e.preventDefault();
+    e.stopPropagation();
+    wwwContextMenu = { visible: true, x: e.clientX, y: e.clientY, entry };
+  }
+
   function handleSiteContextMenu(e: MouseEvent, site: NginxSite) {
     e.preventDefault();
     e.stopPropagation();
-    const menuWidth = 220;
-    const menuHeight = 310;
-    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
-    siteContextMenu = {
-      visible: true,
-      x,
-      y,
-      site,
-    };
+    siteContextMenu = { visible: true, x: e.clientX, y: e.clientY, site };
   }
 
-  function closeSiteContextMenu() {
-    siteContextMenu.visible = false;
+  function siteContextItems(site: NginxSite): NginxContextItem[] {
+    const items: NginxContextItem[] = [
+      { label: 'Quick Inspect', icon: Eye, action: () => openSiteInspector(site) },
+      { label: 'Edit in Full Editor', icon: FileCode, action: () => openSiteInEditor(site) },
+      { label: 'Clone Site Config', icon: Copy, action: () => openCloneModal(site) },
+      { label: 'View Logs & Analytics', icon: BarChart2, action: () => jumpToSiteLogs(site, 'analytics') },
+    ];
+
+    if (!site.has_ssl) {
+      items.push({
+        label: "Issue Let's Encrypt SSL",
+        icon: Sparkles,
+        color: 'var(--color-accent)',
+        action: () => openQuickSsl(site),
+      });
+    }
+
+    if (site.source === 'sites-available' || site.source === 'conf.d') {
+      items.push({
+        label: site.enabled ? 'Disable Site' : 'Enable Site',
+        icon: site.enabled ? EyeOff : Eye,
+        disabled: toggleLoadingFor === site.name,
+        action: () => toggleSite(site),
+      });
+    }
+
+    items.push(
+      {
+        label: 'Copy Config Path',
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(site.path);
+          uiStore.addToast('Copied site path to clipboard', 'info');
+        },
+      },
+      { label: '', divider: true },
+      { label: 'Delete Site', icon: Trash2, danger: true, action: () => confirmDeleteSite(site) },
+    );
+
+    return items;
   }
 
-  // Global click & esc listener to close context menus and popovers
+  function wwwContextItems(entry: WwwEntry | null): NginxContextItem[] {
+    if (!entry) {
+      return [
+        {
+          label: 'New Folder at Root',
+          icon: FolderPlus,
+          action: () => {
+            showNewDirForm = true;
+            newDirParent = '/var/www';
+          },
+        },
+        { label: 'Upload File to /var/www', icon: Upload, action: () => uploadFile('/var/www') },
+        { label: 'Refresh File Tree', icon: RefreshCw, action: () => loadWww() },
+      ];
+    }
+
+    if (!entry.is_dir) {
+      return [
+        { label: 'View / Preview', icon: Eye, action: () => viewWwwFile(entry) },
+        {
+          label: 'Rename File',
+          icon: Edit3,
+          action: () => {
+            renamingEntry = entry;
+            renameValue = entry.name;
+          },
+        },
+        {
+          label: 'Copy Full Path',
+          icon: Copy,
+          action: () => {
+            navigator.clipboard.writeText(entry.path);
+            uiStore.addToast('Copied full path to clipboard', 'info');
+          },
+        },
+        { label: '', divider: true },
+        { label: 'Delete File', icon: Trash2, danger: true, action: () => confirmDeleteWww(entry) },
+      ];
+    }
+
+    return [
+      {
+        label: 'New Subfolder',
+        icon: FolderPlus,
+        action: () => {
+          showNewDirForm = true;
+          newDirParent = entry.path;
+        },
+      },
+      { label: 'Upload File Here', icon: Upload, action: () => uploadFile(entry.path) },
+      {
+        label: 'Rename Folder',
+        icon: Edit3,
+        action: () => {
+          renamingEntry = entry;
+          renameValue = entry.name;
+        },
+      },
+      {
+        label: 'Copy Folder Path',
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(entry.path);
+          uiStore.addToast('Copied folder path to clipboard', 'info');
+        },
+      },
+      { label: '', divider: true },
+      { label: 'Delete Folder', icon: Trash2, danger: true, action: () => confirmDeleteWww(entry) },
+    ];
+  }
+
+  // Close the custom date popover on outside click / Escape. The shared
+  // ContextMenu owns its own dismissal.
   $effect(() => {
     function handleOutsideClick(e: MouseEvent) {
-      if (wwwContextMenu.visible) {
-        closeWwwContextMenu();
-      }
-      if (siteContextMenu.visible) {
-        closeSiteContextMenu();
-      }
       if (showCustomPopover && popoverContainer && !popoverContainer.contains(e.target as Node)) {
         const target = e.target as HTMLElement;
         if (!target.closest('.custom-range-container') && !target.closest('.date-picker-container')) {
@@ -1375,11 +1479,7 @@
       }
     }
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        if (wwwContextMenu.visible) closeWwwContextMenu();
-        if (siteContextMenu.visible) closeSiteContextMenu();
-        if (showCustomPopover) showCustomPopover = false;
-      }
+      if (e.key === 'Escape' && showCustomPopover) showCustomPopover = false;
     }
     window.addEventListener('click', handleOutsideClick);
     window.addEventListener('keydown', handleKey);
@@ -1910,11 +2010,11 @@
                 </p>
 
                 <div class="service-btns">
-                  {#each [['start','Start',false,Play], ['stop','Stop',true,Square], ['restart','Restart',false,RotateCcw], ['reload','Reload',false,RefreshCw]] as [action, label, isDanger, Icon]}
+                  {#each nginxServiceActions as { action, label, danger, icon: Icon }}
                     <Button
-                      variant={isDanger ? 'danger' : 'outline'}
+                      variant={danger ? 'danger' : 'outline'}
                       class="btn-sm"
-                      onclick={() => requestServiceAction(action as string)}
+                      onclick={() => requestServiceAction(action)}
                       disabled={serviceLoading}
                       id={`nginx-svc-${action}`}
                     >
@@ -3679,162 +3779,29 @@
   {/if}
 {/snippet}
 
-<!-- ─── Sites Right-Click Context Menu ────────────────────────────────────── -->
-{#if siteContextMenu.visible && siteContextMenu.site}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div 
-    class="www-context-menu" 
-    style="top: {siteContextMenu.y}px; left: {siteContextMenu.x}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div class="context-menu-header">
-      <Globe size={13} class="text-accent" />
-      <span class="context-menu-title" title={siteContextMenu.site.name}>{siteContextMenu.site.name}</span>
-    </div>
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item" onclick={() => { openSiteInspector(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Eye size={13} />
-      <span>Quick Inspect</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openSiteInEditor(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <FileCode size={13} />
-      <span>Edit in Full Editor</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openCloneModal(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Clone Site Config</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { jumpToSiteLogs(siteContextMenu.site!, 'analytics'); closeSiteContextMenu(); }}>
-      <BarChart2 size={13} />
-      <span>View Logs &amp; Analytics</span>
-    </button>
-
-    {#if !siteContextMenu.site.has_ssl}
-      <button class="context-menu-item" onclick={() => { openQuickSsl(siteContextMenu.site!); closeSiteContextMenu(); }}>
-        <Sparkles size={13} class="text-accent" />
-        <span>Issue Let's Encrypt SSL</span>
-      </button>
-    {/if}
-
-    {#if siteContextMenu.site.source === 'sites-available' || siteContextMenu.site.source === 'conf.d'}
-      <button 
-        class="context-menu-item" 
-        onclick={() => { toggleSite(siteContextMenu.site!); closeSiteContextMenu(); }}
-        disabled={toggleLoadingFor === siteContextMenu.site.name}
-      >
-        {#if siteContextMenu.site.enabled}
-          <EyeOff size={13} />
-          <span>Disable Site</span>
-        {:else}
-          <Eye size={13} />
-          <span>Enable Site</span>
-        {/if}
-      </button>
-    {/if}
-
-    <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(siteContextMenu.site!.path); uiStore.addToast('Copied site path to clipboard', 'info'); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Copy Config Path</span>
-    </button>
-
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item danger" onclick={() => { confirmDeleteSite(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Trash2 size={13} />
-      <span>Delete Site</span>
-    </button>
-  </div>
+<!-- ─── Shared Right-Click Context Menus ─────────────────────────────────── -->
+{#if siteContextMenu.site}
+  <ContextMenu
+    bind:isOpen={siteContextMenu.visible}
+    x={siteContextMenu.x}
+    y={siteContextMenu.y}
+    title={siteContextMenu.site.name}
+    icon={Globe}
+    items={siteContextItems(siteContextMenu.site)}
+    onclose={() => { siteContextMenu.visible = false; }}
+  />
 {/if}
 
-<!-- ─── WWW Right-Click Context Menu ──────────────────────────────────────── -->
-{#if wwwContextMenu.visible}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div 
-    class="www-context-menu" 
-    style="top: {wwwContextMenu.y}px; left: {wwwContextMenu.x}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    {#if wwwContextMenu.entry}
-      <div class="context-menu-header">
-        {#if wwwContextMenu.entry.is_dir}
-          <FolderOpen size={13} class="text-accent" />
-        {:else}
-          <FileText size={13} class="text-accent" />
-        {/if}
-        <span class="context-menu-title" title={wwwContextMenu.entry.name}>{wwwContextMenu.entry.name}</span>
-      </div>
-      <div class="context-menu-divider"></div>
-
-      {#if !wwwContextMenu.entry.is_dir}
-        <!-- File Actions -->
-        <button class="context-menu-item" onclick={() => { viewWwwFile(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Eye size={13} />
-          <span>View / Preview</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
-          <Edit3 size={13} />
-          <span>Rename File</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied full path to clipboard', 'info'); closeWwwContextMenu(); }}>
-          <Copy size={13} />
-          <span>Copy Full Path</span>
-        </button>
-        <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Trash2 size={13} />
-          <span>Delete File</span>
-        </button>
-      {:else}
-        <!-- Directory Actions -->
-        <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = wwwContextMenu.entry!.path; closeWwwContextMenu(); }}>
-          <FolderPlus size={13} />
-          <span>New Subfolder</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { uploadFile(wwwContextMenu.entry!.path); closeWwwContextMenu(); }}>
-          <Upload size={13} />
-          <span>Upload File Here</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
-          <Edit3 size={13} />
-          <span>Rename Folder</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied folder path to clipboard', 'info'); closeWwwContextMenu(); }}>
-          <Copy size={13} />
-          <span>Copy Folder Path</span>
-        </button>
-        <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Trash2 size={13} />
-          <span>Delete Folder</span>
-        </button>
-      {/if}
-    {:else}
-      <!-- Empty Tree Area Actions -->
-      <div class="context-menu-header">
-        <FolderOpen size={13} class="text-accent" />
-        <span class="context-menu-title">/var/www Root</span>
-      </div>
-      <div class="context-menu-divider"></div>
-      <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; closeWwwContextMenu(); }}>
-        <FolderPlus size={13} />
-        <span>New Folder at Root</span>
-      </button>
-      <button class="context-menu-item" onclick={() => { uploadFile('/var/www'); closeWwwContextMenu(); }}>
-        <Upload size={13} />
-        <span>Upload File to /var/www</span>
-      </button>
-      <button class="context-menu-item" onclick={() => { loadWww(); closeWwwContextMenu(); }}>
-        <RefreshCw size={13} />
-        <span>Refresh File Tree</span>
-      </button>
-    {/if}
-  </div>
+{#if wwwContextMenu.visible || wwwContextMenu.entry}
+  <ContextMenu
+    bind:isOpen={wwwContextMenu.visible}
+    x={wwwContextMenu.x}
+    y={wwwContextMenu.y}
+    title={wwwContextMenu.entry?.name ?? '/var/www Root'}
+    icon={wwwContextMenu.entry ? (wwwContextMenu.entry.is_dir ? FolderOpen : FileText) : FolderOpen}
+    items={wwwContextItems(wwwContextMenu.entry)}
+    onclose={() => { wwwContextMenu.visible = false; }}
+  />
 {/if}
 
 <!-- ─── Modals ─────────────────────────────────────────────────────────────── -->
@@ -5025,61 +4992,7 @@
     background: rgba(0, 218, 243, 0.12); 
     color: var(--color-accent); 
     font-weight: 500;
-  }.tree-arrow { width: 14px; display: flex; align-items: center; justify-content: center; opacity: 0.7; }.tree-arrow-spacer { width: 14px; flex-shrink: 0; }.tree-icon { flex-shrink: 0; }.tree-icon.folder { color: #f59e0b; }.tree-icon.file { color: var(--color-text-muted); }.tree-item.tree-selected :global(.tree-icon):global(.file) { color: var(--color-accent); }.tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.tree-size { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }.rename-input { font-size: 11px; padding: 2px 6px; width: 120px; border-radius: 4px; }/* Right-Click Context Menu */ .www-context-menu {
-    position: fixed;
-    z-index: 1000;
-    min-width: 200px;
-    background: var(--color-bg-card, #0f172a);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    animation: menu-fade 0.12s ease;
-  }.context-menu-header {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 5px 8px 6px;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    margin-bottom: 2px;
-  }.context-menu-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 160px;
-  }.context-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 10px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--color-text-secondary);
-    font-size: 11.5px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.12s ease;
-    white-space: nowrap;
-  }.context-menu-item:hover {
-    background: rgba(0, 218, 243, 0.12);
-    color: var(--color-text-primary);
-  }.context-menu-item.danger { color: var(--color-error); }.context-menu-item.danger:hover {
-    background: rgba(239, 68, 68, 0.15);
-    color: #fca5a5;
-  }.context-menu-divider {
-    height: 1px;
-    background: rgba(255, 255, 255, 0.08);
-    margin: 3px 0;
-  }/* WWW Viewer */ .www-viewer {
+  }.tree-arrow { width: 14px; display: flex; align-items: center; justify-content: center; opacity: 0.7; }.tree-arrow-spacer { width: 14px; flex-shrink: 0; }.tree-icon { flex-shrink: 0; }.tree-icon.folder { color: #f59e0b; }.tree-icon.file { color: var(--color-text-muted); }.tree-item.tree-selected :global(.tree-icon):global(.file) { color: var(--color-accent); }.tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.tree-size { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }.rename-input { font-size: 11px; padding: 2px 6px; width: 120px; border-radius: 4px; }/* WWW Viewer */ .www-viewer {
     flex: 1;
     display: flex;
     flex-direction: column;

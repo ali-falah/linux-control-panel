@@ -1,4 +1,8 @@
-export function tableFeatures(node: HTMLTableElement) {
+export function tableFeatures(
+  node: HTMLTableElement,
+  options: { sortable?: boolean } = {},
+) {
+  const sortable = options.sortable ?? true;
   function init() {
     const headers = Array.from(node.querySelectorAll('thead th')) as HTMLTableCellElement[];
     
@@ -42,7 +46,7 @@ export function tableFeatures(node: HTMLTableElement) {
       }
 
       // 2. Setup Sort Indicator
-      if (!th.classList.contains('th-sortable') && th.textContent?.trim()) {
+      if (sortable && !th.classList.contains('th-sortable') && th.textContent?.trim()) {
         th.classList.add('th-sortable');
         const indicator = document.createElement('span');
         indicator.className = 'sort-indicator';

@@ -300,6 +300,7 @@
   let popoverContainer = $state<HTMLDivElement | null>(null);
 
   function handleTabChange(tabId: string) {
+    if (tabId !== 'journal' && tabId !== 'auth' && tabId !== 'audit' && tabId !== 'threats') return;
     activeTab = tabId;
     // Load a tab the first time it is opened — switching back is instant.
     // A range/level change calls refreshActiveTab() explicitly.
@@ -1512,7 +1513,7 @@
       <div class="drawer-overview-card {getPriorityClass(selectedLog.PRIORITY)}">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
           <div style="display: flex; align-items: center; gap: 8px;">
-            <Badge variant={selectedLog.PRIORITY <= 3 ? 'danger' : (selectedLog.PRIORITY == 4 ? 'warning' : 'info')}>
+            <Badge variant={selectedLog.PRIORITY <= 3 ? 'error' : (selectedLog.PRIORITY == 4 ? 'warning' : 'info')}>
               Priority {selectedLog.PRIORITY} ({getPriorityLabel(selectedLog.PRIORITY)})
             </Badge>
             <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--color-text-primary);">

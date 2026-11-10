@@ -3913,6 +3913,7 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "security_lock_account",
     "unit_action",
     "unit_dropin_write",
+    "unit_create",
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
@@ -4120,6 +4121,7 @@ const HELPER_SECURITY_KERNEL_PARAM_ACTIONS: &[&str] = &["security_kernel_param"]
 const HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS: &[&str] = &["security_lock_account"];
 const HELPER_UNIT_ACTION_ACTIONS: &[&str] = &["unit_action"];
 const HELPER_UNIT_DROPIN_ACTIONS: &[&str] = &["unit_dropin_write"];
+const HELPER_UNIT_CREATE_ACTIONS: &[&str] = &["unit_create"];
 const HELPER_UNIT_RECOVERY_ACTIONS: &[&str] = &["unit_daemon_reload"];
 const HELPER_COPR_ACTIONS: &[&str] = &["copr_manage"];
 const HELPER_NMCLI_INTERFACE_STATE_ACTIONS: &[&str] = &["nmcli_interface_state"];
@@ -4934,6 +4936,17 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             ));
         }
         unit_action_valid(&args[1], &args[2])?;
+        return Ok(());
+    }
+    if HELPER_UNIT_CREATE_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one unit name",
+            ));
+        }
+        service_unit_name_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_UNIT_DROPIN_ACTIONS.contains(&action.as_str()) {
@@ -8747,6 +8760,7 @@ mod service_manager_validator_tests {
         check_lcp(&["unit_action", "restart", "nginx.service"]).expect("valid action");
         check_lcp(&["unit_action", "mask", "cups.service"]).expect("valid mask");
         check_lcp(&["unit_dropin_write", "nginx.service"]).expect("valid dropin");
+        check_lcp(&["unit_create", "my-app.service"]).expect("valid create");
         check_lcp(&["unit_daemon_reload"]).expect("valid recovery");
         for args in [
             vec!["unit_action", "restart"],
@@ -8755,6 +8769,7 @@ mod service_manager_validator_tests {
             vec!["unit_action", "restart", "nginx"],
             vec!["unit_dropin_write"],
             vec!["unit_dropin_write", "-bad.service"],
+            vec!["unit_create", "-bad.service"],
             vec!["unit_daemon_reload", "extra"],
         ] {
             assert!(check_lcp(&args).is_err(), "{args:?} must be refused");

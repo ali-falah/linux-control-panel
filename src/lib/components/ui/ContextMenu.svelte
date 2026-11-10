@@ -1,6 +1,7 @@
 <script lang="ts">
   import { portal } from '../../actions/portal.ts';
   import type { Snippet } from 'svelte';
+  import { nextMenuIndex } from '../../utils/menuNavigation';
 
   export interface ContextMenuItem {
     label: string;
@@ -20,6 +21,7 @@
     title = '',
     subtitle = '',
     badge = undefined,
+    badges: badgeList = undefined,
     icon: HeaderIcon = undefined,
     items = [],
     minWidth = '250px',
@@ -34,6 +36,7 @@
     title?: string;
     subtitle?: string;
     badge?: { text: string; variant?: 'success' | 'info' | 'warning' | 'error' | 'muted'; color?: string };
+    badges?: Array<{ text: string; variant?: 'success' | 'info' | 'warning' | 'error' | 'muted'; color?: string }>;
     icon?: any;
     items?: ContextMenuItem[];
     minWidth?: string;
@@ -66,11 +69,52 @@
     }
   });
 
+  function menuItems(): HTMLElement[] {
+    return Array.from(
+      menuEl?.querySelectorAll<HTMLElement>('.context-menu-item:not(:disabled)') ?? [],
+    );
+  }
+
+  function handleMenuKeydown(event: KeyboardEvent) {
+    const items = menuItems();
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      items[nextMenuIndex(current, items.length, 'down')].focus();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      items[nextMenuIndex(current, items.length, 'up')].focus();
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      items[0].focus();
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      items[items.length - 1].focus();
+    } else if (event.key === 'Tab') {
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
   function handleItemClick(item: ContextMenuItem) {
     if (item.disabled || item.divider) return;
     close();
     item.action?.();
   }
+
+  $effect(() => {
+    if (isOpen) {
+      setTimeout(() => menuItems()[0]?.focus(), 0);
+    }
+  });
 </script>
 
 <svelte:window 
@@ -101,6 +145,7 @@
     style="position: fixed; left: {clampedX}px; top: {clampedY}px; z-index: 99999; min-width: {minWidth}; max-width: {maxWidth};"
     onclick={(e) => e.stopPropagation()}
     oncontextmenu={(e) => e.stopPropagation()}
+    onkeydown={handleMenuKeydown}
     role="menu"
     tabindex="-1"
   >
@@ -114,7 +159,18 @@
           {/if}
           <span class="header-title" title={title}>{title}</span>
         </div>
-        {#if badge}
+        {#if badgeList && badgeList.length > 0}
+          <div class="header-badges">
+            {#each badgeList as entry}
+              <span
+                class="badge {entry.variant ? `badge-${entry.variant}` : 'badge-info'}"
+                style={entry.color ? `background: ${entry.color}22; color: ${entry.color};` : ''}
+              >
+                {entry.text}
+              </span>
+            {/each}
+          </div>
+        {:else if badge}
           <span 
             class="badge {badge.variant ? `badge-${badge.variant}` : 'badge-info'}" 
             style={badge.color ? `background: ${badge.color}22; color: ${badge.color};` : ''}
@@ -212,6 +268,13 @@
     align-items: center;
     gap: 6px;
     overflow: hidden;
+  }
+
+  .header-badges {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
   }
 
   :global(.custom-context-menu .header-icon) {

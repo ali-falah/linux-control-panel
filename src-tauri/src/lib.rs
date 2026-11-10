@@ -30,7 +30,7 @@ use commands::{
     hosts_manager::{read_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
     service_manager::{
-        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
+        get_service_logs, list_all_units, read_unit_file, read_unit_override, create_unit_file, unit_file_exists, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
         get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
@@ -242,6 +242,9 @@ pub fn run() {
             unit_action,
             get_service_logs,
             read_unit_file,
+            read_unit_override,
+            create_unit_file,
+            unit_file_exists,
             write_unit_file,
             unit_daemon_reload,
             get_boot_blame,

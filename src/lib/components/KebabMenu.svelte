@@ -2,6 +2,7 @@
   import { MoreVertical } from '@lucide/svelte';
   import type { Snippet } from 'svelte';
   import { portal } from '../actions/portal.ts';
+  import { nextMenuIndex } from '../utils/menuNavigation';
 
   let { 
     children, 
@@ -19,6 +20,7 @@
 
   let isOpen = $state(false);
   let menuNode: HTMLElement;
+  let dropdownNode = $state<HTMLElement>();
   let triggerBtn: HTMLElement;
   let dropdownStyle = $state('');
 
@@ -47,7 +49,7 @@
         leftRightStyle = `left: ${left}px; right: auto;`;
       }
 
-      dropdownStyle = `position: fixed; ${topStyle} ${leftRightStyle} margin-top: 0; z-index: 99999; width: max-content; min-width: 180px; max-width: 290px; overflow-y: auto; overflow-x: hidden;`;
+      dropdownStyle = `position: fixed; ${topStyle} ${leftRightStyle} margin-top: 0; z-index: 99999; overflow-y: auto;`;
     }
   }
 
@@ -57,10 +59,40 @@
       updatePosition();
     }
     isOpen = !isOpen;
+    if (isOpen) {
+      setTimeout(() => {
+        dropdownNode?.querySelector<HTMLElement>('.menu-item:not(:disabled)')?.focus();
+      }, 0);
+    }
   }
 
   function closeMenu() {
     isOpen = false;
+  }
+
+  function menuItems(): HTMLElement[] {
+    return Array.from(
+      dropdownNode?.querySelectorAll<HTMLElement>('.menu-item:not(:disabled)') ?? [],
+    );
+  }
+
+  function handleMenuKeydown(event: KeyboardEvent) {
+    const items = menuItems();
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      items[nextMenuIndex(current, items.length, 'down')].focus();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      items[nextMenuIndex(current, items.length, 'up')].focus();
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      items[0].focus();
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      items[items.length - 1].focus();
+    }
   }
 
   $effect(() => {
@@ -72,13 +104,21 @@
         }
       }
     };
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        isOpen = false;
+        triggerBtn?.focus();
+      }
+    };
     if (isOpen) {
       document.addEventListener('click', handleOutsideClick);
+      document.addEventListener('keydown', handleKeydown);
       window.addEventListener('scroll', updatePosition, true);
       window.addEventListener('resize', updatePosition);
     }
     return () => {
       document.removeEventListener('click', handleOutsideClick);
+      document.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('scroll', updatePosition, true);
       window.removeEventListener('resize', updatePosition);
     };
@@ -88,7 +128,7 @@
 <div class="kebab-menu" bind:this={menuNode}>
   <button 
     bind:this={triggerBtn} 
-    class="trigger-btn btn btn-icon btn-ghost {buttonClass}" 
+    class="trigger-btn btn btn-ghost {buttonClass}"
     onclick={toggleMenu} 
     aria-haspopup="menu" 
     aria-expanded={isOpen}
@@ -102,10 +142,16 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div 
       use:portal
+      bind:this={dropdownNode}
       class="menu-dropdown animate-fade-slide" 
       style={dropdownStyle}
       onclick={closeMenu}
-      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeMenu(); }}
+      onfocusout={(e) => {
+        if (dropdownNode && !dropdownNode.contains(e.relatedTarget as Node | null)) {
+          isOpen = false;
+        }
+      }}
+      onkeydown={(e) => { handleMenuKeydown(e); if (e.key === 'Enter' || e.key === ' ') closeMenu(); }}
       role="menu"
       tabindex="0"
     >
@@ -133,6 +179,11 @@
     color: var(--color-accent);
   }
 
+  .trigger-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+
   .menu-dropdown {
     position: fixed;
     padding: 5px !important;
@@ -142,6 +193,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-x: auto;
     background: var(--color-bg-surface) !important;
     border: 1px solid var(--color-border) !important;
     border-radius: 8px;
@@ -193,32 +245,44 @@
   }
 
   :global(.menu-dropdown .menu-item.text-success) {
+    color: var(--color-text-primary);
+  }
+  :global(.menu-dropdown .menu-item.text-success svg) {
     color: var(--color-success);
   }
   :global(.menu-dropdown .menu-item.text-success:hover) {
     background: var(--color-success-muted);
-    color: var(--color-success);
+    color: var(--color-text-primary);
   }
   :global(.menu-dropdown .menu-item.text-warning) {
+    color: var(--color-text-primary);
+  }
+  :global(.menu-dropdown .menu-item.text-warning svg) {
     color: var(--color-warning);
   }
   :global(.menu-dropdown .menu-item.text-warning:hover) {
     background: var(--color-warning-muted);
-    color: var(--color-warning);
+    color: var(--color-text-primary);
   }
   :global(.menu-dropdown .menu-item.text-info) {
+    color: var(--color-text-primary);
+  }
+  :global(.menu-dropdown .menu-item.text-info svg) {
     color: var(--color-info);
   }
   :global(.menu-dropdown .menu-item.text-info:hover) {
     background: var(--color-info-muted);
-    color: var(--color-info);
+    color: var(--color-text-primary);
   }
   :global(.menu-dropdown .menu-item.text-accent) {
+    color: var(--color-text-primary);
+  }
+  :global(.menu-dropdown .menu-item.text-accent svg) {
     color: var(--color-accent);
   }
   :global(.menu-dropdown .menu-item.text-accent:hover) {
     background: var(--color-accent-muted);
-    color: var(--color-accent);
+    color: var(--color-text-primary);
   }
 
   :global(.menu-dropdown .menu-item:disabled) {

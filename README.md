@@ -59,7 +59,7 @@
 ### ⚙️ System & Administration
 | Module | Description & Capabilities |
 | :--- | :--- |
-| ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), unit file inspector, and inline `journalctl -u` log stream. |
+| ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), new-unit wizard, editable drop-in override plus read-only effective unit view, boot analyzer, and inline `journalctl -u` log stream. |
 | 🔌 **Device Manager** | PCI & USB Device Explorer (`lspci`, `lsusb`), Block Storage Devices (`lsblk`) with filesystem types & mount points, CPU/GPU hardware specs, Thermal Sensors inspector (core temps, fan speeds), and **SMART Disk Health & Self-Test Inspector** (`smartctl`). |
 | 👥 **User Manager** | System Users & Groups manager (`/etc/passwd`, `/etc/group`), user creation & deletion, password management, UID/GID config, default shell selector (`bash`, `zsh`, `fish`), **Sudoers Privilege Rule Builder** (`/etc/sudoers.d/`), and SSH Authorized Keys manager (`~/.ssh/authorized_keys`). |
 | 💻 **Shell Environment** | Graphical editor for shell environment files (`.bashrc`, `.zshrc`, `.bash_profile`), **Shell Aliases Manager** (create, edit, toggle, delete command aliases), **PATH Variable Visual Manager** (add, reorder, or remove directory paths), and shell config backup helper. |
@@ -187,6 +187,12 @@ cd src-tauri && cargo check
 
 # Run Rust unit tests
 cd src-tauri && cargo test
+
+# Check Svelte/TypeScript diagnostics
+npm run check
+
+# Run frontend unit tests
+npm test
 
 # Build frontend production bundle
 npm run build

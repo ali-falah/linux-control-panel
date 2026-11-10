@@ -598,44 +598,106 @@ pub async fn unit_action(name: String, action: ServiceAction, user_mode: Option<
     })
 }
 
+fn service_log_args<'a>(
+    name: &'a str,
+    lines: &'a str,
+    user_mode: bool,
+    boot: bool,
+) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    if user_mode {
+        args.push("--user");
+    }
+    if boot {
+        args.push("--boot");
+    }
+    args.extend(["-u", name, "-n", lines, "--no-pager", "--output=short-precise"]);
+    args
+}
+
+fn user_unit_dir(home: &str) -> String {
+    format!("{home}/.config/systemd/user")
+}
+
+fn user_unit_path(home: &str, name: &str) -> String {
+    format!("{}/{}", user_unit_dir(home), name)
+}
+
+fn user_override_path(home: &str, name: &str) -> String {
+    format!("{}/{}.d/override.conf", user_unit_dir(home), name)
+}
+
+fn validate_new_unit_content(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("A new unit file must not be empty.".to_string());
+    }
+    if content.contains('\0') {
+        return Err("The unit file must not contain NUL bytes.".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_user_unit_slot(path: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Refusing to write through a symlinked unit path: {path}"
+        )),
+        Ok(_) => Err(format!(
+            "The unit {path} already exists; use the override editor instead."
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to inspect {path}: {error}")),
+    }
+}
+
+fn unit_slot_exists(path: &str) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Failed to inspect {path}: {error}")),
+    }
+}
+
+fn ensure_not_symlink(path: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Refusing to write through a symlinked path: {path}"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Check whether the file `unit_create` would write already exists. Vendor
+/// units do not count: shadowing them with a local unit is allowed.
+#[tauri::command]
+pub async fn unit_file_exists(name: String, user_mode: Option<bool>) -> Result<bool, String> {
+    crate::utils::root_policy::service_unit_name_valid(&name)?;
+    let path = if user_mode.unwrap_or(false) {
+        let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;
+        user_unit_path(&home, &name)
+    } else {
+        format!("/etc/systemd/system/{name}")
+    };
+    unit_slot_exists(&path)
+}
+
 /// Get service logs from journalctl
 #[tauri::command]
-pub async fn get_service_logs(name: String, lines: Option<u32>, user_mode: Option<bool>) -> Result<String, String> {
+pub async fn get_service_logs(name: String, lines: Option<u32>, user_mode: Option<bool>, boot: Option<bool>) -> Result<String, String> {
     if !binary_exists("journalctl").await {
         return Err("journalctl is not available on this system".to_string());
     }
 
     let lines_str = lines.unwrap_or(100).to_string();
     let is_user = user_mode.unwrap_or(false);
+    let boot = boot.unwrap_or(false);
 
-    let output = if is_user {
-        Command::new("journalctl")
-            .args([
-                "--user",
-                "-u",
-                &name,
-                "-n",
-                &lines_str,
-                "--no-pager",
-                "--output=short-precise",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run journalctl: {e}"))?
-    } else {
-        Command::new("journalctl")
-            .args([
-                "-u",
-                &name,
-                "-n",
-                &lines_str,
-                "--no-pager",
-                "--output=short-precise",
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run journalctl: {e}"))?
-    };
+    let args = service_log_args(&name, &lines_str, is_user, boot);
+    let output = Command::new("journalctl")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run journalctl: {e}"))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -675,9 +737,79 @@ pub async fn read_unit_file(name: String, user_mode: Option<bool>) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Read only the drop-in override that `write_unit_file` writes. Unlike
+/// `systemctl cat`, this does not include the vendor unit or other drop-ins.
+#[tauri::command]
+pub async fn read_unit_override(name: String, user_mode: Option<bool>) -> Result<String, String> {
+    crate::utils::root_policy::service_unit_name_valid(&name)?;
+    let is_user = user_mode.unwrap_or(false);
+    let path = if is_user {
+        let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;
+        user_override_path(&home, &name)
+    } else {
+        format!("/etc/systemd/system/{name}.d/override.conf")
+    };
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("Failed to read {path}: {error}")),
+    }
+}
+
+/// Create a new unit file (not a drop-in). System scope goes through the
+/// validated helper action; user scope writes the user unit path directly.
+#[tauri::command]
+pub async fn create_unit_file(
+    name: String,
+    content: String,
+    user_mode: Option<bool>,
+) -> Result<(), String> {
+    crate::utils::root_policy::service_unit_name_valid(&name)?;
+    let is_user = user_mode.unwrap_or(false);
+    if !is_user {
+        run_service_named_action("unit_create", std::slice::from_ref(&name), &content).await?;
+        invalidate_unit_file_cache();
+        log_to_file("INFO", &format!("Created unit file {name}"));
+        return Ok(());
+    }
+
+    validate_new_unit_content(&content)?;
+
+    let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;
+    let dir = user_unit_dir(&home);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {dir}: {e}"))?;
+    let path = user_unit_path(&home, &name);
+    ensure_user_unit_slot(&path)?;
+    std::fs::write(&path, &content).map_err(|e| format!("Failed to write {path}: {e}"))?;
+    let reload = match Command::new("systemctl").args(["--user", "daemon-reload"]).output().await {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "Unit written to {path}, but systemctl --user could not start: {error}; the new unit was removed"
+            ));
+        }
+    };
+    if !reload.status.success() {
+        let removed = std::fs::remove_file(&path);
+        let note = if removed.is_ok() {
+            format!("the new unit was removed from {path}")
+        } else {
+            format!("the new unit could not be removed from {path}; delete it manually")
+        };
+        return Err(format!(
+            "systemctl --user daemon-reload failed: {}; {note}",
+            String::from_utf8_lossy(&reload.stderr).trim()
+        ));
+    }
+    log_to_file("INFO", &format!("Created user unit file {name}"));
+    Ok(())
+}
+
 /// Write a drop-in override for a unit file
 #[tauri::command]
 pub async fn write_unit_file(name: String, content: String, user_mode: Option<bool>) -> Result<(), String> {
+    crate::utils::root_policy::service_unit_name_valid(&name)?;
     let is_user = user_mode.unwrap_or(false);
 
     if !is_user {
@@ -690,26 +822,34 @@ pub async fn write_unit_file(name: String, content: String, user_mode: Option<bo
     if is_user {
         let home = std::env::var("HOME").map_err(|_| "Could not find HOME directory".to_string())?;
         let drop_in_dir = format!("{}/.config/systemd/user/{}.d", home, name);
-        let drop_in_file = format!("{}/override.conf", drop_in_dir);
+        let drop_in_file = user_override_path(&home, &name);
 
         // Create directory
+        ensure_not_symlink(&drop_in_dir)?;
         std::fs::create_dir_all(&drop_in_dir)
             .map_err(|e| format!("Failed to create user systemd dir: {e}"))?;
 
         // Write file
+        ensure_not_symlink(&drop_in_file)?;
         std::fs::write(&drop_in_file, &content)
             .map_err(|e| format!("Failed to write user systemd override: {e}"))?;
 
-        // Reload user daemon
-        let _ = Command::new("systemctl")
+        // Reload user daemon; never claim success when systemd did not reload.
+        let reload = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .output()
-            .await;
+            .await
+            .map_err(|e| format!("Override written but systemctl --user could not start: {e}"))?;
+        if !reload.status.success() {
+            return Err(format!(
+                "Override written to {drop_in_file}, but systemctl --user daemon-reload failed: {}",
+                String::from_utf8_lossy(&reload.stderr).trim()
+            ));
+        }
 
         log_to_file("INFO", &format!("Wrote user unit file override for {name}"));
         Ok(())
     } else {
-        crate::utils::root_policy::service_unit_name_valid(&name)?;
         run_service_named_action("unit_dropin_write", &[name.clone()], &content).await?;
         invalidate_unit_file_cache();
         log_to_file("INFO", &format!("Wrote unit file override for {name}"));
@@ -1249,4 +1389,148 @@ pub async fn get_unit_dependencies(name: String, user_mode: Option<bool>) -> Res
     }
 
     Ok(UnitDependencies { requires, wants, after, before })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("lcp-{label}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn service_log_args_default_has_no_scope_flags() {
+        assert_eq!(
+            service_log_args("nginx.service", "100", false, false),
+            vec![
+                "-u",
+                "nginx.service",
+                "-n",
+                "100",
+                "--no-pager",
+                "--output=short-precise",
+            ]
+        );
+    }
+
+    #[test]
+    fn service_log_args_adds_boot_and_user_flags() {
+        assert_eq!(
+            service_log_args("nginx.service", "150", false, true),
+            vec![
+                "--boot",
+                "-u",
+                "nginx.service",
+                "-n",
+                "150",
+                "--no-pager",
+                "--output=short-precise",
+            ]
+        );
+        assert_eq!(
+            service_log_args("nginx.service", "100", true, false)[0],
+            "--user"
+        );
+        assert_eq!(
+            service_log_args("nginx.service", "100", true, true)[..2],
+            ["--user", "--boot"]
+        );
+    }
+
+    #[test]
+    fn user_unit_paths_match_the_paths_the_commands_use() {
+        assert_eq!(user_unit_dir("/home/ali"), "/home/ali/.config/systemd/user");
+        assert_eq!(
+            user_unit_path("/home/ali", "demo.service"),
+            "/home/ali/.config/systemd/user/demo.service"
+        );
+        assert_eq!(
+            user_override_path("/home/ali", "demo.service"),
+            "/home/ali/.config/systemd/user/demo.service.d/override.conf"
+        );
+    }
+
+    #[test]
+    fn new_unit_content_rejects_empty_and_nul() {
+        assert!(validate_new_unit_content(" \n\t ").is_err());
+        assert!(validate_new_unit_content("[Unit]\0").is_err());
+        assert!(validate_new_unit_content("[Unit]\nDescription=Demo\n").is_ok());
+    }
+
+    #[test]
+    fn user_unit_slot_refuses_existing_files_and_symlinks() {
+        let dir = unique_temp_dir("unit-slot");
+        let path = dir.join("demo.service");
+        let path_str = path.to_str().unwrap();
+
+        assert!(ensure_user_unit_slot(path_str).is_ok());
+
+        std::fs::write(&path, "[Unit]\n").unwrap();
+        let exists = ensure_user_unit_slot(path_str).unwrap_err();
+        assert!(exists.contains("already exists"), "{exists}");
+        std::fs::remove_file(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/dev/null", &path).unwrap();
+            let symlink = ensure_user_unit_slot(path_str).unwrap_err();
+            assert!(symlink.contains("symlinked"), "{symlink}");
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn override_symlink_is_refused_but_missing_or_regular_paths_are_allowed() {
+        let dir = unique_temp_dir("override-link");
+        let target = dir.join("real.conf");
+        let link = dir.join("override.conf");
+
+        assert!(ensure_not_symlink(link.to_str().unwrap()).is_ok());
+
+        std::fs::write(&target, "").unwrap();
+        std::fs::write(&link, "").unwrap();
+        assert!(ensure_not_symlink(link.to_str().unwrap()).is_ok());
+        std::fs::remove_file(&link).unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let error = ensure_not_symlink(link.to_str().unwrap()).unwrap_err();
+            assert!(error.contains("symlinked"), "{error}");
+            std::fs::remove_file(&link).unwrap();
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unit_slot_exists_distinguishes_missing_existing_and_symlinked_paths() {
+        let dir = unique_temp_dir("unit-exists");
+        let missing = dir.join("missing.service");
+        assert!(!unit_slot_exists(missing.to_str().unwrap()).unwrap());
+
+        let existing = dir.join("existing.service");
+        std::fs::write(&existing, "[Unit]\n").unwrap();
+        assert!(unit_slot_exists(existing.to_str().unwrap()).unwrap());
+
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.service");
+            std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+            assert!(unit_slot_exists(link.to_str().unwrap()).unwrap());
+            std::fs::remove_file(&link).unwrap();
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

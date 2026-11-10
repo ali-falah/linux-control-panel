@@ -64,7 +64,7 @@
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);
   let filter = $state('');
-  let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'errors' | 'slow' | 'unreachable'>('all');
+  let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'healthy' | 'errors' | 'slow' | 'unreachable'>('all');
   let showAddDialog = $state(false);
   let addUrl = $state('');
   let addLoading = $state(false);

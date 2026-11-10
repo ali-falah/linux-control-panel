@@ -315,7 +315,7 @@
             <div class="group-items">
               {#each filteredItems as item, itemIdx}
                 {@const isActive = uiStore.activeTab === item.id}
-                {@const isFirstResult = searchQuery.trim() && itemIdx === 0}
+                {@const isFirstResult = Boolean(searchQuery.trim()) && itemIdx === 0}
                 <button
                   class="nav-item"
                   class:active={isActive}
