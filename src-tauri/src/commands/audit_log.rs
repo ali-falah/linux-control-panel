@@ -50,8 +50,7 @@ pub async fn get_auth_events(
     // journalctl first: it honours the selected time range, which the flat
     // log files cannot do (they would always return the newest N lines).
     match get_auth_events_journalctl(since_days, custom_start.clone(), custom_end.clone()).await {
-        Ok(events) if !events.is_empty() => return Ok(events),
-        Ok(_) => {}
+        Ok(events) => return Ok(events),
         Err(_) => {}
     }
 
@@ -77,7 +76,15 @@ pub async fn get_auth_events(
                 parse_auth_log_text(&s)
             }
         }
-        _ => Ok(Vec::new()),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                "Could not read the authentication log; administrator authorization is required.".to_string()
+            } else {
+                stderr
+            })
+        }
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -464,6 +471,15 @@ fn extract_audit_arg(line: &str, i: usize) -> Option<String> {
     None
 }
 
+fn local_timestamp(dt: chrono::NaiveDateTime) -> i64 {
+    use chrono::TimeZone;
+    chrono::Local
+        .from_local_datetime(&dt)
+        .single()
+        .map(|local| local.timestamp())
+        .unwrap_or_else(|| dt.and_utc().timestamp())
+}
+
 #[tauri::command]
 pub async fn get_command_audit_logs(
     since_days: Option<u32>,
@@ -508,7 +524,16 @@ pub async fn get_command_audit_logs(
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                 String::from_utf8_lossy(&o.stdout).to_string()
             }
-            _ => String::new(),
+            Ok(o) if o.status.success() => String::new(),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                return Err(if stderr.is_empty() {
+                    "Could not read the audit log; administrator authorization is required.".to_string()
+                } else {
+                    stderr
+                });
+            }
+            Err(e) => return Err(e.to_string()),
         }
     };
 
@@ -523,7 +548,7 @@ pub async fn get_command_audit_logs(
             chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
                 .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).unwrap()))
                 .ok()
-                .map(|dt| dt.and_utc().timestamp())
+                .map(local_timestamp)
         })
     };
 
@@ -531,7 +556,7 @@ pub async fn get_command_audit_logs(
         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
             .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(23, 59, 59).unwrap()))
             .ok()
-            .map(|dt| dt.and_utc().timestamp())
+            .map(local_timestamp)
     });
 
     let mut msg_map: HashMap<String, (String, String, String, String, String, String)> = HashMap::new();
@@ -655,8 +680,8 @@ pub async fn get_runtime_threats(
 ) -> Result<Vec<RuntimeThreat>, String> {
     let mut threats = Vec::new();
 
-    let auth_events = get_auth_events(since_days, custom_start.clone(), custom_end.clone()).await.unwrap_or_default();
-    let audit_events = get_command_audit_logs(since_days, custom_start, custom_end).await.unwrap_or_default();
+    let auth_events = get_auth_events(since_days, custom_start.clone(), custom_end.clone()).await?;
+    let audit_events = get_command_audit_logs(since_days, custom_start, custom_end).await?;
 
     // 1. Repeated Sudo Failures (3+)
     let mut user_sudo_fails: HashMap<String, u32> = HashMap::new();

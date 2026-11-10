@@ -1,11 +1,12 @@
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 static LIVE_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LIVE_STREAM_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Default number of entries returned for an explicit time range.
 /// Old behaviour was a hard 150 (no range) / 2000 (with range) — far too small
@@ -186,22 +187,26 @@ pub async fn get_journal_logs(
         .await
         .map_err(|e| format!("Failed to read journalctl output: {e}"))?
     {
-        if entries.len() >= limit {
-            truncated = true;
-            break;
-        }
         if line.trim().is_empty() {
             continue;
         }
         if let Some(entry) = parse_journal_line(&line) {
             entries.push(entry);
+            if entries.len() > limit {
+                truncated = true;
+                break;
+            }
         }
     }
 
     let _ = child.kill().await;
 
-    // journalctl emits oldest first — the UI wants newest first
+    // journalctl emits oldest first — the UI wants newest first.
     entries.reverse();
+    // The extra record used to detect truncation is the oldest one.
+    if truncated && entries.len() > limit {
+        entries.pop();
+    }
 
     let oldest_ts = entries.last().map(|e| e.ts.clone());
     let returned = entries.len();
@@ -290,52 +295,63 @@ pub async fn start_journal_live_stream(
     unit_filter: Option<String>,
     priority: Option<u8>,
 ) -> Result<(), String> {
-    if LIVE_STREAM_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(()); // Stream already running
+    let generation = LIVE_STREAM_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    LIVE_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+
+    let mut cmd = tokio::process::Command::new("journalctl");
+    cmd.args(["-f", "-n", "0", "-o", "json", "--no-pager"]);
+    cmd.kill_on_drop(true);
+
+    if let Some(unit) = unit_filter {
+        let clean = unit.trim().to_string();
+        if !clean.is_empty() {
+            cmd.args(["-u", &clean]);
+        }
     }
 
+    if let Some(prio) = priority {
+        cmd.args(["-p", &prio.to_string()]);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        format!("Failed to start journalctl -f: {e}")
+    })?;
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        "journalctl -f produced no stdout".to_string()
+    })?;
+
     tokio::spawn(async move {
-        let mut cmd = tokio::process::Command::new("journalctl");
-        cmd.args(["-f", "-n", "0", "-o", "json", "--no-pager"]);
+        let mut reader = BufReader::new(stdout).lines();
 
-        if let Some(unit) = unit_filter {
-            let clean = unit.trim().to_string();
-            if !clean.is_empty() {
-                cmd.args(["-u", &clean]);
-            }
-        }
-
-        if let Some(prio) = priority {
-            cmd.args(["-p", &prio.to_string()]);
-        }
-
-        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-
-        if let Ok(mut child) = cmd.spawn() {
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = BufReader::new(stdout).lines();
-                while LIVE_STREAM_ACTIVE.load(Ordering::SeqCst) {
-                    tokio::select! {
-                        line_res = reader.next_line() => {
-                            match line_res {
-                                Ok(Some(line)) => {
-                                    if !line.trim().is_empty() {
-                                        // emit the same compact shape the page fetch returns
-                                        if let Some(entry) = parse_journal_line(&line) {
-                                            let _ = app.emit("journal-live-log", entry);
-                                        }
-                                    }
+        while LIVE_STREAM_ACTIVE.load(Ordering::SeqCst)
+            && LIVE_STREAM_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            tokio::select! {
+                line_res = reader.next_line() => {
+                    match line_res {
+                        Ok(Some(line)) => {
+                            if !line.trim().is_empty() {
+                                if let Some(entry) = parse_journal_line(&line) {
+                                    let _ = app.emit("journal-live-log", entry);
                                 }
-                                _ => break,
                             }
                         }
-                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+                        _ => break,
                     }
                 }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
             }
-            let _ = child.kill().await;
         }
-        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+
+        let _ = child.kill().await;
+        if LIVE_STREAM_GENERATION.load(Ordering::SeqCst) == generation {
+            LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -343,6 +359,7 @@ pub async fn start_journal_live_stream(
 
 #[tauri::command]
 pub fn stop_journal_live_stream() {
+    LIVE_STREAM_GENERATION.fetch_add(1, Ordering::SeqCst);
     LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
 }
 

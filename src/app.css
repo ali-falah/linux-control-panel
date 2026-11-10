@@ -586,6 +586,29 @@ html.light-mode .pill-root-on {
   border-color: #86EFAC !important;
 }
 
+html.light-mode .badge-warning {
+  background: #FEF3C7 !important;
+  color: #92400E !important;
+  border-color: #FCD34D !important;
+}
+
+html.light-mode .badge-info {
+  background: #E0F2FE !important;
+  color: #0369A1 !important;
+  border-color: #7DD3FC !important;
+}
+
+html.light-mode .badge-muted {
+  background: #F1F5F9 !important;
+  color: #475569 !important;
+  border-color: #CBD5E1 !important;
+}
+
+html.light-mode .badge-outline {
+  color: #475569 !important;
+  border-color: #CBD5E1 !important;
+}
+
 html.light-mode .pill-root-off,
 html.light-mode .ts-pill {
   background: #F1F5F9 !important;

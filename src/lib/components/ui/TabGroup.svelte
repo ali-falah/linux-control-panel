@@ -32,14 +32,38 @@
     activeTab = id;
     onchange?.(id);
   }
+
+  function handleKeydown(event: KeyboardEvent, index: number) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
+      return;
+    }
+    event.preventDefault();
+    let next = index;
+    if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+
+    const tab = tabs[next];
+    if (!tab) return;
+    selectTab(tab.id);
+    const buttons = (event.currentTarget as HTMLElement)
+      .parentElement
+      ?.querySelectorAll<HTMLButtonElement>('.tab-btn');
+    buttons?.[next]?.focus();
+  }
 </script>
 
-<div class="tab-bar {sizeClass} {className}" {style}>
-  {#each tabs as tab}
+<div class="tab-bar {sizeClass} {className}" {style} role="tablist" aria-label="Tabs">
+  {#each tabs as tab, index}
     {@const TabIcon = tab.icon}
     <button
       class="tab-btn {sizeClass} {activeTab === tab.id ? 'active' : ''}"
+      role="tab"
+      aria-selected={activeTab === tab.id}
+      tabindex={activeTab === tab.id ? 0 : -1}
       onclick={() => selectTab(tab.id)}
+      onkeydown={(e) => handleKeydown(e, index)}
       {disabled}
     >
       {#if TabIcon}

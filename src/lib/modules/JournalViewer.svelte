@@ -34,6 +34,17 @@
   /** Timestamp of the oldest entry we have — used to page further back */
   let journalOldestTs = $state<string | null>(null);
   let isLoadingOlder = $state(false);
+  let journalError = $state('');
+  let journalLoaded = $state(false);
+  let fetchGeneration = 0;
+  let authGeneration = 0;
+  let auditGeneration = 0;
+  let threatGeneration = 0;
+  let authLoaded = $state(false);
+  let auditLoaded = $state(false);
+  let threatsLoaded = $state(false);
+  let rangeBeforeCustom = $state('1');
+  let lastNonCustomRange = $state('1');
   /** How many entries a single fetch may return */
   let maxEntries = $state(20000);
 
@@ -52,6 +63,16 @@
       ? `${formatDateLabel(customStartDate)} - ${formatDateLabel(customEndDate)}`
       : 'Custom Range...'
   );
+
+  let customRangeValid = $derived.by(() => {
+    const start = getCustomStart();
+    const end = getCustomEnd();
+    return Boolean(start && end && start < end);
+  });
+
+  $effect(() => {
+    if (timeRange !== 'custom') lastNonCustomRange = timeRange;
+  });
 
   // Sorting state
   let authSortKey = $state('timestamp');
@@ -117,8 +138,21 @@
 
   async function fetchLogs(opts: { appendOlder?: boolean } = {}) {
     const appendOlder = opts.appendOlder === true;
-    if (appendOlder) isLoadingOlder = true; else isLoading = true;
+    const generation = ++fetchGeneration;
+    const previousOldest = journalOldestTs;
+
+    if (appendOlder) {
+      isLoadingOlder = true;
+    } else {
+      isLoading = true;
+      isLoadingOlder = false;
+      journalError = '';
+      journalTruncated = false;
+      journalOldestTs = null;
+      journalTotalInRange = 0;
+    }
     statusStore.setBusy('Fetching journal logs...');
+
     try {
       const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
       let sinceF = null;
@@ -130,10 +164,9 @@
         sinceF = `${timeRange} days ago`;
       }
 
-      // Paging further back: stop at the oldest entry we already have
-      if (appendOlder && journalOldestTs) {
-        const iso = new Date(Number(journalOldestTs) / 1000).toISOString();
-        untilF = iso;
+      // Paging further back: stop at the oldest entry we already have.
+      if (appendOlder && previousOldest) {
+        untilF = new Date(Number(previousOldest) / 1000).toISOString();
       }
 
       const unitF = currentUnitFilter.trim() || null;
@@ -145,12 +178,22 @@
         maxEntries: maxEntries
       });
 
-      // The backend already returns newest-first
-      logs = appendOlder ? [...logs, ...(page.entries || [])] : (page.entries || []);
+      if (generation !== fetchGeneration) return;
+
+      // The backend returns newest-first. `--until` is inclusive, so the
+      // boundary entry is repeated on every page; drop it and anything newer.
+      const incoming = page.entries || [];
+      const entries = appendOlder && previousOldest
+        ? incoming.filter((entry: any) => Number(entry.__REALTIME_TIMESTAMP) < Number(previousOldest))
+        : incoming;
+
+      logs = appendOlder ? [...logs, ...entries] : entries;
       journalTruncated = !!page.truncated;
+      if (page.oldest_ts) journalOldestTs = page.oldest_ts;
       journalFetchMs = page.elapsed_ms || 0;
+      journalLoaded = true;
+
       if (!appendOlder) {
-        journalOldestTs = page.oldest_ts || null;
         setTimeout(() => {
           const tableWrap = logContainer?.querySelector('.table-wrap') as HTMLElement | null;
           if (tableWrap) {
@@ -162,7 +205,7 @@
 
         // Count the whole range in the background — the table is already
         // usable, the exact total fills in when it arrives.
-        countRange(unitF, prioF, sinceF, untilF);
+        countRange(unitF, prioF, sinceF, untilF, generation);
 
         if (page.truncated) {
           uiStore.addToast(
@@ -177,15 +220,21 @@
 
       statusStore.setLastCommand(
         `journalctl -n ${maxEntries} -o json ${prioF ? '-p ' + prioF : ''} ${sinceF ? '--since="' + sinceF + '"' : ''} ${untilF ? '--until="' + untilF + '"' : ''}`,
-        0, true
+        0,
+        true
       );
     } catch (e) {
-      console.error('Error fetching journal logs:', e);
+      if (generation !== fetchGeneration) return;
+      journalError = String(e);
+      journalTruncated = false;
+      journalTotalInRange = 0;
       statusStore.setLastCommand('journalctl', 1, false);
     } finally {
-      isLoading = false;
-      isLoadingOlder = false;
-      statusStore.clearBusy();
+      if (generation === fetchGeneration) {
+        isLoading = false;
+        isLoadingOlder = false;
+        statusStore.clearBusy();
+      }
     }
   }
 
@@ -204,7 +253,8 @@
     unitFilter: string | null,
     priority: number | null,
     sinceFilter: string | null,
-    untilFilter: string | null
+    untilFilter: string | null,
+    generation: number
   ) {
     try {
       const total = await invoke<number>('count_journal_entries', {
@@ -213,52 +263,60 @@
         sinceFilter,
         untilFilter
       });
+      if (generation !== fetchGeneration) return;
       journalTotalInRange = total || 0;
     } catch {
-      journalTotalInRange = 0;
+      if (generation === fetchGeneration) journalTotalInRange = 0;
     }
   }
 
   async function fetchAuthEvents() {
+    const generation = ++authGeneration;
     loadingAuth = true;
     authError = '';
     try {
       const isCustom = timeRange === 'custom';
       const days = isCustom ? null : parseInt(timeRange);
-      authEvents = await invoke('get_auth_events', {
+      const events = await invoke<any[]>('get_auth_events', {
         sinceDays: days,
         customStart: getCustomStart(),
         customEnd: getCustomEnd()
       });
+      if (generation !== authGeneration) return;
+      authEvents = events;
+      authLoaded = true;
     } catch (e: any) {
-      console.error("Error fetching auth events:", e);
+      if (generation !== authGeneration) return;
       authError = String(e);
     } finally {
-      loadingAuth = false;
+      if (generation === authGeneration) loadingAuth = false;
     }
   }
 
   async function fetchAuditLogs() {
+    const generation = ++auditGeneration;
     loadingAudit = true;
     auditError = '';
     try {
       const isCustom = timeRange === 'custom';
       const days = isCustom ? null : parseInt(timeRange);
       const [status, logs] = await Promise.all([
-        invoke<any>('check_auditd_status'),
+        invoke<any>('check_auditd_status').catch(() => null),
         invoke<any[]>('get_command_audit_logs', {
           sinceDays: days,
           customStart: getCustomStart(),
           customEnd: getCustomEnd()
         })
       ]);
+      if (generation !== auditGeneration) return;
       auditdStatus = status;
       auditLogs = logs;
+      auditLoaded = true;
     } catch (e: any) {
-      console.error("Error fetching audit logs:", e);
+      if (generation !== auditGeneration) return;
       auditError = String(e);
     } finally {
-      loadingAudit = false;
+      if (generation === auditGeneration) loadingAudit = false;
     }
   }
 
@@ -279,21 +337,25 @@
   }
 
   async function fetchThreats() {
+    const generation = ++threatGeneration;
     loadingThreats = true;
     threatsError = '';
     try {
       const isCustom = timeRange === 'custom';
       const days = isCustom ? null : parseInt(timeRange);
-      runtimeThreats = await invoke('get_runtime_threats', {
+      const threats = await invoke<any[]>('get_runtime_threats', {
         sinceDays: days,
         customStart: getCustomStart(),
         customEnd: getCustomEnd()
       });
+      if (generation !== threatGeneration) return;
+      runtimeThreats = threats;
+      threatsLoaded = true;
     } catch (e: any) {
-      console.error("Error fetching runtime threats:", e);
+      if (generation !== threatGeneration) return;
       threatsError = String(e);
     } finally {
-      loadingThreats = false;
+      if (generation === threatGeneration) loadingThreats = false;
     }
   }
 
@@ -304,14 +366,15 @@
     activeTab = tabId;
     // Load a tab the first time it is opened — switching back is instant.
     // A range/level change calls refreshActiveTab() explicitly.
-    if (tabId === 'journal' && logs.length === 0) fetchLogs();
-    else if (tabId === 'auth' && authEvents.length === 0) fetchAuthEvents();
-    else if (tabId === 'audit' && auditLogs.length === 0) fetchAuditLogs();
-    else if (tabId === 'threats' && runtimeThreats.length === 0) fetchThreats();
+    if (tabId === 'journal' && !journalLoaded) fetchLogs();
+    else if (tabId === 'auth' && !authLoaded) fetchAuthEvents();
+    else if (tabId === 'audit' && !auditLoaded) fetchAuditLogs();
+    else if (tabId === 'threats' && !threatsLoaded) fetchThreats();
   }
 
   function handleRangeChange() {
     if (timeRange === 'custom') {
+      rangeBeforeCustom = lastNonCustomRange;
       // Delay by one tick so the triggering click doesn't bubble
       // to the document handler and immediately close the popover
       setTimeout(() => { showCustomPopover = true; }, 0);
@@ -319,6 +382,20 @@
       showCustomPopover = false;
       refreshActiveTab();
     }
+  }
+
+  function applyCustomRange() {
+    if (!customRangeValid) {
+      uiStore.addToast('Choose a start and end date with start before end', 'warning');
+      return;
+    }
+    showCustomPopover = false;
+    refreshActiveTab();
+  }
+
+  function cancelCustomRange() {
+    showCustomPopover = false;
+    timeRange = rangeBeforeCustom;
   }
 
   function formatDateLabel(dateStr: string) {
@@ -341,6 +418,15 @@
 
   // Stable click-outside and Escape handlers — registered once in onMount
   // We read showCustomPopover directly (Svelte $state is a live signal).
+
+  function sortIndicator(key: string, active: string, asc: boolean): string {
+    return key === active ? (asc ? '▲' : '▼') : '↕';
+  }
+
+  function ariaSort(key: string, active: string, asc: boolean): 'ascending' | 'descending' | 'none' {
+    if (key !== active) return 'none';
+    return asc ? 'ascending' : 'descending';
+  }
 
   function toggleAuthSort(key: string) {
     if (authSortKey === key) {
@@ -429,13 +515,6 @@
   });
 
   onMount(() => {
-    const handleTabSelect = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      if (customEvent.detail) {
-        handleTabChange(customEvent.detail);
-      }
-    };
-
     // Stable document listeners for popover close-on-outside-click and Escape
     function handleOutsideClick(e: MouseEvent) {
       if (!showCustomPopover) return;
@@ -453,12 +532,10 @@
       }
     }
 
-    window.addEventListener('journal-tab-select', handleTabSelect);
     document.addEventListener('click', handleOutsideClick);
     document.addEventListener('keydown', handleGlobalKeyDown);
 
     return () => {
-      window.removeEventListener('journal-tab-select', handleTabSelect);
       document.removeEventListener('click', handleOutsideClick);
       document.removeEventListener('keydown', handleGlobalKeyDown);
       if (unlistenLive) {
@@ -469,41 +546,92 @@
     };
   });
 
-  async function toggleLiveFollow() {
-    isLiveFollowing = !isLiveFollowing;
-    if (isLiveFollowing) {
-      try {
-        const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
-        // honour the active unit filter — the stream used to ignore it
-        const unitF = currentUnitFilter.trim() || null;
-        await invoke('start_journal_live_stream', { unitFilter: unitF, priority: prioF });
-        unlistenLive = await listen<any>('journal-live-log', (event) => {
-          const parsed = event.payload;
-          if (parsed) {
-            logs = [parsed, ...logs.slice(0, 2500)];
-          }
-        });
-        uiStore.addToast('Live Journal streaming active', 'success');
-      } catch(e) {
-        uiStore.addToast(`Failed to start live stream: ${e}`, 'error');
-        isLiveFollowing = false;
-      }
-    } else {
-      if (unlistenLive) {
-        unlistenLive();
-        unlistenLive = null;
-      }
+  let liveStreamKey = '';
+  let liveRestartBusy = false;
+
+  function currentLiveKey() {
+    return `${filterPriority}|${currentUnitFilter}`;
+  }
+
+  async function stopLiveStream() {
+    if (unlistenLive) {
+      unlistenLive();
+      unlistenLive = null;
+    }
+    await invoke('stop_journal_live_stream').catch(() => {});
+    liveStreamKey = '';
+  }
+
+  async function startLiveStream() {
+    const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
+    const unitF = currentUnitFilter.trim() || null;
+    await invoke('start_journal_live_stream', { unitFilter: unitF, priority: prioF });
+    try {
+      unlistenLive = await listen<any>('journal-live-log', (event) => {
+        const parsed = event.payload;
+        if (parsed) {
+          logs = [parsed, ...logs.slice(0, 2500)];
+        }
+      });
+    } catch (e) {
       await invoke('stop_journal_live_stream').catch(() => {});
+      throw e;
+    }
+    liveStreamKey = currentLiveKey();
+  }
+
+  async function toggleLiveFollow() {
+    if (isLiveFollowing) {
+      isLiveFollowing = false;
+      await stopLiveStream();
       uiStore.addToast('Live follow paused', 'info');
+      return;
+    }
+
+    try {
+      await startLiveStream();
+      isLiveFollowing = true;
+      uiStore.addToast('Live Journal streaming active', 'success');
+    } catch (e) {
+      await stopLiveStream();
+      isLiveFollowing = false;
+      uiStore.addToast(`Failed to start live stream: ${e}`, 'error');
     }
   }
 
-  function copyLog(log: LogItem) {
+  async function restartLiveStream() {
+    if (!isLiveFollowing || liveRestartBusy) return;
+    liveRestartBusy = true;
+    try {
+      await stopLiveStream();
+      await startLiveStream();
+    } catch (e) {
+      await stopLiveStream();
+      isLiveFollowing = false;
+      uiStore.addToast(`Failed to restart live stream: ${e}`, 'error');
+    } finally {
+      liveRestartBusy = false;
+    }
+  }
+
+  // Changing the level or unit filter must restart the stream with the new
+  // arguments; the backend supersedes the old generation.
+  $effect(() => {
+    const key = `${filterPriority}|${currentUnitFilter}`;
+    if (!isLiveFollowing || liveRestartBusy || liveStreamKey === key) return;
+    void restartLiveStream();
+  });
+
+  async function copyLog(log: LogItem) {
     const ts = formatTimestamp(log.__REALTIME_TIMESTAMP);
     const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel';
     const text = `[${ts}] [${unit}] [Priority: ${log.PRIORITY}] ${log.MESSAGE}`;
-    navigator.clipboard.writeText(text);
-    uiStore.addToast('Log entry copied to clipboard', 'info');
+    try {
+      await navigator.clipboard.writeText(text);
+      uiStore.addToast('Log entry copied to clipboard', 'success');
+    } catch (e) {
+      uiStore.addToast(`Could not copy log entry: ${e}`, 'error');
+    }
   }
 
   let showExportMenu = $state(false);
@@ -555,7 +683,7 @@
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
       } else {
-        content = items.map(e => `[${e.timestamp}] [${e.event_type}] [${e.user || 'unknown'}] ${e.message}`).join('\n');
+        content = items.map(e => `[${e.timestamp}] [${e.event_type}] [${e.user || 'unknown'}] [${e.result}] ${e.details || ''}`).join('\n');
       }
     } else if (activeTab === 'audit') {
       const items = filteredAuditLogs;
@@ -568,7 +696,7 @@
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
       } else {
-        content = items.map(a => `[${a.timestamp}] [${a.syscall || a.event_type}] [${a.comm || a.exe}] ${a.details || a.message || ''}`).join('\n');
+        content = items.map(a => `[${a.timestamp}] [${a.user || 'unknown'}] [${a.result}] ${a.command || ''} (cwd: ${a.cwd || '—'})`).join('\n');
       }
     } else if (activeTab === 'threats') {
       const items = filteredThreats;
@@ -581,7 +709,7 @@
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
       } else {
-        content = items.map(t => `[${t.timestamp}] [${t.severity}] [${t.threat_type}] ${t.description}`).join('\n');
+        content = items.map(t => `[${t.timestamp}] [${t.severity}] [${t.category}] ${t.title} — ${t.description}`).join('\n');
       }
     }
 
@@ -692,7 +820,7 @@
   const LOG_OVERSCAN = 35;
 
   let logRowHeight = $derived(
-    uiStore.tableDensity === 'compact' ? 28 : (uiStore.tableDensity === 'spacious' ? 44 : 36)
+    uiStore.tableDensity === 'compact' ? 19 : (uiStore.tableDensity === 'spacious' ? 39 : 28)
   );
   let journalFilteredCount = $derived(filteredLogs.length);
 
@@ -742,19 +870,26 @@
     activeDrawerTab = 'fields';
   }
 
-  function copyField(name: string, value: string) {
-    navigator.clipboard.writeText(value);
-    copiedField = name;
-    uiStore.addToast(`Copied ${name} to clipboard`, 'info', 2000);
-    setTimeout(() => {
-      if (copiedField === name) copiedField = null;
-    }, 2000);
+  async function copyField(name: string, value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      copiedField = name;
+      uiStore.addToast(`Copied ${name} to clipboard`, 'success', 2000);
+      setTimeout(() => {
+        if (copiedField === name) copiedField = null;
+      }, 2000);
+    } catch (e) {
+      uiStore.addToast(`Could not copy ${name}: ${e}`, 'error');
+    }
   }
 
   function filterByDrawerUnit(unitName: string) {
-    searchQuery = unitName;
+    currentUnitFilter = unitName;
+    searchQuery = '';
     isLogDrawerOpen = false;
-    uiStore.addToast(`Filtering logs by unit: ${unitName}`, 'info');
+    activeTab = 'journal';
+    fetchLogs();
+    uiStore.addToast(`Filtering journal by unit: ${unitName}`, 'info');
   }
 
   function filterByDrawerPid(pid: string) {
@@ -868,6 +1003,11 @@
     return loadingThreats;
   });
   function refreshActiveTab() {
+    if (timeRange === 'custom' && !customRangeValid) {
+      uiStore.addToast('Choose a valid custom date range first', 'warning');
+      showCustomPopover = true;
+      return;
+    }
     if (activeTab === 'journal') fetchLogs();
     else if (activeTab === 'auth') fetchAuthEvents();
     else if (activeTab === 'audit') fetchAuditLogs();
@@ -879,8 +1019,14 @@
   {#snippet mark(text: string)}
     {#each highlightSegments(text, searchQuery) as seg, i (i)}{#if seg.hit}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
   {/snippet}
-  <PageHeader title="Journal Logs" icon={FileText}>
-    <!-- Single unified toolbar strip -->
+  <PageHeader
+    title="Journal Logs"
+    subtitle="Live systemd journal, authentication, audit, and runtime-threat events"
+    icon={FileText}
+  />
+
+
+  <div class="page-content log-viewer" style="display:flex; flex-direction:column; gap:16px;">
     <div class="log-toolbar">
       <!-- Search icon -->
       <Search size={14} class="log-search-icon" />
@@ -898,7 +1044,8 @@
         }}
         type="text"
         class="log-search-input"
-        placeholder="Search logs…"
+        placeholder={activeTab === 'auth' ? 'Search auth events…' : activeTab === 'audit' ? 'Search audit commands…' : activeTab === 'threats' ? 'Search threats…' : 'Search logs…'}
+        aria-label="Search logs"
         autocomplete="off"
         spellcheck={false}
       />
@@ -961,17 +1108,15 @@
               <button
                 type="button"
                 class="popover-btn apply-btn"
-                onclick={() => {
-                  showCustomPopover = false;
-                  refreshActiveTab();
-                }}
+                disabled={!customRangeValid}
+                onclick={applyCustomRange}
               >
                 Apply
               </button>
               <button
                 type="button"
                 class="popover-btn cancel-btn"
-                onclick={() => showCustomPopover = false}
+                onclick={cancelCustomRange}
               >
                 Cancel
               </button>
@@ -987,13 +1132,11 @@
       </button>
 
       <!-- Clear view -->
-      <button class="log-action-btn log-action-danger" onclick={clearAll} title="Clear view">
+      <button class="log-action-btn log-action-danger" onclick={clearAll} title="Clear view" aria-label="Clear loaded log entries">
         <Trash2 size={13} />
       </button>
     </div>
-  </PageHeader>
 
-  <div class="page-content log-viewer" style="display:flex; flex-direction:column; gap:16px;">
     <!-- Tab navigation and Actions row -->
     <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%;">
       <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} />
@@ -1013,6 +1156,7 @@
           <button 
             type="button"
             class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
+            aria-pressed={isLiveFollowing}
             onclick={toggleLiveFollow} 
             title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
           >
@@ -1047,7 +1191,7 @@
               <div class="export-menu-divider"></div>
               <button type="button" class="export-menu-item accent" onclick={() => handleExportLogs('txt', true)}>
                 <FolderOpen size={13} />
-                <span>Export &amp; Open Folder</span>
+                <span>Export Text &amp; Open Folder</span>
               </button>
             </div>
           {/if}
@@ -1058,7 +1202,16 @@
     <div class="log-container" bind:this={logContainer}>
       <!-- Tab 1: Journalctl logs -->
       {#if activeTab === 'journal'}
-        {#if filteredLogs.length === 0}
+        {#if journalError}
+          <div class="journal-alert" role="alert">
+            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+            <div class="journal-alert-text">
+              <div class="journal-alert-title">Unable to read the journal</div>
+              <div>{journalError}</div>
+            </div>
+            <Button variant="outline" size="sm" onclick={() => fetchLogs()}>Retry</Button>
+          </div>
+        {:else if filteredLogs.length === 0}
           {#if isLoading}
             <div class="empty-state">Fetching logs…</div>
           {:else if hasActiveSearch && collapsedLogs.length > 0}
@@ -1079,17 +1232,17 @@
                 ? `No systemd journal messages found for ${currentUnitFilter} with the current time and level filters. Try a wider range.`
                 : 'No systemd journal messages found for the current time and level filters.'}
               actionLabel="Refresh Logs"
-              onAction={fetchLogs}
+              onAction={() => fetchLogs()}
             />
           {/if}
         {:else}
-          <Table class="log-table" onscroll={handleLogScroll}>
+          <Table class="log-table" showDensityToggle={false} onscroll={handleLogScroll}>
             <thead>
-              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
-                <th style="padding: 8px 12px; font-weight: 600;">Time</th>
-                <th style="padding: 8px 12px; font-weight: 600;">Unit / Identifier</th>
-                <th style="padding: 8px 12px; font-weight: 600;">Message</th>
-                <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Actions</th>
+              <tr>
+                <th style="width: 150px;">Time</th>
+                <th style="width: 180px;">Unit / Identifier</th>
+                <th>Message</th>
+                <th style="width: 96px; text-align: right;">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1099,22 +1252,30 @@
               {#each visibleLogs as log (log._unique_id || log.__REALTIME_TIMESTAMP + (log._SYSTEMD_UNIT || '') + (log.MESSAGE || ''))}
                 {@const unit = log._SYSTEMD_UNIT || log.SYSLOG_IDENTIFIER || 'kernel'}
                 {@const hasMsg = Boolean(log.MESSAGE && String(log.MESSAGE).trim())}
-                <tr class="log-row {getPriorityClass(log.PRIORITY)}" onclick={() => openLogDrawer(log)} style="cursor: pointer;">
-                  <td class="col-time" style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
-                  <td class="col-unit" title={unit} style="padding: 8px 12px; font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                <tr
+                  class="log-row {getPriorityClass(log.PRIORITY)}"
+                  role="button"
+                  tabindex="0"
+                  aria-label={`Open details for ${unit}`}
+                  onclick={() => openLogDrawer(log)}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLogDrawer(log); } }}
+                  style="cursor: pointer;"
+                >
+                  <td class="col-time" style="white-space: nowrap; color: var(--color-text-muted); font-size: 12px; font-family: var(--font-mono);">{formatTimestamp(log.__REALTIME_TIMESTAMP)}</td>
+                  <td class="col-unit" title={unit} style="font-weight: 600; font-size: 12px; font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                     {@render mark(unit)}
                   </td>
-                  <td class="col-msg" style="padding: 8px 12px; color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
+                  <td class="col-msg" style="color: var(--color-text-secondary); font-size: 12px; font-family: var(--font-mono);">
                     {@render mark(log.MESSAGE)}
                     {#if (log.count ?? 1) > 1}
                       <span class="repeat-badge">×{log.count}</span>
                     {/if}
                   </td>
-                  <td style="padding: 6px 12px; text-align: right; white-space: nowrap;" onclick={(e) => e.stopPropagation()}>
+                  <td style="text-align: right; white-space: nowrap;" onclick={(e) => e.stopPropagation()}>
                     <div style="display: inline-flex; align-items: center; gap: 4px;">
                       <button
                         type="button"
-                        class="btn btn-ghost btn-xs"
+                        class="btn btn-ghost btn-sm"
                         onclick={(e) => { e.stopPropagation(); copyLog(log); }}
                         title="Copy log entry to clipboard"
                         style="padding: 2px 6px; font-size: 11px;"
@@ -1124,7 +1285,7 @@
                       {#if aiStore.enabled}
                         <button
                           type="button"
-                          class="btn btn-outline btn-xs"
+                          class="btn btn-outline btn-sm"
                           disabled={!hasMsg}
                           onclick={(e) => { e.stopPropagation(); hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit); }}
                           title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
@@ -1172,21 +1333,22 @@
 
       <!-- Tab 2: Auth Events -->
       {:else if activeTab === 'auth'}
-        {#if authError && authError.includes('Root privileges')}
-          <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
+        {#if authError}
+          <div class="journal-alert" role="alert">
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open authentication logs.</div>
+            <div class="journal-alert-text">
+              <div class="journal-alert-title">Unable to load authentication logs</div>
+              <div>{authError}</div>
             </div>
+            <Button variant="outline" size="sm" onclick={fetchAuthEvents}>Retry</Button>
           </div>
         {/if}
         {#if filteredAuthEvents.length === 0}
           <div class="empty-state">
             {#if loadingAuth}
               Fetching authentication logs…
-            {:else if authError && authError.includes('Root privileges')}
-              System authorization is requested when you open authentication logs.
+            {:else if authError}
+              Authentication log unavailable.
             {:else if hasActiveSearch}
               No auth events match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1194,25 +1356,25 @@
             {/if}
           </div>
         {:else}
-          <Table class="log-table">
+          <Table class="log-table" showDensityToggle={false}>
             <thead>
-              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('timestamp')}>
-                  Time {authSortKey === 'timestamp' ? (authSortAsc ? '▲' : '▼') : ''}
+              <tr>
+                <th aria-sort={ariaSort('timestamp', authSortKey, authSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('timestamp')}>Time <span aria-hidden="true">{sortIndicator('timestamp', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('user')}>
-                  User {authSortKey === 'user' ? (authSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('user', authSortKey, authSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('user')}>User <span aria-hidden="true">{sortIndicator('user', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('event_type')}>
-                  Event Type {authSortKey === 'event_type' ? (authSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('event_type', authSortKey, authSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('event_type')}>Event Type <span aria-hidden="true">{sortIndicator('event_type', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('source_ip')}>
-                  Source IP {authSortKey === 'source_ip' ? (authSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('source_ip', authSortKey, authSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('source_ip')}>Source IP <span aria-hidden="true">{sortIndicator('source_ip', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuthSort('result')}>
-                  Result {authSortKey === 'result' ? (authSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('result', authSortKey, authSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('result')}>Result <span aria-hidden="true">{sortIndicator('result', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600;">Details</th>
+                <th>Details</th>
               </tr>
             </thead>
             <tbody>
@@ -1246,13 +1408,14 @@
 
       <!-- Tab 3: Command Audit -->
       {:else if activeTab === 'audit'}
-        {#if auditError && auditError.includes('Root privileges')}
-          <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
+        {#if auditError}
+          <div class="journal-alert" role="alert">
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you open audit logs or change audit rules.</div>
+            <div class="journal-alert-text">
+              <div class="journal-alert-title">Unable to load audit logs</div>
+              <div>{auditError}</div>
             </div>
+            <Button variant="outline" size="sm" onclick={fetchAuditLogs}>Retry</Button>
           </div>
         {:else if setupError}
           <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
@@ -1289,8 +1452,8 @@
           <div class="empty-state">
             {#if loadingAudit}
               Fetching command logs…
-            {:else if auditError && auditError.includes('Root privileges')}
-              System authorization is requested when you open command audit logs.
+            {:else if auditError}
+              Audit log unavailable.
             {:else if hasActiveSearch}
               No commands match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
             {:else}
@@ -1298,23 +1461,23 @@
             {/if}
           </div>
         {:else}
-          <Table class="log-table">
+          <Table class="log-table" showDensityToggle={false}>
             <thead>
-              <tr style="border-bottom: 1px solid var(--color-border); font-size: 11px; text-transform: uppercase; color: var(--color-text-secondary); text-align: left;">
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('timestamp')}>
-                  Time {auditSortKey === 'timestamp' ? (auditSortAsc ? '▲' : '▼') : ''}
+              <tr>
+                <th aria-sort={ariaSort('timestamp', auditSortKey, auditSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('timestamp')}>Time <span aria-hidden="true">{sortIndicator('timestamp', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('user')}>
-                  User {auditSortKey === 'user' ? (auditSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('user', auditSortKey, auditSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('user')}>User <span aria-hidden="true">{sortIndicator('user', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('command')}>
-                  Command {auditSortKey === 'command' ? (auditSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('command', auditSortKey, auditSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('command')}>Command <span aria-hidden="true">{sortIndicator('command', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('cwd')}>
-                  CWD {auditSortKey === 'cwd' ? (auditSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('cwd', auditSortKey, auditSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('cwd')}>CWD <span aria-hidden="true">{sortIndicator('cwd', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th style="padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none;" onclick={() => toggleAuditSort('result')}>
-                  Result {auditSortKey === 'result' ? (auditSortAsc ? '▲' : '▼') : ''}
+                <th aria-sort={ariaSort('result', auditSortKey, auditSortAsc)}>
+                  <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('result')}>Result <span aria-hidden="true">{sortIndicator('result', auditSortKey, auditSortAsc)}</span></button>
                 </th>
               </tr>
             </thead>
@@ -1344,16 +1507,35 @@
 
       <!-- Tab 4: Threats -->
       {:else if activeTab === 'threats'}
-        {#if threatsError && threatsError.includes('Root privileges')}
-          <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
+        {#if threatsError}
+          <div class="journal-alert" role="alert">
             <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Root Access Required</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">System authorization is requested when you run threat correlation analysis.</div>
+            <div class="journal-alert-text">
+              <div class="journal-alert-title">Unable to run threat correlation</div>
+              <div>{threatsError}</div>
             </div>
+            <Button variant="outline" size="sm" onclick={fetchThreats}>Retry</Button>
           </div>
         {/if}
-        {#if filteredThreats.length === 0}
+        {#if loadingThreats}
+          <div class="empty-state">Analyzing runtime threats…</div>
+        {:else if filteredThreats.length === 0 && hasActiveSearch}
+          <EmptyState
+            icon={ShieldCheck}
+            title="No Matching Threats"
+            description={`No threat findings matched "${searchQuery}". Clear the search or rescan the selected range.`}
+            actionLabel="Clear Search"
+            onAction={() => { searchQuery = ''; }}
+          />
+        {:else if filteredThreats.length === 0 && threatsError}
+          <EmptyState
+            icon={ShieldAlert}
+            title="Threat scan unavailable"
+            description="The correlation engine could not complete. Check the error above and retry."
+            actionLabel="Retry Scan"
+            onAction={fetchThreats}
+          />
+        {:else if filteredThreats.length === 0}
           <div style="display:flex; flex-direction:column; gap:16px; padding:12px 8px; box-sizing:border-box; width:100%;">
             <!-- Status Card -->
             <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:12px; padding:20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px;">
@@ -1379,49 +1561,49 @@
             <!-- Active Safeguard Rules Grid -->
             <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
               <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
-                Active Correlation Rules & Safeguards (6 Active)
+                Built-in Detection Rules
               </div>
               <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags users failing sudo credentials ≥ 3 times. (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Flags users failing sudo credentials ≥ 3 times.</div>
                   </div>
                 </div>
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Detects IP-based SSH login dictionary attacks ≥ 5 attempts. (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Detects IP-based SSH login dictionary attacks ≥ 5 attempts.</div>
                   </div>
                 </div>
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Alerts immediately if setenforce 0 is executed. (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Alerts immediately if setenforce 0 is executed.</div>
                   </div>
                 </div>
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags flush attacks (iptables -F or nft flush). (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Flags flush attacks (iptables -F or nft flush).</div>
                   </div>
                 </div>
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Monitors unauthorized writes to /etc/passwd & shadow. (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Monitors unauthorized writes to /etc/passwd & shadow.</div>
                   </div>
                 </div>
                 <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
                   <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
                   <div>
                     <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags elevated commands executed without standard sudo. (Status: Clean)</div>
+                    <div style="font-size:11px; color:var(--color-text-muted);">Flags elevated commands executed without standard sudo.</div>
                   </div>
                 </div>
               </div>
@@ -1430,7 +1612,7 @@
         {:else}
           <div style="display:flex; flex-direction:column; gap:12px; padding: 8px; box-sizing: border-box; width: 100%;">
             {#each filteredThreats as threat}
-              <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; box-sizing: border-box; width: 100%;">
+              <div style="background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; box-sizing: border-box; width: 100%;">
                 <div style="display:flex; flex-direction:column; gap:6px;">
                   <div style="display:flex; align-items:center; gap:8px;">
                     <ShieldAlert size={16} color={threat.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)'} />
@@ -1446,14 +1628,14 @@
                     {@render mark(threat.description)}
                   </p>
                   <div style="margin-top: 8px;">
-                    <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: rgba(255,255,255,0.05); color: var(--color-text-muted);">
+                    <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: var(--color-bg-hover); color: var(--color-text-muted);">
                       {threat.category}
                     </Badge>
                   </div>
                 </div>
                 <Button 
                   variant="ghost" 
-                  style="font-size: 11px; height: 26px; padding: 0 10px; border-color: rgba(255,255,255,0.15);" 
+                  style="font-size: 11px; height: 26px; padding: 0 10px; border-color: var(--color-border);"
                   onclick={() => {
                     uiStore.securityCategoryFilter = 'Runtime Threats';
                     uiStore.securitySeverityFilter = 'all';
@@ -1472,61 +1654,49 @@
 </div>
 
 {#if selectedLog}
-  <SideDrawer bind:isOpen={isLogDrawerOpen} title="Log Entry Details" width="580px">
+  <SideDrawer
+    bind:isOpen={isLogDrawerOpen}
+    title={selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER || selectedLog._COMM || 'Log Entry'}
+    subtitle={`${formatTimestamp(selectedLog.__REALTIME_TIMESTAMP)} · Priority ${selectedLog.PRIORITY} (${getPriorityLabel(selectedLog.PRIORITY)})`}
+    width="580px"
+  >
     {#snippet headerActions()}
       <div style="display: flex; align-items: center; gap: 6px; margin-right: 8px;">
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs"
-          class:active={activeDrawerTab === 'fields'}
+        <Button
+          variant={activeDrawerTab === 'fields' ? 'primary' : 'ghost'}
+          size="sm"
+          aria-pressed={activeDrawerTab === 'fields'}
           onclick={() => activeDrawerTab = 'fields'}
-          style="padding: 3px 8px; font-size: 11px; background: {activeDrawerTab === 'fields' ? 'var(--color-bg-hover)' : 'transparent'};"
         >
           <Sliders size={12} /> Fields
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs"
-          class:active={activeDrawerTab === 'json'}
+        </Button>
+        <Button
+          variant={activeDrawerTab === 'json' ? 'primary' : 'ghost'}
+          size="sm"
+          aria-pressed={activeDrawerTab === 'json'}
           onclick={() => activeDrawerTab = 'json'}
-          style="padding: 3px 8px; font-size: 11px; background: {activeDrawerTab === 'json' ? 'var(--color-bg-hover)' : 'transparent'};"
         >
           <Code size={12} /> Raw JSON
-        </button>
-        <button
-          type="button"
-          class="btn btn-outline btn-xs"
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           onclick={() => copyField('Raw JSON', JSON.stringify(selectedLog, null, 2))}
-          style="padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px;"
         >
           {#if copiedField === 'Raw JSON'}
             <Check size={12} style="color: var(--color-success);" /> Copied
           {:else}
             <Copy size={12} /> Copy JSON
           {/if}
-        </button>
+        </Button>
       </div>
     {/snippet}
 
     <div class="log-drawer-body">
       <!-- Top Overview Banner -->
       <div class="drawer-overview-card {getPriorityClass(selectedLog.PRIORITY)}">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <Badge variant={selectedLog.PRIORITY <= 3 ? 'error' : (selectedLog.PRIORITY == 4 ? 'warning' : 'info')}>
-              Priority {selectedLog.PRIORITY} ({getPriorityLabel(selectedLog.PRIORITY)})
-            </Badge>
-            <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--color-text-primary);">
-              {selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER || selectedLog._COMM || 'kernel'}
-            </span>
-          </div>
-          <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">
-            {formatTimestamp(selectedLog.__REALTIME_TIMESTAMP)}
-          </span>
-        </div>
-
         <!-- Action Quick-Bar -->
-        <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06);">
+        <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--color-border-subtle);">
           {#if selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER}
             {@const u = selectedLog._SYSTEMD_UNIT || selectedLog.SYSLOG_IDENTIFIER}
             <button
@@ -1704,9 +1874,11 @@
     height: 28px;
     box-sizing: border-box;
   }.log-dt::-webkit-calendar-picker-indicator {
-    filter: invert(1);
     opacity: 0.45;
     cursor: pointer;
+  }
+  :global(html:not(.light-mode)) .log-dt::-webkit-calendar-picker-indicator {
+    filter: invert(1);
   }.log-dt::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }/* Custom Range Popover */ .custom-range-container {
     position: relative;
     display: inline-block;
@@ -1739,7 +1911,7 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 14px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid var(--color-border-subtle);
     padding-top: 10px;
   }.popover-btn {
     font-family: inherit;
@@ -1752,14 +1924,18 @@
     transition: all 0.15s ease;
   }.apply-btn {
     background: var(--color-accent);
-    color: #0f172a;
-  }.apply-btn:hover {
-    background: #00b9cf;
+    color: var(--color-text-on-accent);
+  }.apply-btn:hover:not(:disabled) {
+    background: var(--color-accent);
+    filter: brightness(1.08);
+  }.apply-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }.cancel-btn {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     color: var(--color-text-secondary);
   }.cancel-btn:hover {
-    background: rgba(255, 255, 255, 0.15);
+    background: var(--color-active-bg);
     color: var(--color-text-primary);
   }/* Refresh / trash action buttons */ .log-action-btn {
     display: flex;
@@ -1769,7 +1945,7 @@
     padding: 0 8px;
     border: none;
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-hover);
     color: var(--color-text-secondary);
     font-size: 12px;
     font-family: var(--font-sans);
@@ -1778,7 +1954,7 @@
     transition: background 0.15s, color 0.15s;
     white-space: nowrap;
   }.log-action-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-active-bg);
     color: var(--color-text-primary);
   }.log-action-btn:disabled {
     opacity: 0.4;
@@ -1825,13 +2001,13 @@
     transition: all 0.12s ease;
     white-space: nowrap;
   }.export-menu-item:hover {
-    background: rgba(0, 218, 243, 0.1);
+    background: var(--color-accent-muted);
     color: var(--color-text-primary);
   }.export-menu-item.accent {
     color: var(--color-accent);
     font-weight: 500;
   }.export-menu-item.accent:hover {
-    background: rgba(0, 218, 243, 0.15);
+    background: var(--color-accent-muted);
   }.export-menu-divider {
     height: 1px;
     background: var(--color-border, rgba(255, 255, 255, 0.08));
@@ -1945,14 +2121,21 @@
   }.log-table {
     width: 100%;
     border-collapse: collapse;
+  }
+  .log-table :global(table) {
     table-layout: fixed;
+    width: 100%;
   }.log-table :global(thead th) {
     position: sticky !important;
     top: 0 !important;
     z-index: 20 !important;
   }.log-row {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  }.log-row:hover { background: rgba(255, 255, 255, 0.04); }.log-row td {
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.log-row:hover { background: var(--color-bg-hover); }
+  .log-row:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: -2px;
+  }.log-row td {
     padding: 4px 8px;
     vertical-align: top;
   }.col-time {
@@ -1967,8 +2150,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }.col-msg {
-    color: #c9d1d9;
-    word-break: break-word;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .log-table .col-msg {
+    white-space: nowrap;
   }/* Priority Colors (Dark Mode Default) */ .log-error .col-msg { color: #ff7b72; font-weight: 500; }.log-error .col-unit { color: #f87171 !important; }.log-warn .col-msg { color: #fbbf24; }.log-warn .col-unit { color: #f59e0b !important; }.log-info .col-msg { color: #38bdf8; }.log-info .col-unit { color: #38bdf8 !important; }.log-debug .col-msg { color: #94a3b8; }.log-debug .col-unit { color: #94a3b8 !important; }/* Priority Colors for Light Mode */ :global(html.light-mode) .log-error .col-unit { color: #dc2626 !important; }:global(html.light-mode) .log-warn .col-unit { color: #d97706 !important; }:global(html.light-mode) .log-info .col-unit { color: #0284c7 !important; }:global(html.light-mode) .log-debug .col-unit { color: #64748b !important; }:global(html.light-mode) .log-error .col-msg { color: #dc2626; }:global(html.light-mode) .log-warn .col-msg { color: #b45309; }:global(html.light-mode) .log-info .col-msg { color: #334155; }:global(html.light-mode) .log-debug .col-msg { color: #64748b; }.repeat-badge {
     background: rgba(255, 255, 255, 0.1);
     color: var(--color-text-secondary);
@@ -2085,12 +2273,12 @@
     align-items: center;
     gap: 12px;
     padding: 7px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid var(--color-border-subtle);
     font-size: 12px;
   }.drawer-field-row:last-child {
     border-bottom: none;
   }.drawer-field-row:hover {
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-hover);
   }.drawer-field-key {
     width: 140px;
     flex-shrink: 0;
@@ -2106,9 +2294,8 @@
     font-family: var(--font-mono);
     font-size: 11.5px;
     color: var(--color-text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }.drawer-field-val code {
     background: transparent;
     padding: 0;
@@ -2132,7 +2319,7 @@
   }.field-row-copy-btn:hover {
     opacity: 1;
     color: var(--color-accent);
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--color-bg-hover);
   }.drawer-raw-json {
     background: var(--color-bg-base);
     border: 1px solid var(--color-border);
@@ -2147,4 +2334,64 @@
     max-height: 500px;
     overflow-y: auto;
     margin: 0;
-  }</style>
+  }  .hl {
+    background: var(--color-accent-muted);
+    color: var(--color-text-primary);
+    border-radius: 3px;
+    padding: 0 2px;
+  }
+  .journal-alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border: 1px solid var(--color-error);
+    border-radius: 8px;
+    background: var(--color-error-muted, rgba(239, 68, 68, 0.08));
+  }
+  .journal-alert-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .journal-alert-title {
+    font-weight: 700;
+    font-size: 12.5px;
+    color: var(--color-error);
+    margin-bottom: 2px;
+  }
+  .log-search-input:focus-visible,
+  .log-action-btn:focus-visible,
+  .log-clear-btn:focus-visible,
+  .popover-btn:focus-visible,
+  .journal-footer-action:focus-visible,
+  .drawer-action-btn:focus-visible,
+  .field-copy-btn:focus-visible,
+  .field-row-copy-btn:focus-visible,
+  .export-menu-item:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+  .journal-sort-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+    text-align: inherit;
+  }
+  .journal-sort-btn:hover { color: var(--color-text-primary); }
+  @media (prefers-reduced-motion: reduce) {
+    .live-status-dot.pulsing { animation: none; }
+  }
+</style>
