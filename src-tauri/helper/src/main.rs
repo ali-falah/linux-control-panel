@@ -2207,6 +2207,69 @@ fn security_apply_action(op: &str) -> Result<(), String> {
     }
 }
 
+/// `audit_setup`: install and load the fixed auditd rule set. No operands.
+fn audit_setup_action() -> Result<(), String> {
+    if resolve_root_program("auditctl").is_none() {
+        if let Some(dnf) = resolve_root_program("dnf") {
+            run_firewall_program(&dnf, &["install", "-y", "audit"], "dnf")?;
+        } else if let Some(apt) = resolve_root_program("apt-get") {
+            run_firewall_program(&apt, &["update"], "apt-get")?;
+            run_firewall_program(&apt, &["install", "-y", "auditd"], "apt-get")?;
+        } else {
+            return Err(
+                "lcp-admin: auditctl is not installed and no supported package manager was found"
+                    .to_string(),
+            );
+        }
+        if resolve_root_program("auditctl").is_none() {
+            return Err("lcp-admin: the audit package did not provide auditctl".to_string());
+        }
+    }
+
+    let rules_dir = std::path::Path::new("/etc/audit/rules.d");
+    if std::fs::symlink_metadata(rules_dir)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing a symlinked audit rules directory".to_string());
+    }
+    std::fs::create_dir_all(rules_dir)
+        .map_err(|e| format!("lcp-admin: could not create the audit rules directory ({e})"))?;
+    let rules_path = rules_dir.join("99-control-panel.rules");
+    if std::fs::symlink_metadata(&rules_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing to replace a symlinked audit rules file".to_string());
+    }
+    let tmp = rules_dir.join(format!("99-control-panel.rules.tmp.{}", std::process::id()));
+    let content = "-a always,exit -F arch=b64 -S execve -k cmd_audit\n\
+-w /etc/passwd -p wa -k identity\n\
+-w /etc/sudoers -p wa -k sudoers_change\n\
+-w /etc/sysctl.d/ -p wa -k sysctl_tamper\n";
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("lcp-admin: could not write the audit rules ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &rules_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("lcp-admin: could not install the audit rules ({e})"));
+    }
+
+    let augenrules = resolve_root_program("augenrules")
+        .ok_or_else(|| "lcp-admin: augenrules is not available; install the audit package".to_string())?;
+    run_firewall_program(&augenrules, &["--load"], "augenrules")?;
+
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    if run_firewall_program(SYSTEMCTL_BIN, &["enable", "--now", "auditd"], "systemctl").is_err() {
+        run_firewall_program(SYSTEMCTL_BIN, &["restart", "auditd"], "systemctl")?;
+    }
+    Ok(())
+}
+
 /// `unit_action <verb> <unit>`: the system-scope unit actions. The shared
 /// policy enforces unit-name grammar and the protected-unit rules; --user
 /// actions stay unprivileged in the app.
@@ -2664,6 +2727,7 @@ const ROOT_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "audit_setup",
     "unit_action",
     "unit_dropin_write",
     "unit_create",
@@ -3009,6 +3073,14 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes no further arguments."
+                ))
+            }
+        } else if requested == "audit_setup" {
+            if args.len() == 1 {
+                audit_setup_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no arguments."
                 ))
             }
         } else if requested == "unit_action" {

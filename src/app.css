@@ -412,16 +412,14 @@ html.light-mode .card-title-icon {
 }
 
 /* Light mode tables & nested containers */
-html.light-mode .table-wrap,
-html.light-mode .log-container {
+html.light-mode .table-wrap {
   background: #FFFFFF !important;
   border-color: #EDEEF1 !important;
   box-shadow: 0 4px 14px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.03) !important;
   transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
 }
 
-html.light-mode .table-wrap:hover,
-html.light-mode .log-container:hover {
+html.light-mode .table-wrap:hover {
   border-color: #CBD5E1 !important;
   box-shadow: 0 8px 20px -3px rgba(15, 23, 42, 0.10), 0 4px 8px -2px rgba(15, 23, 42, 0.05) !important;
 }
@@ -457,9 +455,9 @@ html.light-mode tr:hover {
 
 html.light-mode th,
 html.light-mode thead th {
-  background: #EEF0F4 !important;
+  background: #F8FAFC !important;
   color: #334155 !important;
-  border-bottom: 1px solid #CBD5E1 !important;
+  border-bottom: 1px solid #E2E8F0 !important;
   position: sticky !important;
   top: 0 !important;
   z-index: 20 !important;

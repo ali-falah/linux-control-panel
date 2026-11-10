@@ -22,6 +22,8 @@ const ABSOLUTE_MAX_ENTRIES: usize = 200_000;
 /// (which also carries __CURSOR, __MONOTONIC_TIMESTAMP, _BOOT_ID, …).
 #[derive(Debug, Clone, Serialize)]
 pub struct JournalEntry {
+    #[serde(rename = "__CURSOR")]
+    pub cursor: String,
     #[serde(rename = "__REALTIME_TIMESTAMP")]
     pub ts: String,
     #[serde(rename = "PRIORITY")]
@@ -67,6 +69,8 @@ pub struct JournalPage {
     pub truncated: bool,
     /// timestamp (µs) of the oldest entry in this page — used to fetch older entries
     pub oldest_ts: Option<String>,
+    /// journal cursor of the oldest entry — used for true cursor paging
+    pub oldest_cursor: Option<String>,
     /// wall-clock time the fetch took
     pub elapsed_ms: u64,
 }
@@ -74,6 +78,11 @@ pub struct JournalPage {
 /// Parse one `journalctl -o json` line into a compact entry.
 fn parse_journal_line(line: &str) -> Option<JournalEntry> {
     let value: Value = serde_json::from_str(line).ok()?;
+    let cursor = value
+        .get("__CURSOR")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let text = |key: &str| -> String {
         value
             .get(key)
@@ -95,6 +104,7 @@ fn parse_journal_line(line: &str) -> Option<JournalEntry> {
     };
 
     Some(JournalEntry {
+        cursor,
         ts: text("__REALTIME_TIMESTAMP"),
         // journald emits PRIORITY as a string ("6"), not a number
         prio: value
@@ -128,6 +138,9 @@ pub async fn get_journal_logs(
     since_filter: Option<String>,
     until_filter: Option<String>,
     max_entries: Option<usize>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
+    cursor: Option<String>,
 ) -> Result<JournalPage, String> {
     let started = std::time::Instant::now();
     let limit = max_entries
@@ -135,6 +148,19 @@ pub async fn get_journal_logs(
         .clamp(100, ABSOLUTE_MAX_ENTRIES);
 
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
+
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
+
+    let cursor_filter = cursor.filter(|c| !c.trim().is_empty());
+    if let Some(ref cursor) = cursor_filter {
+        cmd.arg("--cursor").arg(cursor);
+        cmd.arg("--reverse");
+    }
 
     // Ask for one extra entry so we can tell the user the range was truncated
     cmd.arg("-n").arg((limit + 1).to_string());
@@ -191,6 +217,11 @@ pub async fn get_journal_logs(
             continue;
         }
         if let Some(entry) = parse_journal_line(&line) {
+            if let Some(ref cursor) = cursor_filter {
+                if entry.cursor == *cursor {
+                    continue;
+                }
+            }
             entries.push(entry);
             if entries.len() > limit {
                 truncated = true;
@@ -201,14 +232,18 @@ pub async fn get_journal_logs(
 
     let _ = child.kill().await;
 
-    // journalctl emits oldest first — the UI wants newest first.
-    entries.reverse();
+    // Without a cursor journalctl emits oldest first; with --reverse it is
+    // already newest first. Both paths want newest first.
+    if cursor_filter.is_none() {
+        entries.reverse();
+    }
     // The extra record used to detect truncation is the oldest one.
     if truncated && entries.len() > limit {
         entries.pop();
     }
 
     let oldest_ts = entries.last().map(|e| e.ts.clone());
+    let oldest_cursor = entries.last().map(|e| e.cursor.clone());
     let returned = entries.len();
 
     Ok(JournalPage {
@@ -216,6 +251,7 @@ pub async fn get_journal_logs(
         returned,
         truncated,
         oldest_ts,
+        oldest_cursor,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -231,9 +267,19 @@ pub async fn count_journal_entries(
     priority: Option<u8>,
     since_filter: Option<String>,
     until_filter: Option<String>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
 ) -> Result<u64, String> {
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
-    cmd.arg("-o").arg("cat");
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
+    // JSON is one line per entry, so multi-line messages are counted once.
+    cmd.arg("-o").arg("json");
+    cmd.arg("--output-fields=MESSAGE");
     cmd.arg("--no-pager");
 
     if let Some(unit) = unit_filter {
@@ -273,20 +319,29 @@ pub async fn count_journal_entries(
         .ok_or_else(|| "journalctl produced no stdout".to_string())?;
 
     let mut reader = BufReader::new(stdout).lines();
-    let mut count: u64 = 0;
 
-    while let Some(line) = reader
-        .next_line()
-        .await
-        .map_err(|e| format!("Failed to read journalctl output: {e}"))?
-    {
-        if !line.trim().is_empty() {
-            count += 1;
+    let counted = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
+        let mut count: u64 = 0;
+        while let Some(line) = reader
+            .next_line()
+            .await
+            .map_err(|e| format!("Failed to read journalctl output: {e}"))?
+        {
+            if !line.trim().is_empty() {
+                count += 1;
+            }
         }
-    }
+        Ok::<u64, String>(count)
+    })
+    .await;
 
     let _ = child.kill().await;
-    Ok(count)
+
+    match counted {
+        Ok(Ok(count)) => Ok(count),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Counting the selected range took too long; narrow the range.".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -294,11 +349,19 @@ pub async fn start_journal_live_stream(
     app: AppHandle,
     unit_filter: Option<String>,
     priority: Option<u8>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
 ) -> Result<(), String> {
     let generation = LIVE_STREAM_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     LIVE_STREAM_ACTIVE.store(true, Ordering::SeqCst);
 
     let mut cmd = tokio::process::Command::new("journalctl");
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
     cmd.args(["-f", "-n", "0", "-o", "json", "--no-pager"]);
     cmd.kill_on_drop(true);
 

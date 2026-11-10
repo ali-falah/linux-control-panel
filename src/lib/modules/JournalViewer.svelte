@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { 
-    FileText, RefreshCw, Search, X, Trash2, ShieldAlert, ShieldCheck, Shield, Terminal, Key, 
+    FileText, RefreshCw, X, ShieldAlert, ShieldCheck, Shield, Terminal, Key, Eraser,
     AlertTriangle, Sparkles, Copy, Download, Radio, Play, Square, Activity, Check, Code, 
     Sliders, Filter, Cpu, Layers, ExternalLink, ChevronRight, ChevronDown, FolderOpen
   } from '@lucide/svelte';
@@ -16,6 +16,8 @@
   import Table from '../components/ui/Table.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
+  import Skeleton from '../components/Skeleton.svelte';
+  import SearchBar from '../components/ui/SearchBar.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
@@ -33,6 +35,7 @@
   let journalTotalInRange = $state(0);
   /** Timestamp of the oldest entry we have — used to page further back */
   let journalOldestTs = $state<string | null>(null);
+  let journalOldestCursor = $state<string | null>(null);
   let isLoadingOlder = $state(false);
   let journalError = $state('');
   let journalLoaded = $state(false);
@@ -51,6 +54,8 @@
   // Backend filters (re-fetch journalctl)
   let currentUnitFilter = $state('');
   let filterPriority = $state('all');
+  let journalUserScope = $state(false);
+  let journalCurrentBoot = $state(false);
   let timeRange = $state('1'); // Default to last 24 hours (1 day)
   let customStartDate = $state('');
   let customStartTime = $state('00:00');
@@ -89,7 +94,6 @@
   let searchQuery = $state('');
 
   let logContainer: HTMLElement;
-  let searchInputRef: HTMLInputElement;
 
   // New Tab state
   let activeTab = $state<'journal' | 'auth' | 'audit' | 'threats'>(
@@ -105,24 +109,29 @@
   let authEvents = $state<any[]>([]);
   let loadingAuth = $state(false);
   let authError = $state('');
+  let authTotal = $state(0);
+  let authTruncated = $state(false);
 
   // Command Audit state
   let auditLogs = $state<any[]>([]);
   let loadingAudit = $state(false);
   let auditError = $state('');
+  let auditTotal = $state(0);
+  let auditTruncated = $state(false);
   let auditdStatus = $state<{ installed: boolean; running: boolean; rules_configured: boolean } | null>(null);
   let installingAuditd = $state(false);
   let setupError = $state('');
 
   // Threats state
   let runtimeThreats = $state<any[]>([]);
+  let threatRules = $state<any[]>([]);
   let loadingThreats = $state(false);
   let threatsError = $state('');
 
   const LOG_TABS = $derived([
     { id: 'journal', label: 'Journal' },
-    { id: 'auth', label: 'Auth Events' },
-    { id: 'audit', label: 'Command Audit' },
+    { id: 'auth', label: 'Auth' },
+    { id: 'audit', label: 'Audit' },
     { id: 'threats', label: 'Threats', count: runtimeThreats.length > 0 ? runtimeThreats.length : undefined },
   ]);
 
@@ -140,6 +149,7 @@
     const appendOlder = opts.appendOlder === true;
     const generation = ++fetchGeneration;
     const previousOldest = journalOldestTs;
+    const previousCursor = journalOldestCursor;
 
     if (appendOlder) {
       isLoadingOlder = true;
@@ -149,6 +159,7 @@
       journalError = '';
       journalTruncated = false;
       journalOldestTs = null;
+      journalOldestCursor = null;
       journalTotalInRange = 0;
     }
     statusStore.setBusy('Fetching journal logs...');
@@ -164,8 +175,10 @@
         sinceF = `${timeRange} days ago`;
       }
 
-      // Paging further back: stop at the oldest entry we already have.
-      if (appendOlder && previousOldest) {
+      // Paging further back: prefer the opaque journal cursor; fall back to
+      // the oldest timestamp for older backends.
+      const usingCursor = appendOlder && !!previousCursor;
+      if (appendOlder && previousOldest && !usingCursor) {
         untilF = new Date(Number(previousOldest) / 1000).toISOString();
       }
 
@@ -175,7 +188,10 @@
         priority: prioF,
         sinceFilter: sinceF,
         untilFilter: untilF,
-        maxEntries: maxEntries
+        maxEntries: maxEntries,
+        userMode: journalUserScope,
+        boot: journalCurrentBoot,
+        cursor: usingCursor ? previousCursor : null
       });
 
       if (generation !== fetchGeneration) return;
@@ -183,13 +199,14 @@
       // The backend returns newest-first. `--until` is inclusive, so the
       // boundary entry is repeated on every page; drop it and anything newer.
       const incoming = page.entries || [];
-      const entries = appendOlder && previousOldest
+      const entries = appendOlder && previousOldest && !usingCursor
         ? incoming.filter((entry: any) => Number(entry.__REALTIME_TIMESTAMP) < Number(previousOldest))
         : incoming;
 
       logs = appendOlder ? [...logs, ...entries] : entries;
       journalTruncated = !!page.truncated;
       if (page.oldest_ts) journalOldestTs = page.oldest_ts;
+      if (page.oldest_cursor) journalOldestCursor = page.oldest_cursor;
       journalFetchMs = page.elapsed_ms || 0;
       journalLoaded = true;
 
@@ -261,7 +278,9 @@
         unitFilter,
         priority,
         sinceFilter,
-        untilFilter
+        untilFilter,
+        userMode: journalUserScope,
+        boot: journalCurrentBoot
       });
       if (generation !== fetchGeneration) return;
       journalTotalInRange = total || 0;
@@ -277,13 +296,15 @@
     try {
       const isCustom = timeRange === 'custom';
       const days = isCustom ? null : parseInt(timeRange);
-      const events = await invoke<any[]>('get_auth_events', {
+      const page = await invoke<{ events: any[]; total: number; truncated: boolean }>('get_auth_events', {
         sinceDays: days,
         customStart: getCustomStart(),
         customEnd: getCustomEnd()
       });
       if (generation !== authGeneration) return;
-      authEvents = events;
+      authEvents = page.events;
+      authTotal = page.total;
+      authTruncated = page.truncated;
       authLoaded = true;
     } catch (e: any) {
       if (generation !== authGeneration) return;
@@ -302,7 +323,7 @@
       const days = isCustom ? null : parseInt(timeRange);
       const [status, logs] = await Promise.all([
         invoke<any>('check_auditd_status').catch(() => null),
-        invoke<any[]>('get_command_audit_logs', {
+        invoke<{ events: any[]; total: number; truncated: boolean }>('get_command_audit_logs', {
           sinceDays: days,
           customStart: getCustomStart(),
           customEnd: getCustomEnd()
@@ -310,7 +331,9 @@
       ]);
       if (generation !== auditGeneration) return;
       auditdStatus = status;
-      auditLogs = logs;
+      auditLogs = logs.events;
+      auditTotal = logs.total;
+      auditTruncated = logs.truncated;
       auditLoaded = true;
     } catch (e: any) {
       if (generation !== auditGeneration) return;
@@ -343,13 +366,17 @@
     try {
       const isCustom = timeRange === 'custom';
       const days = isCustom ? null : parseInt(timeRange);
-      const threats = await invoke<any[]>('get_runtime_threats', {
-        sinceDays: days,
-        customStart: getCustomStart(),
-        customEnd: getCustomEnd()
-      });
+      const [threats, rules] = await Promise.all([
+        invoke<any[]>('get_runtime_threats', {
+          sinceDays: days,
+          customStart: getCustomStart(),
+          customEnd: getCustomEnd()
+        }),
+        invoke<any[]>('get_threat_rules').catch(() => [])
+      ]);
       if (generation !== threatGeneration) return;
       runtimeThreats = threats;
+      threatRules = rules;
       threatsLoaded = true;
     } catch (e: any) {
       if (generation !== threatGeneration) return;
@@ -418,6 +445,13 @@
 
   // Stable click-outside and Escape handlers — registered once in onMount
   // We read showCustomPopover directly (Svelte $state is a live signal).
+
+  function timestampValue(ts: string): number {
+    if (!ts) return 0;
+    const text = ts.includes('-') ? ts : `${new Date().getFullYear()} ${ts}`;
+    const parsed = Date.parse(text);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
 
   function sortIndicator(key: string, active: string, asc: boolean): string {
     return key === active ? (asc ? '▲' : '▼') : '↕';
@@ -550,7 +584,7 @@
   let liveRestartBusy = false;
 
   function currentLiveKey() {
-    return `${filterPriority}|${currentUnitFilter}`;
+    return `${filterPriority}|${currentUnitFilter}|${journalUserScope}|${journalCurrentBoot}`;
   }
 
   async function stopLiveStream() {
@@ -565,7 +599,12 @@
   async function startLiveStream() {
     const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
     const unitF = currentUnitFilter.trim() || null;
-    await invoke('start_journal_live_stream', { unitFilter: unitF, priority: prioF });
+    await invoke('start_journal_live_stream', {
+      unitFilter: unitF,
+      priority: prioF,
+      userMode: journalUserScope,
+      boot: journalCurrentBoot,
+    });
     try {
       unlistenLive = await listen<any>('journal-live-log', (event) => {
         const parsed = event.payload;
@@ -617,7 +656,7 @@
   // Changing the level or unit filter must restart the stream with the new
   // arguments; the backend supersedes the old generation.
   $effect(() => {
-    const key = `${filterPriority}|${currentUnitFilter}`;
+    const key = `${filterPriority}|${currentUnitFilter}|${journalUserScope}|${journalCurrentBoot}`;
     if (!isLiveFollowing || liveRestartBusy || liveStreamKey === key) return;
     void restartLiveStream();
   });
@@ -649,7 +688,112 @@
     return () => document.removeEventListener('click', handleOutsideClick);
   });
 
-  async function handleExportLogs(format: 'txt' | 'json', openFolder: boolean = false) {
+  function csvCell(value: unknown): string {
+    return `"${String(value ?? '').replace(/"/g, '""')}"`;
+  }
+
+  function csvRowsForTab(tab: string, items: any[]): unknown[][] {
+    if (tab === 'journal') {
+      return [
+        ['Time', 'Unit', 'Priority', 'Message'],
+        ...items.map(l => [
+          formatTimestamp(l.__REALTIME_TIMESTAMP),
+          l._SYSTEMD_UNIT || l.SYSLOG_IDENTIFIER || 'kernel',
+          l.PRIORITY,
+          l.MESSAGE,
+        ]),
+      ];
+    }
+    if (tab === 'auth') {
+      return [
+        ['Time', 'User', 'Event Type', 'Source IP', 'Result', 'Details'],
+        ...items.map(e => [e.timestamp, e.user, e.event_type, e.source_ip, e.result, e.details]),
+      ];
+    }
+    if (tab === 'audit') {
+      return [
+        ['Time', 'User', 'Command', 'CWD', 'Result'],
+        ...items.map(a => [a.timestamp, a.user, a.command, a.cwd, a.result]),
+      ];
+    }
+    return [
+      ['Time', 'Severity', 'Category', 'Title', 'Description'],
+      ...items.map(t => [t.timestamp, t.severity, t.category, t.title, t.description]),
+    ];
+  }
+
+  async function handleExportAll() {
+    showExportMenu = false;
+    if (timeRange === 'custom' && !customRangeValid) {
+      uiStore.addToast('Choose a valid custom date range first', 'warning');
+      return;
+    }
+
+    let items: any[] = [];
+    let truncated = false;
+    try {
+      if (activeTab === 'journal') {
+        const prioF = filterPriority !== 'all' ? parseInt(filterPriority) : null;
+        const sinceF = timeRange === 'custom' ? getCustomStart() : `${timeRange} days ago`;
+        const untilF = timeRange === 'custom' ? getCustomEnd() : null;
+        const page = await invoke<any>('get_journal_logs', {
+          unitFilter: currentUnitFilter.trim() || null,
+          priority: prioF,
+          sinceFilter: sinceF,
+          untilFilter: untilF,
+          maxEntries: 200000,
+          userMode: journalUserScope,
+          boot: journalCurrentBoot,
+          cursor: null,
+        });
+        items = page.entries || [];
+        truncated = !!page.truncated;
+      } else if (activeTab === 'auth') {
+        const isCustom = timeRange === 'custom';
+        const page = await invoke<{ events: any[]; truncated: boolean }>('get_auth_events', {
+          sinceDays: isCustom ? null : parseInt(timeRange),
+          customStart: getCustomStart(),
+          customEnd: getCustomEnd(),
+          all: true,
+        });
+        items = page.events;
+        truncated = page.truncated;
+      } else if (activeTab === 'audit') {
+        const isCustom = timeRange === 'custom';
+        const page = await invoke<{ events: any[]; truncated: boolean }>('get_command_audit_logs', {
+          sinceDays: isCustom ? null : parseInt(timeRange),
+          customStart: getCustomStart(),
+          customEnd: getCustomEnd(),
+          all: true,
+        });
+        items = page.events;
+        truncated = page.truncated;
+      } else {
+        items = runtimeThreats;
+      }
+
+      if (items.length === 0) {
+        uiStore.addToast('No entries in the selected range', 'warning');
+        return;
+      }
+
+      const content = csvRowsForTab(activeTab, items)
+        .map(row => row.map(csvCell).join(','))
+        .join('\n');
+      const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `${activeTab}-full-${dateStr}.csv`;
+      const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
+      lastExportedFile = { name: filename, path: savedPath };
+      uiStore.addToast(
+        `Exported ${items.length.toLocaleString()} entries to ${filename}${truncated ? ' (range still exceeds the 200k cap)' : ''}`,
+        truncated ? 'warning' : 'success',
+      );
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
+  }
+
+  async function handleExportLogs(format: 'txt' | 'json' | 'csv', openFolder: boolean = false) {
     showExportMenu = false;
     let exportCount = 0;
     let content = '';
@@ -665,6 +809,17 @@
       filename = `system-journal-${dateStr}.${format}`;
       if (format === 'json') {
         content = JSON.stringify(filteredLogs, null, 2);
+      } else if (format === 'csv') {
+        const rows = [
+          ['Time', 'Unit', 'Priority', 'Message'],
+          ...filteredLogs.map(l => [
+            formatTimestamp(l.__REALTIME_TIMESTAMP),
+            l._SYSTEMD_UNIT || l.SYSLOG_IDENTIFIER || 'kernel',
+            l.PRIORITY,
+            l.MESSAGE,
+          ]),
+        ];
+        content = rows.map(row => row.map(csvCell).join(',')).join('\n');
       } else {
         content = filteredLogs.map(l => {
           const ts = formatTimestamp(l.__REALTIME_TIMESTAMP);
@@ -682,6 +837,12 @@
       filename = `auth-events-${dateStr}.${format}`;
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
+      } else if (format === 'csv') {
+        const rows = [
+          ['Time', 'User', 'Event Type', 'Source IP', 'Result', 'Details'],
+          ...items.map(e => [e.timestamp, e.user, e.event_type, e.source_ip, e.result, e.details]),
+        ];
+        content = rows.map(row => row.map(csvCell).join(',')).join('\n');
       } else {
         content = items.map(e => `[${e.timestamp}] [${e.event_type}] [${e.user || 'unknown'}] [${e.result}] ${e.details || ''}`).join('\n');
       }
@@ -695,6 +856,12 @@
       filename = `audit-logs-${dateStr}.${format}`;
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
+      } else if (format === 'csv') {
+        const rows = [
+          ['Time', 'User', 'Command', 'CWD', 'Result'],
+          ...items.map(a => [a.timestamp, a.user, a.command, a.cwd, a.result]),
+        ];
+        content = rows.map(row => row.map(csvCell).join(',')).join('\n');
       } else {
         content = items.map(a => `[${a.timestamp}] [${a.user || 'unknown'}] [${a.result}] ${a.command || ''} (cwd: ${a.cwd || '—'})`).join('\n');
       }
@@ -708,6 +875,12 @@
       filename = `threat-events-${dateStr}.${format}`;
       if (format === 'json') {
         content = JSON.stringify(items, null, 2);
+      } else if (format === 'csv') {
+        const rows = [
+          ['Time', 'Severity', 'Category', 'Title', 'Description'],
+          ...items.map(t => [t.timestamp, t.severity, t.category, t.title, t.description]),
+        ];
+        content = rows.map(row => row.map(csvCell).join(',')).join('\n');
       } else {
         content = items.map(t => `[${t.timestamp}] [${t.severity}] [${t.category}] ${t.title} — ${t.description}`).join('\n');
       }
@@ -944,12 +1117,13 @@
     ) : [...authEvents];
 
     items.sort((a, b) => {
-      let valA = a[authSortKey as keyof typeof a] || '';
-      let valB = b[authSortKey as keyof typeof b] || '';
-      if (typeof valA === 'string') {
-        return authSortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      if (authSortKey === 'timestamp') {
+        const diff = timestampValue(a.timestamp) - timestampValue(b.timestamp);
+        return authSortAsc ? diff : -diff;
       }
-      return authSortAsc ? (valA > valB ? 1 : -1) : (valA < valB ? 1 : -1);
+      const valA = String(a[authSortKey] ?? '');
+      const valB = String(b[authSortKey] ?? '');
+      return authSortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
     });
     return items;
   });
@@ -963,12 +1137,13 @@
     ) : [...auditLogs];
 
     items.sort((a, b) => {
-      let valA = a[auditSortKey as keyof typeof a] || '';
-      let valB = b[auditSortKey as keyof typeof b] || '';
-      if (typeof valA === 'string') {
-        return auditSortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      if (auditSortKey === 'timestamp') {
+        const diff = timestampValue(a.timestamp) - timestampValue(b.timestamp);
+        return auditSortAsc ? diff : -diff;
       }
-      return auditSortAsc ? (valA > valB ? 1 : -1) : (valA < valB ? 1 : -1);
+      const valA = String(a[auditSortKey] ?? '');
+      const valB = String(b[auditSortKey] ?? '');
+      return auditSortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
     });
     return items;
   });
@@ -1023,180 +1198,182 @@
     title="Journal Logs"
     subtitle="Live systemd journal, authentication, audit, and runtime-threat events"
     icon={FileText}
-  />
+  >
+    <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} size="sm" class="header-tabs" />
+    <Button variant="outline" size="sm" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh the active tab">
+      <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
+      <span>Refresh</span>
+    </Button>
+  </PageHeader>
 
 
-  <div class="page-content log-viewer" style="display:flex; flex-direction:column; gap:16px;">
-    <div class="log-toolbar">
-      <!-- Search icon -->
-      <Search size={14} class="log-search-icon" />
-
-      <!-- Text input: live search -->
-      <input
-        bind:this={searchInputRef}
-        bind:value={searchQuery}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            const tw = logContainer?.querySelector('.table-wrap');
-            if (tw) tw.scrollTop = 0;
-          }
-        }}
-        type="text"
-        class="log-search-input"
-        placeholder={activeTab === 'auth' ? 'Search auth events…' : activeTab === 'audit' ? 'Search audit commands…' : activeTab === 'threats' ? 'Search threats…' : 'Search logs…'}
-        aria-label="Search logs"
-        autocomplete="off"
-        spellcheck={false}
-      />
-
-      {#if hasActiveSearch}
-        <span class="log-count-badge">{activeLogsCount}/{totalLogsCount}</span>
-        <button class="log-clear-btn" onclick={() => { searchQuery = ''; searchInputRef?.focus(); }} title="Clear search">
-          <X size={14} />
-        </button>
-      {/if}
-
-      {#if currentUnitFilter}
-        <div style="display: flex; align-items: center; gap: 6px; padding: 2px 8px; background: rgba(0, 218, 243, 0.12); border: 1px solid rgba(0, 218, 243, 0.3); border-radius: 6px; font-size: 11.5px; color: var(--color-accent); flex-shrink: 0;">
-          <span>Unit: <strong>{currentUnitFilter}</strong></span>
-          <button 
-            type="button" 
-            onclick={() => { currentUnitFilter = ''; fetchLogs(); }} 
-            title="Clear unit filter"
-            style="background: transparent; border: none; color: var(--color-accent); cursor: pointer; padding: 0; display: flex; align-items: center;"
-          >
-            <X size={12} />
-          </button>
+  <div class="log-viewer">
+    <div class="log-controls">
+        <div class="log-search-wrap">
+          <SearchBar
+            bind:value={searchQuery}
+            count={hasActiveSearch ? activeLogsCount : undefined}
+            total={hasActiveSearch ? totalLogsCount : undefined}
+            placeholder={activeTab === 'auth' ? 'Search auth events…' : activeTab === 'audit' ? 'Search audit commands…' : activeTab === 'threats' ? 'Search threats…' : 'Search logs…'}
+            ariaLabel="Search journal logs"
+            style="width: 100%;"
+          />
         </div>
-      {/if}
 
-      <span class="log-sep"></span>
-
-      <!-- Range Selector (applicable to all tabs) -->
-      <span class="log-label">Range:</span>
-      <div class="custom-range-container">
-        <Select bind:value={timeRange} onchange={handleRangeChange} style="height: 28px; width: 130px;">
-          <option value="1">Last 24 Hours</option>
-          <option value="3">Last 3 Days</option>
-          <option value="7">Last 7 Days</option>
-          <option value="30">Last 30 Days</option>
-          <option value="custom">{customRangeLabel}</option>
-        </Select>
-
-        {#if timeRange === 'custom' && showCustomPopover}
-          <div bind:this={popoverContainer} class="custom-range-popover">
-            <div class="popover-row">
-              <span class="popover-label">From</span>
-              <DatePicker bind:value={customStartDate} placeholder="Start date" />
-              <input
-                type="time"
-                bind:value={customStartTime}
-                class="log-dt"
-              />
-            </div>
-            <div class="popover-row" style="margin-top: 10px;">
-              <span class="popover-label">To</span>
-              <DatePicker bind:value={customEndDate} placeholder="End date" />
-              <input
-                type="time"
-                bind:value={customEndTime}
-                class="log-dt"
-              />
-            </div>
-            <div class="popover-actions">
-              <button
-                type="button"
-                class="popover-btn apply-btn"
-                disabled={!customRangeValid}
-                onclick={applyCustomRange}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                class="popover-btn cancel-btn"
-                onclick={cancelCustomRange}
-              >
-                Cancel
-              </button>
-            </div>
+        {#if currentUnitFilter}
+          <div class="log-unit-chip">
+            <span>Unit: <strong>{currentUnitFilter}</strong></span>
+            <button
+              type="button"
+              onclick={() => { currentUnitFilter = ''; fetchLogs(); }}
+              title="Clear unit filter"
+              aria-label="Clear unit filter"
+            >
+              <X size={12} />
+            </button>
           </div>
         {/if}
-      </div>
 
-      <!-- Refresh -->
-      <button class="log-action-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh">
-        <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
-        <span>Refresh</span>
-      </button>
+        <div class="log-filter-cluster">
+                <div class="custom-range-container">
+            <Select class="log-range-select {timeRange === 'custom' ? 'is-custom' : ''}" bind:value={timeRange} onchange={handleRangeChange} style="height: 28px;">
+              <option value="1">Last 24 Hours</option>
+              <option value="3">Last 3 Days</option>
+              <option value="7">Last 7 Days</option>
+              <option value="30">Last 30 Days</option>
+              <option value="custom">{customRangeLabel}</option>
+            </Select>
 
-      <!-- Clear view -->
-      <button class="log-action-btn log-action-danger" onclick={clearAll} title="Clear view" aria-label="Clear loaded log entries">
-        <Trash2 size={13} />
-      </button>
-    </div>
+            {#if timeRange === 'custom' && showCustomPopover}
+              <div bind:this={popoverContainer} class="custom-range-popover">
+                <div class="popover-row">
+                  <span class="popover-label">From</span>
+                  <DatePicker bind:value={customStartDate} placeholder="Start date" />
+                  <input
+                    type="time"
+                    bind:value={customStartTime}
+                    class="log-dt"
+                  />
+                </div>
+                <div class="popover-row" style="margin-top: 10px;">
+                  <span class="popover-label">To</span>
+                  <DatePicker bind:value={customEndDate} placeholder="End date" />
+                  <input
+                    type="time"
+                    bind:value={customEndTime}
+                    class="log-dt"
+                  />
+                </div>
+                <div class="popover-actions">
+                  <button
+                    type="button"
+                    class="popover-btn apply-btn"
+                    disabled={!customRangeValid}
+                    onclick={applyCustomRange}
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    class="popover-btn cancel-btn"
+                    onclick={cancelCustomRange}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </div>
 
-    <!-- Tab navigation and Actions row -->
-    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%;">
-      <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} />
+          {#if activeTab === 'journal'}
+            <Select
+              class="log-level-select"
+              bind:value={filterPriority}
+              onchange={fetchLogs}
+              ariaLabel="Journal level"
+              style="height: 28px; width: 120px;"
+            >
+              <option value="all">All Levels</option>
+              <option value="3">Error+</option>
+              <option value="4">Warning+</option>
+              <option value="6">Info+</option>
+            </Select>
 
-      <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-        {#if activeTab === 'journal'}
-          <!-- Level Selector -->
-          <span class="log-label" style="font-size: 11px;">Level:</span>
-          <Select bind:value={filterPriority} onchange={fetchLogs} style="height: 28px; width: 110px;">
-            <option value="all">All Levels</option>
-            <option value="3">Error+</option>
-            <option value="4">Warning+</option>
-            <option value="6">Info+</option>
-          </Select>
-
-          <!-- Live Follow Toggle -->
-          <button 
-            type="button"
-            class="log-action-btn {isLiveFollowing ? 'live-following-btn' : ''}" 
-            aria-pressed={isLiveFollowing}
-            onclick={toggleLiveFollow} 
-            title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
-          >
-            <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
-            <span>{isLiveFollowing ? 'Live Following' : 'Live Follow'}</span>
-          </button>
-        {/if}
-
-        <!-- Export Logs Dropdown -->
-        <div class="export-dropdown-container" bind:this={exportMenuContainer}>
-          <button 
-            type="button"
-            class="log-action-btn export-main-btn" 
-            onclick={() => showExportMenu = !showExportMenu} 
-            title="Export logs (Text, JSON, with option to open folder)"
-          >
-            <Download size={13} />
-            <span>Export</span>
-            <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
-          </button>
-
-          {#if showExportMenu}
-            <div class="export-dropdown-menu">
-              <button type="button" class="export-menu-item" onclick={() => handleExportLogs('txt', false)}>
-                <FileText size={13} />
-                <span>Export as Text (.txt)</span>
-              </button>
-              <button type="button" class="export-menu-item" onclick={() => handleExportLogs('json', false)}>
-                <Code size={13} />
-                <span>Export as JSON (.json)</span>
-              </button>
-              <div class="export-menu-divider"></div>
-              <button type="button" class="export-menu-item accent" onclick={() => handleExportLogs('txt', true)}>
-                <FolderOpen size={13} />
-                <span>Export Text &amp; Open Folder</span>
-              </button>
-            </div>
+            <Button
+              variant={journalCurrentBoot ? 'primary' : 'ghost'}
+              size="sm"
+              aria-pressed={journalCurrentBoot}
+              onclick={() => { journalCurrentBoot = !journalCurrentBoot; fetchLogs(); }}
+              title="Restrict the journal to the current boot"
+            >
+              This boot
+            </Button>
+            <Button
+              variant={journalUserScope ? 'primary' : 'ghost'}
+              size="sm"
+              aria-pressed={journalUserScope}
+              onclick={() => { journalUserScope = !journalUserScope; fetchLogs(); }}
+              title="Show the current user's journal (journalctl --user)"
+            >
+              User journal
+            </Button>
+            <Button
+              variant={isLiveFollowing ? 'primary' : 'ghost'}
+              size="sm"
+              aria-pressed={isLiveFollowing}
+              onclick={toggleLiveFollow}
+              title={isLiveFollowing ? 'Streaming new logs in real-time (Click to pause)' : 'Follow new logs in real-time'}
+            >
+              <span class="live-status-dot {isLiveFollowing ? 'pulsing' : ''}"></span>
+              <span>Live</span>
+            </Button>
           {/if}
+
+          <span class="log-divider" aria-hidden="true"></span>
+
+                  <div class="export-dropdown-container" bind:this={exportMenuContainer}>
+            <button
+              type="button"
+              class="log-action-btn export-main-btn"
+              onclick={() => showExportMenu = !showExportMenu}
+              title="Export logs (Text, JSON, with option to open folder)"
+            >
+              <Download size={13} />
+              <span>Export</span>
+              <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
+            </button>
+
+            {#if showExportMenu}
+              <div class="export-dropdown-menu">
+                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('txt', false)}>
+                  <FileText size={13} />
+                  <span>Export as Text (.txt)</span>
+                </button>
+                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('json', false)}>
+                  <Code size={13} />
+                  <span>Export as JSON (.json)</span>
+                </button>
+                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('csv', false)}>
+                  <FileText size={13} />
+                  <span>Export as CSV (.csv, loaded rows)</span>
+                </button>
+                <button type="button" class="export-menu-item accent" onclick={handleExportAll}>
+                  <FolderOpen size={13} />
+                  <span>Export full range (CSV)</span>
+                </button>
+                <div class="export-menu-divider"></div>
+                <button type="button" class="export-menu-item accent" onclick={() => handleExportLogs('txt', true)}>
+                  <FolderOpen size={13} />
+                  <span>Export Text &amp; Open Folder</span>
+                </button>
+              </div>
+            {/if}
+          </div>
+
+          <Button variant="ghost" size="sm" onclick={clearAll} title="Clear loaded results" aria-label="Clear loaded log entries">
+            <Eraser size={14} />
+          </Button>
         </div>
-      </div>
     </div>
 
     <div class="log-container" bind:this={logContainer}>
@@ -1213,7 +1390,11 @@
           </div>
         {:else if filteredLogs.length === 0}
           {#if isLoading}
-            <div class="empty-state">Fetching logs…</div>
+            <div class="log-skeleton" role="status" aria-label="Loading journal entries">
+              {#each [1, 2, 3, 4, 5, 6, 7, 8] as row}
+                <Skeleton height="18px" borderRadius="4px" />
+              {/each}
+            </div>
           {:else if hasActiveSearch && collapsedLogs.length > 0}
             <EmptyState
               icon={FileText}
@@ -1236,7 +1417,7 @@
             />
           {/if}
         {:else}
-          <Table class="log-table" showDensityToggle={false} onscroll={handleLogScroll}>
+          <Table class="log-table" onscroll={handleLogScroll}>
             <thead>
               <tr>
                 <th style="width: 150px;">Time</th>
@@ -1307,13 +1488,21 @@
           {#if !isLoading && logs.length > 0}
             <div class="journal-table-footer">
               <div class="journal-footer-stats">
-                <span class="journal-footer-count">
+                <span class="journal-footer-count" title={hasActiveSearch ? 'Search covers the loaded entries only' : ''}>
                   <Layers size={12} />
-                  {journalTotalInRange
-                    ? `${logs.length.toLocaleString()} of ${journalTotalInRange.toLocaleString()} entries`
-                    : `${logs.length.toLocaleString()} entries`}
+                  {#if hasActiveSearch}
+                    {filteredLogs.length.toLocaleString()} matches · {logs.length.toLocaleString()} loaded
+                  {:else if journalTotalInRange}
+                    {logs.length.toLocaleString()} of {journalTotalInRange.toLocaleString()} entries
+                  {:else}
+                    {logs.length.toLocaleString()} entries
+                  {/if}
                 </span>
-                <span class="journal-footer-time">fetched in {journalFetchMs} ms</span>
+                {#if hasActiveSearch && journalTruncated}
+                  <span class="journal-footer-time">search covers loaded entries</span>
+                {:else if journalFetchMs > 0}
+                  <span class="journal-footer-time">fetched in {journalFetchMs} ms</span>
+                {/if}
               </div>
               {#if journalTruncated}
                 <button
@@ -1356,7 +1545,10 @@
             {/if}
           </div>
         {:else}
-          <Table class="log-table" showDensityToggle={false}>
+          {#if authTruncated}
+            <div class="journal-note">Showing the newest {authEvents.length} of {authTotal} auth events in this range.</div>
+          {/if}
+          <Table class="log-table">
             <thead>
               <tr>
                 <th aria-sort={ariaSort('timestamp', authSortKey, authSortAsc)}>
@@ -1461,7 +1653,10 @@
             {/if}
           </div>
         {:else}
-          <Table class="log-table" showDensityToggle={false}>
+          {#if auditTruncated}
+            <div class="journal-note">Showing the newest {auditLogs.length} of {auditTotal} audit events in this range.</div>
+          {/if}
+          <Table class="log-table">
             <thead>
               <tr>
                 <th aria-sort={ariaSort('timestamp', auditSortKey, auditSortAsc)}>
@@ -1559,53 +1754,24 @@
             </div>
 
             <!-- Active Safeguard Rules Grid -->
-            <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
+            <div style="background:var(--color-bg-raised); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
               <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
                 Built-in Detection Rules
               </div>
               <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags users failing sudo credentials ≥ 3 times.</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Detects IP-based SSH login dictionary attacks ≥ 5 attempts.</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Alerts immediately if setenforce 0 is executed.</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags flush attacks (iptables -F or nft flush).</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Monitors unauthorized writes to /etc/passwd & shadow.</div>
-                  </div>
-                </div>
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
-                  <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                  <div>
-                    <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
-                    <div style="font-size:11px; color:var(--color-text-muted);">Flags elevated commands executed without standard sudo.</div>
-                  </div>
-                </div>
+                {#if threatRules.length > 0}
+                  {#each threatRules as rule (rule.id)}
+                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; display:flex; align-items:flex-start; gap:10px;">
+                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
+                      <div>
+                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">{rule.title}</div>
+                        <div style="font-size:11px; color:var(--color-text-muted);">{rule.description}</div>
+                      </div>
+                    </div>
+                  {/each}
+                {:else}
+                  <div style="font-size:11.5px; color:var(--color-text-muted);">Detection-rule metadata is unavailable.</div>
+                {/if}
               </div>
             </div>
           </div>
@@ -1789,80 +1955,56 @@
   </SideDrawer>
 {/if}
 
-<style>/* ── Single unified toolbar strip ───────────────────── */ .log-toolbar {
+<style>/* ── Journal controls row ───────────────────────────── */ .log-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    width: 100%;
+  }.log-search-wrap {
+    flex: 1 1 260px;
+    min-width: 220px;
+    max-width: 400px;
+  }.log-filter-cluster {
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 32px;
-    background: var(--color-bg-input);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 0 10px;
-    width: 100%;
-    box-sizing: border-box;
-  }/* Search icon */ .log-toolbar :global(.log-search-icon) {
-    color: var(--color-text-muted);
+    flex-wrap: wrap;
     flex-shrink: 0;
-  }/* Text input */ .log-search-input {
-    flex: 1;
-    min-width: 120px;
-    height: 100%;
+    margin-left: auto;
+  }.log-unit-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    background: var(--color-accent-muted);
+    border: 1px solid var(--color-accent);
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }.log-unit-chip button {
     background: transparent;
     border: none;
-    outline: none;
-    color: var(--color-text-primary);
-    font-size: 13px;
-    font-family: var(--font-sans);
-  }.log-search-input::placeholder {
-    color: var(--color-text-muted);
-  }/* Match count badge */ .log-count-badge {
-    font-size: 11px;
-    font-family: var(--font-mono);
-    color: var(--color-accent);
-    background: var(--color-accent-muted);
-    padding: 1px 7px;
-    border-radius: 10px;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }/* Clear search button */ .log-clear-btn {
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    flex-shrink: 0;
-    border: none;
-    border-radius: 4px;
-    background: var(--color-bg-hover);
-    color: var(--color-text-muted);
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-  }.log-clear-btn:hover {
-    background: var(--color-active-bg);
-    color: var(--color-text-primary);
-  }/* Separator */ .log-sep {
+  }.log-divider {
     width: 1px;
-    height: 16px;
-    background: var(--color-border-subtle);
+    height: 20px;
+    background: var(--color-border);
     flex-shrink: 0;
-  }/* Small label */ .log-label {
-    font-size: 11px;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }/* Level select */ .log-select {
-    height: 100%;
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--color-text-secondary);
-    font-size: 12px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    appearance: none;
-    -webkit-appearance: none;
-    flex-shrink: 0;
-  }/* Date / time inputs */ .log-dt {
+  }
+  @media (max-width: 1200px) {
+    .log-search-wrap { flex: 1 1 100%; max-width: none; }
+    .log-filter-cluster { margin-left: 0; }
+  }
+  @media (max-width: 900px) {
+    .log-filter-cluster { width: 100%; }
+  }
+/* Date / time inputs */ .log-dt {
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
     border-radius: 6px;
@@ -1937,12 +2079,12 @@
   }.cancel-btn:hover {
     background: var(--color-active-bg);
     color: var(--color-text-primary);
-  }/* Refresh / trash action buttons */ .log-action-btn {
+  }/* Refresh / export action buttons */ .log-action-btn {
     display: flex;
     align-items: center;
     gap: 5px;
-    height: 24px;
-    padding: 0 8px;
+    height: 28px;
+    padding: 0 10px;
     border: none;
     border-radius: 6px;
     background: var(--color-bg-hover);
@@ -1959,9 +2101,6 @@
   }.log-action-btn:disabled {
     opacity: 0.4;
     cursor: default;
-  }.log-action-danger { padding: 0 6px; }.log-action-danger:hover {
-    background: rgba(255, 118, 117, 0.12);
-    color: var(--color-error);
   }/* Export Dropdown Menu */ .export-dropdown-container {
     position: relative;
     display: inline-flex;
@@ -2036,8 +2175,11 @@
     padding: 0;
     display: flex;
     flex-direction: column;
+    gap: 20px;
+    margin-top: -14px;
     overflow: hidden;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
   }.log-container {
     flex: 1;
     min-height: 0;
@@ -2045,6 +2187,8 @@
     flex-direction: column;
     overflow: hidden;
     background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
   }
@@ -2110,6 +2254,10 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    box-shadow: none !important;
+    border: none;
+    border-radius: 0;
+    background: transparent;
   }.empty-state {
     display: flex;
     justify-content: center;
@@ -2166,10 +2314,6 @@
     margin-left: 8px;
     font-weight: bold;
     display: inline-block;
-  }.live-following-btn {
-    background: rgba(16, 185, 129, 0.15) !important;
-    color: var(--color-success) !important;
-    border: 1px solid rgba(16, 185, 129, 0.3) !important;
   }.live-status-dot {
     width: 7px;
     height: 7px;
@@ -2363,9 +2507,7 @@
     color: var(--color-error);
     margin-bottom: 2px;
   }
-  .log-search-input:focus-visible,
   .log-action-btn:focus-visible,
-  .log-clear-btn:focus-visible,
   .popover-btn:focus-visible,
   .journal-footer-action:focus-visible,
   .drawer-action-btn:focus-visible,
@@ -2393,5 +2535,42 @@
   .journal-sort-btn:hover { color: var(--color-text-primary); }
   @media (prefers-reduced-motion: reduce) {
     .live-status-dot.pulsing { animation: none; }
+  }
+  .journal-note {
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 6px;
+    background: var(--color-bg-hover);
+    color: var(--color-text-muted);
+    font-size: 11.5px;
+  }
+  .log-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px;
+  }
+  :global(.header-tabs) {
+    box-shadow: none !important;
+    background: transparent !important;
+    border-color: transparent !important;
+    padding: 0 !important;
+  }
+  :global(.log-range-select) {
+    width: 130px;
+    flex: 0 0 130px;
+    transition: width 0.18s ease, flex-basis 0.18s ease;
+  }
+  :global(.log-range-select.is-custom) {
+    width: 250px;
+    flex: 0 0 250px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.log-range-select) { transition: none; }
+  }
+  :global(.log-level-select) {
+    width: 120px;
+    flex: 0 0 120px;
   }
 </style>

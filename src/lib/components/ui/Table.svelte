@@ -38,7 +38,8 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'compact' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('compact')}
-        title="Compact Mode (28px row height, 11px font, max data density)"
+        aria-pressed={activeDensity === 'compact'}
+        title="Compact Mode (max data density, 11px font)"
       >
         <Rows4 size={12} />
       </button>
@@ -46,7 +47,8 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'normal' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('normal')}
-        title="Normal Mode (36px row height, 12px font, standard balanced view)"
+        aria-pressed={activeDensity === 'normal'}
+        title="Normal Mode (balanced density, 12px font)"
       >
         <Rows3 size={12} />
       </button>
@@ -54,7 +56,8 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'spacious' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('spacious')}
-        title="Spacious Mode (44px row height, 13px font, comfortable relaxed view)"
+        aria-pressed={activeDensity === 'spacious'}
+        title="Spacious Mode (comfortable reading, 13px font)"
       >
         <Rows2 size={12} />
       </button>

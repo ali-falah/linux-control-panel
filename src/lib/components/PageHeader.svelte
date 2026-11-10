@@ -218,7 +218,7 @@
 
 <div class="header-wrapper">
   <div class="page-header">
-    <div class="breadcrumb" aria-label="Breadcrumb navigation">
+    <div class="breadcrumb" role="navigation" aria-label="Breadcrumb navigation">
       <!-- Unified Back + Recent History Split Dropdown -->
       {#if uiStore.canGoBack || uiStore.recentTabs.length > 0}
         <div bind:this={dropdownContainerRef} class="back-split-container">
@@ -233,10 +233,12 @@
             <button
               class="back-dropdown-btn"
               class:open={showHistoryDropdown}
+              class:no-back={!uiStore.canGoBack}
               onclick={() => showHistoryDropdown = !showHistoryDropdown}
               title="Recently Visited Pages"
             >
               <History size={11} style="color:var(--color-accent);" />
+              <span class="back-dd-sep" aria-hidden="true"></span>
               <ChevronDown size={11} />
             </button>
 
@@ -381,13 +383,18 @@
     padding: 3px 6px;
     background: transparent;
     border: none;
-    border-left: 1px solid rgba(255, 255, 255, 0.08);
     color: var(--color-text-muted);
     cursor: pointer;
     transition: all 0.15s ease;
     border-radius: 0 5px 5px 0;
-  }:global(html.light-mode) .back-dropdown-btn {
-    border-left-color: #CBD5E1;
+  }  .back-dd-sep {
+    width: 1px;
+    height: 12px;
+    background: var(--color-border);
+    flex-shrink: 0;
+    margin: 0 1px;
+  }.back-dropdown-btn.no-back {
+    border-radius: 5px;
   }.back-dropdown-btn:hover, .back-dropdown-btn.open {
     background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
     color: var(--color-accent);
@@ -527,7 +534,10 @@
   }.header-actions {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
     /* may give way, but never below its own content width */
     flex-shrink: 1;
+    min-width: 0;
   }</style>

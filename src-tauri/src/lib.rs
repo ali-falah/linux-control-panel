@@ -90,7 +90,7 @@ use commands::{
     },
     audit_log::{
         get_auth_events, check_auditd_status, setup_auditd_rules,
-        get_command_audit_logs, get_runtime_threats
+        get_command_audit_logs, get_runtime_threats, get_threat_rules
     },
     ssh_cert_vault::{
         vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
@@ -431,6 +431,7 @@ pub fn run() {
             setup_auditd_rules,
             get_command_audit_logs,
             get_runtime_threats,
+            get_threat_rules,
             // SSH & SSL Vault
             vault_list_ssh_keys,
             vault_generate_ssh_key,

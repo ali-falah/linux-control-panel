@@ -3911,6 +3911,7 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "audit_setup",
     "unit_action",
     "unit_dropin_write",
     "unit_create",
@@ -4429,6 +4430,16 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             action,
             "this action does not exist",
         ));
+    }
+    if action == "audit_setup" {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments",
+            ));
+        }
+        return Ok(());
     }
     if HELPER_ACCOUNT_ACTIONS.contains(&action.as_str()) {
         let [_, account] = args else {
@@ -8757,6 +8768,8 @@ mod service_manager_validator_tests {
 
     #[test]
     fn unit_action_gate_enforces_shapes() {
+        check_lcp(&["audit_setup"]).expect("valid audit setup");
+        assert!(check_lcp(&["audit_setup", "extra"]).is_err());
         check_lcp(&["unit_action", "restart", "nginx.service"]).expect("valid action");
         check_lcp(&["unit_action", "mask", "cups.service"]).expect("valid mask");
         check_lcp(&["unit_dropin_write", "nginx.service"]).expect("valid dropin");

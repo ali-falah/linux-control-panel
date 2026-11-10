@@ -7,6 +7,7 @@
     placeholder?: string;
     disabled?: boolean;
     debounceMs?: number;
+    ariaLabel?: string;
     count?: number;
     total?: number;
     class?: string;
@@ -18,6 +19,7 @@
     placeholder = 'Search...', 
     disabled = false,
     debounceMs = 120,
+    ariaLabel = undefined,
     count,
     total,
     class: className = '',
@@ -76,6 +78,7 @@
       onkeydown={handleKeydown}
       {placeholder}
       {disabled}
+      aria-label={ariaLabel}
       class="search-input"
     />
     {#if internalInput}

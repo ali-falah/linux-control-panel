@@ -24,6 +24,20 @@ pub struct AuditLogEvent {
     pub auid: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AuthEventsPage {
+    pub events: Vec<AuthEvent>,
+    pub total: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogsPage {
+    pub events: Vec<AuditLogEvent>,
+    pub total: usize,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RuntimeThreat {
     pub id: String,
@@ -41,8 +55,7 @@ pub struct AuditdStatus {
     pub rules_configured: bool,
 }
 
-#[tauri::command]
-pub async fn get_auth_events(
+async fn get_auth_events_inner(
     since_days: Option<u32>,
     custom_start: Option<String>,
     custom_end: Option<String>
@@ -188,12 +201,56 @@ async fn get_auth_events_journalctl(
             }
         }
 
-        if events.len() >= 200 { break; }
     }
 
     Ok(events)
 }
 
+
+fn timestamp_epoch(ts: &str) -> i64 {
+    let ts = ts.trim();
+    if ts.is_empty() {
+        return 0;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt.timestamp();
+    }
+    let current_year = chrono::Local::now().format("%Y").to_string();
+    for (candidate, format) in [
+        (format!("{current_year} {ts}"), "%Y %b %d %H:%M:%S"),
+        (ts.to_string(), "%Y-%m-%d %H:%M:%S"),
+        (ts.to_string(), "%Y-%m-%dT%H:%M:%S"),
+    ] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&candidate, format) {
+            return local_timestamp(dt);
+        }
+    }
+    0
+}
+
+fn sort_auth_events(events: &mut [AuthEvent]) {
+    events.sort_by(|a, b| timestamp_epoch(&b.timestamp).cmp(&timestamp_epoch(&a.timestamp)));
+}
+
+fn sort_audit_events(events: &mut [AuditLogEvent]) {
+    events.sort_by(|a, b| timestamp_epoch(&b.timestamp).cmp(&timestamp_epoch(&a.timestamp)));
+}
+
+#[tauri::command]
+pub async fn get_auth_events(
+    since_days: Option<u32>,
+    custom_start: Option<String>,
+    custom_end: Option<String>,
+    all: Option<bool>,
+) -> Result<AuthEventsPage, String> {
+    let mut events = get_auth_events_inner(since_days, custom_start, custom_end).await?;
+    let total = events.len();
+    sort_auth_events(&mut events);
+    let cap = if all.unwrap_or(false) { total } else { 200 };
+    let truncated = total > cap;
+    events.truncate(cap);
+    Ok(AuthEventsPage { events, total, truncated })
+}
 
 fn parse_auth_log_text(text: &str) -> Result<Vec<AuthEvent>, String> {
     let mut events = Vec::new();
@@ -383,38 +440,8 @@ pub async fn check_auditd_status() -> Result<AuditdStatus, String> {
 
 #[tauri::command]
 pub async fn setup_auditd_rules() -> Result<String, String> {
-    let script = r#"set -e
-if ! command -v auditctl >/dev/null 2>&1; then
-  if command -v dnf >/dev/null 2>&1; then
-    dnf install -y audit || true
-  elif command -v apt-get >/dev/null 2>&1; then
-    apt-get update && apt-get install -y auditd || true
-  fi
-fi
-mkdir -p /etc/audit/rules.d
-cat << 'EOF' > /etc/audit/rules.d/99-control-panel.rules
--a always,exit -F arch=b64 -S execve -k cmd_audit
--w /etc/passwd -p wa -k identity
--w /etc/sudoers -p wa -k sudoers_change
--w /etc/sysctl.d/ -p wa -k sysctl_tamper
-EOF
-if command -v augenrules >/dev/null 2>&1; then
-  augenrules --load || true
-fi
-systemctl enable --now auditd || systemctl restart auditd || true
-"#;
-
-    let out = privileged::run_privileged_script(script).await
-        .map_err(|e| e.to_string())?;
-
-    if out.status.success() {
-        Ok("Auditd rules successfully installed and reloaded.".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        let combined = if stderr.is_empty() { stdout } else { stderr };
-        Err(format!("Failed to configure auditd rules: {}", combined.trim()))
-    }
+    crate::commands::service_manager::run_service_named_action("audit_setup", &[], "").await?;
+    Ok("Auditd rules successfully installed and reloaded.".to_string())
 }
 
 #[tauri::command]
@@ -480,8 +507,7 @@ fn local_timestamp(dt: chrono::NaiveDateTime) -> i64 {
         .unwrap_or_else(|| dt.and_utc().timestamp())
 }
 
-#[tauri::command]
-pub async fn get_command_audit_logs(
+async fn get_command_audit_logs_inner(
     since_days: Option<u32>,
     custom_start: Option<String>,
     custom_end: Option<String>
@@ -653,7 +679,7 @@ pub async fn get_command_audit_logs(
         }
     }
 
-    let mut events: Vec<AuditLogEvent> = msg_map
+    let events: Vec<AuditLogEvent> = msg_map
         .into_iter()
         .map(|(_, (ts, uid, auid, cmd, cwd, res))| AuditLogEvent {
             timestamp: ts,
@@ -666,10 +692,75 @@ pub async fn get_command_audit_logs(
         })
         .collect();
 
-    events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    events.truncate(300);
-
     Ok(events)
+}
+
+#[tauri::command]
+pub async fn get_command_audit_logs(
+    since_days: Option<u32>,
+    custom_start: Option<String>,
+    custom_end: Option<String>,
+    all: Option<bool>,
+) -> Result<AuditLogsPage, String> {
+    let mut events = get_command_audit_logs_inner(since_days, custom_start, custom_end).await?;
+    let total = events.len();
+    sort_audit_events(&mut events);
+    let cap = if all.unwrap_or(false) { total } else { 300 };
+    let truncated = total > cap;
+    events.truncate(cap);
+    Ok(AuditLogsPage { events, total, truncated })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreatRule {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+}
+
+pub const THREAT_RULES: &[(&str, &str, &str)] = &[
+    (
+        "repeated_sudo",
+        "Repeated Sudo Failures",
+        "Flags users failing sudo credentials 3 or more times in the selected range.",
+    ),
+    (
+        "ssh_bruteforce",
+        "SSH Brute-Force",
+        "Detects IP-based SSH login failures with 5 or more attempts.",
+    ),
+    (
+        "selinux_disable",
+        "SELinux Disablement",
+        "Alerts when setenforce 0 or a permissive SELinux change is observed.",
+    ),
+    (
+        "firewall_flush",
+        "Firewall Ruleset Flush",
+        "Detects iptables -F or nft flush operations that drop the active ruleset.",
+    ),
+    (
+        "credential_writes",
+        "Credential File Tampering",
+        "Watches for unauthorized writes to /etc/passwd, /etc/shadow, or sudoers.",
+    ),
+    (
+        "root_bypass",
+        "Direct Root Bypass",
+        "Flags elevated commands executed outside the standard sudo path.",
+    ),
+];
+
+#[tauri::command]
+pub fn get_threat_rules() -> Vec<ThreatRule> {
+    THREAT_RULES
+        .iter()
+        .map(|(id, title, description)| ThreatRule {
+            id: (*id).to_string(),
+            title: (*title).to_string(),
+            description: (*description).to_string(),
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -680,8 +771,8 @@ pub async fn get_runtime_threats(
 ) -> Result<Vec<RuntimeThreat>, String> {
     let mut threats = Vec::new();
 
-    let auth_events = get_auth_events(since_days, custom_start.clone(), custom_end.clone()).await?;
-    let audit_events = get_command_audit_logs(since_days, custom_start, custom_end).await?;
+    let auth_events = get_auth_events_inner(since_days, custom_start.clone(), custom_end.clone()).await?;
+    let audit_events = get_command_audit_logs_inner(since_days, custom_start, custom_end).await?;
 
     // 1. Repeated Sudo Failures (3+)
     let mut user_sudo_fails: HashMap<String, u32> = HashMap::new();

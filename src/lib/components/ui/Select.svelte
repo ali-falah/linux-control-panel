@@ -5,6 +5,7 @@
 
   interface Props extends HTMLSelectAttributes {
     label?: string;
+    ariaLabel?: string;
     id?: string;
     children?: Snippet;
     onchange?: (e: any) => void;
@@ -12,6 +13,7 @@
 
   let { 
     label,
+    ariaLabel,
     id = Math.random().toString(36).substring(2, 9),
     class: className = '',
     value = $bindable(),
@@ -159,7 +161,7 @@
     aria-expanded={isOpen}
     aria-haspopup="listbox"
     aria-controls="{id}-listbox"
-    aria-label={label || 'Select option'}
+    aria-label={label || ariaLabel || 'Select option'}
     {style}
   >
     <span class="ui-select-value">{activeLabel}</span>

@@ -5,7 +5,7 @@ use crate::{binary_exists, log_to_file};
 
 /// Forward a validated system-scope unit operation to the installed helper.
 /// The helper re-validates the unit name and the protected-unit policy.
-async fn run_service_named_action(
+pub(crate) async fn run_service_named_action(
     action: &str,
     params: &[String],
     input: &str,
