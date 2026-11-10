@@ -19,6 +19,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
+  import { redactSensitiveData } from '../utils/aiRedaction';
   import PageHeader from '../components/PageHeader.svelte';
 
   // ─── AI Terminal Assistant State ──────────────────────────────────────────
@@ -34,7 +35,7 @@
     aiResponse = null;
     try {
       const res = await invoke<any>('ai_generate_terminal_command', {
-        prompt: aiPrompt.trim(),
+        prompt: redactSensitiveData(aiPrompt.trim()),
         settings: aiStore.getSettingsPayload(),
       });
       aiResponse = res;

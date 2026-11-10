@@ -106,7 +106,6 @@ use commands::{
         ai_diagnose_log_error, ai_explain_dnf_conflict,
         ai_generate_nginx_rule, ai_generate_firewall_rule,
         ai_generate_terminal_command, ai_test_cloud_connection,
-        open_system_config_file,
     },
     pm2_manager::{
         pm2_get_system_status, pm2_list_processes, pm2_process_action,
@@ -463,7 +462,6 @@ pub fn run() {
             ai_generate_firewall_rule,
             ai_generate_terminal_command,
             ai_test_cloud_connection,
-            open_system_config_file,
             // PM2 Process Manager
             pm2_get_system_status,
             pm2_list_processes,

@@ -159,6 +159,7 @@
               <span class="badge badge-muted">{aiStore.activeLogService}</span>
             </div>
             <pre class="snippet-preview"><code>{aiStore.activeLogContext.slice(0, 200)}...</code></pre>
+            <div class="redaction-note">Sensitive values (keys, tokens, passwords, emails) are redacted before sending.</div>
           </div>
 
         {:else if aiStore.activeModalType === 'dnf'}
@@ -167,6 +168,7 @@
               <span class="badge badge-warning"><Package size={11} /> DNF Package Manager</span>
             </div>
             <pre class="snippet-preview"><code>{aiStore.activeDnfOutput.slice(0, 200)}...</code></pre>
+            <div class="redaction-note">Sensitive values (keys, tokens, passwords, emails) are redacted before sending.</div>
           </div>
 
         {:else if aiStore.activeModalType === 'nginx'}
@@ -841,4 +843,9 @@
 
   :global(.spin) { animation: spin 1s linear infinite; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .redaction-note {
+    margin-top: 6px;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
 </style>

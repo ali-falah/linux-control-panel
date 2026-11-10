@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { uiStore } from './ui.svelte.ts';
+import { redactSensitiveData } from '../utils/aiRedaction';
 
 export interface SecurityFindingInput {
   id: string;
@@ -336,7 +337,7 @@ export interface AiSettingsConfig {
 
 export class AiStore {
   // Master ON/OFF Switch
-  enabled = $state(true);
+  enabled = $state(false);
 
   // Config state
   provider = $state<'ollama' | 'gemini' | 'openai'>('ollama');
@@ -471,7 +472,8 @@ export class AiStore {
       uiStore.addToast('Cannot diagnose an empty log message.', 'warning');
       return;
     }
-    this.activeLogContext = logContext.trim();
+    const safeContext = redactSensitiveData(logContext.trim());
+    this.activeLogContext = safeContext;
     this.activeLogService = serviceName || 'System Journal / Audit';
     this.logResult = null;
     this.analysisError = null;
@@ -480,7 +482,7 @@ export class AiStore {
 
     try {
       const res = await invoke<LogDiagnosisResponse>('ai_diagnose_log_error', {
-        logContext: logContext.trim(),
+        logContext: safeContext,
         serviceName: this.activeLogService,
         settings: this.getSettingsPayload(),
       });
@@ -495,7 +497,8 @@ export class AiStore {
   }
 
   async explainDnfConflict(terminalOutput: string) {
-    this.activeDnfOutput = terminalOutput;
+    const safeOutput = redactSensitiveData(terminalOutput);
+    this.activeDnfOutput = safeOutput;
     this.dnfResult = null;
     this.analysisError = null;
     this.analyzing = true;
@@ -503,7 +506,7 @@ export class AiStore {
 
     try {
       const res = await invoke<DnfConflictResponse>('ai_explain_dnf_conflict', {
-        terminalOutput,
+        terminalOutput: safeOutput,
         settings: this.getSettingsPayload(),
       });
       this.dnfResult = res;
@@ -517,7 +520,8 @@ export class AiStore {
   }
 
   async generateNginxRule(prompt: string) {
-    this.activeNginxPrompt = prompt;
+    const safePrompt = redactSensitiveData(prompt);
+    this.activeNginxPrompt = safePrompt;
     this.nginxResult = null;
     this.analysisError = null;
     this.analyzing = true;
@@ -525,7 +529,7 @@ export class AiStore {
 
     try {
       const res = await invoke<NginxRuleResponse>('ai_generate_nginx_rule', {
-        prompt,
+        prompt: safePrompt,
         settings: this.getSettingsPayload(),
       });
       this.nginxResult = res;
@@ -539,7 +543,8 @@ export class AiStore {
   }
 
   async generateFirewallRule(prompt: string) {
-    this.activeFirewallPrompt = prompt;
+    const safePrompt = redactSensitiveData(prompt);
+    this.activeFirewallPrompt = safePrompt;
     this.firewallResult = null;
     this.analysisError = null;
     this.analyzing = true;
@@ -547,7 +552,7 @@ export class AiStore {
 
     try {
       const res = await invoke<FirewallRuleResponse>('ai_generate_firewall_rule', {
-        prompt,
+        prompt: safePrompt,
         settings: this.getSettingsPayload(),
       });
       this.firewallResult = res;

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { 
-    X, Sun, Moon, Check, Sparkles, Bot, Cpu, Globe, Key, 
-    RefreshCw, Eye, EyeOff, Save, Sliders, Bell, HardDrive, 
-    AlertTriangle, FileText, CheckCircle2 
+  import {
+    X, Sun, Moon, Check, Sparkles, Bot, Cpu, Globe, Key,
+    RefreshCw, Eye, EyeOff, Save, Sliders, Bell,
+    AlertTriangle, CheckCircle2
   } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
   import Toggle from './ui/Toggle.svelte';
@@ -13,7 +13,6 @@
 
   let activeCategoryTab = $state<'appearance' | 'ai' | 'system'>('appearance');
   let showKey = $state(false);
-  let openingConfig = $state(false);
   let appVersion = $state(uiStore.version);
 
   onMount(async () => {
@@ -27,17 +26,6 @@
       console.error('Failed to fetch app version:', err);
     }
   });
-
-  async function handleOpenConfigFile() {
-    openingConfig = true;
-    try {
-      await invoke('open_system_config_file');
-    } catch (err) {
-      console.error('Failed to open config file:', err);
-    } finally {
-      openingConfig = false;
-    }
-  }
 
   /** OLED mode is dark-theme only — switching theme keeps it enabled. */
   function toggleOledMode() {
@@ -429,7 +417,9 @@
                   <div>
                     <div class="master-ai-title">Enable AI Intelligence Features</div>
                     <div class="master-ai-sub">
-                      {draftEnabled ? 'Intelligent diagnostics, log reasoning, and remediation commands active.' : 'AI features are completely disabled throughout the application.'}
+                      {draftEnabled
+                        ? 'Prompts go to the selected provider. Logs and DNF output are redacted before sending.'
+                        : 'AI is off by default. Nothing leaves this machine until you enable a provider.'}
                     </div>
                   </div>
                 </div>
@@ -654,22 +644,21 @@
 
                 <div class="pref-item">
                   <div class="pref-icon-info">
-                    <HardDrive size={18} class="pref-icon" />
+                    <Key size={18} class="pref-icon" />
                     <div>
-                      <div class="pref-title">Configuration Directory</div>
-                      <div class="pref-sub font-mono">~/.config/linux-control-panel/</div>
+                      <div class="pref-title">AI Engine</div>
+                      <div class="pref-sub">Provider, model, and API key are managed in the AI Engine tab</div>
                     </div>
                   </div>
                   <div class="pref-action">
                     <button
                       type="button"
                       class="btn btn-secondary btn-sm"
-                      onclick={handleOpenConfigFile}
-                      disabled={openingConfig}
-                      title="Open global configuration file in text editor"
+                      onclick={() => activeCategoryTab = 'ai'}
+                      title="Open AI Engine settings"
                     >
-                      <FileText size={13} class={openingConfig ? 'animate-spin-slow' : ''} />
-                      <span>{openingConfig ? 'Opening...' : 'Open Config'}</span>
+                      <Sparkles size={13} />
+                      <span>AI Settings</span>
                     </button>
                   </div>
                 </div>
@@ -1313,8 +1302,6 @@
   }.badge-success {
     background: rgba(34, 197, 94, 0.15);
     color: var(--color-success);
-  }.font-mono {
-    font-family: var(--font-mono, monospace);
   }
 @keyframes spin {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
 }</style>

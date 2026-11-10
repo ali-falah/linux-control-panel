@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiSettingsConfig {
-    pub enabled: bool,           // default: true
+    pub enabled: bool,           // default: false
     pub provider: String,        // "ollama" | "gemini" | "openai"
     pub ollama_url: String,      // default: "http://127.0.0.1:11434"
     pub ollama_model: String,    // default: "qwen2.5:1.5b"
@@ -18,7 +18,7 @@ pub struct AiSettingsConfig {
 impl Default for AiSettingsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             provider: "ollama".to_string(),
             ollama_url: "http://127.0.0.1:11434".to_string(),
             ollama_model: "llama3.2:1b".to_string(),
@@ -43,6 +43,12 @@ pub fn ai_load_settings() -> Result<AiSettingsConfig, String> {
     if !path.exists() {
         return Ok(AiSettingsConfig::default());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Files written by older versions were 0644; the API key lives here.
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let config: AiSettingsConfig = serde_json::from_str(&content).unwrap_or_default();
     Ok(config)
@@ -52,24 +58,32 @@ pub fn ai_load_settings() -> Result<AiSettingsConfig, String> {
 pub fn ai_save_settings(settings: AiSettingsConfig) -> Result<(), String> {
     let path = get_ai_settings_file_path();
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| format!("Failed to save AI settings to disk: {e}"))?;
-    Ok(())
+    write_private_file(&path, &json)
 }
 
-#[tauri::command]
-pub fn open_system_config_file() -> Result<String, String> {
-    let path = get_ai_settings_file_path();
-    if !path.exists() {
-        let default_config = AiSettingsConfig::default();
-        if let Ok(json) = serde_json::to_string_pretty(&default_config) {
-            let _ = fs::write(&path, json);
-        }
+/// AI settings contain an API key; never create them world-readable.
+fn write_private_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("Failed to open AI settings for writing: {e}"))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|e| format!("Failed to save AI settings to disk: {e}"))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure AI settings file: {e}"))?;
+        return Ok(());
     }
-    std::process::Command::new("xdg-open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to launch system text editor: {}", e))?;
-    Ok(path.to_string_lossy().to_string())
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents).map_err(|e| format!("Failed to save AI settings to disk: {e}"))
+    }
 }
 
 // ─── Data Types for AI Tasks ──────────────────────────────────────────────────
@@ -189,8 +203,8 @@ async fn dispatch_ai_request(
         };
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, settings.api_key.trim()
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            model
         );
 
         let full_prompt = format!("{}\n\nUser Question:\n{}", system_prompt, user_prompt);
@@ -205,6 +219,7 @@ async fn dispatch_ai_request(
 
         let res = client
             .post(&url)
+            .header("x-goog-api-key", settings.api_key.trim())
             .json(&payload)
             .send()
             .await
@@ -430,7 +445,7 @@ pub async fn ai_test_cloud_connection(
     }
 
     let test_settings = AiSettingsConfig {
-        enabled: true,
+        enabled: false,
         provider: provider.clone(),
         ollama_url: String::new(),
         ollama_model: String::new(),
@@ -644,4 +659,66 @@ Respond ONLY with a valid JSON object in the exact following structure without m
     let resp: TerminalCommandResponse = serde_json::from_str(&clean)
         .map_err(|e| format!("Failed to parse AI Terminal response: {e}\nRaw output: {clean}"))?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod ai_advisor_security_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lcp-ai-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("ai_settings.json")
+    }
+
+    #[test]
+    fn ai_is_disabled_by_default() {
+        assert!(!AiSettingsConfig::default().enabled);
+    }
+
+    #[test]
+    fn ai_settings_are_written_with_owner_only_permissions() {
+        let path = temp_file("perms");
+        write_private_file(&path, "{}").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn existing_world_readable_settings_are_tightened() {
+        let path = temp_file("tighten");
+        std::fs::write(&path, "{}").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        write_private_file(&path, "{}").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
