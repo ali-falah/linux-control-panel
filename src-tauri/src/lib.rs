@@ -11,8 +11,8 @@ use commands::{
         cron_list_timers, cron_toggle_timer,
     },
     admin::{
-        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_status,
-        helper_installed,
+        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_repair,
+        admin_policy_status, helper_installed,
     },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
@@ -213,6 +213,7 @@ pub fn run() {
             admin_mode_off,
             admin_mode_state,
             admin_policy_status,
+            admin_policy_repair,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,

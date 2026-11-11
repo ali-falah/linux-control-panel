@@ -18,6 +18,9 @@ use std::process::{Child, Output, Stdio};
 //  * no `pkexec` call is even started while admin mode is off — the status
 //    bar's toggle (backed by the real PolicyKit state) is the only way to
 //    turn it on, so a privileged step can never raise a prompt uninvited.
+//    The single exception is the helper's own bootstrap actions
+//    (`admin_keep`, `install_polkit_rule`): they are what makes turning it on
+//    possible, and neither can run anything but the panel's fixed rule.
 
 pub use crate::utils::root_policy::{
     ensure_arguments_for_program, ensure_no_shell_escape, ensure_program_allowed,
@@ -68,10 +71,20 @@ pub fn refresh_admin_state() -> AdminModeState {
     crate::commands::admin::read_admin_mode_state()
 }
 
-/// Whether this is the admin-mode prompt raiser itself — the one pkexec call
-/// that must be allowed while admin mode is off, because taking the
-/// authorisation is what turns it on. The helper's `admin_keep` action is
-/// inert: it opens nothing and only exits 0.
+/// Whether this is a bootstrap call that must be allowed while admin mode is
+/// off, because it is what makes turning admin mode on possible at all:
+///
+///  * `admin_keep` — inert; it opens nothing and only exits 0 after taking the
+///    kept authorisation.
+///  * `install_polkit_rule` — writes only the panel's own fixed rules.d text
+///    (the helper verifies it byte for byte). On a source checkout or an
+///    AppImage nothing else installs that rule, and without it PolicyKit keeps
+///    no authorisation at all — so refusing this call while OFF would leave
+///    admin mode permanently unreachable.
+///
+/// Both take no path, no command and no free-form data, so the strongest thing
+/// they can do is "the root owned helper may run as root" — exactly what the
+/// rule grants deliberately.
 fn raises_admin_authorisation(program: &str, args: &[String]) -> bool {
     // Two call shapes reach here: the resolved helper directly
     // (`lcp-admin admin_keep`) and the command wrapper
@@ -84,11 +97,16 @@ fn raises_admin_authorisation(program: &str, args: &[String]) -> bool {
     } else {
         (program, args)
     };
-    std::path::Path::new(target)
+    if !std::path::Path::new(target)
         .file_name()
         .is_some_and(|name| name == "lcp-admin")
-        && rest.len() == 1
-        && rest[0] == "admin_keep"
+    {
+        return false;
+    }
+    match rest {
+        [action] => action.as_str() == "admin_keep" || action.as_str() == "install_polkit_rule",
+        _ => false,
+    }
 }
 
 /// Refuse a privileged call while admin mode is off, before anything is
@@ -1332,12 +1350,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_inert_admin_keep_call_bypasses_the_gate() {
+    fn only_the_bootstrap_calls_bypass_the_gate() {
         let keep = vec![String::from("admin_keep")];
         assert!(raises_admin_authorisation("/usr/local/libexec/lcp-admin", &keep));
         assert!(raises_admin_authorisation(
             "pkexec",
             &[String::from("/usr/bin/lcp-admin"), String::from("admin_keep")]
+        ));
+        // The rule installer is the other bootstrap call: without it a source
+        // checkout can never take a kept authorisation in the first place.
+        assert!(raises_admin_authorisation(
+            "/usr/local/libexec/lcp-admin",
+            &[String::from("install_polkit_rule")]
+        ));
+        assert!(raises_admin_authorisation(
+            "pkexec",
+            &[
+                String::from("/usr/local/libexec/lcp-admin"),
+                String::from("install_polkit_rule")
+            ]
         ));
         // any other helper action, any extra argument and any other program
         // must still be gated
@@ -1347,8 +1378,19 @@ mod tests {
         ));
         assert!(!raises_admin_authorisation(
             "/usr/bin/lcp-admin",
+            &["install_polkit_rule".to_string(), "extra".to_string()]
+        ));
+        assert!(!raises_admin_authorisation(
+            "/usr/bin/lcp-admin",
             &["admin_keep".to_string(), "extra".to_string()]
         ));
         assert!(!raises_admin_authorisation("/usr/bin/systemctl", &keep));
+        assert!(!raises_admin_authorisation(
+            "/usr/bin/pkexec",
+            &[
+                String::from("/usr/bin/lcp-admin"),
+                String::from("install_polkit_rule")
+            ]
+        ));
     }
 }

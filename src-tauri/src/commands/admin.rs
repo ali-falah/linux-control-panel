@@ -254,6 +254,50 @@ pub async fn admin_policy_status() -> Result<(), String> {
     crate::utils::root_policy::verify_installed_polkit_state()
 }
 
+/// Install (or repair) the rules.d rule that turns the helper's authorisation
+/// into a *kept* one, then read it back.
+///
+/// A source checkout and an AppImage do not run the package scripts, so the
+/// policy file can be present while the rule is missing. The consequence is
+/// not cosmetic: `admin_mode_on` can never turn ON (PolicyKit keeps nothing
+/// without the rule), and every privileged action would prompt again. This
+/// command closes that dead end with the one authorisation the helper's
+/// `install_polkit_rule` action needs.
+///
+/// The rule text comes from the app's own constant and the helper refuses
+/// anything that is not byte-identical to it, so the strongest thing this can
+/// grant is still exactly "the root owned helper may run as root".
+#[tauri::command]
+pub async fn admin_policy_repair() -> Result<String, String> {
+    // The rule only grants a keep *for* the policy's action ids, so repairing
+    // it without the policy would be meaningless (and the helper refuses to
+    // run without the policy anyway).
+    crate::utils::root_policy::verify_installed_polkit_policy()?;
+
+    // Already installed byte for byte: never raise a needless prompt.
+    if crate::utils::root_policy::verify_installed_polkit_state().is_ok() {
+        return Ok("The administrator authorization rule is already installed.".to_string());
+    }
+
+    // The same named-action route every other helper call takes: no arguments,
+    // one PolicyKit prompt, the rule text on stdin. It reports a helper that
+    // predates the action, and the helper itself refuses any content that is
+    // not byte-identical to its own constant.
+    crate::commands::service_manager::run_service_named_action(
+        "install_polkit_rule",
+        &[],
+        crate::utils::root_policy::POLKIT_RULE_TEXT,
+    )
+    .await?;
+
+    // Never trust the exit code alone: the installed file has to verify.
+    crate::utils::root_policy::verify_installed_polkit_state().map_err(|error| {
+        format!("The authorization rule was written but does not verify: {error}")
+    })?;
+
+    Ok("Administrator authorization rule installed. Admin mode can be enabled now.".to_string())
+}
+
 /// Turn admin mode ON by taking the one authorisation the panel caches.
 ///
 /// The prompt is raised by the helper's dedicated `admin_keep` action: it does
@@ -269,6 +313,13 @@ pub async fn admin_mode_on() -> AdminModeState {
             "The installed PolicyKit policy is missing or unsafe: {error}. \
              Reinstall src-tauri/polkit/com.controlpanel.pkexec.policy before enabling admin mode."
         )));
+    }
+    // A missing or stale rules.d rule means PolicyKit would keep nothing: the
+    // prompt would be paid for and the toggle would still come back Off. Say
+    // so before spending the user's password — the status bar can then offer
+    // the one-click repair that writes the rule.
+    if let Err(error) = crate::utils::root_policy::verify_installed_polkit_state() {
+        return AdminModeState::off(Some(error));
     }
     let before = read_admin_mode_state();
     if before.on {

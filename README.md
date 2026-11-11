@@ -175,7 +175,19 @@ by the rules.d rule shipped by the RPM/DEB package at
 `/etc/polkit-1/rules.d/50-linux-control-panel.rules` — it matches the helper's
 two paths and nothing else. The helper's `install_polkit_rule` action can
 repair or reinstall that rule. AppImage builds do not install host system
-policy; install the policy and rule manually when using an AppImage.
+policy; install the policy and rule manually when using an AppImage:
+
+```bash
+sudo install -D -m 0644 -o root -g root \
+  src-tauri/polkit/50-linux-control-panel.rules \
+  /etc/polkit-1/rules.d/50-linux-control-panel.rules
+```
+
+When the rule is missing, the status bar's admin-mode toggle reports it and
+offers a **Repair** button: one PolicyKit prompt runs the helper's
+`install_polkit_rule` action, which writes only the fixed rule above, and the
+installed file is read back and verified. No password is spent on a toggle
+that PolicyKit would not keep.
 
 ---
 

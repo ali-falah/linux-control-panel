@@ -1,6 +1,6 @@
 <script lang="ts">
   import { CheckCircle2, XCircle, Loader, Terminal, Wifi, Network, Copy, ExternalLink, Search } from '@lucide/svelte';
-  import { statusStore, refreshAdminModeState, setAdminMode } from '../stores/status.svelte.ts';
+  import { statusStore, refreshAdminModeState, setAdminMode, repairAdminPolicy, isPolicyRuleError } from '../stores/status.svelte.ts';
   import { ShieldCheck } from '@lucide/svelte';
 
   // The countdown ticks once a second from PolicyKit's real expiry; the
@@ -40,6 +40,24 @@
   });
 
   const adminError = $derived(statusStore.adminActionError ?? statusStore.adminMode.error);
+
+  // Only the "the rule that keeps the authorisation is missing" error has a
+  // one-click fix; a dismissed prompt or a missing helper does not.
+  const needsPolicyRepair = $derived(isPolicyRuleError(adminError));
+
+  let repairing = $state(false);
+  async function repairPolicy() {
+    if (repairing) return;
+    repairing = true;
+    try {
+      const message = await repairAdminPolicy();
+      uiStore.addToast(message, 'success');
+    } catch (error) {
+      uiStore.addToast(`Repair failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      repairing = false;
+    }
+  }
 
   // Read the real PolicyKit state every five seconds while the window is
   // visible. This also notices an expiry and turns it into a calm note.
@@ -210,6 +228,17 @@
   <div class="status-right">
     {#if adminError}
       <span class="admin-error" title={adminError}>{adminError}</span>
+      {#if needsPolicyRepair}
+        <button
+          type="button"
+          class="admin-repair"
+          disabled={repairing}
+          onclick={repairPolicy}
+          title="Install the PolicyKit rule that lets the administrator helper keep an authorisation (one prompt)"
+        >
+          {repairing ? 'Repairing…' : 'Repair'}
+        </button>
+      {/if}
     {/if}
     {#if statusStore.adminNotice}
       <span class="admin-note" role="status">{statusStore.adminNotice}</span>
@@ -322,6 +351,26 @@
     white-space: nowrap;
     font-size: 10.5px;
     color: var(--color-error);
+  }
+  .admin-repair {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--color-accent);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .admin-repair:hover:not(:disabled) {
+    border-color: var(--color-accent);
+    background: var(--color-bg-hover);
+  }
+  .admin-repair:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .status-bar {
     display: flex;
