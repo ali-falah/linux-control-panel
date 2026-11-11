@@ -558,6 +558,34 @@ pub fn ensure_safe_operand(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a path that is about to be handed to a desktop handler
+/// (`xdg-open`, a file manager) by `open_folder` and `reveal_in_file_manager`.
+///
+/// Both used to forward the webview's string verbatim, which let any URI
+/// scheme (`smb://…`, `file://…`), a relative path or a `..` escape reach the
+/// handler. The path must be absolute, contain no relative parts and exist.
+pub fn ensure_openable_path(path: &str) -> Result<(), String> {
+    use std::path::{Component, Path};
+
+    if path.trim().is_empty() {
+        return Err("No path was given.".to_string());
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("The path must be absolute, got: {path}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!("The path must not contain relative parts: {path}"));
+    }
+    if !candidate.exists() {
+        return Err(format!("The path does not exist: {path}"));
+    }
+    Ok(())
+}
+
 /// Validate a repository configuration file path.
 ///
 /// Only the directories the package manager itself uses are allowed, the file
@@ -1929,9 +1957,10 @@ pub fn security_ssh_param_valid(param: &str, value: &str) -> Result<(), String> 
         "PasswordAuthentication" => &["no", "yes"],
         "MaxAuthTries" => &["4", "6"],
         "LoginGraceTime" => &["60", "120"],
+        "X11Forwarding" => &["no", "yes"],
         _ => {
             return Err(format!(
-                "The SSH parameter must be PermitRootLogin, PasswordAuthentication, MaxAuthTries or LoginGraceTime, got: {param}"
+                "The SSH parameter must be PermitRootLogin, PasswordAuthentication, MaxAuthTries, LoginGraceTime or X11Forwarding, got: {param}"
             ))
         }
     };
@@ -1954,6 +1983,11 @@ pub fn security_kernel_param_valid(key: &str, value: &str) -> Result<(), String>
         "kernel.dmesg_restrict",
         "net.ipv4.conf.all.accept_redirects",
         "net.ipv4.conf.all.log_martians",
+        "fs.suid_dumpable",
+        "net.ipv4.conf.all.accept_source_route",
+        "net.ipv4.icmp_ignore_bogus_error_responses",
+        "net.ipv4.conf.all.rp_filter",
+        "kernel.sysrq",
     ];
     if !KEYS.contains(&key) {
         return Err(format!(
@@ -8588,9 +8622,9 @@ mod user_management_validator_tests {
 #[cfg(test)]
 mod security_action_validator_tests {
     use super::{
-        ctrl_alt_del_verb_valid, ensure_arguments_for_program, security_apply_op_valid,
-        security_kernel_param_valid, security_service_unit_valid, security_service_verb_valid,
-        security_ssh_param_valid,
+        ctrl_alt_del_verb_valid, ensure_arguments_for_program, ensure_openable_path,
+        security_apply_op_valid, security_kernel_param_valid, security_service_unit_valid,
+        security_service_verb_valid, security_ssh_param_valid,
     };
 
     fn check_lcp(args: &[&str]) -> Result<(), String> {
@@ -8631,6 +8665,8 @@ mod security_action_validator_tests {
             ("MaxAuthTries", "6"),
             ("LoginGraceTime", "60"),
             ("LoginGraceTime", "120"),
+            ("X11Forwarding", "no"),
+            ("X11Forwarding", "yes"),
         ] {
             security_ssh_param_valid(param, value)
                 .unwrap_or_else(|e| panic!("{param}={value}: {e}"));
@@ -8641,6 +8677,7 @@ mod security_action_validator_tests {
             ("MaxAuthTries", "9"),
             ("Banner", "none"),
             ("LoginGraceTime", "30"),
+            ("X11Forwarding", "maybe"),
         ] {
             assert!(
                 security_ssh_param_valid(param, value).is_err(),
@@ -8656,12 +8693,19 @@ mod security_action_validator_tests {
             "kernel.dmesg_restrict",
             "net.ipv4.conf.all.accept_redirects",
             "net.ipv4.conf.all.log_martians",
+            "fs.suid_dumpable",
+            "net.ipv4.conf.all.accept_source_route",
+            "net.ipv4.icmp_ignore_bogus_error_responses",
+            "net.ipv4.conf.all.rp_filter",
+            "kernel.sysrq",
         ] {
             security_kernel_param_valid(key, "1").unwrap_or_else(|e| panic!("{key}: {e}"));
         }
         for (key, value) in [
             ("kernel.panic", "1"),
             ("net.ipv4.ip_forward", "yes"),
+            ("fs.suid_dumpable", "yes"),
+            ("vm.swappiness", "60"),
             ("kernel.dmesg_restrict", "1
 "),
             ("kernel.dmesg_restrict", ""),
@@ -8682,6 +8726,26 @@ mod security_action_validator_tests {
         }
         for op in ["", "reboot", "password_policy_extra"] {
             assert!(security_apply_op_valid(op).is_err(), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn only_existing_absolute_paths_reach_a_desktop_handler() {
+        let existing = std::env::temp_dir();
+        let existing = existing.to_string_lossy();
+        ensure_openable_path(&existing).unwrap_or_else(|e| panic!("{existing}: {e}"));
+
+        for path in [
+            "",
+            "   ",
+            "smb://fileserver/share",
+            "file:///etc/passwd",
+            "relative/dir",
+            "../etc",
+            "/tmp/../etc/passwd",
+            "/definitely/not/a/real/path-12345",
+        ] {
+            assert!(ensure_openable_path(path).is_err(), "{path:?} must be refused");
         }
     }
 

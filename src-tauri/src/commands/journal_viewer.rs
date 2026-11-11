@@ -426,17 +426,80 @@ pub fn stop_journal_live_stream() {
     LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
 }
 
+/// The export filename comes from the webview, so it may only ever be a single
+/// path component: `Path::join` honours `../` and replaces the base outright
+/// for an absolute name, either of which would write anywhere the user can.
+fn ensure_export_filename(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("The export file name is empty.".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("Refused to write an export to '{name}'."));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!("The export file name must not contain a path: {name}"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(format!("The export file name contains unsupported characters: {name}"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn export_journal_logs_to_file(filename: String, content: String) -> Result<String, String> {
+    let name = filename.trim();
+    ensure_export_filename(name)?;
+
     let download_dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
-    let target_path = download_dir.join(&filename);
+    let target_path = download_dir.join(name);
     tokio::fs::write(&target_path, content.as_bytes())
         .await
         .map_err(|e| format!("Failed to write export file: {e}"))?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_export_filename;
+
+    #[test]
+    fn export_filenames_are_single_components() {
+        for name in [
+            "journal-logs-2026-11-11T10-22-33-123Z.csv",
+            "auth-full-2026-11-11.csv",
+            "audit.txt",
+            "a_b-c1.csv",
+        ] {
+            ensure_export_filename(name).expect(name);
+        }
+    }
+
+    #[test]
+    fn export_filenames_cannot_escape_the_download_directory() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../.bashrc",
+            "../../etc/cron.d/pwn",
+            "/etc/cron.d/pwn",
+            "sub/dir.csv",
+            "name with space.csv",
+            "name\n.csv",
+            "na\u{0000}me.csv",
+        ] {
+            assert!(
+                ensure_export_filename(name).is_err(),
+                "{name:?} must be refused"
+            );
+        }
+    }
 }
 

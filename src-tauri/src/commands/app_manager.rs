@@ -794,12 +794,8 @@ pub async fn launch_desktop_app(exec: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
-    let p = std::path::Path::new(&path);
-    let abs_path = if p.is_relative() {
-        std::env::current_dir().unwrap_or_default().join(p)
-    } else {
-        p.to_path_buf()
-    };
+    crate::utils::root_policy::ensure_openable_path(&path)?;
+    let abs_path = std::path::PathBuf::from(&path);
 
     if abs_path.is_file() {
         let uri = format!("file://{}", abs_path.to_string_lossy());

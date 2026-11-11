@@ -22,6 +22,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import { highlightSegments } from '../utils/highlight.ts';
+  import { csvCell } from '../utils/csv.ts';
 
   // raw state: a large journal page is replaced wholesale, never mutated in
   // place — deep reactivity would proxy every one of the 20k entries
@@ -687,10 +688,6 @@
     document.addEventListener('click', handleOutsideClick);
     return () => document.removeEventListener('click', handleOutsideClick);
   });
-
-  function csvCell(value: unknown): string {
-    return `"${String(value ?? '').replace(/"/g, '""')}"`;
-  }
 
   function csvRowsForTab(tab: string, items: any[]): unknown[][] {
     if (tab === 'journal') {
