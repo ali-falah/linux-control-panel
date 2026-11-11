@@ -3,7 +3,7 @@
   import type { HTMLButtonAttributes } from 'svelte/elements';
 
   interface Props extends HTMLButtonAttributes {
-    variant?: 'primary' | 'danger' | 'ghost' | 'outline' | 'default' | 'secondary' | 'accent';
+    variant?: 'primary' | 'danger' | 'ghost' | 'outline' | 'default' | 'secondary';
     size?: 'xs' | 'sm' | 'md' | 'lg';
     children?: Snippet;
     disabled?: boolean;

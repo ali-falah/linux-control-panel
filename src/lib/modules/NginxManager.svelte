@@ -1727,7 +1727,7 @@
     {#if activeTab === 'logs'}
       <!-- Range Selector (Journal Logs Style) placed in Page Header -->
       <div class="custom-range-container">
-        <Select bind:value={timeRange} onchange={handleRangeChange} style="height: 30px; width: 140px;">
+        <Select bind:value={timeRange} onchange={handleRangeChange} size="sm" style="width: 140px;">
           <option value="all">All Logs</option>
           <option value="1">Last 24 Hours</option>
           <option value="3">Last 3 Days</option>
@@ -1860,9 +1860,9 @@
 
       <div class="tab-actions">
         {#if activeTab === 'sites'}
-          <Button variant="outline" class="btn-sm" onclick={loadSites} id="nginx-refresh-sites">
+          <button class="header-refresh-btn" onclick={loadSites} id="nginx-refresh-sites">
             <RefreshCw size={13} /> Refresh
-          </Button>
+          </button>
           <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
             <Plus size={13} /> New Site
           </Button>
@@ -1870,14 +1870,14 @@
             <Globe size={13} /> New Proxy
           </Button>
         {:else if activeTab === 'editor'}
-          <Button variant="outline" class="btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
+          <button class="header-refresh-btn" onclick={loadConfigs} id="nginx-refresh-configs">
             <RefreshCw size={13} /> Refresh
-          </Button>
+          </button>
           <Button variant="outline" class="btn-sm" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
             <ArchiveRestore size={13} /> Backups ({backups.length})
           </Button>
         {:else if activeTab === 'www'}
-          <Button variant="outline" class="btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={13} /> Refresh</Button>
+          <button class="header-refresh-btn" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={13} /> Refresh</button>
           <Button variant="primary" class="btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
             <FolderPlus size={13} /> New Dir
           </Button>
@@ -1898,23 +1898,23 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
+            <button class="header-refresh-btn" onclick={loadLog} id="nginx-log-refresh">
               <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
-            </Button>
+            </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
               <Clock size={13} /> {logAutoRefresh ? 'Live: On' : 'Live: Off'}
             </Button>
-            <Button variant="outline" class="btn-sm" onclick={exportLog} id="nginx-log-export">
+            <button class="export-action-btn" onclick={exportLog} id="nginx-log-export">
               <Download size={13} /> Export
-            </Button>
+            </button>
             <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
               <Trash2 size={13} /> Clear
             </Button>
           </div>
         {:else if activeTab === 'ssl'}
-          <Button variant="outline" class="btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
+          <button class="header-refresh-btn" onclick={loadSslCerts} id="nginx-refresh-ssl">
             <RefreshCw size={13} /> Refresh
-          </Button>
+          </button>
         {/if}
       </div>
     </div>
@@ -3229,7 +3229,7 @@
             <div class="analytics-header-right">
               <div style="display:flex; align-items:center; gap:8px;">
                 <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Log Source:</span>
-                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} style="height:28px; width:260px;">
+                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} size="sm" style="width:260px;">
                   {#if analyticsLogFile && !logFiles.includes(analyticsLogFile)}
                     <option value={analyticsLogFile}>{analyticsLogFile.split('/').pop()} • Custom</option>
                   {/if}
@@ -3251,10 +3251,10 @@
                 <span>{analyticsLogFile.includes('error') ? 'Error Event Diagnostics' : 'Sample: 15,000 requests'}</span>
               </span>
 
-              <Button variant="outline" class="btn-sm" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
+              <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
                 <RefreshCw size={12} class={analyticsLoading ? 'animate-spin' : ''} />
                 <span>Refresh</span>
-              </Button>
+              </button>
             </div>
           </div>
 

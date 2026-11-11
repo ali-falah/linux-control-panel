@@ -356,7 +356,7 @@
 
 <div class="module-page">
   <PageHeader title="Device Manager" icon={HardDrive} description="Hardware inventory, disk diagnostics & motherboard topology">
-    <TabGroup
+    <TabGroup size="sm"
       tabs={[
         { id: 'list', label: 'Device Inventory' },
         { id: 'smart', label: 'S.M.A.R.T Diagnostics' },
@@ -379,10 +379,10 @@
         <Button variant="ghost" size="sm" onclick={() => toggleAll(true)}>Expand All</Button>
         <Button variant="ghost" size="sm" onclick={() => toggleAll(false)}>Collapse All</Button>
       </div>
-      <Button variant="outline" size="sm" onclick={loadData} disabled={loading}>
+      <button class="header-refresh-btn" onclick={loadData} disabled={loading}>
         <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} />
         Rescan
-      </Button>
+      </button>
     </div>
 
     <div class="module-content-scroll inventory-list">
@@ -525,16 +525,16 @@
       <div class="toolbar-left">
         <span class="toolbar-label">Drive</span>
         <div style="width: 220px;">
-          <Select bind:value={selectedDrive} onchange={(e: any) => { triggerMessage = ''; loadSmartData(e.target.value); }} disabled={loadingSmartDrives}>
+          <Select bind:value={selectedDrive} size="sm" onchange={(e: any) => { triggerMessage = ''; loadSmartData(e.target.value); }} disabled={loadingSmartDrives}>
             {#each smartDrives as drv}
               <option value={drv.name}>{drv.name} [{drv.protocol}]</option>
             {/each}
           </Select>
         </div>
-        <Button variant="ghost" size="sm" onclick={loadSmartDrives} disabled={loadingSmartDrives}>
+        <button class="header-refresh-btn" onclick={loadSmartDrives} disabled={loadingSmartDrives}>
           <RefreshCw size={13} class={loadingSmartDrives ? 'animate-spin-slow' : ''} />
           Rescan
-        </Button>
+        </button>
       </div>
 
       {#if selectedDrive}

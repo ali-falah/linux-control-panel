@@ -117,10 +117,10 @@
 
 <div class="module-page">
   <PageHeader title="Environment Variables" subtitle="Manage system-wide environment variables (/etc/environment)" icon={FileText}>
-    <Button variant="ghost" onclick={requestReload} disabled={loading || saving} title="Reload /etc/environment from disk">
+    <button class="header-refresh-btn" onclick={requestReload} disabled={loading || saving} title="Reload /etc/environment from disk">
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </Button>
-    <Button
+    </button>
+    <Button size="sm"
       variant="primary"
       onclick={confirmSave}
       disabled={loading || saving || !hasChanges}

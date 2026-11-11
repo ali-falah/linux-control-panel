@@ -1389,7 +1389,8 @@
                       <Select
                         bind:value={logTailLines}
                         onchange={() => loadLogs()}
-                        style="width: 95px; height: 28px;"
+                        size="sm"
+                        style="width: 95px;"
                       >
                         <option value="100">100</option>
                         <option value="200">200</option>
@@ -2561,7 +2562,7 @@
 <style>/* Root Module Page */ .module-page {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--page-content-gap);
     padding: 20px;
     position: absolute;
     inset: 0;

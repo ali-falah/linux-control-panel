@@ -256,7 +256,7 @@
 
 <div class="module-page">
   <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs, and systemd timers" icon={Clock}>
-    <TabGroup
+    <TabGroup size="sm"
       tabs={[
         { id: 'cron', label: 'Cron Jobs', count: jobs.length },
         { id: 'timers', label: 'Systemd Timers', count: timers.length }
@@ -264,11 +264,11 @@
       bind:activeTab={view}
       onchange={() => (filterQuery = '')}
     />
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
+    <button class="header-refresh-btn" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </Button>
+    </button>
     {#if view === 'cron'}
-      <Button variant="primary" onclick={() => showAdd = true}>
+      <Button size="sm" variant="primary" onclick={() => showAdd = true}>
         <Plus size={14} /> Add Job
       </Button>
     {/if}

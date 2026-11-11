@@ -2574,10 +2574,11 @@ fn process_owner_is_invoking_user(text: &str, invoking_uid: u32) -> Result<(), S
     Ok(())
 }
 
-fn process_owner_uid(pid: u32) -> Result<u32, String> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .map_err(|e| format!("lcp-admin: the process {pid} status could not be read ({e})"))?;
-    process_owner_uid_from_status(&status)
+/// Read a process status document from `/proc`, for the ownership check the
+/// renice action performs before touching another process.
+fn process_status_text(pid: u32) -> Result<String, String> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|e| format!("lcp-admin: the process {pid} status could not be read ({e})"))
 }
 
 /// `process_renice <pid> <priority>`: the privileged negative-niceness action.
@@ -2595,12 +2596,8 @@ fn process_renice_action(pid: &str, priority: &str) -> Result<(), String> {
     let invoking_uid = invoking_uid().ok_or_else(|| {
         "lcp-admin: the invoking user could not be determined; refusing to renice".to_string()
     })?;
-    let owner = process_owner_uid(pid)?;
-    if owner != invoking_uid {
-        return Err(format!(
-            "lcp-admin: process {pid} belongs to another user; refusing to renice"
-        ));
-    }
+    let status = process_status_text(pid)?;
+    process_owner_is_invoking_user(&status, invoking_uid)?;
     let priority_text = priority.to_string();
     let pid_text = pid.to_string();
     let renice = resolve_trusted_program("renice")?;
@@ -6341,7 +6338,9 @@ mod firewall_ssh_guard_tests {
 
 #[cfg(test)]
 mod process_ownership_tests {
-    use super::{process_owner_is_invoking_user, process_owner_uid, process_owner_uid_from_status};
+    use super::{
+        process_owner_is_invoking_user, process_owner_uid_from_status, process_status_text,
+    };
 
     const OWN: &str = "Name:\ttest\nUid:\t1000\t1000\t1000\t1000\n";
     const OTHER: &str = "Name:\tother\nUid:\t0\t0\t0\t0\n";
@@ -6365,7 +6364,7 @@ mod process_ownership_tests {
         assert!(process_owner_uid_from_status("Uid:\tnot-a-number\t0\t0\t0\n").is_err());
         assert!(process_owner_uid_from_status("Uid:\n").is_err());
         assert!(
-            process_owner_uid(u32::MAX).is_err(),
+            process_status_text(u32::MAX).is_err(),
             "a missing process status must fail closed"
         );
     }

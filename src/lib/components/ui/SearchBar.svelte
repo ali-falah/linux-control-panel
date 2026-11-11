@@ -104,7 +104,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 32px;
+    height: 28px;
     min-width: 0;
     box-sizing: border-box;
   }
@@ -113,7 +113,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 32px;
+    height: 28px;
     width: 100%;
     flex: 1;
     min-width: 0;

@@ -559,9 +559,9 @@
       </Button>
     {/if}
     {#if activeTab === 'variables'}
-      <Button variant="outline" size="sm" onclick={loadVarGroups} disabled={varsLoading}>
+      <button class="header-refresh-btn" onclick={loadVarGroups} disabled={varsLoading}>
         <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      </button>
       <Button variant="primary" size="sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
         <Plus size={13} /> Add Variable
       </Button>
@@ -657,21 +657,21 @@
           <Eye size={14} /> Live values
         </Button>
       {:else if activeTab === 'path'}
-        <Button variant="outline" onclick={loadPathEntries} id="shell-reload-path">
+        <button class="header-refresh-btn" onclick={loadPathEntries} id="shell-reload-path">
           <RefreshCw size={14} /> Refresh
-        </Button>
+        </button>
         <Button variant="primary" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
           <Plus size={14} /> Add Entry
         </Button>
       {:else if activeTab === 'files'}
-        <Button variant="outline" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={14} /> Refresh</Button>
+        <button class="header-refresh-btn" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={14} /> Refresh</button>
         <Button variant="primary" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
           <Plus size={14} /> New File
         </Button>
       {:else if activeTab === 'preview'}
         <div style="display:flex; align-items:center; gap:6px;">
           <span class="text-muted text-xs">Source:</span>
-          <Select bind:value={selectedSourceFile} style="padding:4px 24px 4px 8px; font-size:13px; height:36px; width: 140px;">
+          <Select bind:value={selectedSourceFile} size="sm" style="width: 140px;">
             <option value="">Select file...</option>
             {#each profileFiles.filter(f => !f.is_system) as f}
               <option value={f.path}>{f.display_name}</option>

@@ -773,21 +773,119 @@ pub async fn register_appimage(
     Ok(())
 }
 
+/// Directories the panel itself scans for `.desktop` entries. A launch request
+/// may only name a file inside one of them, so a crafted path can not make the
+/// panel execute a downloaded entry from `~/Downloads`.
+fn desktop_entry_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/share/applications"));
+    }
+    dirs
+}
+
+/// Read the main `Exec=` line out of a `.desktop` file.
+fn read_desktop_exec(path: &std::path::Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Could not read the desktop entry: {e}"))?;
+    text.lines()
+        .map(str::trim_start)
+        .find_map(|line| line.strip_prefix("Exec="))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "the desktop entry has no Exec= line".to_string())
+}
+
+/// Split an `Exec=` line into argv the way the desktop entry spec defines it:
+/// double quotes group, a backslash escapes the next character, and `%` field
+/// codes are not arguments at all (`%%` is a literal percent).
+///
+/// There is deliberately no shell here: `;`, `|`, backticks and `$(…)` are
+/// ordinary characters, which is the whole point of tokenising instead of
+/// handing the line to `sh -c`.
+fn tokenize_exec(exec: &str) -> Result<Vec<String>, String> {
+    let mut argv: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut in_quotes = false;
+    let mut chars = exec.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                started = true;
+            }
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                    started = true;
+                }
+            }
+            _ if c.is_whitespace() && !in_quotes => {
+                if started {
+                    argv.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            '%' => match chars.next() {
+                Some('%') => {
+                    current.push('%');
+                    started = true;
+                }
+                // %f %F %u %U %i %c %k … are substituted by the caller, never argv.
+                Some(_) | None => {}
+            },
+            _ => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+
+    if in_quotes {
+        return Err("the Exec line has an unterminated quote".to_string());
+    }
+    if started {
+        argv.push(current);
+    }
+    if argv.is_empty() {
+        return Err("the Exec line is empty".to_string());
+    }
+    Ok(argv)
+}
+
+/// Launch an installed application.
+///
+/// The webview names the *file*, never the command: for a `.desktop` entry the
+/// `Exec=` line is read from disk here, and for a local binary the file itself
+/// is the program. Either way the result is spawned as argv with no shell, so
+/// a compromised renderer can only start something that is really installed.
 #[tauri::command]
-pub async fn launch_desktop_app(exec: String) -> Result<(), String> {
-    let clean_exec = exec
-        .split_whitespace()
-        .filter(|s| !s.starts_with('%'))
-        .collect::<Vec<&str>>()
-        .join(" ");
+pub async fn launch_desktop_app(file_path: String) -> Result<(), String> {
+    crate::utils::root_policy::ensure_openable_path(&file_path)?;
+    let path = std::path::Path::new(&file_path);
 
-    let cmd = if clean_exec.trim().is_empty() { exec } else { clean_exec };
+    let argv = if path.extension().is_some_and(|ext| ext == "desktop") {
+        if !desktop_entry_dirs().iter().any(|dir| path.starts_with(dir)) {
+            return Err(format!(
+                "Refused to launch a desktop entry outside the application directories: {file_path}"
+            ));
+        }
+        tokenize_exec(&read_desktop_exec(path)?)?
+    } else {
+        // AppImage and other local binaries: the file itself is the program.
+        vec![file_path.clone()]
+    };
 
-    tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{} &", cmd))
+    let program = argv[0].clone();
+    tokio::process::Command::new(&program)
+        .args(&argv[1..])
         .spawn()
-        .map_err(|e| format!("Failed to spawn process: {e}"))?;
+        .map_err(|e| format!("Failed to launch {program}: {e}"))?;
 
     Ok(())
 }
@@ -843,5 +941,56 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::tokenize_exec;
+
+    #[test]
+    fn exec_lines_are_tokenised_instead_of_interpreted() {
+        assert_eq!(tokenize_exec("firefox").unwrap(), vec!["firefox"]);
+        assert_eq!(
+            tokenize_exec("env FOO=1 \"my app\" --flag").unwrap(),
+            vec!["env", "FOO=1", "my app", "--flag"]
+        );
+        assert_eq!(
+            tokenize_exec(r#"app --name=\"x\""#).unwrap(),
+            vec!["app", "--name=\"x\""]
+        );
+
+        // Field codes are substituted by the caller; they are never argv.
+        assert_eq!(tokenize_exec("firefox %u").unwrap(), vec!["firefox"]);
+        assert_eq!(
+            tokenize_exec("opener --file=%f").unwrap(),
+            vec!["opener", "--file="]
+        );
+        assert_eq!(tokenize_exec("say 100%%").unwrap(), vec!["say", "100%"]);
+
+        // Shell syntax stays ordinary characters — this is the whole point of
+        // not handing the line to `sh -c` any more.
+        assert_eq!(
+            tokenize_exec("app; rm -rf ~").unwrap(),
+            vec!["app;", "rm", "-rf", "~"]
+        );
+        assert_eq!(
+            tokenize_exec("a `id` $(whoami)").unwrap(),
+            vec!["a", "`id`", "$(whoami)"]
+        );
+        assert_eq!(
+            tokenize_exec("app && curl http://evil").unwrap(),
+            vec!["app", "&&", "curl", "http://evil"]
+        );
+    }
+
+    #[test]
+    fn broken_exec_lines_are_refused() {
+        assert!(tokenize_exec("").is_err(), "empty must be refused");
+        assert!(tokenize_exec("   ").is_err(), "blank must be refused");
+        assert!(
+            tokenize_exec("app \"unterminated").is_err(),
+            "an unterminated quote must be refused"
+        );
+    }
 }
 

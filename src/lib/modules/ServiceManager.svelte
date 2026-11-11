@@ -917,7 +917,7 @@
 
   {#if mainTab === 'services'}
     <!-- Filter & search row: Search on Left, Tabs & Action on Right -->
-    <div class="header-row">
+    <div class="controls-row">
       <button
         class="scope-toggle-btn"
         class:active={userScope}
@@ -979,7 +979,7 @@
       </div>
     </div>
   {:else if mainTab === 'autostart'}
-    <div class="header-row">
+    <div class="controls-row">
       <SearchBar 
         bind:value={autostartFilter} 
         count={filteredAutostart.length} 
@@ -1000,7 +1000,7 @@
       </Button>
     </div>
   {:else if mainTab === 'boot_analyzer'}
-    <div class="header-row">
+    <div class="controls-row">
       <div style="display:flex; align-items:center; gap:8px;">
         <!-- View switch -->
         <div class="filter-pills">
@@ -1643,13 +1643,7 @@
   onautostartsaved={loadAutostart}
 />
 
-<style>/* ── Header row (tabs + stats + search) ─────────────────────────────── */ .header-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-  }.header-spacer {
+<style>/* ── Right-hand push for the shared controls row ──────────────────────── */ .header-spacer {
     flex: 1;
   }/* ── Action icon hover colors ───────────────────────────────────────── */ .action-btn.action-start:hover:not(:disabled) {
     background: var(--color-success-muted);
@@ -1981,45 +1975,8 @@
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 10px;
     margin-bottom: 2px;
-  }.header-refresh-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    height: 28px;
-    border-radius: var(--radius-md, 6px);
-    font-size: 11px;
-    font-family: var(--font-sans);
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }.header-refresh-btn:hover:not(:disabled) {
-    background: var(--color-bg-hover);
-    color: var(--color-text-primary);
-    border-color: var(--color-border-hover);
-  }.header-refresh-btn:disabled, .header-refresh-btn.refreshing {
-    cursor: not-allowed !important;
-    opacity: 0.8 !important;
-    background: var(--color-accent-muted) !important;
-    border-color: var(--color-accent-glow) !important;
-    color: var(--color-accent) !important;
-    box-shadow: 0 0 16px var(--color-accent-glow) !important;
-    animation: cyber-pulse-glow 1.1s ease-in-out infinite alternate !important;
-  }
-@keyframes cyber-pulse-glow {0% {
-      box-shadow: 0 0 4px var(--color-accent-glow);
-      border-color: var(--color-accent-glow);
-      transform: scale(0.98);
-    }100% {
-      box-shadow: 0 0 18px var(--color-accent-glow);
-      border-color: var(--color-accent);
-      transform: scale(1);
-    }
-}.scope-toggle-btn:focus-visible, .header-tab-btn:focus-visible,
-  .header-refresh-btn:focus-visible, .trigger-btn:focus-visible {
+  }.scope-toggle-btn:focus-visible, .header-tab-btn:focus-visible,
+  .trigger-btn:focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 1px;
   }
@@ -2028,12 +1985,7 @@
       flex-wrap: wrap;
       justify-content: flex-end;
     }
-  }.spin-refresh {
-    animation: spin-cw 0.75s linear infinite !important;
-    color: var(--color-accent) !important;
-  }
-@keyframes spin-cw {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
-}  .text-secondary { color: var(--color-text-secondary); }
+  }  .text-secondary { color: var(--color-text-secondary); }
   .empty-state {
     display: flex;
     flex-direction: column;

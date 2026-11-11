@@ -195,7 +195,7 @@
     closeContextMenu();
     try {
       uiStore.addToast(`Launching ${app.name}...`, 'info');
-      await invoke('launch_desktop_app', { exec: app.exec });
+      await invoke('launch_desktop_app', { filePath: app.file_path });
     } catch (err: any) {
       uiStore.addToast(`Failed to launch: ${err?.message || err}`, 'error');
     }
@@ -589,9 +589,9 @@
 
 <div class="module-page" class:panel-open={selectedAppForDetails}>
   <PageHeader title="App Manager" subtitle="Manage installed graphical applications" icon={LayoutGrid}>
-    <Button variant="ghost" onclick={loadApps} disabled={loading || isUninstalling}>
+    <button class="header-refresh-btn" onclick={loadApps} disabled={loading || isUninstalling}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-    </Button>
+    </button>
   </PageHeader>
 
   {#if duplicates.length > 0 && sourceFilter !== 'Duplicates'}
@@ -632,7 +632,7 @@
     <div style="display:flex;align-items:center;gap:16px;">
       <div style="display:flex; align-items:center; gap:8px;">
         <span style="font-size: 12px; color: var(--color-text-muted);width:-webkit-fill-available;">Sort by:</span>
-        <Select bind:value={sortBy} disabled={isUninstalling}>
+        <Select bind:value={sortBy} size="sm" disabled={isUninstalling}>
           <option value="name">Name</option>
           <option value="size">Size</option>
           <option value="date">Install Date</option>

@@ -1431,16 +1431,14 @@
             <Play size={13} />
           {/if}
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
+        <button class="header-refresh-btn"
           onclick={() => fetchData()}
           disabled={refreshing}
           title="Refresh telemetry"
           aria-label="Refresh telemetry"
         >
           <RefreshCw size={13} class={refreshing ? 'animate-spin-slow' : ''} />
-        </Button>
+        </button>
       </div>
     </div>
   </div>

@@ -17,6 +17,8 @@
   import DatePicker from '../components/ui/DatePicker.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Skeleton from '../components/Skeleton.svelte';
+  import GuideBanner from '../components/ui/GuideBanner.svelte';
+  import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import { statusStore } from '../stores/status.svelte.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -675,19 +677,26 @@
   }
 
   let showExportMenu = $state(false);
-  let exportMenuContainer = $state<HTMLDivElement | null>(null);
+  let exportTriggerRef = $state<HTMLButtonElement | null>(null);
+  let exportMenuPos = $state({ x: 0, y: 0 });
   let lastExportedFile = $state<{ name: string; path: string } | null>(null);
 
-  // Close export dropdown when clicking outside
-  $effect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (!showExportMenu) return;
-      if (exportMenuContainer && exportMenuContainer.contains(e.target as Node)) return;
-      showExportMenu = false;
+  function toggleExportMenu() {
+    if (exportTriggerRef) {
+      const rect = exportTriggerRef.getBoundingClientRect();
+      exportMenuPos = { x: rect.left, y: rect.bottom + 6 };
     }
-    document.addEventListener('click', handleOutsideClick);
-    return () => document.removeEventListener('click', handleOutsideClick);
-  });
+    showExportMenu = !showExportMenu;
+  }
+
+  const exportMenuItems: ContextMenuItem[] = [
+    { label: 'Export as Text (.txt)', icon: FileText, action: () => handleExportLogs('txt', false) },
+    { label: 'Export as JSON (.json)', icon: Code, action: () => handleExportLogs('json', false) },
+    { label: 'Export as CSV (.csv, loaded rows)', icon: FileText, action: () => handleExportLogs('csv', false) },
+    { label: 'Export full range (CSV)', icon: FolderOpen, action: handleExportAll },
+    { label: '', divider: true },
+    { label: 'Export Text & Open Folder', icon: FolderOpen, action: () => handleExportLogs('txt', true) },
+  ];
 
   function csvRowsForTab(tab: string, items: any[]): unknown[][] {
     if (tab === 'journal') {
@@ -989,10 +998,19 @@
   let logContainerHeight = $state(700);
   const LOG_OVERSCAN = 35;
 
-  let logRowHeight = $derived(
-    uiStore.tableDensity === 'compact' ? 19 : (uiStore.tableDensity === 'spacious' ? 39 : 28)
-  );
+  let logRowHeight = $state(28);
   let journalFilteredCount = $derived(filteredLogs.length);
+
+  // The density rules in app.css decide the real row height (padding, font,
+  // line-height and the 1px row border), so measure one instead of repeating
+  // the arithmetic here — a density change can no longer desync the padding.
+  $effect(() => {
+    uiStore.tableDensity; // re-measure when the density changes
+    journalFilteredCount; // …and once the table has rows to measure
+    const row = logContainer?.querySelector<HTMLElement>('.log-table tbody tr');
+    const height = row?.getBoundingClientRect().height ?? 0;
+    logRowHeight = height > 0 ? Math.round(height) : 28;
+  });
 
   let logStartIndex = $derived.by(() => {
     if (journalFilteredCount <= 60) return 0;
@@ -1197,15 +1215,15 @@
     icon={FileText}
   >
     <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} size="sm" class="header-tabs" />
-    <Button variant="outline" size="sm" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh the active tab">
+    <button class="header-refresh-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh the active tab">
       <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
       <span>Refresh</span>
-    </Button>
+    </button>
   </PageHeader>
 
 
   <div class="log-viewer">
-    <div class="log-controls">
+    <div class="controls-row log-controls">
         <div class="log-search-wrap">
           <SearchBar
             bind:value={searchQuery}
@@ -1231,9 +1249,9 @@
           </div>
         {/if}
 
-        <div class="log-filter-cluster">
+        <div class="tab-actions">
                 <div class="custom-range-container">
-            <Select class="log-range-select {timeRange === 'custom' ? 'is-custom' : ''}" bind:value={timeRange} onchange={handleRangeChange} style="height: 28px;">
+            <Select class="log-range-select {timeRange === 'custom' ? 'is-custom' : ''}" size="sm" bind:value={timeRange} onchange={handleRangeChange}>
               <option value="1">Last 24 Hours</option>
               <option value="3">Last 3 Days</option>
               <option value="7">Last 7 Days</option>
@@ -1288,7 +1306,7 @@
               bind:value={filterPriority}
               onchange={fetchLogs}
               ariaLabel="Journal level"
-              style="height: 28px; width: 120px;"
+              size="sm"
             >
               <option value="all">All Levels</option>
               <option value="3">Error+</option>
@@ -1328,43 +1346,29 @@
 
           <span class="log-divider" aria-hidden="true"></span>
 
-                  <div class="export-dropdown-container" bind:this={exportMenuContainer}>
+                  <div class="export-dropdown-container">
             <button
               type="button"
-              class="log-action-btn export-main-btn"
-              onclick={() => showExportMenu = !showExportMenu}
+              class="export-action-btn"
+              bind:this={exportTriggerRef}
+              onclick={toggleExportMenu}
               title="Export logs (Text, JSON, with option to open folder)"
+              aria-haspopup="menu"
+              aria-expanded={showExportMenu}
             >
               <Download size={13} />
               <span>Export</span>
               <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
             </button>
 
-            {#if showExportMenu}
-              <div class="export-dropdown-menu">
-                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('txt', false)}>
-                  <FileText size={13} />
-                  <span>Export as Text (.txt)</span>
-                </button>
-                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('json', false)}>
-                  <Code size={13} />
-                  <span>Export as JSON (.json)</span>
-                </button>
-                <button type="button" class="export-menu-item" onclick={() => handleExportLogs('csv', false)}>
-                  <FileText size={13} />
-                  <span>Export as CSV (.csv, loaded rows)</span>
-                </button>
-                <button type="button" class="export-menu-item accent" onclick={handleExportAll}>
-                  <FolderOpen size={13} />
-                  <span>Export full range (CSV)</span>
-                </button>
-                <div class="export-menu-divider"></div>
-                <button type="button" class="export-menu-item accent" onclick={() => handleExportLogs('txt', true)}>
-                  <FolderOpen size={13} />
-                  <span>Export Text &amp; Open Folder</span>
-                </button>
-              </div>
-            {/if}
+            <ContextMenu
+              bind:isOpen={showExportMenu}
+              x={exportMenuPos.x}
+              y={exportMenuPos.y}
+              title="Export"
+              minWidth="230px"
+              items={exportMenuItems}
+            />
           </div>
 
           <Button variant="ghost" size="sm" onclick={clearAll} title="Clear loaded results" aria-label="Clear loaded log entries">
@@ -1373,19 +1377,70 @@
         </div>
     </div>
 
+      <!-- Banners sit outside the table card: a bordered alert inside a
+           bordered card reads as a card inside a card. -->
+      {#if activeTab === 'journal' && journalError}
+        <div class="journal-alert" role="alert">
+          <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+          <div class="journal-alert-text">
+            <div class="journal-alert-title">Unable to read the journal</div>
+            <div>{journalError}</div>
+          </div>
+          <Button variant="outline" size="sm" onclick={() => fetchLogs()}>Retry</Button>
+        </div>
+      {:else if activeTab === 'auth' && authError}
+        <div class="journal-alert" role="alert">
+          <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+          <div class="journal-alert-text">
+            <div class="journal-alert-title">Unable to load authentication logs</div>
+            <div>{authError}</div>
+          </div>
+          <Button variant="outline" size="sm" onclick={fetchAuthEvents}>Retry</Button>
+        </div>
+      {:else if activeTab === 'audit' && auditError}
+        <div class="journal-alert" role="alert">
+          <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+          <div class="journal-alert-text">
+            <div class="journal-alert-title">Unable to load audit logs</div>
+            <div>{auditError}</div>
+          </div>
+          <Button variant="outline" size="sm" onclick={fetchAuditLogs}>Retry</Button>
+        </div>
+      {:else if activeTab === 'audit' && setupError}
+        <div class="journal-alert" role="alert">
+          <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+          <div class="journal-alert-text">
+            <div class="journal-alert-title">Setup Failed</div>
+            <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px; font-family: var(--font-mono);">{setupError}</div>
+          </div>
+        </div>
+      {:else if activeTab === 'audit' && auditdStatus && (!auditdStatus.installed || !auditdStatus.running || !auditdStatus.rules_configured)}
+        <GuideBanner
+          variant="warning"
+          icon={ShieldAlert}
+          title="Audit Daemon Rules Unconfigured"
+          description={!auditdStatus.installed
+            ? 'auditd package is not installed on this system.'
+            : !auditdStatus.running
+              ? 'auditd service is installed but not currently active.'
+              : 'Control panel rule definitions are missing from /etc/audit/rules.d/'}
+          actionLabel={installingAuditd ? 'Configuring...' : 'Configure Auditd Rules'}
+          onAction={handleSetupAuditd}
+        />
+      {:else if activeTab === 'threats' && threatsError}
+        <div class="journal-alert" role="alert">
+          <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
+          <div class="journal-alert-text">
+            <div class="journal-alert-title">Unable to run threat correlation</div>
+            <div>{threatsError}</div>
+          </div>
+          <Button variant="outline" size="sm" onclick={fetchThreats}>Retry</Button>
+        </div>
+      {/if}
     <div class="log-container" bind:this={logContainer}>
       <!-- Tab 1: Journalctl logs -->
       {#if activeTab === 'journal'}
-        {#if journalError}
-          <div class="journal-alert" role="alert">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div class="journal-alert-text">
-              <div class="journal-alert-title">Unable to read the journal</div>
-              <div>{journalError}</div>
-            </div>
-            <Button variant="outline" size="sm" onclick={() => fetchLogs()}>Retry</Button>
-          </div>
-        {:else if filteredLogs.length === 0}
+        {#if filteredLogs.length === 0}
           {#if isLoading}
             <div class="log-skeleton" role="status" aria-label="Loading journal entries">
               {#each [1, 2, 3, 4, 5, 6, 7, 8] as row}
@@ -1420,7 +1475,7 @@
                 <th style="width: 150px;">Time</th>
                 <th style="width: 180px;">Unit / Identifier</th>
                 <th>Message</th>
-                <th style="width: 96px; text-align: right;">Actions</th>
+                <th style="width: 96px;">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1456,7 +1511,6 @@
                         class="btn btn-ghost btn-sm"
                         onclick={(e) => { e.stopPropagation(); copyLog(log); }}
                         title="Copy log entry to clipboard"
-                        style="padding: 2px 6px; font-size: 11px;"
                       >
                         <Copy size={11} />
                       </button>
@@ -1467,7 +1521,7 @@
                           disabled={!hasMsg}
                           onclick={(e) => { e.stopPropagation(); hasMsg && aiStore.diagnoseLogError(String(log.MESSAGE), unit); }}
                           title={hasMsg ? "Diagnose log message with AI" : "Cannot diagnose empty log message"}
-                          style="padding: 2px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
+                          style="display: inline-flex; align-items: center; gap: 4px; opacity: {hasMsg ? 1 : 0.4}; cursor: {hasMsg ? 'pointer' : 'not-allowed'};"
                         >
                           <Sparkles size={11} style="color:var(--color-accent);" /> Diagnose
                         </button>
@@ -1519,28 +1573,28 @@
 
       <!-- Tab 2: Auth Events -->
       {:else if activeTab === 'auth'}
-        {#if authError}
-          <div class="journal-alert" role="alert">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div class="journal-alert-text">
-              <div class="journal-alert-title">Unable to load authentication logs</div>
-              <div>{authError}</div>
-            </div>
-            <Button variant="outline" size="sm" onclick={fetchAuthEvents}>Retry</Button>
-          </div>
-        {/if}
         {#if filteredAuthEvents.length === 0}
-          <div class="empty-state">
-            {#if loadingAuth}
-              Fetching authentication logs…
-            {:else if authError}
-              Authentication log unavailable.
-            {:else if hasActiveSearch}
-              No auth events match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
-            {:else}
-              No auth events recorded.
-            {/if}
-          </div>
+          {#if loadingAuth}
+            <div class="empty-state">Fetching authentication logs…</div>
+          {:else if authError}
+            <!-- the alert above already states the failure, with a Retry -->
+          {:else if hasActiveSearch}
+            <EmptyState
+              icon={ShieldCheck}
+              title="No Matching Auth Events"
+              description={`No authentication events matched "${searchQuery}" in the selected time range. Widen the range or clear the search.`}
+              actionLabel="Clear Search"
+              onAction={() => { searchQuery = ''; }}
+            />
+          {:else}
+            <EmptyState
+              icon={ShieldCheck}
+              title="No Auth Events in Selected Range"
+              description="No authentication events were recorded for the current time range. Try a wider range."
+              actionLabel="Refresh"
+              onAction={() => fetchAuthEvents()}
+            />
+          {/if}
         {:else}
           {#if authTruncated}
             <div class="journal-note">Showing the newest {authEvents.length} of {authTotal} auth events in this range.</div>
@@ -1548,19 +1602,19 @@
           <Table class="log-table">
             <thead>
               <tr>
-                <th aria-sort={ariaSort('timestamp', authSortKey, authSortAsc)}>
+                <th style="width: 150px;" aria-sort={ariaSort('timestamp', authSortKey, authSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('timestamp')}>Time <span aria-hidden="true">{sortIndicator('timestamp', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('user', authSortKey, authSortAsc)}>
+                <th style="width: 110px;" aria-sort={ariaSort('user', authSortKey, authSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('user')}>User <span aria-hidden="true">{sortIndicator('user', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('event_type', authSortKey, authSortAsc)}>
+                <th style="width: 115px;" aria-sort={ariaSort('event_type', authSortKey, authSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('event_type')}>Event Type <span aria-hidden="true">{sortIndicator('event_type', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('source_ip', authSortKey, authSortAsc)}>
+                <th style="width: 130px;" aria-sort={ariaSort('source_ip', authSortKey, authSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('source_ip')}>Source IP <span aria-hidden="true">{sortIndicator('source_ip', authSortKey, authSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('result', authSortKey, authSortAsc)}>
+                <th style="width: 90px;" aria-sort={ariaSort('result', authSortKey, authSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuthSort('result')}>Result <span aria-hidden="true">{sortIndicator('result', authSortKey, authSortAsc)}</span></button>
                 </th>
                 <th>Details</th>
@@ -1568,87 +1622,77 @@
             </thead>
             <tbody>
               {#each filteredAuthEvents as ev}
-                <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
-                  <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
-                  <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
+                <tr class="log-row" style="font-size: 12px; font-family: var(--font-mono);">
+                  <td style="width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-text-muted);" title={ev.timestamp}>{ev.timestamp}</td>
+                  <td style="font-weight: 600; color: var(--color-text-primary);">
                     {@render mark(ev.user)}
                   </td>
-                  <td style="padding: 8px 12px;">
-                    <Badge variant={ev.event_type.includes('SSH') ? 'info' : (ev.event_type.includes('Sudo') ? 'warning' : 'muted')} style="font-size: 10px;">
+                  <td>
+                    <Badge variant={ev.event_type.includes('SSH') ? 'info' : (ev.event_type.includes('Sudo') ? 'warning' : 'muted')}>
                       {@render mark(ev.event_type)}
                     </Badge>
                   </td>
-                  <td style="padding: 8px 12px; color: var(--color-text-secondary);">
+                  <td style="color: var(--color-text-secondary);">
                     {@render mark(ev.source_ip)}
                   </td>
-                  <td style="padding: 8px 12px;">
-                    <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
+                  <td>
+                    <Badge variant={ev.result === 'Success' ? 'success' : 'error'}>
                       {ev.result}
                     </Badge>
                   </td>
-                  <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.details}>
+                  <td style="color: var(--color-text-secondary); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.details}>
                     {@render mark(ev.details)}
                   </td>
                 </tr>
               {/each}
             </tbody>
           </Table>
+          <!-- Table footer: counts, matching the journal tab -->
+          {#if !loadingAuth && filteredAuthEvents.length > 0}
+            <div class="journal-table-footer">
+              <div class="journal-footer-stats">
+                <span class="journal-footer-count">
+                  <Layers size={12} />
+                  {#if hasActiveSearch}
+                    {filteredAuthEvents.length.toLocaleString()} matches · {authEvents.length.toLocaleString()} loaded
+                  {:else if authTotal}
+                    {authEvents.length.toLocaleString()} of {authTotal.toLocaleString()} events
+                  {:else}
+                    {authEvents.length.toLocaleString()} events
+                  {/if}
+                </span>
+                {#if authTruncated}
+                  <span class="journal-footer-time">newest entries only</span>
+                {/if}
+              </div>
+            </div>
+          {/if}
         {/if}
 
       <!-- Tab 3: Command Audit -->
       {:else if activeTab === 'audit'}
-        {#if auditError}
-          <div class="journal-alert" role="alert">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div class="journal-alert-text">
-              <div class="journal-alert-title">Unable to load audit logs</div>
-              <div>{auditError}</div>
-            </div>
-            <Button variant="outline" size="sm" onclick={fetchAuditLogs}>Retry</Button>
-          </div>
-        {:else if setupError}
-          <div style="background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div>
-              <div style="font-weight: 600; font-size: 13px; color: var(--color-error);">Setup Failed</div>
-              <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px; font-family: var(--font-mono);">{setupError}</div>
-            </div>
-          </div>
-        {:else if auditdStatus && (!auditdStatus.installed || !auditdStatus.running || !auditdStatus.rules_configured)}
-          <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box; width: 100%;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <ShieldAlert size={20} color="var(--color-warning)" style="flex-shrink: 0;" />
-              <div>
-                <div style="font-weight: 600; font-size: 13px; color: var(--color-warning);">Audit Daemon Rules Unconfigured</div>
-                <div style="font-size: 11px; color: var(--color-text-secondary); margin-top: 2px;">
-                  {#if !auditdStatus.installed}
-                    auditd package is not installed on this system.
-                  {:else if !auditdStatus.running}
-                    auditd service is installed but not currently active.
-                  {:else}
-                    Control panel rule definitions are missing from /etc/audit/rules.d/
-                  {/if}
-                </div>
-              </div>
-            </div>
-            <Button variant="accent" style="font-size: 11px; padding: 4px 12px; height: 28px;" onclick={handleSetupAuditd} disabled={installingAuditd}>
-              {installingAuditd ? 'Configuring...' : 'Configure Auditd Rules'}
-            </Button>
-          </div>
-        {/if}
-
         {#if filteredAuditLogs.length === 0}
-          <div class="empty-state">
-            {#if loadingAudit}
-              Fetching command logs…
-            {:else if auditError}
-              Audit log unavailable.
-            {:else if hasActiveSearch}
-              No commands match <strong style="color:var(--color-text-primary); margin-left:4px;">"{searchQuery}"</strong>
-            {:else}
-              No audit command logs recorded.
-            {/if}
-          </div>
+          {#if loadingAudit}
+            <div class="empty-state">Fetching command logs…</div>
+          {:else if auditError}
+            <!-- the alert above already states the failure, with a Retry -->
+          {:else if hasActiveSearch}
+            <EmptyState
+              icon={Terminal}
+              title="No Matching Commands"
+              description={`No audit commands matched "${searchQuery}" in the selected time range. Widen the range or clear the search.`}
+              actionLabel="Clear Search"
+              onAction={() => { searchQuery = ''; }}
+            />
+          {:else}
+            <EmptyState
+              icon={Terminal}
+              title="No Commands in Selected Range"
+              description="No audited commands were recorded for the current time range. Try a wider range."
+              actionLabel="Refresh"
+              onAction={() => fetchAuditLogs()}
+            />
+          {/if}
         {:else}
           {#if auditTruncated}
             <div class="journal-note">Showing the newest {auditLogs.length} of {auditTotal} audit events in this range.</div>
@@ -1656,10 +1700,10 @@
           <Table class="log-table">
             <thead>
               <tr>
-                <th aria-sort={ariaSort('timestamp', auditSortKey, auditSortAsc)}>
+                <th style="width: 150px;" aria-sort={ariaSort('timestamp', auditSortKey, auditSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('timestamp')}>Time <span aria-hidden="true">{sortIndicator('timestamp', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('user', auditSortKey, auditSortAsc)}>
+                <th style="width: 110px;" aria-sort={ariaSort('user', auditSortKey, auditSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('user')}>User <span aria-hidden="true">{sortIndicator('user', auditSortKey, auditSortAsc)}</span></button>
                 </th>
                 <th aria-sort={ariaSort('command', auditSortKey, auditSortAsc)}>
@@ -1668,26 +1712,26 @@
                 <th aria-sort={ariaSort('cwd', auditSortKey, auditSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('cwd')}>CWD <span aria-hidden="true">{sortIndicator('cwd', auditSortKey, auditSortAsc)}</span></button>
                 </th>
-                <th aria-sort={ariaSort('result', auditSortKey, auditSortAsc)}>
+                <th style="width: 90px;" aria-sort={ariaSort('result', auditSortKey, auditSortAsc)}>
                   <button type="button" class="journal-sort-btn" onclick={() => toggleAuditSort('result')}>Result <span aria-hidden="true">{sortIndicator('result', auditSortKey, auditSortAsc)}</span></button>
                 </th>
               </tr>
             </thead>
             <tbody>
               {#each filteredAuditLogs as ev}
-                <tr class="log-row" style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 12px; font-family: var(--font-mono);">
-                  <td style="padding: 8px 12px; white-space: nowrap; color: var(--color-text-muted);">{ev.timestamp}</td>
-                  <td style="padding: 8px 12px; font-weight: 600; color: var(--color-text-primary);">
+                <tr class="log-row" style="font-size: 12px; font-family: var(--font-mono);">
+                  <td style="width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-text-muted);" title={ev.timestamp}>{ev.timestamp}</td>
+                  <td style="font-weight: 600; color: var(--color-text-primary);">
                     {@render mark(ev.user)}
                   </td>
-                  <td style="padding: 8px 12px; color: var(--color-accent); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.command}>
+                  <td style="color: var(--color-accent); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.command}>
                     {@render mark(ev.command)}
                   </td>
-                  <td style="padding: 8px 12px; color: var(--color-text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.cwd}>
+                  <td style="color: var(--color-text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title={ev.cwd}>
                     {@render mark(ev.cwd)}
                   </td>
-                  <td style="padding: 8px 12px;">
-                    <Badge variant={ev.result === 'Success' ? 'success' : 'error'} style="font-size: 10px;">
+                  <td>
+                    <Badge variant={ev.result === 'Success' ? 'success' : 'error'}>
                       {ev.result}
                     </Badge>
                   </td>
@@ -1695,20 +1739,30 @@
               {/each}
             </tbody>
           </Table>
+          <!-- Table footer: counts, matching the journal tab -->
+          {#if !loadingAudit && filteredAuditLogs.length > 0}
+            <div class="journal-table-footer">
+              <div class="journal-footer-stats">
+                <span class="journal-footer-count">
+                  <Layers size={12} />
+                  {#if hasActiveSearch}
+                    {filteredAuditLogs.length.toLocaleString()} matches · {auditLogs.length.toLocaleString()} loaded
+                  {:else if auditTotal}
+                    {auditLogs.length.toLocaleString()} of {auditTotal.toLocaleString()} events
+                  {:else}
+                    {auditLogs.length.toLocaleString()} events
+                  {/if}
+                </span>
+                {#if auditTruncated}
+                  <span class="journal-footer-time">newest entries only</span>
+                {/if}
+              </div>
+            </div>
+          {/if}
         {/if}
 
       <!-- Tab 4: Threats -->
       {:else if activeTab === 'threats'}
-        {#if threatsError}
-          <div class="journal-alert" role="alert">
-            <ShieldAlert size={18} color="var(--color-error)" style="flex-shrink:0;" />
-            <div class="journal-alert-text">
-              <div class="journal-alert-title">Unable to run threat correlation</div>
-              <div>{threatsError}</div>
-            </div>
-            <Button variant="outline" size="sm" onclick={fetchThreats}>Retry</Button>
-          </div>
-        {/if}
         {#if loadingThreats}
           <div class="empty-state">Analyzing runtime threats…</div>
         {:else if filteredThreats.length === 0 && hasActiveSearch}
@@ -1745,9 +1799,9 @@
                   </div>
                 </div>
               </div>
-              <Button variant="ghost" style="font-size:11px;" onclick={fetchThreats}>
+              <button class="header-refresh-btn" onclick={fetchThreats}>
                 <RefreshCw size={13} class={loadingThreats ? 'animate-spin-slow' : ''} /> Rescan Logs
-              </Button>
+              </button>
             </div>
 
             <!-- Active Safeguard Rules Grid -->
@@ -1782,7 +1836,7 @@
                     <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: var(--color-text-primary);">
                       {@render mark(threat.title)}
                     </h3>
-                    <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="font-size: 9px; text-transform: uppercase;">
+                    <Badge variant={threat.severity === 'Critical' ? 'error' : 'warning'} style="text-transform: uppercase;">
                       {threat.severity}
                     </Badge>
                     <span style="font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono);">{threat.timestamp}</span>
@@ -1791,14 +1845,14 @@
                     {@render mark(threat.description)}
                   </p>
                   <div style="margin-top: 8px;">
-                    <Badge variant="muted" style="font-size: 9px; text-transform: uppercase; background: var(--color-bg-hover); color: var(--color-text-muted);">
+                    <Badge variant="muted" style="text-transform: uppercase; background: var(--color-bg-hover); color: var(--color-text-muted);">
                       {threat.category}
                     </Badge>
                   </div>
                 </div>
                 <Button 
                   variant="ghost" 
-                  style="font-size: 11px; height: 26px; padding: 0 10px; border-color: var(--color-border);"
+                  style="border-color: var(--color-border);"
                   onclick={() => {
                     uiStore.securityCategoryFilter = 'Runtime Threats';
                     uiStore.securitySeverityFilter = 'all';
@@ -1810,6 +1864,16 @@
               </div>
             {/each}
           </div>
+          {#if filteredThreats.length > 0}
+            <div class="journal-table-footer">
+              <div class="journal-footer-stats">
+                <span class="journal-footer-count">
+                  <Shield size={12} />
+                  {filteredThreats.length.toLocaleString()} threats in range
+                </span>
+              </div>
+            </div>
+          {/if}
         {/if}
       {/if}
     </div>
@@ -1953,22 +2017,13 @@
 {/if}
 
 <style>/* ── Journal controls row ───────────────────────────── */ .log-controls {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    width: 100%;
+    /* .controls-row supplies layout + spacing; the viewer's gap already owns
+       the distance to the table, so the shared row's margin is neutralised. */
+    margin-bottom: 0;
   }.log-search-wrap {
     flex: 1 1 260px;
     min-width: 220px;
     max-width: 400px;
-  }.log-filter-cluster {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    flex-shrink: 0;
-    margin-left: auto;
   }.log-unit-chip {
     display: inline-flex;
     align-items: center;
@@ -1996,10 +2051,10 @@
   }
   @media (max-width: 1200px) {
     .log-search-wrap { flex: 1 1 100%; max-width: none; }
-    .log-filter-cluster { margin-left: 0; }
+    .log-controls .tab-actions { flex: 0 0 auto; justify-content: flex-start; }
   }
   @media (max-width: 900px) {
-    .log-filter-cluster { width: 100%; }
+    .log-controls .tab-actions { width: 100%; }
   }
 /* Date / time inputs */ .log-dt {
     background: var(--color-bg-input);
@@ -2076,104 +2131,14 @@
   }.cancel-btn:hover {
     background: var(--color-active-bg);
     color: var(--color-text-primary);
-  }/* Refresh / export action buttons */ .log-action-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 10px;
-    border: none;
-    border-radius: 6px;
-    background: var(--color-bg-hover);
-    color: var(--color-text-secondary);
-    font-size: 12px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background 0.15s, color 0.15s;
-    white-space: nowrap;
-  }.log-action-btn:hover {
-    background: var(--color-active-bg);
-    color: var(--color-text-primary);
-  }.log-action-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
   }/* Export Dropdown Menu */ .export-dropdown-container {
     position: relative;
     display: inline-flex;
-  }.export-main-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }.export-dropdown-menu {
-    position: absolute;
-    top: calc(100% + 5px);
-    right: 0;
-    z-index: 100;
-    min-width: 185px;
-    background: var(--color-bg-card, #0f172a);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 5px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    animation: menu-fade 0.12s ease;
-  }.export-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 10px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--color-text-secondary);
-    font-size: 11.5px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.12s ease;
-    white-space: nowrap;
-  }.export-menu-item:hover {
-    background: var(--color-accent-muted);
-    color: var(--color-text-primary);
-  }.export-menu-item.accent {
-    color: var(--color-accent);
-    font-weight: 500;
-  }.export-menu-item.accent:hover {
-    background: var(--color-accent-muted);
-  }.export-menu-divider {
-    height: 1px;
-    background: var(--color-border, rgba(255, 255, 255, 0.08));
-    margin: 3px 0;
-  }.export-open-folder-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 24px;
-    padding: 0 8px;
-    background: rgba(0, 218, 243, 0.12);
-    border: 1px solid rgba(0, 218, 243, 0.3);
-    color: var(--color-accent);
-    border-radius: 6px;
-    font-size: 11.5px;
-    font-family: var(--font-sans);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-  }.export-open-folder-btn:hover {
-    background: rgba(0, 218, 243, 0.22);
-    color: #fff;
-    border-color: rgba(0, 218, 243, 0.5);
   }/* ── Log viewer ──────────────────────────────────────── */ .log-viewer {
     padding: 0;
     display: flex;
     flex-direction: column;
     gap: 20px;
-    margin-top: -14px;
     overflow: hidden;
     flex: 1;
     min-height: 0;
@@ -2247,9 +2212,10 @@
   .journal-footer-action:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }:global(.log-container .table-wrap) {
+  }:global(.log-container .table-frame) {
     flex: 1;
     min-height: 0;
+  }:global(.log-container .table-wrap) {
     overflow-y: auto;
     box-shadow: none !important;
     border: none;
@@ -2281,7 +2247,6 @@
     outline: 2px solid var(--color-accent);
     outline-offset: -2px;
   }.log-row td {
-    padding: 4px 8px;
     vertical-align: top;
   }.col-time {
     width: 155px;
@@ -2289,7 +2254,6 @@
     white-space: nowrap;
   }.col-unit {
     width: 145px;
-    color: #8b949e;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
@@ -2303,7 +2267,7 @@
   .log-table .col-msg {
     white-space: nowrap;
   }/* Priority Colors (Dark Mode Default) */ .log-error .col-msg { color: #ff7b72; font-weight: 500; }.log-error .col-unit { color: #f87171 !important; }.log-warn .col-msg { color: #fbbf24; }.log-warn .col-unit { color: #f59e0b !important; }.log-info .col-msg { color: #38bdf8; }.log-info .col-unit { color: #38bdf8 !important; }.log-debug .col-msg { color: #94a3b8; }.log-debug .col-unit { color: #94a3b8 !important; }/* Priority Colors for Light Mode */ :global(html.light-mode) .log-error .col-unit { color: #dc2626 !important; }:global(html.light-mode) .log-warn .col-unit { color: #d97706 !important; }:global(html.light-mode) .log-info .col-unit { color: #0284c7 !important; }:global(html.light-mode) .log-debug .col-unit { color: #64748b !important; }:global(html.light-mode) .log-error .col-msg { color: #dc2626; }:global(html.light-mode) .log-warn .col-msg { color: #b45309; }:global(html.light-mode) .log-info .col-msg { color: #334155; }:global(html.light-mode) .log-debug .col-msg { color: #64748b; }.repeat-badge {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-bg-hover);
     color: var(--color-text-secondary);
     border-radius: 4px;
     padding: 1px 5px;
@@ -2486,7 +2450,6 @@
     align-items: flex-start;
     gap: 12px;
     padding: 12px 16px;
-    margin-bottom: 12px;
     border: 1px solid var(--color-error);
     border-radius: 8px;
     background: var(--color-error-muted, rgba(239, 68, 68, 0.08));
@@ -2504,7 +2467,6 @@
     color: var(--color-error);
     margin-bottom: 2px;
   }
-  .log-action-btn:focus-visible,
   .popover-btn:focus-visible,
   .journal-footer-action:focus-visible,
   .drawer-action-btn:focus-visible,
@@ -2547,12 +2509,6 @@
     flex-direction: column;
     gap: 8px;
     padding: 16px;
-  }
-  :global(.header-tabs) {
-    box-shadow: none !important;
-    background: transparent !important;
-    border-color: transparent !important;
-    padding: 0 !important;
   }
   :global(.log-range-select) {
     width: 130px;

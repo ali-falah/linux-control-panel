@@ -747,6 +747,15 @@ body,
   animation: spin 1s linear infinite;
 }
 
+/* Primary module tabs that live in the page header: no chrome of their own,
+   the header already draws the surface. Shared by Journal and Security. */
+.header-tabs {
+  box-shadow: none !important;
+  background: transparent !important;
+  border-color: transparent !important;
+  padding: 0 !important;
+}
+
 /* ─── Card & Container Components ───────────────────────────────────────────── */
 .card {
   background: var(--color-bg-card);
@@ -865,6 +874,13 @@ html.modal-open-scroll-lock .content-area {
   cursor: not-allowed;
   transform: none !important;
   box-shadow: none !important;
+}
+
+/* Keyboard focus has to stay visible: .btn clears the outline for the mouse,
+   so the ring is drawn with the same recipe the inputs use. */
+.btn:focus-visible {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-muted);
 }
 
 /* Primary — solid fill, theme text */
@@ -1316,6 +1332,16 @@ input[type="checkbox"]:checked::after {
 }
 
 /* ─── Table ──────────────────────────────────────────────────────────── */
+/* Positioning context for the floating density pill: it must not scroll with
+   the rows, so it sits outside .table-wrap (which is the scroller). */
+.table-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .table-wrap {
   flex: 1;
   min-height: 0;
@@ -1544,8 +1570,6 @@ tbody tr:last-child td:last-child {
   font-size: 10.5px !important;
 }
 
-.table-wrap.table-spacious table tbody td .col-msg,
-.table-wrap.table-spacious table tbody td.col-msg,
 .table-wrap.table-spacious table tbody td.col-desc,
 .table-wrap.table-spacious table tbody td.col-path,
 .table-wrap.table-spacious table tbody td .truncate-path,
@@ -1557,11 +1581,134 @@ tbody tr:last-child td:last-child {
   max-width: none !important;
 }
 
+/* The journal table virtualises its rows and sizes them from the first one,
+   so this cell may never wrap — a long message is clipped instead. It is the
+   only .col-msg in the app. */
+.table-wrap.table-spacious table tbody td.col-msg,
+.table-wrap.table-spacious table tbody td .col-msg {
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
 /* ─── Module Page Layout ─────────────────────────────────────────────── */
+/* ─── Toolbar action buttons ─────────────────────────────────────────────── */
+
+/* Refresh/reload: outlined 28px control that pulses while it works. Service
+   Manager is the reference; every text-bearing refresh button shares it. */
+.header-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  height: 28px;
+  border-radius: var(--radius-md, 6px);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.header-refresh-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-hover);
+}
+
+.header-refresh-btn:disabled,
+.header-refresh-btn.refreshing {
+  cursor: not-allowed !important;
+  opacity: 0.8 !important;
+  background: var(--color-accent-muted) !important;
+  border-color: var(--color-accent-glow) !important;
+  color: var(--color-accent) !important;
+  box-shadow: 0 0 16px var(--color-accent-glow) !important;
+  animation: cyber-pulse-glow 1.1s ease-in-out infinite alternate !important;
+}
+
+.header-refresh-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.header-refresh-btn .spin-refresh,
+.spin-refresh {
+  animation: spin-cw 0.75s linear infinite !important;
+  color: var(--color-accent) !important;
+}
+
+@keyframes cyber-pulse-glow {
+  0% {
+    box-shadow: 0 0 4px var(--color-accent-glow);
+    border-color: var(--color-accent-glow);
+    transform: scale(0.98);
+  }
+  100% {
+    box-shadow: 0 0 18px var(--color-accent-glow);
+    border-color: var(--color-accent);
+    transform: scale(1);
+  }
+}
+
+@keyframes spin-cw {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+
+/* Export: subtle filled, 28px. Journal Logs is the reference; the Security
+   Auditor and Nginx exports share it so every export control looks the same. */
+.export-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.export-action-btn:hover:not(:disabled) {
+  background: var(--color-active-bg);
+  color: var(--color-text-primary);
+}
+
+.export-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.export-action-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* The two gaps every module page is measured against. The page header pulls
+   itself up by the page padding and closes the remaining distance with
+   (header gap - content gap), so header -> first content is always
+   --page-header-gap no matter which page you are on. */
+:root {
+  --page-header-gap: 10px;
+  --page-content-gap: 16px;
+}
+
 .module-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--page-content-gap);
   padding: 24px;
   position: absolute;
   inset: 0;
@@ -1756,6 +1903,12 @@ pre {
 }
 
 /* ─── Security Auditor Explicit Light Mode Card Rules ────────────────────── */
+html.light-mode .glass-panel {
+  background: #FFFFFF !important;
+  border: 1px solid #E5E7EB !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+}
+
 html.light-mode .finding-card {
   background: #FFFFFF !important;
   border: 1px solid #E5E7EB !important;

@@ -165,9 +165,9 @@
     </div>
 
     {#if activeSubTab === 'installed'}
-      <Button variant="ghost" class="btn-sm" onclick={loadSystemCoprs} disabled={loadingSystemCoprs}>
+      <button class="header-refresh-btn" onclick={loadSystemCoprs} disabled={loadingSystemCoprs}>
         <RefreshCw size={13} class={loadingSystemCoprs ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      </button>
     {/if}
   </div>
 

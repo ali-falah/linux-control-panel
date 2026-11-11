@@ -1,8 +1,41 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { X, AlertTriangle } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { fade, fly } from 'svelte/transition';
   import { portal } from '../actions/portal.ts';
+
+  let dialogEl = $state<HTMLElement | null>(null);
+
+  // Focus moves into the dialog when it opens and back to whatever opened it
+  // when it closes, so keyboard users are never left behind the backdrop.
+  $effect(() => {
+    if (!uiStore.confirmDialog.isOpen) return;
+    const opener =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    untrack(() => dialogEl)
+      ?.querySelector<HTMLElement>('.dialog-actions .btn-ghost')
+      ?.focus();
+    return () => opener?.focus?.();
+  });
+
+  // Keep Tab inside the dialog while it is modal.
+  function trapTab(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    const focusable = dialogEl?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusable || focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   async function handleConfirm() {
     const callback = uiStore.confirmDialog.onConfirm;
@@ -25,7 +58,18 @@
       onclick={() => uiStore.closeConfirm()}
     ></div>
     
-    <div class="modal" style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 100001" transition:fly={{ y: 20, duration: 250 }} role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div
+      class="modal"
+      style="width: 400px; max-width: calc(100vw - 32px); position: relative; z-index: 100001"
+      transition:fly={{ y: 20, duration: 250 }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-message"
+      tabindex="-1"
+      bind:this={dialogEl}
+      onkeydown={trapTab}
+    >
       <div class="dialog-header">
         {#if uiStore.confirmDialog.danger}
           <div class="dialog-icon danger">
@@ -33,12 +77,16 @@
           </div>
         {/if}
         <h2 id="confirm-title" class="dialog-title">{uiStore.confirmDialog.title}</h2>
-        <button class="close-btn btn btn-icon btn-ghost" onclick={() => uiStore.closeConfirm()}>
+        <button
+          class="close-btn btn btn-icon btn-ghost"
+          aria-label="Close"
+          onclick={() => uiStore.closeConfirm()}
+        >
           <X size={16} />
         </button>
       </div>
 
-      <p class="dialog-message">{uiStore.confirmDialog.message}</p>
+      <p id="confirm-message" class="dialog-message">{uiStore.confirmDialog.message}</p>
 
       <div class="dialog-actions">
         <button class="btn btn-ghost" onclick={() => uiStore.closeConfirm()}>

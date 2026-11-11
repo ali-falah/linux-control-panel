@@ -824,7 +824,7 @@
 
 <div class="module-page">
   <PageHeader title="Monitoring" subtitle="Real-time system health and process management." icon={Activity}>
-    <TabGroup
+    <TabGroup size="sm"
       tabs={[
         { id: 'overview', label: 'Overview' },
         { id: 'processes', label: 'Processes' }
@@ -833,17 +833,17 @@
       style="margin-right: 8px;"
     />
     <div style="display:flex; gap: 8px;">
-      <Button onclick={() => isPaused = !isPaused} variant={isPaused ? 'primary' : 'ghost'}>
+      <Button size="sm" onclick={() => isPaused = !isPaused} variant={isPaused ? 'primary' : 'ghost'}>
         {#if isPaused}
           <Play size={14} style="margin-right: 4px;" /> Resume
         {:else}
           <Pause size={14} style="margin-right: 4px;" /> Pause
         {/if}
       </Button>
-      <Button onclick={forceRefresh} variant="primary" disabled={isRefreshing}>
+      <button class="header-refresh-btn" onclick={forceRefresh} disabled={isRefreshing}>
         <RefreshCw size={14} class={isRefreshing ? 'animate-spin-slow' : ''} />
         Refresh
-      </Button>
+      </button>
     </div>
   </PageHeader>
 
@@ -1096,9 +1096,9 @@
             <div style="display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0;">
               <div>
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
-                <div style="display:flex; gap: 8px; flex-wrap: wrap; width: 100%;">
+                <div class="iface-speed-row">
                   {#each activeInterfaces as iface}
-                    <div style="flex: 1; min-width: 180px; background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 6px; padding: 6px 10px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                    <div class="iface-speed-card">
                       <div style="display:flex; align-items:center; gap:6px;">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
                           <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1923,7 +1923,39 @@
     height: 200px;
     color: var(--color-text-muted);
     font-size: 14px;
-  }/* 2-column layout */ .monitor-layout {
+  }/* Interface speed cards: one fixed height so a long interface name can never
+   stretch the row. Scoped to this page by design. */
+  .iface-speed-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    width: 100%;
+    align-items: flex-start;
+  }
+  .iface-speed-card {
+    flex: 1 1 180px;
+    min-width: 180px;
+    height: 32px;
+    box-sizing: border-box;
+    overflow: hidden;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .iface-speed-card > div {
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .iface-speed-card span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* 2-column layout */ .monitor-layout {
     display: grid;
     grid-template-columns: 4fr 10fr;
     gap: 10px;
@@ -1975,12 +2007,18 @@
     height: 100%;
     min-height: 0;
     overflow-y: auto;
+  /* Panels size to their content and only ever grow: with the shared
+     flex-basis:0 a content-sized sibling (Disk I/O) pushed these two to zero
+     height whenever it was taller than the column. */
   }.monitor-column-left :global(.monitor-panel) {
-    min-height: 0;
+    height: auto;
+    flex-grow: 1;
+    flex-shrink: 0;
+    flex-basis: auto;
   }.monitor-column-left :global(.monitor-panel):first-child {
-    flex: 1.5;
+    flex-grow: 1.5;
   }.monitor-column-left :global(.monitor-panel):last-child {
-    flex: 0.8;
+    flex-grow: 0.8;
   }:global(.active-conn-table table thead th) {
     position: sticky;
     top: 0;

@@ -27,6 +27,7 @@
     type Icon as LucideIcon
   } from '@lucide/svelte';
   import { uiStore, type TabId } from '../stores/ui.svelte.ts';
+  import ContextMenu, { type ContextMenuItem } from './ui/ContextMenu.svelte';
 
   export interface BreadcrumbItem {
     label: string;
@@ -54,18 +55,16 @@
   } = $props();
 
   let showHistoryDropdown = $state(false);
-  let dropdownContainerRef = $state<HTMLDivElement | null>(null);
+  let historyTriggerRef = $state<HTMLButtonElement | null>(null);
+  let historyMenuPos = $state({ x: 0, y: 0 });
 
-  // Close history dropdown when clicking outside
-  $effect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (!showHistoryDropdown) return;
-      if (dropdownContainerRef && dropdownContainerRef.contains(e.target as Node)) return;
-      showHistoryDropdown = false;
+  function toggleHistoryMenu() {
+    if (historyTriggerRef) {
+      const rect = historyTriggerRef.getBoundingClientRect();
+      historyMenuPos = { x: rect.left, y: rect.bottom + 6 };
     }
-    document.addEventListener('click', handleOutsideClick);
-    return () => document.removeEventListener('click', handleOutsideClick);
-  });
+    showHistoryDropdown = !showHistoryDropdown;
+  }
 
   const TAB_INFO: Record<string, { label: string; icon: any }> = {
     'system-dashboard': { label: 'Dashboard', icon: LayoutDashboard },
@@ -89,6 +88,22 @@
     'pm2-manager': { label: 'PM2 Manager', icon: Layers },
     'ssh-cert-manager': { label: 'SSH & SSL Vault', icon: KeyRound },
   };
+
+  const historyItems = $derived.by((): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [];
+    for (const recentId of uiStore.recentTabs) {
+      const meta = TAB_INFO[recentId];
+      if (!meta) continue;
+      items.push({
+        label: meta.label,
+        icon: meta.icon,
+        // the page you are already on is not a destination
+        disabled: uiStore.activeTab === recentId,
+        action: () => uiStore.setActiveTab(recentId as TabId),
+      });
+    }
+    return items;
+  });
 
   const computedBreadcrumbs = $derived.by(() => {
     // 1. If explicit custom breadcrumbs provided
@@ -221,7 +236,7 @@
     <div class="breadcrumb" role="navigation" aria-label="Breadcrumb navigation">
       <!-- Unified Back + Recent History Split Dropdown -->
       {#if uiStore.canGoBack || uiStore.recentTabs.length > 0}
-        <div bind:this={dropdownContainerRef} class="back-split-container">
+        <div class="back-split-container">
           {#if uiStore.canGoBack}
             <button class="back-main-btn" onclick={() => uiStore.goBack()} title="Go back to previous page">
               <ChevronLeft size={14} />
@@ -234,44 +249,26 @@
               class="back-dropdown-btn"
               class:open={showHistoryDropdown}
               class:no-back={!uiStore.canGoBack}
-              onclick={() => showHistoryDropdown = !showHistoryDropdown}
+              bind:this={historyTriggerRef}
+              onclick={toggleHistoryMenu}
               title="Recently Visited Pages"
+              aria-haspopup="menu"
+              aria-expanded={showHistoryDropdown}
             >
               <History size={11} style="color:var(--color-accent);" />
               <span class="back-dd-sep" aria-hidden="true"></span>
               <ChevronDown size={11} />
             </button>
 
-            {#if showHistoryDropdown}
-              <div class="history-dropdown-menu" role="menu">
-                <div class="history-menu-title">
-                  <History size={11} />
-                  <span>Recent History</span>
-                </div>
-                {#each uiStore.recentTabs as recentId}
-                  {@const meta = TAB_INFO[recentId]}
-                  {@const isCurrent = uiStore.activeTab === recentId}
-                  {#if meta}
-                    <button
-                      class="history-menu-item"
-                      class:current={isCurrent}
-                      onclick={() => {
-                        uiStore.setActiveTab(recentId as TabId);
-                        showHistoryDropdown = false;
-                      }}
-                    >
-                      <span class="history-item-label">
-                        <meta.icon size={12} />
-                        <span>{meta.label}</span>
-                      </span>
-                      {#if isCurrent}
-                        <span class="active-dot"></span>
-                      {/if}
-                    </button>
-                  {/if}
-                {/each}
-              </div>
-            {/if}
+            <ContextMenu
+              bind:isOpen={showHistoryDropdown}
+              x={historyMenuPos.x}
+              y={historyMenuPos.y}
+              title="Recent History"
+              icon={History}
+              minWidth="190px"
+              items={historyItems}
+            />
           {/if}
         </div>
         <span class="crumb-divider-bar" aria-hidden="true">|</span>
@@ -321,10 +318,13 @@
 <style>.header-wrapper {
     display: flex;
     flex-direction: column;
-    margin: -24px -24px 8px -24px;
+    margin: -24px -24px calc(var(--page-header-gap) - var(--page-content-gap)) -24px;
     padding-top: 6px;
   }.page-header {
     display: flex;
+    /* when the tabs + actions do not fit, the whole actions block moves to its
+       own line instead of the breadcrumb being truncated mid-group */
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
     padding: 8px 24px;
@@ -404,71 +404,6 @@
     font-size: 13px;
     user-select: none;
     flex-shrink: 0;
-  }/* History Floating Dropdown Menu */ .history-dropdown-menu {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    z-index: 100;
-    min-width: 180px;
-    background: var(--color-bg-card, #0b1726);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    animation: menu-fade 0.15s ease;
-  }:global(html.light-mode) .history-dropdown-menu {
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
-  }
-@keyframes menu-fade {from { opacity: 0; transform: translateY(-4px); }to { opacity: 1; transform: translateY(0); }
-}.history-menu-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 4px 8px 6px;
-    border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
-    margin-bottom: 2px;
-  }:global(html.light-mode) .history-menu-title {
-    border-bottom-color: #E2E8F0;
-  }.history-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 6px 10px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.12s ease;
-  }.history-item-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }.history-menu-item:hover {
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
-    color: var(--color-text-primary);
-  }.history-menu-item.current {
-    color: var(--color-accent);
-    font-weight: 600;
-  }.active-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--color-accent);
   }/* Interactive Breadcrumb Trail */ .breadcrumb-trail {
     display: flex;
     align-items: center;

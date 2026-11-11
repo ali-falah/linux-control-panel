@@ -425,11 +425,11 @@
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Rule Generator
       </Button>
     {/if}
-    <Button variant="ghost" class="" onclick={loadState} disabled={loading}>
+    <button class="header-refresh-btn" onclick={loadState} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </Button>
+    </button>
     {#if firewallState?.is_running}
-      <Button 
+      <Button size="sm"
         variant={firewallState.is_panic ? 'primary' : 'danger'}
         onclick={confirmTogglePanic}
       >

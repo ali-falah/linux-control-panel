@@ -8,7 +8,9 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
-  import Select from '../components/ui/Select.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
+  import GuideBanner from '../components/ui/GuideBanner.svelte';
+  import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
   import {
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
@@ -98,20 +100,22 @@
   let scoreHistory = $state<number[]>([]);
   let expandedId = $state<string | null>(null);
   let showExportDropdown = $state(false);
-  let exportDropdownRef = $state<HTMLDivElement | null>(null);
+  let exportMenuPos = $state({ x: 0, y: 0 });
   /** Tracks tamper-flagged findings the user has explicitly acknowledged this session */
   let reviewedTamperIds = $state<string[]>([]);
 
-  // Close export dropdown when clicking outside
-  $effect(() => {
-    function handleOutsideClick(e: MouseEvent) {
-      if (!showExportDropdown) return;
-      if (exportDropdownRef && exportDropdownRef.contains(e.target as Node)) return;
-      showExportDropdown = false;
-    }
-    document.addEventListener('click', handleOutsideClick);
-    return () => document.removeEventListener('click', handleOutsideClick);
-  });
+  // The trigger is a component, so the menu is anchored from the click target
+  // rather than from a bound element.
+  function toggleExportDropdown(trigger: EventTarget | null) {
+    const rect = (trigger as HTMLElement | null)?.getBoundingClientRect();
+    if (rect) exportMenuPos = { x: rect.right, y: rect.bottom + 6 };
+    showExportDropdown = !showExportDropdown;
+  }
+
+  const exportDropdownItems: ContextMenuItem[] = [
+    { label: 'Export HTML Report', icon: Download, action: exportHtmlReport },
+    { label: 'Export JSON Data', icon: Download, action: exportReport },
+  ];
 
   // ── Category config ────────────────────────────────────────────────────────
   const CATEGORIES = [
@@ -702,7 +706,18 @@
   }
 
   // Export report as JSON
-  function exportReport() {
+  /** Write an export through the backend: a Blob + <a>.click() is a silent
+      no-op in the Tauri webview, which is why this button did nothing. */
+  async function saveExportFile(filename: string, content: string, message: string) {
+    try {
+      await invoke<string>('export_journal_logs_to_file', { filename, content });
+      uiStore.addToast(message, 'success', 6000, 'Open Folder', openDownloadsFolder);
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
+  }
+
+  async function exportReport() {
     if (!report) return;
     const data = {
       generated: new Date().toISOString(),
@@ -711,14 +726,11 @@
       findings: report.findings,
       muted_findings: mutedIds
     };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `security-audit-${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    uiStore.addToast('JSON audit data exported successfully.', 'success', 6000, 'Open Folder', openDownloadsFolder);
+    await saveExportFile(
+      `security-audit-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(data, null, 2),
+      'JSON audit data exported successfully.'
+    );
   }
 
   // Open Downloads Folder in file manager
@@ -739,7 +751,7 @@
   }
 
   // Export report as styled HTML
-  function exportHtmlReport() {
+  async function exportHtmlReport() {
     if (!report) return;
     const dateStr = new Date().toLocaleString();
     const html = `<!DOCTYPE html>
@@ -773,14 +785,11 @@
 </body>
 </html>`;
 
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `security-audit-report-${new Date().toISOString().slice(0,10)}.html`;
-    a.click();
-    URL.revokeObjectURL(url);
-    uiStore.addToast('Formatted HTML compliance report exported.', 'success', 6000, 'Open Folder', openDownloadsFolder);
+    await saveExportFile(
+      `security-audit-report-${new Date().toISOString().slice(0, 10)}.html`,
+      html,
+      'Formatted HTML compliance report exported.'
+    );
   }
 
   async function openReference(ref: string, title: string) {
@@ -817,35 +826,41 @@
 <!-- ── Markup ──────────────────────────────────────────────────────────────── -->
 <div class="module-page security-auditor">
   <PageHeader title="Security Auditor" subtitle="System Hardening &amp; Security Audit" icon={Shield}>
+    <TabGroup
+      size="sm"
+      class="header-tabs"
+      tabs={tabsWithCounts}
+      bind:activeTab={activeCategory}
+      disabled={loading}
+    />
     {#if report}
-      <span class="header-score-pill" style="background: {getScoreColor(effectiveScore)}20; color: {getScoreColor(effectiveScore)}; border-color: {getScoreColor(effectiveScore)}40; margin-right: 8px;">
-        {effectiveScore}% — {getScoreLabel(effectiveScore)}
-      </span>
       <!-- Single Export Dropdown Button -->
-      <div bind:this={exportDropdownRef} class="export-dropdown-wrap">
-        <Button variant="outline" size="sm" onclick={() => showExportDropdown = !showExportDropdown} title="Export Audit Report Options">
+      <div class="export-dropdown-wrap">
+        <button
+          class="export-action-btn"
+          onclick={(e) => toggleExportDropdown(e.currentTarget)}
+          title="Export Audit Report Options"
+          aria-haspopup="menu"
+          aria-expanded={showExportDropdown}
+        >
           <Download size={14} />
-          Export Report
+          Export
           <ChevronDown size={12} />
-        </Button>
-        {#if showExportDropdown}
-          <div class="export-dropdown-menu" role="menu">
-            <button class="export-menu-item" onclick={() => { exportHtmlReport(); showExportDropdown = false; }}>
-              <Download size={13} style="color:var(--color-accent);" />
-              <span>Export HTML Report</span>
-            </button>
-            <button class="export-menu-item" onclick={() => { exportReport(); showExportDropdown = false; }}>
-              <Download size={13} style="color:var(--color-info);" />
-              <span>Export JSON Data</span>
-            </button>
-          </div>
-        {/if}
+        </button>
+        <ContextMenu
+          bind:isOpen={showExportDropdown}
+          x={exportMenuPos.x}
+          y={exportMenuPos.y}
+          title="Export Report"
+          minWidth="200px"
+          items={exportDropdownItems}
+        />
       </div>
     {/if}
-    <Button variant="outline" size="sm" onclick={() => runAudit(true)} disabled={loading}>
-      <RefreshCw size={14} class={loading ? 'spin' : ''} />
-      {loading ? 'Scanning...' : 'Rescan System'}
-    </Button>
+    <button class="header-refresh-btn" onclick={() => runAudit(true)} disabled={loading}>
+      <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} />
+      {loading ? 'Scanning...' : 'Rescan'}
+    </button>
   </PageHeader>
 
   <div class="content-scroll">
@@ -922,6 +937,7 @@
               onclick={() => activeSeverity = activeSeverity === 'Critical' ? 'all' : 'Critical'}
               class="stat-pill critical clickable"
               class:active={activeSeverity === 'Critical'}
+              aria-pressed={activeSeverity === 'Critical'}
             >
               <XCircle size={11} />
               {report.findings.filter(f => f.severity === 'Critical' && !f.is_resolved).length} Critical
@@ -931,6 +947,7 @@
               onclick={() => activeSeverity = activeSeverity === 'Warning' ? 'all' : 'Warning'}
               class="stat-pill warning clickable"
               class:active={activeSeverity === 'Warning'}
+              aria-pressed={activeSeverity === 'Warning'}
             >
               <AlertTriangle size={11} />
               {report.findings.filter(f => f.severity === 'Warning' && !f.is_resolved).length} Warnings
@@ -940,6 +957,7 @@
               onclick={() => activeSeverity = activeSeverity === 'Good' ? 'all' : 'Good'}
               class="stat-pill good clickable"
               class:active={activeSeverity === 'Good'}
+              aria-pressed={activeSeverity === 'Good'}
             >
               <CheckCircle2 size={11} />
               {report.findings.filter(f => f.is_resolved).length} Passed
@@ -950,6 +968,7 @@
                 onclick={() => { activeView = activeView === 'muted' ? 'all' : 'muted'; activeSeverity = 'all'; activeCategory = 'all'; }}
                 class="stat-pill muted clickable"
                 class:active={activeView === 'muted'}
+                aria-pressed={activeView === 'muted'}
                 title="Score excludes these {mutedIds.length} finding{mutedIds.length !== 1 ? 's' : ''}"
               >
                 <EyeOff size={11} />
@@ -967,6 +986,7 @@
               {@const isRuntime = cs.category === 'Runtime Threats'}
               <button
                 class="cat-card glass-panel {activeCategory === cs.category ? 'cat-active' : ''} {isRuntime && cs.issues > 0 ? 'cat-threat' : ''}"
+                aria-pressed={activeCategory === cs.category}
                 onclick={() => activeCategory = activeCategory === cs.category ? 'all' : cs.category}
                 style="--cat-color: {isRuntime ? (cs.issues > 0 ? 'var(--color-error)' : 'var(--color-success)') : getScoreColor(cs.score)}"
               >
@@ -1001,8 +1021,6 @@
 
       <!-- ── Category Tabs + Findings ── -->
       <div class="findings-header">
-        <TabGroup tabs={tabsWithCounts} bind:activeTab={activeCategory} disabled={loading} />
-        
         <div class="findings-header-right">
           <span class="issue-badge" class:has-issues={totalIssues > 0}>
             {#if activeSeverity !== 'all' || activeCategory !== 'all'}
@@ -1014,7 +1032,7 @@
         </div>
       </div>
 
-        <div class="findings-list">
+        <div class="findings-list density-{uiStore.tableDensity}">
           {#each filteredFindings as finding, idx (finding.id || idx)}
             <div
               class="finding-card"
@@ -1026,6 +1044,7 @@
               <!-- Card Header (always visible) -->
               <button
                 class="finding-row"
+                aria-expanded={expandedId === finding.id}
                 onclick={() => expandedId = expandedId === finding.id ? null : finding.id}
               >
                 <div class="finding-icon">
@@ -1075,9 +1094,7 @@
                       {#if finding.category === 'Runtime Threats'}
                         <!-- Deep-link buttons: navigate directly to the relevant log tabs -->
                         <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;">
-                          <button
-                            type="button"
-                            class="cm-nav-btn"
+                          <Button type="button" variant="outline" size="sm"
                             onclick={() => {
                               uiStore.preAppliedJournalPriority = 'all';
                               uiStore.targetSubTab = 'auth';
@@ -1086,10 +1103,8 @@
                           >
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                             View Auth Events
-                          </button>
-                          <button
-                            type="button"
-                            class="cm-nav-btn"
+                          </Button>
+                          <Button type="button" variant="outline" size="sm"
                             onclick={() => {
                               uiStore.preAppliedJournalPriority = 'all';
                               uiStore.targetSubTab = 'audit';
@@ -1098,7 +1113,7 @@
                           >
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                             View Command Audit
-                          </button>
+                          </Button>
                         </div>
                       {/if}
                     </div>
@@ -1202,91 +1217,31 @@
 
           {#if filteredFindings.length === 0}
             {#if activeCategory === 'Runtime Threats'}
-              <div style="display:flex; flex-direction:column; gap:16px; width:100%; box-sizing:border-box; padding:4px 0;">
-                <!-- Status Banner -->
-                <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:12px; padding:20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px;">
-                  <div style="display:flex; align-items:center; gap:14px;">
-                    <div style="width:44px; height:44px; border-radius:50%; background:rgba(34,197,94,0.12); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-                      <ShieldCheck size={26} color="var(--color-success)" />
-                    </div>
-                    <div>
-                      <div style="font-size:15px; font-weight:700; color:var(--color-text-primary); display:flex; align-items:center; gap:8px;">
-                        Zero Active Runtime Threats Detected
-                        <span style="font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; background:rgba(34,197,94,0.15); color:var(--color-success); font-family:var(--font-mono);">100% HEALTHY</span>
-                      </div>
-                      <div style="font-size:12px; color:var(--color-text-muted); margin-top:2px;">
-                        The continuous threat engine evaluated authentication logs and kernel audit activity with 0 security breaches or anomalies found.
-                      </div>
-                    </div>
-                  </div>
-                  <Button
-                    variant="outline"
-                    style="font-size:11px;"
-                    onclick={() => {
-                      uiStore.targetSubTab = 'threats';
-                      uiStore.setActiveTab('journal-logs');
-                    }}
-                  >
-                    View Live Threats Log
-                  </Button>
-                </div>
-
-                <!-- Active Safeguard Monitor Grid -->
-                <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:16px;">
-                  <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:12px;">
-                    Continuous Threat Defense Monitors (6 Active)
-                  </div>
-                  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:10px;">
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Sudo Password Brute-Force</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Monitors and flags repeated sudo password failures (≥ 3 attempts).</div>
-                      </div>
-                    </div>
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SSH Inbound Attack Defense</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Tracks remote IP addresses attempting brute-force SSH logins (≥ 5 attempts).</div>
-                      </div>
-                    </div>
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">SELinux Disablement Watch</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Alerts immediately if <code>setenforce 0</code> or permissive mode is commanded.</div>
-                      </div>
-                    </div>
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Firewall Ruleset Integrity</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Flags malicious firewall wiping (<code>iptables -F</code>, <code>nft flush</code>).</div>
-                      </div>
-                    </div>
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Credential & Identity Protection</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Watches unauthorized modifications to <code>/etc/passwd</code>, <code>/etc/shadow</code>, and sudoers.</div>
-                      </div>
-                    </div>
-                    <div style="background:var(--color-bg-card); border:1px solid var(--color-border); border-radius:8px; padding:12px; display:flex; align-items:flex-start; gap:10px;">
-                      <ShieldCheck size={16} color="var(--color-success)" style="margin-top:2px; flex-shrink:0;" />
-                      <div>
-                        <div style="font-size:12px; font-weight:600; color:var(--color-text-primary);">Direct Root Bypass Checks</div>
-                        <div style="font-size:11px; color:var(--color-text-muted); margin-top:1px;">Detects elevated commands executed outside standard sudo/pkexec accountability.</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <GuideBanner
+                variant="success"
+                icon={ShieldCheck}
+                title="Zero Active Runtime Threats Detected"
+                description="The correlation engine evaluated authentication and kernel audit activity for this range and found no violations."
+                actionLabel="View Live Threats Log"
+                onAction={() => {
+                  uiStore.targetSubTab = 'threats';
+                  uiStore.setActiveTab('journal-logs');
+                }}
+              />
             {:else}
-              <div class="empty-state">
-                <ShieldCheck size={40} color="var(--color-success)" />
-                <div>No issues in this category</div>
-              </div>
+              <EmptyState
+                icon={ShieldCheck}
+                title="No issues in this category"
+                description={activeView === 'muted'
+                  ? 'Every finding in this view is muted, so none are listed.'
+                  : activeSeverity !== 'all'
+                    ? `No ${activeSeverity} findings are listed under the current severity filter.`
+                    : activeCategory !== 'all'
+                      ? `Nothing needs attention in ${activeCategory}.`
+                      : 'Every check in this view passed — nothing needs attention.'}
+                actionLabel={activeView !== 'all' || activeSeverity !== 'all' || activeCategory !== 'all' ? 'Clear filters' : ''}
+                onAction={() => { activeView = 'all'; activeSeverity = 'all'; activeCategory = 'all'; }}
+              />
             {/if}
           {/if}
         </div>
@@ -1318,20 +1273,14 @@
   }
 
   :global(.module-page.security-auditor .header-wrapper) {
-    margin: 0 !important;
+    margin-top: 0;
+    margin-right: 0;
+    margin-left: 0;
+    margin-bottom: calc(var(--page-header-gap) - var(--page-content-gap));
     flex-shrink: 0;
   }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
-
-  .header-score-pill {
-    font-size: 12px;
-    font-weight: 700;
-    padding: 3px 10px;
-    border-radius: 20px;
-    border: 1px solid;
-    letter-spacing: 0.3px;
-  }
 
   /* ── Content Scroll Container ────────────────────────────────────────────── */
   .content-scroll {
@@ -1417,49 +1366,6 @@
     display: inline-block;
   }
 
-  .export-dropdown-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    z-index: 100;
-    min-width: 175px;
-    background: var(--color-bg-card, #0b1726);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 4px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    animation: menu-fade 0.15s ease;
-  }
-
-  .export-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 10px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.12s ease;
-  }
-
-  .export-menu-item:hover {
-    background: rgba(0, 218, 243, 0.1);
-    color: var(--color-text-primary);
-  }
-
-  @keyframes menu-fade {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
 
   /* ── Top Row ─────────────────────────────────────────────────────────────── */
   .top-row {
@@ -1476,7 +1382,7 @@
   .glass-panel {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 12px;
+    border-radius: 14px;
     padding: 16px;
   }
 
@@ -1603,7 +1509,7 @@
   }
 
   .sparkline-wrap-compact .sparkline-label {
-    font-size: 9px;
+    font-size: 10px;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1653,7 +1559,7 @@
   .stat-pill.clickable.active {
     background: var(--color-accent) !important;
     border-color: var(--color-accent) !important;
-    color: #00363d !important;
+    color: var(--color-text-on-accent) !important;
   }
 
   .stat-pill.critical { background: rgba(239,68,68,.12); color: var(--color-error); }
@@ -1763,7 +1669,7 @@
   .cat-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
-    border-radius: 10px;
+    border-radius: 14px;
     padding: 9px 11px;
     cursor: pointer;
     transition: all 0.18s ease;
@@ -1818,7 +1724,7 @@
     font-size: 10px;
     font-weight: 700;
     padding: 1px 5px;
-    border-radius: 10px;
+    border-radius: 9999px;
   }
 
   .cat-bar-wrap {
@@ -1851,30 +1757,16 @@
 
   /* ── Findings Section ────────────────────────────────────────────────────── */
 
+  /* Just the summary line now: the tabs it used to share with are in the
+     page header, so the sticky frosted bar is gone. */
   .findings-header {
-    position: sticky;
-    top: 0;
-    z-index: 50;
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
     flex-shrink: 0;
-    background: rgba(10, 15, 29, 0.85);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    padding: 10px 0;
-    margin-bottom: 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  :global(html.light-mode) .findings-header {
-    background: rgba(248, 250, 252, 0.88);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border-bottom: 1px solid rgba(226, 232, 240, 0.8);
-    box-shadow: none;
+    padding-bottom: 8px;
   }
 
   .findings-header-right {
@@ -1899,19 +1791,6 @@
     border-color: rgba(239, 68, 68, 0.25);
   }
 
-  :global(html.light-mode) .issue-badge {
-    background: #FFFFFF;
-    color: #475569;
-    border: 1px solid #E2E8F0;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-  }
-
-  :global(html.light-mode) .issue-badge.has-issues {
-    background: #FEF2F2;
-    color: #DC2626;
-    border-color: #FECACA;
-  }
-
   /* ── Findings List ────────────────────────────────────────────────────────── */
   .findings-list {
     display: flex;
@@ -1920,12 +1799,23 @@
     padding-bottom: 32px;
   }
 
+  /* Density comes from the same control the tables use — no new UI. */
+  .findings-list.density-compact .finding-row {
+    padding: 8px 12px;
+    gap: 10px;
+  }
+
+  .findings-list.density-spacious .finding-row {
+    padding: 18px 20px;
+    gap: 16px;
+  }
+
   /* ── Finding Card ────────────────────────────────────────────────────────── */
   .finding-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-left: 4px solid var(--sev-color);
-    border-radius: 10px;
+    border-radius: 8px;
     overflow: hidden;
     transition: background 0.12s ease, border-color 0.12s ease;
     contain: layout style;
@@ -1998,7 +1888,7 @@
   .sev-badge {
     font-size: 10px;
     padding: 2px 7px;
-    border-radius: 4px;
+    border-radius: 9999px;
     text-transform: uppercase;
     font-weight: 700;
     letter-spacing: 0.3px;
@@ -2073,25 +1963,6 @@
     line-height: 1.5;
   }
 
-  .cm-nav-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    font-family: inherit;
-    padding: 5px 10px;
-    border-radius: 6px;
-    border: 1px solid rgba(0, 218, 243, 0.3);
-    background: rgba(0, 218, 243, 0.08);
-    color: var(--color-accent);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-  .cm-nav-btn:hover {
-    background: rgba(0, 218, 243, 0.18);
-    border-color: rgba(0, 218, 243, 0.6);
-  }
 
   .reference-row {
     display: flex;
@@ -2128,18 +1999,14 @@
   }
 
   /* ── Empty State ─────────────────────────────────────────────────────────── */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    padding: 40px;
-    color: var(--color-text-muted);
-    font-size: 14px;
-  }
-
   /* ── Spinner ─────────────────────────────────────────────────────────────── */
-  @keyframes spin { 100% { transform: rotate(360deg); } }
+
+  /* Only the shared utility and the spinner keep moving for everyone. */
+  @media (prefers-reduced-motion: reduce) {
+    .cat-card.cat-threat { animation: none; }
+    .gauge-fill { transition: none; }
+    .cat-bar-fill { transition: none; }
+  }
 
   .spinner-sm {
     width: 13px;
@@ -2151,58 +2018,17 @@
   }
 
   /* ── Light Mode Category Summary Grid Cards ── */
-  :global(html.light-mode) .cat-card {
-    background: #FFFFFF !important;
-    border: 1px solid #E5E7EB !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
-  }
-  :global(html.light-mode) .cat-card:hover {
-    background: #F9FAFB !important;
-    border-color: #D1D5DB !important;
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
-  }
-  :global(html.light-mode) .cat-card.cat-active {
-    background: rgba(37, 99, 235, 0.08) !important;
-    border-color: #2563EB !important;
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15) !important;
-  }
-  :global(html.light-mode) .cat-name {
-    color: #111827 !important;
-  }
   :global(html.light-mode) .cat-bar {
     background: #E5E7EB !important;
   }
 
   /* ── Light Mode Accordion & Finding Card Overrides ── */
-  :global(html.light-mode) .finding-card {
-    background: #FFFFFF !important;
-    border: 1px solid #E5E7EB !important;
-    border-left: 4px solid var(--sev-color) !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
-  }
   :global(html.light-mode) .finding-card:hover,
   :global(html.light-mode) .finding-card.expanded {
     border-color: #D1D5DB !important;
     border-left: 4px solid var(--sev-color) !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08) !important;
     background: #FFFFFF !important;
-  }
-  :global(html.light-mode) .finding-row {
-    background: #FFFFFF !important;
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .finding-row:hover {
-    background: #F9FAFB !important;
-  }
-  :global(html.light-mode) .finding-title {
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .finding-desc {
-    color: #4B5563 !important;
-  }
-  :global(html.light-mode) .finding-detail {
-    background: #FAFAFA !important;
-    border-top: 1px solid #E5E7EB !important;
   }
   :global(html.light-mode) .countermeasure-box {
     background: rgba(37, 99, 235, 0.06) !important;

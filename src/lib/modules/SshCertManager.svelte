@@ -465,16 +465,14 @@
         </span>
       {/if}
 
-      <Button 
-        variant="outline" 
-        size="sm"
+      <button class="header-refresh-btn"
         onclick={loadAllData} 
         disabled={loading}
         title="Reload all SSH keys, configs, SSL certs, and fail2ban data"
       >
         <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} />
         <span>Refresh</span>
-      </Button>
+      </button>
     </div>
   </PageHeader>
 
@@ -1523,7 +1521,7 @@
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
-    gap: 10px;
+    gap: var(--page-content-gap);
     padding: 24px;
     box-sizing: border-box;
     background: transparent;

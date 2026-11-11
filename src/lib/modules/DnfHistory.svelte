@@ -523,9 +523,9 @@
 <div class="module-page">
   <PageHeader title="Packages & Updates" subtitle="Manage packages, view history, and perform system upgrades" icon={Package}>
     {#if activeTab === 'history'}
-      <Button variant="outline" size="sm" onclick={loadHistory} disabled={loadingHistory}>
+      <button class="header-refresh-btn" onclick={loadHistory} disabled={loadingHistory}>
         <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      </button>
     {:else if activeTab === 'updates'}
       <Button variant="outline" size="sm" onclick={checkUpdates} disabled={loadingUpdates}>
         <RefreshCw size={13} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
@@ -541,9 +541,9 @@
         <ListTree size={13} /> Versions
       </Button>
     {:else if activeTab === 'logs'}
-      <Button variant="outline" size="sm" onclick={loadDnfLog} disabled={loadingLog}>
+      <button class="header-refresh-btn" onclick={loadDnfLog} disabled={loadingLog}>
         <RefreshCw size={13} class={loadingLog ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      </button>
     {:else if activeTab === 'maintenance'}
       <Button variant="outline" size="sm" onclick={checkLockStatus} disabled={lockLoading}>
         <RefreshCw size={13} class={lockLoading ? 'animate-spin-slow' : ''} /> Check Lock
@@ -595,7 +595,7 @@
         placeholder="Filter by package, version or repository…"
       />
 
-      <Select bind:value={archFilter} aria-label="Filter by architecture">
+      <Select bind:value={archFilter} size="sm" aria-label="Filter by architecture">
         <option value="all">All architectures</option>
         {#each archList as arch}
           <option value={arch}>{arch}</option>

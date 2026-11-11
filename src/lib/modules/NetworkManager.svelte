@@ -924,9 +924,9 @@
       </div>
 
       <div class="tab-actions">
-        <Button variant="outline" class="btn-sm" onclick={loadData}>
+        <button class="header-refresh-btn" onclick={loadData}>
           <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Refresh
-        </Button>
+        </button>
         {#if activeTab === 'connections'}
           <Button variant="primary" class="btn-sm" onclick={() => editConnection('')}>
             <Plus size={13}/> Add Connection

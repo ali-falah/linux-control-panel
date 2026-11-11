@@ -345,15 +345,15 @@
       <Button variant={view === 'groups' ? 'primary' : 'ghost'} size="sm" onclick={() => view = 'groups'}>Groups</Button>
       <Button variant={view === 'sessions' ? 'primary' : 'ghost'} size="sm" onclick={() => view = 'sessions'}>Sessions</Button>
     </div>
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
+    <button class="header-refresh-btn" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </Button>
+    </button>
     {#if view === 'users'}
-      <Button variant="primary" onclick={() => showAddUser = !showAddUser}>
+      <Button size="sm" variant="primary" onclick={() => showAddUser = !showAddUser}>
         <UserPlus size={14} /> Add User
       </Button>
     {:else}
-      <Button variant="primary" onclick={() => showAddGroup = !showAddGroup}>
+      <Button size="sm" variant="primary" onclick={() => showAddGroup = !showAddGroup}>
         <Layers size={14} /> Add Group
       </Button>
     {/if}

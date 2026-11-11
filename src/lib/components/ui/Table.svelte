@@ -31,8 +31,20 @@
   let activeDensity = $derived(density ?? uiStore.tableDensity);
 </script>
 
-<div class="table-wrap table-{activeDensity} {className}" {style} {onscroll}>
+<div class="table-frame" {style}>
+  <div class="table-wrap table-{activeDensity} {className}" {onscroll}>
+    {#if tableAction}
+      <table use:tableAction={actionParams} {...rest}>
+        {@render children?.()}
+      </table>
+    {:else}
+      <table {...rest}>
+        {@render children?.()}
+      </table>
+    {/if}
+  </div>
   {#if showDensityToggle}
+    <!-- Outside the scrolling box, so it stays put while the rows move. -->
     <div class="tbl-floating-density-pill" role="group" aria-label="Table Density Toggle">
       <button
         type="button"
@@ -63,16 +75,6 @@
       </button>
     </div>
   {/if}
-
-  {#if tableAction}
-    <table use:tableAction={actionParams} {...rest}>
-      {@render children?.()}
-    </table>
-  {:else}
-    <table {...rest}>
-      {@render children?.()}
-    </table>
-  {/if}
 </div>
 
 <style>
@@ -85,6 +87,10 @@
     top: 6px;
     right: 8px;
     z-index: 30;
+    /* recessed until pointed at — 0.4 keeps it discoverable without
+       competing with the data; keyboard focus lifts it too */
+    opacity: 0.4;
+    transition: opacity 0.15s ease;
     display: inline-flex;
     align-items: center;
     background: rgba(11, 23, 38, 0.85);
@@ -100,6 +106,11 @@
     background: rgba(255, 255, 255, 0.9);
     border-color: #CBD5E1;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+  }
+
+  .tbl-floating-density-pill:hover,
+  .tbl-floating-density-pill:focus-within {
+    opacity: 1;
   }
 
   .tbl-floating-density-btn {
