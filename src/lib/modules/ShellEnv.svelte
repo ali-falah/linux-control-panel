@@ -657,14 +657,14 @@
           <Eye size={14} /> Live values
         </Button>
       {:else if activeTab === 'path'}
-        <button class="header-refresh-btn" onclick={loadPathEntries} id="shell-reload-path">
-          <RefreshCw size={14} /> Refresh
+        <button class="header-refresh-btn" onclick={loadPathEntries} disabled={pathLoading} id="shell-reload-path">
+          <RefreshCw size={14} class={pathLoading ? 'animate-spin-slow' : ''} /> Refresh
         </button>
         <Button variant="primary" onclick={() => (addPathForm = { directory: '', profile_path: profileFiles[0]?.path ?? '' })} id="shell-add-path">
           <Plus size={14} /> Add Entry
         </Button>
       {:else if activeTab === 'files'}
-        <button class="header-refresh-btn" onclick={loadProfileFiles} id="shell-reload-files"><RefreshCw size={14} /> Refresh</button>
+        <button class="header-refresh-btn" onclick={loadProfileFiles} disabled={filesLoading} id="shell-reload-files"><RefreshCw size={14} class={filesLoading ? 'animate-spin-slow' : ''} /> Refresh</button>
         <Button variant="primary" onclick={() => (showNewFileForm = !showNewFileForm)} id="shell-new-profile-d">
           <Plus size={14} /> New File
         </Button>
@@ -1104,7 +1104,7 @@
               <SearchBar bind:value={backupSearch} placeholder="Search backup archives…" style="width: 100%; margin: 0;" />
             </div>
             <Button variant="ghost" size="sm" onclick={loadBackups} disabled={backupsLoading} title="Refresh backup snapshots">
-              <RefreshCw size={12} class={backupsLoading ? 'animate-spin' : ''} />
+              <RefreshCw size={12} class={backupsLoading ? 'animate-spin-slow' : ''} />
             </Button>
           </div>
 

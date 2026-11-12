@@ -368,6 +368,8 @@
   let connListenCount = $derived(activeConnections.filter(c => c.state && c.state.toLowerCase().includes('listen')).length);
   let connEstabCount = $derived(activeConnections.filter(c => c.state && (c.state.toLowerCase().includes('estab') || c.state.toLowerCase().includes('connected'))).length);
 
+  let statsError = $state<string | null>(null);
+
   async function pollLeftAndCenter() {
     try {
       const [sysStats, temp, procList] = await Promise.all([
@@ -375,13 +377,16 @@
         invoke('get_cpu_temperature'),
         invoke('get_process_list')
       ]);
+      statsError = null;
       stats = sysStats;
       cpuTemp = temp as number | null;
       processes = procList as any[];
       cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
       ramHistory = [...ramHistory.slice(1), stats.ram_percent];
       swapHistory = [...swapHistory.slice(1), stats.swap_percent];
-    } catch(e) {}
+    } catch (e) {
+      statsError = e instanceof Error ? e.message : String(e);
+    }
     await fetchDiskIo();
   }
 
@@ -594,6 +599,17 @@
       return meta.is_up && (meta.ip4 || meta.ip6 || (networkSpeeds[iface.interface] && (networkSpeeds[iface.interface].rxSpeed > 0 || networkSpeeds[iface.interface].txSpeed > 0)));
     })
   );
+
+  // Idle interfaces (virtual NICs, bridges) are dropped so the card row stays
+  // short; when nothing is moving we fall back to the full list rather than
+  // showing an empty strip.
+  const busyInterfaces = $derived(
+    activeInterfaces.filter((iface) => {
+      const speeds = networkSpeeds[iface.interface];
+      return !!speeds && (speeds.rxSpeed > 0 || speeds.txSpeed > 0);
+    })
+  );
+  const shownInterfaces = $derived(busyInterfaces.length > 0 ? busyInterfaces : activeInterfaces);
 
   // Sparkline generator helper
   function generateSparkline(data: number[], height: number, width: number): string {
@@ -814,10 +830,17 @@
   }
 
   async function forceRefresh() {
-    if (currentTab === 'overview') {
-      await Promise.all([pollLeftAndCenter(), pollRight()]);
-    } else {
-      await pollProcesses();
+    // the header button spins/pulses off this flag — without it the refresh
+    // looked like a dead click
+    isRefreshing = true;
+    try {
+      if (currentTab === 'overview') {
+        await Promise.all([pollLeftAndCenter(), pollRight()]);
+      } else {
+        await pollProcesses();
+      }
+    } finally {
+      isRefreshing = false;
     }
   }
 </script>
@@ -847,7 +870,7 @@
     </div>
   </PageHeader>
 
-  <div class="page-content" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 6px 8px; overflow: hidden;">
+  <div class="page-content">
     {#if currentTab === 'overview'}
       {#if stats}
         <div class="monitor-layout" class:resources-collapsed={resourceSidebarCollapsed}>
@@ -874,14 +897,14 @@
                     <span>CPU Usage</span>
                     <span style="display: flex; gap: 8px; align-items: center;">
                       {#if cpuTemp !== null}
-                        <span style="font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: {cpuTemp >= 85 ? 'rgba(239, 68, 68, 0.15)' : cpuTemp >= 70 ? 'rgba(245, 158, 11, 0.15)' : 'rgba(255, 255, 255, 0.05)'}; color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'}; font-family: var(--font-mono);">
+                        <span style="font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: {cpuTemp >= 85 ? 'rgba(239, 68, 68, 0.15)' : cpuTemp >= 70 ? 'rgba(245, 158, 11, 0.15)' : 'var(--color-bg-hover)'}; color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'}; font-family: var(--font-mono);">
                           {cpuTemp.toFixed(0)}&deg;C
                         </span>
                       {/if}
                       <span>{stats.cpu_percent.toFixed(1)}%</span>
                     </span>
                   </div>
-                  <div style="height: 60px; background: rgba(0,0,0,0.2); border-radius: 8px; overflow:hidden; padding: 4px;">
+                  <div style="height: 60px; background: var(--color-bg-surface); border-radius: 8px; overflow:hidden; padding: 4px;">
                     <svg viewBox="0 0 200 60" preserveAspectRatio="none" style="width: 100%; height: 100%;">
                       <path d={generateSparkline(cpuHistory, 60, 200)} class="spark-fill cpu-fill" />
                       <polyline points={generateSparklineStroke(cpuHistory, 60, 200)} class="spark-stroke cpu-stroke" fill="none" />
@@ -900,14 +923,14 @@
 
                 <!-- CPU Cores Expandable Grid -->
                 {#if showCores && stats.cpu_per_core && stats.cpu_per_core.length > 0}
-                  <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 6px; padding: 8px; background: rgba(0,0,0,0.25); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+                  <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 6px; padding: 8px; background: var(--color-bg-surface); border-radius: 6px; border: 1px solid var(--color-border-subtle);">
                     {#each stats.cpu_per_core as corePct, idx}
                       <div style="display:flex; flex-direction:column; gap:2px; font-size:10px; font-family:var(--font-mono);">
                         <div style="display:flex; justify-content:space-between; color:var(--color-text-muted);">
                           <span>C{idx}</span>
                           <span>{corePct.toFixed(0)}%</span>
                         </div>
-                        <div class="progress-bg" style="height: 4px; background: rgba(255,255,255,0.05);">
+                        <div class="progress-bg" style="height: 4px; background: var(--color-bg-hover);">
                           <div class="progress-fill" style="width: {corePct}%; height: 100%; background: {corePct > 70 ? 'var(--color-error)' : corePct > 40 ? 'var(--color-warning)' : 'var(--color-accent)'};"></div>
                         </div>
                       </div>
@@ -921,10 +944,10 @@
                     <span>Memory</span>
                     <span>{stats.ram_percent.toFixed(1)}%</span>
                   </div>
-                  <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
+                  <div class="progress-bg" style="height: 8px; background: var(--color-bg-surface); border-radius: 4px; overflow: hidden;">
                     <div class="progress-fill ram-fill" style="width: {stats.ram_percent}%; height: 100%; transition: width 0.3s ease;"></div>
                   </div>
-                  <div style="height: 36px; background: rgba(0,0,0,0.2); border-radius: 6px; overflow:hidden; padding: 2px;">
+                  <div style="height: 36px; background: var(--color-bg-surface); border-radius: 6px; overflow:hidden; padding: 2px;">
                     <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
                       <polyline points={generateSparklineStroke(ramHistory, 36, 200)} style="stroke: var(--color-accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
                     </svg>
@@ -941,10 +964,10 @@
                     <span>Swap Space</span>
                     <span>{stats.swap_percent.toFixed(1)}%</span>
                   </div>
-                  <div class="progress-bg" style="height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden;">
+                  <div class="progress-bg" style="height: 8px; background: var(--color-bg-surface); border-radius: 4px; overflow: hidden;">
                     <div class="progress-fill swap-fill" style="width: {stats.swap_percent}%; height: 100%; transition: width 0.3s ease;"></div>
                   </div>
-                  <div style="height: 36px; background: rgba(0,0,0,0.2); border-radius: 6px; overflow:hidden; padding: 2px;">
+                  <div style="height: 36px; background: var(--color-bg-surface); border-radius: 6px; overflow:hidden; padding: 2px;">
                     <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
                       <polyline points={generateSparklineStroke(swapHistory, 36, 200)} style="stroke: var(--color-warning, #f59e0b); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
                     </svg>
@@ -957,7 +980,7 @@
 
                 <!-- Top Resource Consumers Section -->
                 {#if topCpuProcesses.length > 0}
-                  <div style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 10px; margin-top: 4px; display:flex; flex-direction:column; gap:8px;">
+                  <div style="border-top: 1px dashed var(--color-border); padding-top: 10px; margin-top: 4px; display:flex; flex-direction:column; gap:8px;">
                     <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; display:flex; justify-content:space-between; align-items:center;">
                       <button
                         onclick={() => showTopConsumers = !showTopConsumers}
@@ -978,7 +1001,7 @@
                     {#if showTopConsumers}
                       <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                         <!-- Top CPU -->
-                        <div style="background: rgba(0,0,0,0.2); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
+                        <div style="background: var(--color-bg-surface); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
                           <span style="font-size: 9px; font-weight:700; color: var(--color-info); text-transform: uppercase;">Top CPU</span>
                           {#each topCpuProcesses as p}
                             <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
@@ -989,7 +1012,7 @@
                         </div>
 
                         <!-- Top RAM -->
-                        <div style="background: rgba(0,0,0,0.2); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
+                        <div style="background: var(--color-bg-surface); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
                           <span style="font-size: 9px; font-weight:700; color: var(--color-accent); text-transform: uppercase;">Top RAM</span>
                           {#each topMemProcesses as p}
                             <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
@@ -1097,7 +1120,7 @@
               <div>
                 <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
                 <div class="iface-speed-row">
-                  {#each activeInterfaces as iface}
+                  {#each shownInterfaces as iface}
                     <div class="iface-speed-card">
                       <div style="display:flex; align-items:center; gap:6px;">
                         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
@@ -1118,7 +1141,7 @@
                       </div>
                     </div>
                   {/each}
-                  {#if activeInterfaces.length === 0}
+                  {#if shownInterfaces.length === 0}
                     <span style="font-size:11px; color:var(--color-text-muted); font-style:italic;">No active network interfaces.</span>
                   {/if}
                 </div>
@@ -1136,7 +1159,7 @@
                       type="text"
                       placeholder="Search IP, port, PID, process..."
                       bind:value={connSearch}
-                      style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); padding: 4px 8px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
+                      style="width: 100%; background: var(--color-bg-surface); border: 1px solid var(--color-border); padding: 4px 8px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
                     />
                   </div>
 
@@ -1186,7 +1209,7 @@
                       {#each filteredConnections as conn}
                         {@const isListen = conn.state && conn.state.toLowerCase().includes('listen')}
                         <tr 
-                          style="border-bottom:1px solid rgba(255,255,255,0.02); cursor: pointer; background: {isListen ? 'rgba(245, 158, 11, 0.04)' : 'transparent'};"
+                          style="border-bottom:1px solid var(--color-border-subtle); cursor: pointer; background: {isListen ? 'rgba(245, 158, 11, 0.04)' : 'transparent'};"
                           onclick={() => openConnectionDetails(conn)}
                           oncontextmenu={(e) => handleConnectionContextMenu(e, conn)}
                         >
@@ -1239,6 +1262,11 @@
               </div>
             </div>
           </Card>
+        </div>
+      {:else if statsError}
+        <div class="monitor-load-error" role="alert">
+          <span>Could not load system metrics: {statsError}</span>
+          <Button variant="outline" size="sm" onclick={() => pollLeftAndCenter()}>Retry</Button>
         </div>
       {:else}
         <div class="loading-state">
@@ -1573,7 +1601,7 @@
   {#if selectedConnection}
     <div style="display:flex; flex-direction:column; gap: 20px;">
       <!-- Port/Connection Section -->
-      <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
+      <div style="background: var(--color-bg-hover); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
         <h4 style="margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--color-info); display: flex; align-items: center; gap: 6px;">
           <Wifi size={14} /> Network Port Details
         </h4>
@@ -1582,17 +1610,17 @@
           <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">State</span> <span style="color:var(--color-success); font-weight:600;">{selectedConnection.state}</span></div>
           <div style="display:flex; justify-content:space-between; flex-direction:column; gap:2px;">
             <span style="color:var(--color-text-muted);">Local Address & Port</span>
-            <span style="font-family:var(--font-mono); background:rgba(0,0,0,0.2); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.local_address}</span>
+            <span style="font-family:var(--font-mono); background:var(--color-bg-surface); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.local_address}</span>
           </div>
           <div style="display:flex; justify-content:space-between; flex-direction:column; gap:2px;">
             <span style="color:var(--color-text-muted);">Remote Address & Port</span>
-            <span style="font-family:var(--font-mono); background:rgba(0,0,0,0.2); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.remote_address}</span>
+            <span style="font-family:var(--font-mono); background:var(--color-bg-surface); padding: 4px 8px; border-radius:4px; word-break:break-all;">{selectedConnection.remote_address}</span>
           </div>
         </div>
       </div>
 
       <!-- Process Section -->
-      <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
+      <div style="background: var(--color-bg-hover); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px;">
         <h4 style="margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--color-accent); display: flex; align-items: center; gap: 6px;">
           <Activity size={14} /> Process Details
         </h4>
@@ -1606,14 +1634,14 @@
               <div style="display:flex; flex-direction:column; gap: 8px; font-size: 12px;">
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Process Name</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.name}</span></div>
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">PID</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.pid}</span></div>
-                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">User</span> <span style="background:rgba(255,255,255,0.05); padding:1px 6px; border-radius:4px;">{detailedProcess.user}</span></div>
+                <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">User</span> <span style="background:var(--color-bg-hover); padding:1px 6px; border-radius:4px;">{detailedProcess.user}</span></div>
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">CPU Usage</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.cpu_percent.toFixed(1)}%</span></div>
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Memory Usage</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.mem_percent.toFixed(1)}% ({detailedProcess.mem_rss_mb.toFixed(1)} MB)</span></div>
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">State</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.state}</span></div>
                 <div style="display:flex; justify-content:space-between;"><span style="color:var(--color-text-muted);">Threads</span> <span style="font-weight:600; font-family:var(--font-mono);">{detailedProcess.threads}</span></div>
                 <div style="display:flex; flex-direction:column; gap:4px; margin-top:4px;">
                   <span style="color:var(--color-text-muted);">Full Command Line</span>
-                  <div style="font-family:var(--font-mono); background:rgba(0,0,0,0.3); padding: 8px; border-radius:4px; font-size:10px; max-height:100px; overflow-y:auto; word-break:break-all; border: 1px solid rgba(255,255,255,0.03);">
+                  <div style="font-family:var(--font-mono); background:var(--color-bg-surface); padding: 8px; border-radius:4px; font-size:10px; max-height:100px; overflow-y:auto; word-break:break-all; border: 1px solid var(--color-border-subtle);">
                     {detailedProcess.cmdline || detailedProcess.name}
                   </div>
                 </div>
@@ -1634,7 +1662,7 @@
             {:else}
               <div style="color:var(--color-text-muted); font-size:12px; display:flex; flex-direction:column; gap:10px; padding:8px 0;">
                 <p style="margin:0; line-height:1.4;">Detailed process metrics are unavailable (the process may have terminated, or requires higher privileges to inspect).</p>
-                <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); border-radius: 6px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                <div style="background: var(--color-bg-surface); border: 1px solid var(--color-border); border-radius: 6px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
                   <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
                     <span style="color:var(--color-text-secondary);">Application / Process:</span> 
                     <strong style="font-family:var(--font-mono); color:var(--color-text-primary); text-align:right; word-break:break-all;">{selectedConnection.process_name}</strong>
@@ -1702,7 +1730,7 @@
         </div>
 
         <!-- Parent Process Row -->
-        <div style="display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:6px; padding:8px 12px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; background:var(--color-bg-surface); border:1px solid var(--color-border); border-radius:6px; padding:8px 12px;">
           <div style="display:flex; align-items:center; gap:8px;">
             <CornerDownRight size={14} style="color:var(--color-text-muted);" />
             <div>
@@ -1742,9 +1770,9 @@
               No active sub-processes under this process.
             </div>
           {:else}
-            <div class="drawer-children-list" style="max-height:160px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:6px; padding:6px;">
+            <div class="drawer-children-list" style="max-height:160px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; background:var(--color-bg-surface); border:1px solid var(--color-border); border-radius:6px; padding:6px;">
               {#each inspectedChildProcesses as child (child.pid)}
-                <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-radius:4px; background:rgba(255,255,255,0.02);">
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-radius:4px; background:var(--color-bg-hover);">
                   <div style="display:flex; align-items:center; gap:6px; min-width:0;">
                     <span style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-muted); min-width:36px;">{child.pid}</span>
                     <span style="font-size:12px; font-weight:500; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{child.name}</span>
@@ -1778,7 +1806,7 @@
       </div>
 
       <!-- Process Signal Controls -->
-      <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
+      <div style="background:var(--color-bg-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
         <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:10px;">
           Process Signals
         </div>
@@ -1832,7 +1860,7 @@
       </div>
 
       <!-- Priority / Niceness Adjustment -->
-      <div style="background:rgba(0,0,0,0.2); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
+      <div style="background:var(--color-bg-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px;">
         <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
           <span>Process Scheduling Priority (Niceness)</span>
           <span class="badge" style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary);">{inspectedProcessPriority} ({processPriorityLabel(Number(inspectedProcessPriority))})</span>
@@ -1873,7 +1901,7 @@
             {/if}
           </button>
         </div>
-        <div style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary); background:rgba(0,0,0,0.3); border:1px solid var(--color-border); border-radius:6px; padding:10px; word-break:break-all; max-height:120px; overflow-y:auto; line-height:1.4;">
+        <div style="font-family:var(--font-mono); font-size:11px; color:var(--color-text-primary); background:var(--color-bg-surface); border:1px solid var(--color-border); border-radius:6px; padding:10px; word-break:break-all; max-height:120px; overflow-y:auto; line-height:1.4;">
           {inspectedProcess.cmdline || inspectedProcess.name}
         </div>
       </div>
@@ -1955,9 +1983,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .page-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 2px 8px 6px 8px;
+    overflow: hidden;
+  }
   /* 2-column layout */ .monitor-layout {
     display: grid;
-    grid-template-columns: 4fr 10fr;
+    grid-template-columns: minmax(260px, 4fr) minmax(0, 10fr);
     gap: 10px;
     align-items: stretch;
     height: 100%;
@@ -1965,7 +2002,7 @@
     width: 100%;
     transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }.monitor-layout.resources-collapsed {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }.sidebar-collapse-toggle-btn {
     display: inline-flex;
     align-items: center;
@@ -2001,24 +2038,20 @@
     border-color: var(--color-accent);
     color: var(--color-accent);
   }.monitor-column-left {
-    display: flex;
-    flex-direction: column;
+    /* One scroll owner (this column) with explicit floors: every row is at
+       least its content, then shares the leftover by weight — a content-sized
+       sibling can no longer push another panel to zero height. */
+    display: grid;
+    grid-template-rows: minmax(min-content, 1.5fr) minmax(min-content, 1fr) minmax(min-content, 0.8fr);
     gap: 10px;
     height: 100%;
     min-height: 0;
     overflow-y: auto;
-  /* Panels size to their content and only ever grow: with the shared
-     flex-basis:0 a content-sized sibling (Disk I/O) pushed these two to zero
-     height whenever it was taller than the column. */
   }.monitor-column-left :global(.monitor-panel) {
+    /* grid stretches a card to its row; min-height:auto keeps the row's
+       min-content floor honest (the shared rule sets 0) */
     height: auto;
-    flex-grow: 1;
-    flex-shrink: 0;
-    flex-basis: auto;
-  }.monitor-column-left :global(.monitor-panel):first-child {
-    flex-grow: 1.5;
-  }.monitor-column-left :global(.monitor-panel):last-child {
-    flex-grow: 0.8;
+    min-height: auto;
   }:global(.active-conn-table table thead th) {
     position: sticky;
     top: 0;
@@ -2031,13 +2064,15 @@
     min-height: 0;
   }.panel-scroll {
     flex: 1;
-    overflow-y: auto;
+    /* No inner scrollbar: the column above owns scrolling, and an overflow box
+       has a min-content size of 0, which would collapse the grid row. */
+    overflow: visible;
     display: flex;
     flex-direction: column;
     gap: 16px;
   }.spark-stroke { stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }.cpu-stroke { stroke: var(--color-info); }.cpu-fill { fill: var(--color-info); opacity: 0.15; }.progress-bg {
     height: 6px;
-    background: rgba(0,0,0,0.3);
+    background: var(--color-bg-surface);
     border-radius: 4px;
     overflow: hidden;
   }.progress-fill {
@@ -2340,7 +2375,7 @@
     font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }.user-badge {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-hover);
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 11px;

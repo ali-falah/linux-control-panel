@@ -25,6 +25,7 @@
   import { aiStore } from '../stores/aiStore.svelte.ts';
   import { highlightSegments } from '../utils/highlight.ts';
   import { csvCell } from '../utils/csv.ts';
+  import { safeExport } from '../utils/safeExport.ts';
 
   // raw state: a large journal page is replaced wholesale, never mutated in
   // place — deep reactivity would proxy every one of the 20k entries
@@ -687,15 +688,16 @@
       exportMenuPos = { x: rect.left, y: rect.bottom + 6 };
     }
     showExportMenu = !showExportMenu;
+    console.info('[export] menu', showExportMenu ? 'opened' : 'closed');
   }
 
   const exportMenuItems: ContextMenuItem[] = [
-    { label: 'Export as Text (.txt)', icon: FileText, action: () => handleExportLogs('txt', false) },
-    { label: 'Export as JSON (.json)', icon: Code, action: () => handleExportLogs('json', false) },
-    { label: 'Export as CSV (.csv, loaded rows)', icon: FileText, action: () => handleExportLogs('csv', false) },
-    { label: 'Export full range (CSV)', icon: FolderOpen, action: handleExportAll },
+    { label: 'Export as Text (.txt)', icon: FileText, action: () => safeExport(() => handleExportLogs('txt', false)) },
+    { label: 'Export as JSON (.json)', icon: Code, action: () => safeExport(() => handleExportLogs('json', false)) },
+    { label: 'Export as CSV (.csv, loaded rows)', icon: FileText, action: () => safeExport(() => handleExportLogs('csv', false)) },
+    { label: 'Export full range (CSV)', icon: FolderOpen, action: () => safeExport(handleExportAll) },
     { label: '', divider: true },
-    { label: 'Export Text & Open Folder', icon: FolderOpen, action: () => handleExportLogs('txt', true) },
+    { label: 'Export Text & Open Folder', icon: FolderOpen, action: () => safeExport(() => handleExportLogs('txt', true)) },
   ];
 
   function csvRowsForTab(tab: string, items: any[]): unknown[][] {
@@ -779,6 +781,7 @@
       }
 
       if (items.length === 0) {
+        console.warn('[export] skipped: no entries in the selected range');
         uiStore.addToast('No entries in the selected range', 'warning');
         return;
       }
@@ -788,13 +791,16 @@
         .join('\n');
       const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `${activeTab}-full-${dateStr}.csv`;
+      console.info(`[export] writing ${filename} (${content.length} bytes, ${items.length} rows)`);
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
+      console.info('[export] wrote', savedPath);
       lastExportedFile = { name: filename, path: savedPath };
       uiStore.addToast(
         `Exported ${items.length.toLocaleString()} entries to ${filename}${truncated ? ' (range still exceeds the 200k cap)' : ''}`,
         truncated ? 'warning' : 'success',
       );
     } catch (e) {
+      console.error('[export] backend write failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
@@ -808,6 +814,7 @@
 
     if (activeTab === 'journal') {
       if (filteredLogs.length === 0) {
+        console.warn('[export] skipped: no journal logs loaded');
         uiStore.addToast('No journal logs to export', 'warning');
         return;
       }
@@ -836,6 +843,7 @@
     } else if (activeTab === 'auth') {
       const items = filteredAuthEvents;
       if (items.length === 0) {
+        console.warn('[export] skipped: no auth events loaded');
         uiStore.addToast('No auth events to export', 'warning');
         return;
       }
@@ -855,6 +863,7 @@
     } else if (activeTab === 'audit') {
       const items = filteredAuditLogs;
       if (items.length === 0) {
+        console.warn('[export] skipped: no audit logs loaded');
         uiStore.addToast('No audit logs to export', 'warning');
         return;
       }
@@ -874,6 +883,7 @@
     } else if (activeTab === 'threats') {
       const items = filteredThreats;
       if (items.length === 0) {
+        console.warn('[export] skipped: no threat entries loaded');
         uiStore.addToast('No threat entries to export', 'warning');
         return;
       }
@@ -895,7 +905,9 @@
     try {
       // The backend writes the file straight into ~/Downloads — a browser
       // download on top of that would leave the user with two copies.
+      console.info(`[export] writing ${filename} (${content.length} bytes, ${exportCount} rows)`);
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
+      console.info('[export] wrote', savedPath);
       lastExportedFile = { name: filename, path: savedPath };
 
       if (openFolder) {
@@ -905,7 +917,7 @@
         uiStore.addToast(`Exported ${exportCount} logs to ${filename}`, 'success');
       }
     } catch (e: any) {
-      console.error('Failed to export logs:', e);
+      console.error('[export] backend write failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
@@ -1799,7 +1811,7 @@
                   </div>
                 </div>
               </div>
-              <button class="header-refresh-btn" onclick={fetchThreats}>
+              <button class="header-refresh-btn" onclick={fetchThreats} disabled={loadingThreats}>
                 <RefreshCw size={13} class={loadingThreats ? 'animate-spin-slow' : ''} /> Rescan Logs
               </button>
             </div>

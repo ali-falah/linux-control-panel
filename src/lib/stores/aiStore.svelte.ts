@@ -350,6 +350,8 @@ export class AiStore {
   // Connection & model list
   ollamaConnected = $state(false);
   availableModels = $state<string[]>([]);
+  /** True while the model list is being fetched, so the button can animate. */
+  ollamaChecking = $state(false);
 
   // Active Task Modal State
   analyzing = $state(false);
@@ -415,6 +417,7 @@ export class AiStore {
   }
 
   async checkOllamaStatus() {
+    this.ollamaChecking = true;
     try {
       const models = await invoke<string[]>('ai_check_ollama_status', { url: this.ollamaUrl });
       this.ollamaConnected = true;
@@ -428,6 +431,8 @@ export class AiStore {
     } catch (e) {
       this.ollamaConnected = false;
       this.availableModels = [];
+    } finally {
+      this.ollamaChecking = false;
     }
   }
 

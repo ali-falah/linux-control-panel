@@ -521,7 +521,7 @@
       <div class="card module-content-scroll" style="flex:1; display:flex; flex-direction:column; gap:20px">
         {#if loadingRules}
           <div style="display:flex; align-items:center; gap:8px; color:var(--color-text-muted)">
-            <RefreshCw size={14} class="animate-spin" /> Loading rules…
+            <RefreshCw size={14} class="animate-spin-slow" /> Loading rules…
           </div>
         {:else if rules}
           <!-- Sub-tabs bar -->

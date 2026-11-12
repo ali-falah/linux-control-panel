@@ -880,7 +880,7 @@
                       disabled={undoingId === entry.id}
                     >
                       {#if undoingId === entry.id}
-                        <RefreshCw size={14} class="animate-spin" /> Rolling back…
+                        <RefreshCw size={14} class="animate-spin-slow" /> Rolling back…
                       {:else}
                         <Undo2 size={14} /> Undo Transaction
                       {/if}

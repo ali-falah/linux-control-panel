@@ -3,7 +3,7 @@
   import SearchBar from './ui/SearchBar.svelte';
   import { 
     X, AlertTriangle, CheckCircle2, ArrowRight, Download, HardDrive, 
-    RefreshCw, Package, Play, ShieldAlert, Terminal, Layers
+    Package, Play, ShieldAlert, Terminal, Layers
   } from '@lucide/svelte';
   import { fade, fly } from 'svelte/transition';
 

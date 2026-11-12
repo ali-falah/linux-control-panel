@@ -230,9 +230,9 @@
             <AlertTriangle size={32} class="text-error" />
             <div class="error-title">AI Analysis Failed</div>
             <div class="error-msg">{aiStore.analysisError}</div>
-            <Button variant="outline" size="sm" onclick={handleRetry}>
-              <RefreshCw size={13} /> Retry Analysis
-            </Button>
+            <button class="header-refresh-btn" onclick={handleRetry} disabled={aiStore.analyzing}>
+              <RefreshCw size={13} class={aiStore.analyzing ? 'animate-spin-slow' : ''} /> Retry Analysis
+            </button>
           </div>
         {/if}
       </div>

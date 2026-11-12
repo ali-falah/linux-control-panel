@@ -1559,13 +1559,15 @@
   }
 
   async function exportLog() {
-    const blob = new Blob([logContent], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = selectedLog.split('/').pop() ?? 'nginx.log';
-    a.click();
-    URL.revokeObjectURL(url);
+    // The webview has no download handler, so a Blob + <a>.click() does
+    // nothing — write the file through the backend like every other export.
+    try {
+      const filename = selectedLog.split('/').pop() ?? 'nginx.log';
+      await invoke<string>('export_journal_logs_to_file', { filename, content: logContent });
+      uiStore.addToast(`Exported ${filename} to Downloads.`, 'success');
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
   }
 
   // ─── SSL ───────────────────────────────────────────────────────────────────
@@ -1860,8 +1862,8 @@
 
       <div class="tab-actions">
         {#if activeTab === 'sites'}
-          <button class="header-refresh-btn" onclick={loadSites} id="nginx-refresh-sites">
-            <RefreshCw size={13} /> Refresh
+          <button class="header-refresh-btn" onclick={loadSites} disabled={sitesLoading} id="nginx-refresh-sites">
+            <RefreshCw size={13} class={sitesLoading ? 'animate-spin-slow' : ''} /> Refresh
           </button>
           <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
             <Plus size={13} /> New Site
@@ -1870,14 +1872,14 @@
             <Globe size={13} /> New Proxy
           </Button>
         {:else if activeTab === 'editor'}
-          <button class="header-refresh-btn" onclick={loadConfigs} id="nginx-refresh-configs">
-            <RefreshCw size={13} /> Refresh
+          <button class="header-refresh-btn" onclick={loadConfigs} disabled={editorLoading} id="nginx-refresh-configs">
+            <RefreshCw size={13} class={editorLoading ? 'animate-spin-slow' : ''} /> Refresh
           </button>
           <Button variant="outline" class="btn-sm" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
             <ArchiveRestore size={13} /> Backups ({backups.length})
           </Button>
         {:else if activeTab === 'www'}
-          <button class="header-refresh-btn" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={13} /> Refresh</button>
+          <button class="header-refresh-btn" onclick={loadWww} disabled={wwwLoading} id="nginx-refresh-www"><RefreshCw size={13} class={wwwLoading ? 'animate-spin-slow' : ''} /> Refresh</button>
           <Button variant="primary" class="btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
             <FolderPlus size={13} /> New Dir
           </Button>
@@ -1898,7 +1900,7 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <button class="header-refresh-btn" onclick={loadLog} id="nginx-log-refresh">
+            <button class="header-refresh-btn" onclick={loadLog} disabled={logLoading} id="nginx-log-refresh">
               <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
             </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
@@ -1912,8 +1914,8 @@
             </Button>
           </div>
         {:else if activeTab === 'ssl'}
-          <button class="header-refresh-btn" onclick={loadSslCerts} id="nginx-refresh-ssl">
-            <RefreshCw size={13} /> Refresh
+          <button class="header-refresh-btn" onclick={loadSslCerts} disabled={sslLoading} id="nginx-refresh-ssl">
+            <RefreshCw size={13} class={sslLoading ? 'animate-spin-slow' : ''} /> Refresh
           </button>
         {/if}
       </div>
@@ -1980,8 +1982,9 @@
                 class="btn-sm" 
                 onclick={() => Promise.all([loadServiceStatus(), loadTestResult(), loadStats(), loadSites()])}
                 title="Refresh all overview statistics"
+                disabled={serviceLoading || testLoading || sitesLoading}
               >
-                <RefreshCw size={13} class={serviceLoading || testLoading ? 'animate-spin' : ''} />
+                <RefreshCw size={13} class={serviceLoading || testLoading || sitesLoading ? 'animate-spin-slow' : ''} />
                 <span>Refresh</span>
               </Button>
             </div>
@@ -3252,7 +3255,7 @@
               </span>
 
               <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
-                <RefreshCw size={12} class={analyticsLoading ? 'animate-spin' : ''} />
+                <RefreshCw size={12} class={analyticsLoading ? 'animate-spin-slow' : ''} />
                 <span>Refresh</span>
               </button>
             </div>

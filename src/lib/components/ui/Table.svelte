@@ -89,7 +89,7 @@
     z-index: 30;
     /* recessed until pointed at — 0.4 keeps it discoverable without
        competing with the data; keyboard focus lifts it too */
-    opacity: 0.4;
+    opacity: 0.3;
     transition: opacity 0.15s ease;
     display: inline-flex;
     align-items: center;

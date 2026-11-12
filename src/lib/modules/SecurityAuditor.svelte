@@ -11,6 +11,7 @@
   import EmptyState from '../components/ui/EmptyState.svelte';
   import GuideBanner from '../components/ui/GuideBanner.svelte';
   import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
+  import { safeExport } from '../utils/safeExport.ts';
   import {
     Shield, ShieldAlert, ShieldCheck, Info, CheckCircle2,
     AlertTriangle, XCircle, RefreshCw, Lock, Zap, Download,
@@ -110,11 +111,12 @@
     const rect = (trigger as HTMLElement | null)?.getBoundingClientRect();
     if (rect) exportMenuPos = { x: rect.right, y: rect.bottom + 6 };
     showExportDropdown = !showExportDropdown;
+    console.info('[export] menu', showExportDropdown ? 'opened' : 'closed');
   }
 
   const exportDropdownItems: ContextMenuItem[] = [
-    { label: 'Export HTML Report', icon: Download, action: exportHtmlReport },
-    { label: 'Export JSON Data', icon: Download, action: exportReport },
+    { label: 'Export HTML Report', icon: Download, action: () => safeExport(exportHtmlReport) },
+    { label: 'Export JSON Data', icon: Download, action: () => safeExport(exportReport) },
   ];
 
   // ── Category config ────────────────────────────────────────────────────────
@@ -709,16 +711,22 @@
   /** Write an export through the backend: a Blob + <a>.click() is a silent
       no-op in the Tauri webview, which is why this button did nothing. */
   async function saveExportFile(filename: string, content: string, message: string) {
+    console.info(`[export] writing ${filename} (${content.length} bytes)`);
     try {
-      await invoke<string>('export_journal_logs_to_file', { filename, content });
-      uiStore.addToast(message, 'success', 6000, 'Open Folder', openDownloadsFolder);
+      const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
+      console.info('[export] wrote', savedPath);
+      uiStore.addToast(`${message} Saved to ${savedPath}`, 'success', 6000, 'Open Folder', openDownloadsFolder);
     } catch (e) {
+      console.error('[export] backend write failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
 
   async function exportReport() {
-    if (!report) return;
+    if (!report) {
+      uiStore.addToast('There is no audit report to export yet.', 'warning');
+      return;
+    }
     const data = {
       generated: new Date().toISOString(),
       score: effectiveScore,
@@ -752,7 +760,11 @@
 
   // Export report as styled HTML
   async function exportHtmlReport() {
-    if (!report) return;
+    if (!report) {
+      console.warn('[export] no report loaded yet');
+      uiStore.addToast('There is no audit report to export yet.', 'warning');
+      return;
+    }
     const dateStr = new Date().toLocaleString();
     const html = `<!DOCTYPE html>
 <html>
@@ -839,7 +851,7 @@
         <button
           class="export-action-btn"
           onclick={(e) => toggleExportDropdown(e.currentTarget)}
-          title="Export Audit Report Options"
+          title="Export options"
           aria-haspopup="menu"
           aria-expanded={showExportDropdown}
         >

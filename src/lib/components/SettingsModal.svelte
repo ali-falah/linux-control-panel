@@ -535,10 +535,11 @@
                         <label for="ai-model-sel" class="config-label">Installed Model</label>
                         <button
                           type="button"
-                          class="link-action-btn"
+                          class="header-refresh-btn"
                           onclick={() => aiStore.checkOllamaStatus()}
+                          disabled={aiStore.ollamaChecking}
                         >
-                          <RefreshCw size={11} /> Refresh Models
+                          <RefreshCw size={11} class={aiStore.ollamaChecking ? 'animate-spin-slow' : ''} /> Refresh Models
                         </button>
                       </div>
 
@@ -1207,18 +1208,6 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-  }.link-action-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-accent);
-    cursor: pointer;
-    font-size: 11px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 0;
-  }.link-action-btn:hover {
-    text-decoration: underline;
   }.styled-select {
     padding: 8px 12px;
     background: var(--color-bg-card);

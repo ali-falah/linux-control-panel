@@ -924,7 +924,7 @@
       </div>
 
       <div class="tab-actions">
-        <button class="header-refresh-btn" onclick={loadData}>
+        <button class="header-refresh-btn" onclick={loadData} disabled={loading}>
           <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} /> Refresh
         </button>
         {#if activeTab === 'connections'}

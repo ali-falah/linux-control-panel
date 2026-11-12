@@ -322,6 +322,8 @@
     padding-top: 6px;
   }.page-header {
     display: flex;
+    /* when the header wraps, the second row must not sit on top of the first */
+    row-gap: var(--page-header-gap);
     /* when the tabs + actions do not fit, the whole actions block moves to its
        own line instead of the breadcrumb being truncated mid-group */
     flex-wrap: wrap;

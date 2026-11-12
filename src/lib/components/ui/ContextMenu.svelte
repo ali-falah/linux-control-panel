@@ -50,6 +50,23 @@
   // The effect below owns the final position — these are only starting values
   let clampedX = $state(0);
   let clampedY = $state(0);
+  // Svelte flushes the new menu into the DOM between the click listener on the
+  // trigger and the one on window. The very click that opened this menu would
+  // therefore reach the outside-click handler with the menu already mounted and
+  // close it again — a real click could never keep the menu open.
+  let ignoreOutsideClick = false;
+
+  $effect(() => {
+    if (!isOpen) {
+      ignoreOutsideClick = false;
+      return;
+    }
+    ignoreOutsideClick = true;
+    const timer = setTimeout(() => {
+      ignoreOutsideClick = false;
+    }, 0);
+    return () => clearTimeout(timer);
+  });
 
   function close() {
     isOpen = false;
@@ -107,7 +124,15 @@
   function handleItemClick(item: ContextMenuItem) {
     if (item.disabled || item.divider) return;
     close();
-    item.action?.();
+    try {
+      const result: unknown = item.action?.();
+      // an async action that rejects would otherwise disappear silently
+      if (result instanceof Promise) {
+        result.catch((error) => console.error('Menu action failed:', error));
+      }
+    } catch (error) {
+      console.error('Menu action failed:', error);
+    }
   }
 
   $effect(() => {
@@ -119,12 +144,14 @@
 
 <svelte:window 
   onclick={(e) => {
-    if (isOpen && menuEl && !menuEl.contains(e.target as Node)) {
+    if (ignoreOutsideClick) return;
+    if (isOpen && menuEl && e.target instanceof Node && !menuEl.contains(e.target)) {
       close();
     }
   }}
   oncontextmenu={(e) => {
-    if (isOpen && menuEl && !menuEl.contains(e.target as Node)) {
+    if (ignoreOutsideClick) return;
+    if (isOpen && menuEl && e.target instanceof Node && !menuEl.contains(e.target)) {
       close();
     }
   }}
@@ -247,11 +274,9 @@
   @keyframes contextMenuFade {
     from {
       opacity: 0;
-      transform: scale(0.96) translateY(-2px);
     }
     to {
       opacity: 1;
-      transform: scale(1) translateY(0);
     }
   }
 

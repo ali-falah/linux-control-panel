@@ -481,6 +481,43 @@ mod tests {
         }
     }
 
+    /// The command itself: it must actually write the file and return the path
+    /// it wrote to, or the export silently produces nothing.
+    #[test]
+    fn export_writes_the_file_and_returns_its_path() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let name = format!("lcp-selftest-{}.csv", std::process::id());
+        let content = "a,b\n1,2";
+        let path = rt
+            .block_on(super::export_journal_logs_to_file(name.clone(), content.to_string()))
+            .expect("export must succeed");
+        let written = std::fs::read_to_string(&path).expect("file must exist and be readable");
+        assert_eq!(written, content, "the written bytes must match");
+        assert!(
+            std::path::Path::new(&path).ends_with(&name),
+            "the file must be named as requested: {path}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn export_rejects_a_traversal_filename_without_writing() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let err = rt
+            .block_on(super::export_journal_logs_to_file(
+                "../lcp-evil.csv".to_string(),
+                "x".to_string(),
+            ))
+            .expect_err("traversal must be refused");
+        assert!(err.contains("path"), "the error must name the problem: {err}");
+    }
+
     #[test]
     fn export_filenames_cannot_escape_the_download_directory() {
         for name in [
