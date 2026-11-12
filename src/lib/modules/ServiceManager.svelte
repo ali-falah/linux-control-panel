@@ -38,7 +38,11 @@
     if (typeof localStorage !== 'undefined') persistRecoveryWarning(localStorage, next);
   }
 
+  let reloadRetrying = $state(false);
+
   async function retryDaemonReload() {
+    if (reloadRetrying) return;
+    reloadRetrying = true;
     try {
       await invoke<string>('unit_daemon_reload');
       setRecoveryWarning(
@@ -50,6 +54,8 @@
         reduceRecoveryWarning(recoveryWarning, { kind: 'recovery-failed', error: e })
       );
       uiStore.addToast(`daemon-reload retry failed: ${e}`, 'error');
+    } finally {
+      reloadRetrying = false;
     }
   }
   import {
@@ -908,8 +914,8 @@
           it without rewriting any configuration. This warning stays until that reload is confirmed successful.
         </div>
         <pre style="white-space:pre-wrap; word-break:break-word; font-size:11px; margin:8px 0; padding:8px; background:var(--color-bg-base); border-radius:6px; color:var(--color-text-muted);">{recoveryWarning}</pre>
-        <Button variant="outline" class="btn-sm" onclick={retryDaemonReload}>
-          <RefreshCw size={13} /> Retry daemon-reload
+        <Button variant="outline" class="btn-sm" onclick={retryDaemonReload} disabled={reloadRetrying}>
+          <RefreshCw size={13} class={reloadRetrying ? 'animate-spin-slow' : ''} /> Retry daemon-reload
         </Button>
       </div>
     </div>

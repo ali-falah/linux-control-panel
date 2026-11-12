@@ -229,6 +229,7 @@
   let serviceStatus = $state<NginxServiceStatus | null>(null);
   let testResult = $state<NginxTestResult | null>(null);
   let stats = $state<NginxStats | null>(null);
+  let statsLoading = $state(false);
   let serviceLoading = $state(false);
   const nginxServiceActions: Array<{
     action: 'start' | 'stop' | 'restart' | 'reload';
@@ -686,11 +687,14 @@
   }
 
   async function loadStats() {
+    statsLoading = true;
     try {
       stats = await invoke<NginxStats>('nginx_get_stats');
       statusStore.setLastCommand('curl -s http://localhost/nginx_status', 0, true);
     } catch {
       statusStore.setLastCommand('curl -s http://localhost/nginx_status', 1, false);
+    } finally {
+      statsLoading = false;
     }
   }
 
@@ -1841,8 +1845,8 @@
           <code>sudo pacman -S nginx</code>
         </div>
       </div>
-      <Button variant="primary" class="" onclick={init}>
-        <RefreshCw size={14} /> Recheck
+      <Button variant="primary" class="" onclick={init} disabled={loading}>
+        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Recheck
       </Button>
     </div>
   {:else}
@@ -1982,9 +1986,9 @@
                 class="btn-sm" 
                 onclick={() => Promise.all([loadServiceStatus(), loadTestResult(), loadStats(), loadSites()])}
                 title="Refresh all overview statistics"
-                disabled={serviceLoading || testLoading || sitesLoading}
+                disabled={serviceLoading || testLoading || sitesLoading || statsLoading}
               >
-                <RefreshCw size={13} class={serviceLoading || testLoading || sitesLoading ? 'animate-spin-slow' : ''} />
+                <RefreshCw size={13} class={serviceLoading || testLoading || sitesLoading || statsLoading ? 'animate-spin-slow' : ''} />
                 <span>Refresh</span>
               </Button>
             </div>

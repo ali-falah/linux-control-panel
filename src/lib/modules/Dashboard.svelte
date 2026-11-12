@@ -2103,7 +2103,7 @@
             <div class="available-services-list-expanded">
               {#if loadingUnits}
                 <div style="padding:32px; text-align:center; color:var(--color-text-muted); font-size:12.5px;">
-                  <RefreshCw size={16} class="spin" style="margin-right:6px;" /> Loading installed service units…
+                  <RefreshCw size={16} class="animate-spin-slow" style="margin-right:6px;" /> Loading installed service units…
                 </div>
               {:else if filteredAvailableUnits.length === 0}
                 <div style="padding:32px; text-align:center; color:var(--color-text-muted); font-size:12.5px;">

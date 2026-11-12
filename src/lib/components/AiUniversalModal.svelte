@@ -235,7 +235,7 @@
                     title="Apply the pre-validated fix using the application's built-in hardened command"
                   >
                     {#if applyingFix}
-                      <RefreshCw size={13} class="spin" /> Applying…
+                      <RefreshCw size={13} class="animate-spin-slow" /> Applying…
                     {:else}
                       <Lock size={13} /> Apply Verified Fix
                     {/if}
