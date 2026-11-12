@@ -9,11 +9,10 @@ import { uiStore } from '../stores/ui.svelte.ts';
  * export menu action routes through it.
  */
 export async function safeExport(exporter: () => void | Promise<void>): Promise<void> {
-  console.info('[export] action started');
   try {
     await exporter();
   } catch (e) {
-    console.error('[export] action failed:', e);
+    console.error('Export failed:', e);
     uiStore.addToast(`Export failed: ${e}`, 'error');
   }
 }

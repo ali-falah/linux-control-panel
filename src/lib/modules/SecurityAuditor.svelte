@@ -111,7 +111,6 @@
     const rect = (trigger as HTMLElement | null)?.getBoundingClientRect();
     if (rect) exportMenuPos = { x: rect.right, y: rect.bottom + 6 };
     showExportDropdown = !showExportDropdown;
-    console.info('[export] menu', showExportDropdown ? 'opened' : 'closed');
   }
 
   const exportDropdownItems: ContextMenuItem[] = [
@@ -711,13 +710,11 @@
   /** Write an export through the backend: a Blob + <a>.click() is a silent
       no-op in the Tauri webview, which is why this button did nothing. */
   async function saveExportFile(filename: string, content: string, message: string) {
-    console.info(`[export] writing ${filename} (${content.length} bytes)`);
     try {
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
-      console.info('[export] wrote', savedPath);
       uiStore.addToast(`${message} Saved to ${savedPath}`, 'success', 6000, 'Open Folder', openDownloadsFolder);
     } catch (e) {
-      console.error('[export] backend write failed:', e);
+      console.error('Export failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
@@ -761,7 +758,6 @@
   // Export report as styled HTML
   async function exportHtmlReport() {
     if (!report) {
-      console.warn('[export] no report loaded yet');
       uiStore.addToast('There is no audit report to export yet.', 'warning');
       return;
     }

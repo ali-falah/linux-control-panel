@@ -688,7 +688,6 @@
       exportMenuPos = { x: rect.left, y: rect.bottom + 6 };
     }
     showExportMenu = !showExportMenu;
-    console.info('[export] menu', showExportMenu ? 'opened' : 'closed');
   }
 
   const exportMenuItems: ContextMenuItem[] = [
@@ -781,7 +780,6 @@
       }
 
       if (items.length === 0) {
-        console.warn('[export] skipped: no entries in the selected range');
         uiStore.addToast('No entries in the selected range', 'warning');
         return;
       }
@@ -791,16 +789,14 @@
         .join('\n');
       const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `${activeTab}-full-${dateStr}.csv`;
-      console.info(`[export] writing ${filename} (${content.length} bytes, ${items.length} rows)`);
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
-      console.info('[export] wrote', savedPath);
       lastExportedFile = { name: filename, path: savedPath };
       uiStore.addToast(
         `Exported ${items.length.toLocaleString()} entries to ${filename}${truncated ? ' (range still exceeds the 200k cap)' : ''}`,
         truncated ? 'warning' : 'success',
       );
     } catch (e) {
-      console.error('[export] backend write failed:', e);
+      console.error('Export failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
@@ -814,7 +810,6 @@
 
     if (activeTab === 'journal') {
       if (filteredLogs.length === 0) {
-        console.warn('[export] skipped: no journal logs loaded');
         uiStore.addToast('No journal logs to export', 'warning');
         return;
       }
@@ -843,7 +838,6 @@
     } else if (activeTab === 'auth') {
       const items = filteredAuthEvents;
       if (items.length === 0) {
-        console.warn('[export] skipped: no auth events loaded');
         uiStore.addToast('No auth events to export', 'warning');
         return;
       }
@@ -863,7 +857,6 @@
     } else if (activeTab === 'audit') {
       const items = filteredAuditLogs;
       if (items.length === 0) {
-        console.warn('[export] skipped: no audit logs loaded');
         uiStore.addToast('No audit logs to export', 'warning');
         return;
       }
@@ -883,7 +876,6 @@
     } else if (activeTab === 'threats') {
       const items = filteredThreats;
       if (items.length === 0) {
-        console.warn('[export] skipped: no threat entries loaded');
         uiStore.addToast('No threat entries to export', 'warning');
         return;
       }
@@ -905,9 +897,7 @@
     try {
       // The backend writes the file straight into ~/Downloads — a browser
       // download on top of that would leave the user with two copies.
-      console.info(`[export] writing ${filename} (${content.length} bytes, ${exportCount} rows)`);
       const savedPath = await invoke<string>('export_journal_logs_to_file', { filename, content });
-      console.info('[export] wrote', savedPath);
       lastExportedFile = { name: filename, path: savedPath };
 
       if (openFolder) {
@@ -917,7 +907,7 @@
         uiStore.addToast(`Exported ${exportCount} logs to ${filename}`, 'success');
       }
     } catch (e: any) {
-      console.error('[export] backend write failed:', e);
+      console.error('Export failed:', e);
       uiStore.addToast(`Export failed: ${e}`, 'error');
     }
   }
