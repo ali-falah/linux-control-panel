@@ -480,17 +480,60 @@ pub fn verify_installed_polkit_policy() -> Result<(), String> {
     )
 }
 
+/// What an unprivileged process can tell about the installed rules.d rule.
+///
+/// `/etc/polkit-1/rules.d` is `0750 root:polkitd` on a stock Fedora, so the
+/// app cannot read the file at all; only the helper (root) and PolicyKit
+/// itself can. Not being able to read it is therefore *not* evidence that the
+/// rule is missing or stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolkitRuleCheck {
+    /// Readable and byte-identical to `POLKIT_RULE_TEXT`.
+    Verified,
+    /// The file (or its directory) is not readable by this user.
+    Unreadable(String),
+    /// Readable but not byte-identical, or absent.
+    Mismatch(String),
+}
+
+/// Classify the installed rules.d rule without assuming the caller may read it.
+pub fn polkit_rule_check() -> PolkitRuleCheck {
+    classify_polkit_rule(std::fs::read_to_string(POLKIT_RULE_FILE))
+}
+
+fn classify_polkit_rule(read: std::io::Result<String>) -> PolkitRuleCheck {
+    match read {
+        Ok(text) if text == POLKIT_RULE_TEXT => PolkitRuleCheck::Verified,
+        Ok(_) => PolkitRuleCheck::Mismatch(
+            "the installed PolicyKit rule is stale or was modified; reinstall it with the \
+             helper's install_polkit_rule action"
+                .to_string(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            PolkitRuleCheck::Unreadable(format!(
+                "the installed PolicyKit rule {POLKIT_RULE_FILE} could not be read: {error}"
+            ))
+        }
+        Err(error) => PolkitRuleCheck::Mismatch(format!(
+            "the installed PolicyKit rule {POLKIT_RULE_FILE} is missing or unreadable: {error}"
+        )),
+    }
+}
+
 /// Verify the installed rules.d rule as well. The rule is what grants the
 /// five-minute keep, so a stale copy that mentions a generic action would
 /// weaken the boundary. This is a startup/status diagnostic rather than a hard
 /// execution gate: the helper's `install_polkit_rule` action must remain able
 /// to repair a missing rule.
+///
+/// Strict by design: callers that must work on a host where the rule is not
+/// readable use [`polkit_rule_check`] instead.
 pub fn verify_installed_polkit_state() -> Result<(), String> {
     verify_installed_polkit_policy()?;
-    let text = std::fs::read_to_string(POLKIT_RULE_FILE).map_err(|e| {
-        format!("the installed PolicyKit rule {} could not be read: {e}", POLKIT_RULE_FILE)
-    })?;
-    verify_polkit_rule_text(&text)
+    match polkit_rule_check() {
+        PolkitRuleCheck::Verified => Ok(()),
+        PolkitRuleCheck::Unreadable(message) | PolkitRuleCheck::Mismatch(message) => Err(message),
+    }
 }
 
 /// Verify the installed rules.d rule. It must be byte-identical to the text
@@ -6319,6 +6362,31 @@ mod argument_policy_tests {
         ));
         // COPR ids mention the word but do not start with a protected family
         assert!(!repo_id_is_protected("my-fedora-mirror"));
+    }
+
+    #[test]
+    fn an_unreadable_polkit_rule_is_not_a_stale_rule() {
+        use super::{classify_polkit_rule, PolkitRuleCheck, POLKIT_RULE_TEXT};
+
+        assert_eq!(
+            classify_polkit_rule(Ok(POLKIT_RULE_TEXT.to_string())),
+            PolkitRuleCheck::Verified
+        );
+        assert!(matches!(
+            classify_polkit_rule(Ok("// something else\n".to_string())),
+            PolkitRuleCheck::Mismatch(_)
+        ));
+        assert!(matches!(
+            classify_polkit_rule(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            PolkitRuleCheck::Mismatch(_)
+        ));
+        // Fedora ships rules.d as 0750 root:polkitd: only the helper can read it.
+        assert!(matches!(
+            classify_polkit_rule(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            PolkitRuleCheck::Unreadable(_)
+        ));
     }
 
     #[test]

@@ -495,13 +495,27 @@ pub fn run() {
                 ),
             );
             if let Err(error) =
-                crate::utils::root_policy::verify_installed_polkit_state()
+                crate::utils::root_policy::verify_installed_polkit_policy()
             {
                 log_to_file(
                     "WARN",
                     &format!(
                         "PolicyKit policy verification failed: {error}. Privileged actions \
                          will be refused until the shipped policy is reinstalled."
+                    ),
+                );
+            }
+            // A rules.d file this user cannot read is expected on Fedora
+            // (`0750 root:polkitd`) and is not a fault; only a readable file
+            // that does not match is worth a warning.
+            if let crate::utils::root_policy::PolkitRuleCheck::Mismatch(error) =
+                crate::utils::root_policy::polkit_rule_check()
+            {
+                log_to_file(
+                    "WARN",
+                    &format!(
+                        "PolicyKit rule verification failed: {error}. Admin mode will offer \
+                         to repair the rule."
                     ),
                 );
             }
