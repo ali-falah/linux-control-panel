@@ -1217,10 +1217,50 @@
     icon={FileText}
   >
     <TabGroup tabs={LOG_TABS} bind:activeTab={activeTab} onchange={handleTabChange} size="sm" class="header-tabs" />
-    <button class="header-refresh-btn" onclick={refreshActiveTab} disabled={activeTabLoading} title="Refresh the active tab">
+    <button
+      class="header-refresh-btn"
+      onclick={refreshActiveTab}
+      disabled={activeTabLoading}
+      title="Refresh the active tab"
+      aria-label="Refresh the active tab"
+    >
       <RefreshCw size={13} class={activeTabLoading ? 'animate-spin-slow' : ''} />
-      <span>Refresh</span>
     </button>
+
+    <div class="export-dropdown-container">
+      <button
+        type="button"
+        class="export-action-btn"
+        bind:this={exportTriggerRef}
+        onclick={toggleExportMenu}
+        title="Export logs (Text, JSON, with option to open folder)"
+        aria-label="Export logs"
+        aria-haspopup="menu"
+        aria-expanded={showExportMenu}
+      >
+        <Download size={13} />
+        <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
+      </button>
+
+      <ContextMenu
+        bind:isOpen={showExportMenu}
+        x={exportMenuPos.x}
+        y={exportMenuPos.y}
+        title="Export"
+        minWidth="230px"
+        items={exportMenuItems}
+      />
+    </div>
+
+    <Button
+      variant="ghost"
+      size="sm"
+      onclick={clearAll}
+      title="Clear loaded results"
+      aria-label="Clear loaded log entries"
+    >
+      <Eraser size={14} />
+    </Button>
   </PageHeader>
 
 
@@ -1345,37 +1385,6 @@
               <span>Live</span>
             </Button>
           {/if}
-
-          <span class="log-divider" aria-hidden="true"></span>
-
-                  <div class="export-dropdown-container">
-            <button
-              type="button"
-              class="export-action-btn"
-              bind:this={exportTriggerRef}
-              onclick={toggleExportMenu}
-              title="Export logs (Text, JSON, with option to open folder)"
-              aria-haspopup="menu"
-              aria-expanded={showExportMenu}
-            >
-              <Download size={13} />
-              <span>Export</span>
-              <ChevronDown size={11} style="opacity:0.7; margin-left:1px;" />
-            </button>
-
-            <ContextMenu
-              bind:isOpen={showExportMenu}
-              x={exportMenuPos.x}
-              y={exportMenuPos.y}
-              title="Export"
-              minWidth="230px"
-              items={exportMenuItems}
-            />
-          </div>
-
-          <Button variant="ghost" size="sm" onclick={clearAll} title="Clear loaded results" aria-label="Clear loaded log entries">
-            <Eraser size={14} />
-          </Button>
         </div>
     </div>
 

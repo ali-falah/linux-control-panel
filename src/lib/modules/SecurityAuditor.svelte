@@ -841,33 +841,14 @@
       bind:activeTab={activeCategory}
       disabled={loading}
     />
-    {#if report}
-      <!-- Single Export Dropdown Button -->
-      <div class="export-dropdown-wrap">
-        <button
-          class="export-action-btn"
-          onclick={(e) => toggleExportDropdown(e.currentTarget)}
-          title="Export options"
-          aria-haspopup="menu"
-          aria-expanded={showExportDropdown}
-        >
-          <Download size={14} />
-          Export
-          <ChevronDown size={12} />
-        </button>
-        <ContextMenu
-          bind:isOpen={showExportDropdown}
-          x={exportMenuPos.x}
-          y={exportMenuPos.y}
-          title="Export Report"
-          minWidth="200px"
-          items={exportDropdownItems}
-        />
-      </div>
-    {/if}
-    <button class="header-refresh-btn" onclick={() => runAudit(true)} disabled={loading}>
+    <button
+      class="header-refresh-btn"
+      onclick={() => runAudit(true)}
+      disabled={loading}
+      title={loading ? 'Scanning the system…' : 'Rescan the security audit'}
+      aria-label={loading ? 'Scanning the system' : 'Rescan the security audit'}
+    >
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} />
-      {loading ? 'Scanning...' : 'Rescan'}
     </button>
   </PageHeader>
 
@@ -1037,6 +1018,30 @@
               {totalIssues} issue{totalIssues !== 1 ? 's' : ''} total
             {/if}
           </span>
+
+          <!-- Export lives with the findings summary it belongs to. -->
+          <div class="export-dropdown-wrap">
+            <button
+              class="export-action-btn"
+              onclick={(e) => toggleExportDropdown(e.currentTarget)}
+              title="Export options"
+              aria-label="Export options"
+              aria-haspopup="menu"
+              aria-expanded={showExportDropdown}
+            >
+              <Download size={14} />
+              Export
+              <ChevronDown size={12} />
+            </button>
+            <ContextMenu
+              bind:isOpen={showExportDropdown}
+              x={exportMenuPos.x}
+              y={exportMenuPos.y}
+              title="Export Report"
+              minWidth="200px"
+              items={exportDropdownItems}
+            />
+          </div>
         </div>
       </div>
 
