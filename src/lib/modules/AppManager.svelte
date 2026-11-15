@@ -12,7 +12,7 @@
   import Card from '../components/ui/Card.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
-  import TabGroup from '../components/ui/TabGroup.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import Select from '../components/ui/Select.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -88,6 +88,18 @@
   if (uiStore.appSourceFilter) {
     uiStore.appSourceFilter = null;
   }
+
+  // "Waydroid" only exists on hosts that have one; "Duplicates" carries a count.
+  const sourceFilterOptions = $derived([
+    { id: 'All' as const, label: 'All Sources' },
+    { id: 'RPM' as const, label: 'RPM / DEB' },
+    { id: 'Flatpak' as const, label: 'Flatpak' },
+    { id: 'AppImage' as const, label: 'AppImage' },
+    ...(apps.some(a => a.source === 'Waydroid')
+      ? [{ id: 'Waydroid' as const, label: 'Waydroid' }]
+      : []),
+    { id: 'Duplicates' as const, label: 'Duplicates', count: duplicates.length },
+  ]);
   if (uiStore.targetSubTab && ['All', 'RPM', 'Flatpak', 'AppImage', 'Waydroid', 'Duplicates'].includes(uiStore.targetSubTab)) {
     uiStore.targetSubTab = null;
   }
@@ -615,16 +627,10 @@
     <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
       <SearchBar bind:value={filter} placeholder="Search installed apps..." disabled={isUninstalling} style="flex: 1; max-width: 300px;" />
       
-      <TabGroup 
-        tabs={[
-          {id: 'All', label: 'All Sources'},
-          {id: 'RPM', label: 'RPM / DEB'},
-          {id: 'Flatpak', label: 'Flatpak'},
-          {id: 'AppImage', label: 'AppImage'},
-          ...(apps.some(a => a.source === 'Waydroid') ? [{id: 'Waydroid', label: 'Waydroid'}] : []),
-          {id: 'Duplicates', label: `Duplicates (${duplicates.length})`}
-        ]}
-        bind:activeTab={sourceFilter}
+      <FilterChips
+        options={sourceFilterOptions}
+        bind:value={sourceFilter}
+        label="Filter apps by source"
         disabled={isUninstalling}
       />
     </div>

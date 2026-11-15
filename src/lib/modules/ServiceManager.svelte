@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Table from '../components/ui/Table.svelte';
@@ -80,6 +81,16 @@
   let statusFilter = $state<'active' | 'failed' | 'all'>(
     uiStore.serviceFilter === 'failed' ? 'failed' : 'all'
   );
+  const statusFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'active', label: 'Active' },
+    { id: 'failed', label: 'Failed' },
+  ] as const;
+  const statusCounts = $derived({
+    all: units.length,
+    active: units.filter(u => u.active_state === 'active').length,
+    failed: units.filter(u => u.active_state === 'failed').length,
+  });
 
   $effect(() => {
     // Service Manager deep links are one-shot: apply the pending navigation
@@ -303,6 +314,18 @@
   let loadingBlame = $state(false);
   let blameViewMode = $state<'blame' | 'critical-chain'>('blame');
   let blameFilter = $state<'all' | 'services' | 'slow' | 'critical'>('all');
+  const blameFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'services', label: 'Services' },
+    { id: 'slow', label: 'Slow >2s' },
+    { id: 'critical', label: 'Critical >5s' },
+  ] as const;
+  const blameFilterCounts = $derived({
+    all: blameEntries.length,
+    services: blameEntries.filter(b => b.is_service).length,
+    slow: blameEntries.filter(b => b.time_ms >= 2000).length,
+    critical: blameEntries.filter(b => b.time_ms >= 5000).length,
+  });
   let blameSearch = $state('');
 
   // Boot Logs Drawer State
@@ -950,26 +973,11 @@
       <div class="header-spacer"></div>
 
       <div style="display:flex; align-items:center; gap:10px;">
-        <div class="filter-pills">
-          <button 
-            class="pill-btn {statusFilter === 'all' ? 'active' : ''}" 
-            onclick={() => statusFilter = 'all'}
-          >
-            All ({units.length})
-          </button>
-          <button 
-            class="pill-btn {statusFilter === 'active' ? 'active' : ''}" 
-            onclick={() => statusFilter = 'active'}
-          >
-            Active ({units.filter(u => u.active_state === 'active').length})
-          </button>
-          <button 
-            class="pill-btn {statusFilter === 'failed' ? 'active' : ''}" 
-            onclick={() => statusFilter = 'failed'}
-          >
-            Failed ({units.filter(u => u.active_state === 'failed').length})
-          </button>
-        </div>
+        <FilterChips
+          options={statusFilters.map(option => ({ ...option, count: statusCounts[option.id] }))}
+          bind:value={statusFilter}
+          label="Filter services by state"
+        />
 
         {@render refreshButton()}
 
@@ -1028,32 +1036,11 @@
 
         {#if blameViewMode === 'blame'}
           <!-- Filter pills -->
-          <div class="filter-pills">
-            <button 
-              class="pill-btn {blameFilter === 'all' ? 'active' : ''}" 
-              onclick={() => blameFilter = 'all'}
-            >
-              All ({blameEntries.length})
-            </button>
-            <button 
-              class="pill-btn {blameFilter === 'services' ? 'active' : ''}" 
-              onclick={() => blameFilter = 'services'}
-            >
-              Services ({blameEntries.filter(b => b.is_service).length})
-            </button>
-            <button 
-              class="pill-btn {blameFilter === 'slow' ? 'active' : ''}" 
-              onclick={() => blameFilter = 'slow'}
-            >
-              Slow &gt;2s ({blameEntries.filter(b => b.time_ms >= 2000).length})
-            </button>
-            <button 
-              class="pill-btn {blameFilter === 'critical' ? 'active' : ''}" 
-              onclick={() => blameFilter = 'critical'}
-            >
-              Critical &gt;5s ({blameEntries.filter(b => b.time_ms >= 5000).length})
-            </button>
-          </div>
+          <FilterChips
+            options={blameFilters.map(option => ({ ...option, count: blameFilterCounts[option.id] }))}
+            bind:value={blameFilter}
+            label="Filter boot units"
+          />
         {/if}
       </div>
 
@@ -2010,19 +1997,4 @@
     font: inherit;
   }
 
-  .th-sort-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: inherit;
-    gap: 4px;
-    width: 100%;
-    padding: 0;
-    background: transparent;
-    border: none;
-    color: inherit;
-    font: inherit;
-    text-align: inherit;
-    cursor: pointer;
-  }
-  .th-sort-btn:hover { color: var(--color-text-primary); }
 </style>

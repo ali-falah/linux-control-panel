@@ -1434,6 +1434,33 @@ thead th {
   color: var(--color-accent);
 }
 
+/* Sortable header button. Data-driven tables sort the array (not the DOM),
+   so the whole header cell is one control and the indicator rides with it. */
+.th-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: inherit;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.th-sort-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.th-sort-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .resize-handle {
   position: absolute;
   right: 0;

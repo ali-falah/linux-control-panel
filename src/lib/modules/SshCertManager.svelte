@@ -11,6 +11,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Button from '../components/ui/Button.svelte';
   import Badge from '../components/ui/Badge.svelte';
@@ -201,6 +202,17 @@
   let expiringCertsCount = $derived(
     sslCerts.filter(c => c.is_expiring_soon || c.is_expired).length
   );
+
+  const certFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'valid', label: 'Valid' },
+    { id: 'expiring', label: 'Expiring' },
+  ] as const;
+  const certFilterCounts = $derived({
+    all: sslCerts.length,
+    valid: sslCerts.filter(c => !c.is_expired).length,
+    expiring: expiringCertsCount,
+  });
 
   // ─── Data Loading ────────────────────────────────────────────────────────────
 
@@ -984,29 +996,11 @@
                 count={filteredSslCerts.length}
                 total={sslCerts.length}
               />
-              <div class="filter-chip-group">
-                <button 
-                  class="filter-chip" 
-                  class:active={certFilter === 'all'} 
-                  onclick={() => certFilter = 'all'}
-                >
-                  All ({sslCerts.length})
-                </button>
-                <button 
-                  class="filter-chip" 
-                  class:active={certFilter === 'valid'} 
-                  onclick={() => certFilter = 'valid'}
-                >
-                  Valid ({sslCerts.filter(c => !c.is_expired).length})
-                </button>
-                <button 
-                  class="filter-chip" 
-                  class:active={certFilter === 'expiring'} 
-                  onclick={() => certFilter = 'expiring'}
-                >
-                  Expiring ({expiringCertsCount})
-                </button>
-              </div>
+              <FilterChips
+                options={certFilters.map(option => ({ ...option, count: certFilterCounts[option.id] }))}
+                bind:value={certFilter}
+                label="Filter certificates by state"
+              />
             </div>
           </div>
 
@@ -1586,30 +1580,6 @@
   }:global(html.light-mode) .table-toolbar {
     background: #F8FAFC;
     border-bottom-color: #E2E8F0;
-  }.filter-chip-group {
-    display: flex;
-    gap: 6px;
-  }.filter-chip {
-    padding: 5px 12px;
-    border-radius: 8px;
-    font-size: 11.5px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    cursor: pointer;
-    transition: all 0.15s;
-  }:global(html.light-mode) .filter-chip {
-    border-color: #E2E8F0;
-  }.filter-chip.active {
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.12));
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-    font-weight: 600;
-  }:global(html.light-mode) .filter-chip.active {
-    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
-    border-color: var(--color-accent);
-    color: var(--color-accent);
   }.table-wrap {
     overflow-x: auto;
   }.data-table {

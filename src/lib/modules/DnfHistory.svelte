@@ -1,5 +1,6 @@
 <script lang="ts">
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Badge from '../components/ui/Badge.svelte';
@@ -626,27 +627,14 @@
         {/if}
       </span>
 
-      <div class="repo-chips">
-        <button
-          type="button"
-          class="repo-chip"
-          class:active={repoFilter === 'all'}
-          onclick={() => (repoFilter = 'all')}
-        >
-          All <span class="repo-chip-count">{updates.length}</span>
-        </button>
-        {#each repoCounts as [repo, count]}
-          <button
-            type="button"
-            class="repo-chip"
-            class:active={repoFilter === repo}
-            onclick={() => (repoFilter = repo)}
-            title={repo}
-          >
-            {repo} <span class="repo-chip-count">{count}</span>
-          </button>
-        {/each}
-      </div>
+      <FilterChips
+        options={[
+          { id: 'all', label: 'All', count: updates.length },
+          ...repoCounts.map(([repo, count]) => ({ id: repo, label: repo, count })),
+        ]}
+        bind:value={repoFilter}
+        label="Filter updates by repository"
+      />
     </div>
 
     <div class="card" style="display:flex; flex-direction:column; padding: 0; flex: 1; min-height: 0;">
@@ -1118,49 +1106,6 @@
     padding: 0 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-  }
-
-  .repo-chips {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex-wrap: wrap;
-  }
-
-  .repo-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 26px;
-    padding: 0 9px;
-    border-radius: 999px;
-    border: 1px solid var(--color-border);
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 11.5px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .repo-chip:hover {
-    color: var(--color-text-primary);
-    border-color: var(--color-accent);
-  }
-
-  .repo-chip.active {
-    color: var(--color-accent);
-    border-color: var(--color-accent);
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  }
-
-  .repo-chip-count {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--color-text-muted);
-  }
-
-  .repo-chip.active .repo-chip-count {
-    color: var(--color-accent);
   }
 
   .selection-summary {

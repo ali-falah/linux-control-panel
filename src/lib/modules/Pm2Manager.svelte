@@ -13,6 +13,7 @@
   import TabGroup from '../components/ui/TabGroup.svelte';
   import KpiCard from '../components/ui/KpiCard.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import Select from '../components/ui/Select.svelte';
   import Button from '../components/ui/Button.svelte';
   import Stepper from '../components/ui/Stepper.svelte';
@@ -122,6 +123,12 @@
   // Filters & Search
   let searchQuery = $state('');
   let statusFilter = $state<'all' | 'online' | 'stopped' | 'errored'>('all');
+  const statusFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'online', label: 'Online' },
+    { id: 'stopped', label: 'Stopped' },
+    { id: 'errored', label: 'Errored' },
+  ] as const;
   let envSearchQuery = $state('');
 
   // Copy Feedback
@@ -203,6 +210,12 @@
   let onlineApps = $derived(processes.filter(p => p.status === 'online').length);
   let stoppedApps = $derived(processes.filter(p => p.status === 'stopped').length);
   let erroredApps = $derived(processes.filter(p => p.status === 'errored').length);
+  const statusCounts = $derived({
+    all: processes.length,
+    online: onlineApps,
+    stopped: stoppedApps,
+    errored: erroredApps,
+  });
   let totalMemoryBytes = $derived(processes.reduce((acc, p) => acc + (p.memory || 0), 0));
   let totalCpuPercent = $derived(processes.reduce((acc, p) => acc + (p.cpu || 0), 0));
 
@@ -1106,36 +1119,12 @@
               </div>
 
               <div class="master-pills-row">
-                <div class="pills-group">
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'all'}
-                    onclick={() => statusFilter = 'all'}
-                  >
-                    All ({processes.length})
-                  </button>
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'online'}
-                    onclick={() => statusFilter = 'online'}
-                  >
-                    Online ({onlineApps})
-                  </button>
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'stopped'}
-                    onclick={() => statusFilter = 'stopped'}
-                  >
-                    Stopped ({stoppedApps})
-                  </button>
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'errored'}
-                    onclick={() => statusFilter = 'errored'}
-                  >
-                    Errored ({erroredApps})
-                  </button>
-                </div>
+                <FilterChips
+                  options={statusFilters.map(option => ({ ...option, count: statusCounts[option.id] }))}
+                  bind:value={statusFilter}
+                  label="Filter apps by status"
+                  style="flex:1; min-width:0"
+                />
 
                 <KebabMenu align="left" title="Cluster Bulk Actions">
                   <button class="menu-item" onclick={() => handleProcessAction('start', 'all')}>
@@ -2643,35 +2632,6 @@
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-  }.pills-group {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-    flex: 1;
-    min-width: 0;
-  }.pill-btn {
-    padding: 3px 8px;
-    border-radius: 12px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    font-family: inherit;
-    display: inline-flex;
-    align-items: center;
-    white-space: nowrap;
-  }.pill-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text-primary);
-  }.pill-btn.active {
-    background: var(--color-accent-muted);
-    color: var(--color-accent);
-    border-color: var(--color-accent);
-    font-weight: 600;
   }.empty-list-container {
     display: flex;
     flex-direction: column;

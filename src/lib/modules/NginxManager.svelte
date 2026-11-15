@@ -1,5 +1,6 @@
 <script lang="ts">
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import Select from '../components/ui/Select.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
@@ -905,6 +906,16 @@
 
   let siteSearchQuery = $state('');
   let siteSourceFilter = $state<'all' | 'conf.d' | 'sites-available' | 'sites-enabled'>('all');
+  const siteSourceFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'conf.d', label: 'conf.d' },
+    { id: 'sites-available', label: 'sites-available' },
+  ] as const;
+  const siteSourceCounts = $derived({
+    all: sites.length,
+    'conf.d': sites.filter(s => s.source === 'conf.d').length,
+    'sites-available': sites.filter(s => s.source === 'sites-available').length,
+  });
 
   let filteredSites = $derived.by(() => {
     let list = sites;
@@ -2416,32 +2427,12 @@
                   placeholder="Search sites by name, source, or path…" 
                 />
               </div>
-              <div class="sites-filter-pills">
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'all'} 
-                  onclick={() => siteSourceFilter = 'all'}
-                >
-                  All ({sites.length})
-                </button>
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'conf.d'} 
-                  onclick={() => siteSourceFilter = 'conf.d'}
-                >
-                  conf.d ({sites.filter(s => s.source === 'conf.d').length})
-                </button>
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'sites-available'} 
-                  onclick={() => siteSourceFilter = 'sites-available'}
-                >
-                  sites-available ({sites.filter(s => s.source === 'sites-available').length})
-                </button>
-              </div>
+              <FilterChips
+                options={siteSourceFilters.map(option => ({ ...option, count: siteSourceCounts[option.id] }))}
+                value={siteSourceFilter}
+                onchange={(id) => (siteSourceFilter = id)}
+                label="Filter sites by source"
+              />
             </div>
 
             <div class="table-wrap">
@@ -4534,30 +4525,6 @@
     flex: 1;
     min-width: 260px;
     max-width: 480px;
-  }.sites-filter-pills {
-    display: flex;
-    gap: 4px;
-    background: var(--color-bg-base);
-    padding: 3px;
-    border-radius: 8px;
-    border: 1px solid var(--color-border);
-  }.filter-pill {
-    background: transparent;
-    border: none;
-    padding: 4px 10px;
-    font-size: 11.5px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }.filter-pill:hover {
-    color: var(--color-text-primary);
-  }.filter-pill.active {
-    background: var(--color-bg-card);
-    color: var(--color-accent);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    font-weight: 600;
   }.site-row {
     transition: background 0.15s ease, transform 0.1s ease;
   }.site-row:hover {
