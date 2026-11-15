@@ -1,11 +1,24 @@
 use crate::utils::privilege::{ensure_repo_file_path, ensure_safe_operand};
 use crate::utils::privilege::{run_privileged_with_stdin, RootAuth};
-use crate::utils::root_policy::{count_enabled_repos_in_content, repo_url_https_only};
+use crate::utils::root_policy::{
+    is_system_owned_repo_path, repo_id_is_protected, repo_override_option_valid,
+    repo_url_https_only, REPO_READ_ONLY_DIRS, USER_REPO_DIR,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{binary_exists, log_to_file};
+
+/// Shown when the host has no dnf5. Plain language only: the user is not
+/// expected to read stderr or exit codes.
+const DNF4_UNSUPPORTED_MESSAGE: &str =
+    "This system uses an older package manager (dnf4) that isn't supported — repository management is unavailable here.";
+
+/// dnf5's config-manager override file. Only this file is touched by
+/// `config-manager setopt/unsetopt`; other override files are distribution
+/// owned and are never removed here.
+const DNF5_CONFIG_MANAGER_OVERRIDE: &str = "/etc/dnf/repos.override.d/99-config_manager.repo";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoEntry {
@@ -18,6 +31,580 @@ pub struct RepoEntry {
     pub mirrorlist: Option<String>,
     pub gpgcheck: bool,
     pub priority: Option<u32>,
+    /// True when dnf5 reports the config file under a package-owned directory
+    /// (`/usr/share/dnf5/repos.d`, `/etc/distro.repos.d`). Such a repo is
+    /// toggle-only: the panel never writes its file.
+    pub system_owned: bool,
+}
+
+/// One entry of `dnf5 repo info --all --json`. Fields are `serde(default)`
+/// so a missing optional key cannot abort the whole listing.
+#[derive(Debug, Clone, Deserialize)]
+struct Dnf5RepoInfo {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    is_enabled: bool,
+    #[serde(default)]
+    priority: Option<u32>,
+    #[serde(default)]
+    base_url: Vec<String>,
+    #[serde(default)]
+    metalink: String,
+    #[serde(default)]
+    mirrorlist: String,
+    #[serde(default)]
+    pkg_gpgcheck: bool,
+    #[serde(default)]
+    repo_gpgcheck: bool,
+    #[serde(default)]
+    repo_file_path: String,
+}
+
+/// One entry of `dnf5 repo list --all --json` — the metadata-free view.
+#[derive(Debug, Clone, Deserialize)]
+struct Dnf5RepoListEntry {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    is_enabled: bool,
+}
+
+impl Dnf5RepoInfo {
+    fn to_entry(&self) -> RepoEntry {
+        RepoEntry {
+            id: self.id.clone(),
+            name: if self.name.is_empty() { self.id.clone() } else { self.name.clone() },
+            baseurl: self.base_url.join(" "),
+            enabled: self.is_enabled,
+            file_path: self.repo_file_path.clone(),
+            metalink: empty_to_none(&self.metalink),
+            mirrorlist: empty_to_none(&self.mirrorlist),
+            gpgcheck: self.pkg_gpgcheck,
+            priority: self.priority,
+            system_owned: is_system_owned_repo_path(&self.repo_file_path),
+        }
+    }
+}
+
+fn empty_to_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// Parse dnf5's JSON output. Pure, so both layouts can be tested from
+/// fixtures without running dnf5.
+fn parse_dnf5_repos(json: &str) -> Result<Vec<Dnf5RepoInfo>, String> {
+    serde_json::from_str(json)
+        .map_err(|e| format!("dnf5 returned unreadable repository data: {e}"))
+}
+
+/// Run one read-only `dnf5 ... --json` query. `-C` keeps it offline and
+/// fast: it never refreshes the metadata cache.
+async fn dnf5_json(args: &[&str]) -> Result<String, String> {
+    let output = tokio::process::Command::new("dnf5")
+        .arg("-C")
+        .args(args)
+        .arg("--json")
+        .output()
+        .await
+        .map_err(|e| format!("dnf5 could not be started: {e}"))?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "dnf5 could not report repositories".to_string()
+        } else {
+            format!("dnf5 could not report repositories: {detail}")
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn dnf5_repo_info_json(query: &[&str]) -> Result<String, String> {
+    let mut args = vec!["repo", "info"];
+    args.extend_from_slice(query);
+    dnf5_json(&args).await
+}
+
+/// `dnf5 repo list --all --json` — ids, names and the *effective* enabled
+/// state (overrides applied), without loading any metadata. Unlike
+/// `repo info`, this works for a repo that has never been cached.
+async fn dnf5_repo_list_json() -> Result<String, String> {
+    dnf5_json(&["repo", "list", "--all"]).await
+}
+
+fn parse_dnf5_repo_list(json: &str) -> Result<Vec<Dnf5RepoListEntry>, String> {
+    serde_json::from_str(json)
+        .map_err(|e| format!("dnf5 returned unreadable repository data: {e}"))
+}
+
+/// Every repo dnf5 knows about, including disabled ones. `repo info` is the
+/// preferred source: it also reports the config file dnf5 really used.
+///
+/// `repo info` needs cached metadata for enabled repositories; a repository
+/// that was just added has none yet, which would fail the whole listing. In
+/// that case the list falls back to `repo list --all` for the authoritative
+/// ids/state and reads the remaining display fields from dnf's repo files.
+async fn load_dnf5_repos() -> Result<Vec<Dnf5RepoInfo>, String> {
+    if !binary_exists("dnf5").await {
+        return Err(DNF4_UNSUPPORTED_MESSAGE.to_string());
+    }
+
+    match dnf5_repo_info_json(&["--all"])
+        .await
+        .and_then(|json| parse_dnf5_repos(&json))
+    {
+        Ok(repos) => Ok(repos),
+        Err(info_error) => {
+            log_to_file(
+                "WARN",
+                &format!(
+                    "dnf5 repo info unavailable ({info_error}); \
+                     falling back to repo list plus config files"
+                ),
+            );
+            load_dnf5_repos_from_list(&info_error).await
+        }
+    }
+}
+
+/// Fallback for `load_dnf5_repos`: dnf5 still decides every id and effective
+/// enabled state; the repo files supply the display/edit fields `repo list`
+/// does not report.
+async fn load_dnf5_repos_from_list(info_error: &str) -> Result<Vec<Dnf5RepoInfo>, String> {
+    let json = dnf5_repo_list_json()
+        .await
+        .map_err(|list_error| format!("{info_error}; dnf5 repo list also failed: {list_error}"))?;
+    let listed = parse_dnf5_repo_list(&json)?;
+
+    Ok(listed
+        .into_iter()
+        .map(|item| {
+            let details = repo_details_from_config_files(&item.id);
+            Dnf5RepoInfo {
+                id: item.id,
+                name: details
+                    .as_ref()
+                    .and_then(|d| d.name.clone())
+                    .unwrap_or(item.name),
+                is_enabled: item.is_enabled,
+                priority: details.as_ref().and_then(|d| d.priority),
+                base_url: details
+                    .as_ref()
+                    .map(|d| d.baseurls.clone())
+                    .unwrap_or_default(),
+                metalink: details
+                    .as_ref()
+                    .and_then(|d| d.metalink.clone())
+                    .unwrap_or_default(),
+                mirrorlist: details
+                    .as_ref()
+                    .and_then(|d| d.mirrorlist.clone())
+                    .unwrap_or_default(),
+                pkg_gpgcheck: details.as_ref().map_or(true, |d| d.gpgcheck),
+                repo_gpgcheck: false,
+                repo_file_path: details
+                    .as_ref()
+                    .map(|d| d.file_path.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect())
+}
+
+/// Display fields of one repo section found on disk.
+#[derive(Debug, Default)]
+struct RepoFileDetails {
+    file_path: String,
+    name: Option<String>,
+    baseurls: Vec<String>,
+    metalink: Option<String>,
+    mirrorlist: Option<String>,
+    gpgcheck: bool,
+    priority: Option<u32>,
+}
+
+/// Find the `.repo` file that defines `repo_id` and read its section. Used
+/// only by the `repo info`-unavailable fallback; ids and state still come
+/// from dnf5.
+fn repo_details_from_config_files(repo_id: &str) -> Option<RepoFileDetails> {
+    for dir in REPO_READ_ONLY_DIRS
+        .iter()
+        .copied()
+        .chain(std::iter::once(USER_REPO_DIR))
+    {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("repo") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(mut details) = repo_details_from_content(&content, repo_id) {
+                details.file_path = path.to_string_lossy().to_string();
+                return Some(details);
+            }
+        }
+    }
+    None
+}
+
+/// Parse one repo file and return `repo_id`'s section fields.
+fn repo_details_from_content(content: &str, repo_id: &str) -> Option<RepoFileDetails> {
+    let mut in_target = false;
+    let mut found = false;
+    let mut details = RepoFileDetails {
+        gpgcheck: true,
+        ..RepoFileDetails::default()
+    };
+    let mut baseurls = Vec::new();
+    let mut metalink = None;
+    let mut mirrorlist = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_target {
+                break;
+            }
+            in_target = &trimmed[1..trimmed.len() - 1] == repo_id;
+            found |= in_target;
+            continue;
+        }
+        if !in_target {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match key.trim().to_lowercase().as_str() {
+            "name" => details.name = Some(value),
+            "baseurl" => baseurls.extend(value.split_whitespace().map(str::to_string)),
+            "metalink" => metalink = Some(value).filter(|v| !v.is_empty()),
+            "mirrorlist" => mirrorlist = Some(value).filter(|v| !v.is_empty()),
+            "gpgcheck" => details.gpgcheck = value == "1" || value.eq_ignore_ascii_case("true"),
+            "priority" => details.priority = value.parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+
+    if !found {
+        return None;
+    }
+    details.baseurls = baseurls;
+    details.metalink = metalink;
+    details.mirrorlist = mirrorlist;
+    Some(details)
+}
+
+async fn load_repo_entries() -> Result<Vec<RepoEntry>, String> {
+    Ok(load_dnf5_repos().await?.iter().map(Dnf5RepoInfo::to_entry).collect())
+}
+
+/// Effective state of one repo, taken from `repo list`'s report. An empty
+/// result means the repo is unknown (dnf5 exits 0 in that case), so it is an
+/// error, never a success.
+fn effective_state_from_list_json(json: &str, repo_id: &str) -> Result<bool, String> {
+    let repos = parse_dnf5_repo_list(json)?;
+    let mut matches = repos.iter().filter(|repo| repo.id == repo_id);
+    match (matches.next(), matches.next()) {
+        (Some(repo), None) => Ok(repo.is_enabled),
+        (None, _) => Err(format!("dnf5 does not report a repository with id '{repo_id}'")),
+        (Some(_), Some(_)) => Err(format!("dnf5 reports the repository id '{repo_id}' more than once")),
+    }
+}
+
+/// Verification never depends on metadata: `repo list` reports the
+/// authoritative effective state and works for an uncached repository.
+async fn repo_effective_enabled(repo_id: &str) -> Result<bool, String> {
+    let json = dnf5_repo_list_json().await?;
+    effective_state_from_list_json(&json, repo_id)
+}
+
+fn ensure_effective_state(repo_id: &str, expected: bool, actual: bool) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    let state = |enabled: bool| if enabled { "enabled" } else { "disabled" };
+    Err(format!(
+        "dnf5 reports repository '{repo_id}' as {}, but {} was requested",
+        state(actual),
+        state(expected)
+    ))
+}
+
+async fn verify_repo_enabled(repo_id: &str, expected: bool) -> Result<(), String> {
+    let actual = repo_effective_enabled(repo_id).await?;
+    ensure_effective_state(repo_id, expected, actual)
+}
+
+/// After a delete, dnf5 must no longer report the id at all.
+///
+/// `repo list` is used instead of `repo info`: it needs no metadata, so the
+/// check works even when the deleted repo had never been cached.
+async fn verify_repo_absent(repo_id: &str) -> Result<(), String> {
+    let json = dnf5_repo_list_json().await?;
+    let repos = parse_dnf5_repo_list(&json)?;
+    if repos.iter().any(|repo| repo.id == repo_id) {
+        return Err(format!(
+            "dnf5 still reports repository '{repo_id}' after deletion"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse `dnf5 --dump-repo-config=<id>` output. The tool prints a header line
+/// per repository (`======== "id" repository configuration: ========`, which
+/// starts with `=` and is skipped), then `key = value` lines. A list or string
+/// option that is empty prints as a bare key with no `=`, so it maps to an
+/// empty string.
+fn parse_repo_config_dump(output: &str) -> std::collections::HashMap<String, String> {
+    let mut values = std::collections::HashMap::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('=') {
+            continue;
+        }
+        match trimmed.split_once('=') {
+            Some((key, value)) => {
+                values.insert(key.trim().to_string(), value.trim().to_string());
+            }
+            None => {
+                values.insert(trimmed.to_string(), String::new());
+            }
+        }
+    }
+    values
+}
+
+/// dnf5's effective configuration for one repository, as key/value pairs.
+///
+/// `--dump-repo-config` reads configuration only — no metadata download — so
+/// it works for an uncached repo and on an offline host. An empty map means
+/// dnf5 does not know the id.
+async fn dnf5_repo_config_dump(
+    repo_id: &str,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let selector = format!("--dump-repo-config={repo_id}");
+    let output = tokio::process::Command::new("dnf5")
+        .arg(&selector)
+        .output()
+        .await
+        .map_err(|e| format!("dnf5 could not be started: {e}"))?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("dnf5 could not report the configuration of '{repo_id}'")
+        } else {
+            format!("dnf5 could not report the configuration of '{repo_id}': {detail}")
+        });
+    }
+
+    Ok(parse_repo_config_dump(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Collapse whitespace so a value dnf5 normalises (multiple base URLs, line
+/// wrapping, trailing spaces) compares equal to what the panel wrote.
+fn normalize_repo_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Compare one saved field with dnf5's fresh report. Returns whether it
+/// matches; a mismatch logs both the raw and the normalised forms at DEBUG so
+/// a tolerant comparison never hides what dnf5 actually stored.
+fn saved_field_matches(
+    repo_id: &str,
+    field: &str,
+    raw_actual: &str,
+    raw_expected: &str,
+) -> bool {
+    let actual = normalize_repo_value(raw_actual);
+    let expected = normalize_repo_value(raw_expected);
+    if actual == expected {
+        return true;
+    }
+    log_to_file(
+        "DEBUG",
+        &format!(
+            "repo save verification: '{repo_id}' {field} differs \
+             (raw actual={raw_actual:?}, raw expected={raw_expected:?}, \
+             normalized actual={actual:?}, normalized expected={expected:?})"
+        ),
+    );
+    false
+}
+
+/// Split a dnf list value on whitespace and on the commas
+/// `--dump-repo-config` puts between base URLs.
+fn split_repo_list(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Compare a list-valued field (baseurl). dnf5 preserves the order, so a
+/// reordering is a real difference; only the separator (spaces in the file,
+/// commas in the dump) is normalised.
+fn saved_list_field_matches(
+    repo_id: &str,
+    field: &str,
+    raw_actual: &str,
+    raw_expected: &str,
+) -> bool {
+    let actual = split_repo_list(raw_actual);
+    let expected = split_repo_list(raw_expected);
+    if actual == expected {
+        return true;
+    }
+    log_to_file(
+        "DEBUG",
+        &format!(
+            "repo save verification: '{repo_id}' {field} differs \
+             (raw actual={raw_actual:?}, raw expected={raw_expected:?}, \
+             parsed actual={actual:?}, parsed expected={expected:?})"
+        ),
+    );
+    false
+}
+
+/// Verify the values the panel just wrote against dnf5's own effective
+/// configuration.
+///
+/// `--dump-repo-config` reads configuration only (no metadata download), so
+/// the check works for a repo that has never been cached and on an offline
+/// host. dnf5 normalises some values — baseurl is printed comma-separated and
+/// unset options print as bare keys — so comparison is tolerant while every
+/// mismatch logs the raw and normalised forms at DEBUG.
+async fn verify_saved_repo_details(
+    repo_id: &str,
+    name: &str,
+    baseurl: &str,
+    metalink: &Option<String>,
+    mirrorlist: &Option<String>,
+    gpgcheck: bool,
+    priority: Option<u32>,
+) -> Result<(), String> {
+    let values = dnf5_repo_config_dump(repo_id).await?;
+    if values.is_empty() {
+        return Err(format!(
+            "dnf5 no longer reports repository '{repo_id}' after saving"
+        ));
+    }
+    let actual = |key: &str| values.get(key).map(String::as_str).unwrap_or("");
+
+    let mut mismatches = Vec::new();
+    if !saved_field_matches(repo_id, "name", actual("name"), name) {
+        mismatches.push("name");
+    }
+    if !saved_list_field_matches(repo_id, "baseurl", actual("baseurl"), baseurl) {
+        mismatches.push("baseurl");
+    }
+    if !saved_field_matches(
+        repo_id,
+        "metalink",
+        actual("metalink"),
+        metalink.as_deref().unwrap_or(""),
+    ) {
+        mismatches.push("metalink");
+    }
+    if !saved_field_matches(
+        repo_id,
+        "mirrorlist",
+        actual("mirrorlist"),
+        mirrorlist.as_deref().unwrap_or(""),
+    ) {
+        mismatches.push("mirrorlist");
+    }
+
+    // dnf5 exposes the package signature check under `pkg_gpgcheck`;
+    // `gpgcheck` is the deprecated alias the panel still writes.
+    let actual_gpgcheck = if values.contains_key("pkg_gpgcheck") {
+        actual("pkg_gpgcheck")
+    } else {
+        actual("gpgcheck")
+    };
+    let actual_gpgcheck = actual_gpgcheck == "1" || actual_gpgcheck.eq_ignore_ascii_case("true");
+    if actual_gpgcheck != gpgcheck {
+        log_to_file(
+            "DEBUG",
+            &format!(
+                "repo save verification: '{repo_id}' gpgcheck differs \
+                 (actual={actual_gpgcheck}, expected={gpgcheck})"
+            ),
+        );
+        mismatches.push("gpgcheck");
+    }
+
+    // `repo info` reports no priority (99 default); the dump always prints
+    // the effective value.
+    let actual_priority = actual("priority").parse::<u32>().unwrap_or(99);
+    let expected_priority = priority.unwrap_or(99);
+    if actual_priority != expected_priority {
+        log_to_file(
+            "DEBUG",
+            &format!(
+                "repo save verification: '{repo_id}' priority differs \
+                 (actual={actual_priority}, expected={expected_priority})"
+            ),
+        );
+        mismatches.push("priority");
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "dnf5 did not apply the saved {} for repository '{repo_id}'",
+        mismatches.join(", ")
+    ))
+}
+
+/// The option names dnf5's config-manager override file sets for one repo id.
+///
+/// Only this repo's `[id]` section is read, and only option names that pass
+/// `repo_override_option_valid` are returned — they become arguments of the
+/// privileged `unsetopt` action. A missing file is an empty list.
+fn repo_override_options(repo_id: &str, override_path: &Path) -> Vec<String> {
+    let content = match fs::read_to_string(override_path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut in_section = false;
+    let mut options = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = &trimmed[1..trimmed.len() - 1] == repo_id;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim().to_ascii_lowercase();
+            if repo_override_option_valid(&key) {
+                options.push(key);
+            }
+        }
+    }
+    options.sort();
+    options.dedup();
+    options
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,139 +613,24 @@ pub struct MirrorSpeedResult {
     pub speed_ms: Option<u32>,
 }
 
-/// Parse all .repo files from /etc/yum.repos.d/ and .list/.sources from /etc/apt/
+/// List dnf repositories from dnf5's own report and apt sources from
+/// `/etc/apt`. dnf5 is authoritative: file contents are never parsed for
+/// enabled state, because overrides can disagree with the base file.
 #[tauri::command]
 pub async fn list_repos() -> Result<Vec<RepoEntry>, String> {
-    let mut entries = Vec::new();
-
-    let repo_dir = PathBuf::from("/etc/yum.repos.d");
-    if repo_dir.exists() {
-        if let Ok(dir_entries) = fs::read_dir(&repo_dir) {
-            for entry in dir_entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("repo") {
-            continue;
+    if !binary_exists("dnf5").await {
+        // Keep apt-only systems working (scope: apt paths are unchanged); a
+        // dnf4-only host gets one plain-language message instead of an empty
+        // table or a raw error.
+        if binary_exists("apt-get").await {
+            let mut apt_entries = Vec::new();
+            parse_apt_repos(&mut apt_entries);
+            return Ok(apt_entries);
         }
-
-        let file_path = path.to_string_lossy().to_string();
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                log_to_file("WARN", &format!("Could not read {:?}: {e}", path));
-                let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                entries.push(RepoEntry {
-                    id: filename.clone(),
-                    name: filename,
-                    baseurl: String::new(),
-                    enabled: false,
-                    file_path: file_path.clone(),
-                    metalink: None,
-                    mirrorlist: None,
-                    gpgcheck: false,
-                    priority: None,
-                });
-                continue;
-            }
-        };
-
-        let mut current_id = String::new();
-        let mut current_name = String::new();
-        let mut current_baseurl = String::new();
-        let mut current_enabled = true;
-        let mut current_metalink: Option<String> = None;
-        let mut current_mirrorlist: Option<String> = None;
-        let mut current_gpgcheck = true;
-        let mut current_priority: Option<u32> = None;
-        let mut in_section = false;
-        let mut sections_found = 0;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('[') && line.ends_with(']') {
-                sections_found += 1;
-                // Save previous section
-                if in_section && !current_id.is_empty() {
-                    entries.push(RepoEntry {
-                        id: current_id.clone(),
-                        name: if current_name.is_empty() {
-                            current_id.clone()
-                        } else {
-                            current_name.clone()
-                        },
-                        baseurl: current_baseurl.clone(),
-                        enabled: current_enabled,
-                        file_path: file_path.clone(),
-                        metalink: current_metalink.clone(),
-                        mirrorlist: current_mirrorlist.clone(),
-                        gpgcheck: current_gpgcheck,
-                        priority: current_priority,
-                    });
-                }
-                current_id = line[1..line.len() - 1].to_string();
-                current_name = String::new();
-                current_baseurl = String::new();
-                current_enabled = true;
-                current_metalink = None;
-                current_mirrorlist = None;
-                current_gpgcheck = true;
-                current_priority = None;
-                in_section = true;
-            } else if in_section {
-                if let Some((key, val)) = line.split_once('=') {
-                    let key = key.trim().to_lowercase();
-                    let val = val.trim().to_string();
-                    match key.as_str() {
-                        "name" => current_name = val,
-                        "baseurl" => current_baseurl = val,
-                        "enabled" => current_enabled = val == "1" || val == "true",
-                        "metalink" => current_metalink = Some(val),
-                        "mirrorlist" => current_mirrorlist = Some(val),
-                        "gpgcheck" => current_gpgcheck = val == "1",
-                        "priority" => current_priority = val.parse::<u32>().ok(),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Save last section
-        if in_section && !current_id.is_empty() {
-            sections_found += 1;
-            entries.push(RepoEntry {
-                id: current_id.clone(),
-                name: if current_name.is_empty() {
-                    current_id.clone()
-                } else {
-                    current_name.clone()
-                },
-                baseurl: current_baseurl.clone(),
-                enabled: current_enabled,
-                file_path: file_path.clone(),
-                metalink: current_metalink.clone(),
-                mirrorlist: current_mirrorlist.clone(),
-                gpgcheck: current_gpgcheck,
-                priority: current_priority,
-            });
-        }
-
-        if sections_found == 0 {
-            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown.repo".to_string());
-            entries.push(RepoEntry {
-                id: filename.clone(),
-                name: filename,
-                baseurl: String::new(),
-                enabled: false,
-                file_path: file_path.clone(),
-                metalink: None,
-                mirrorlist: None,
-                gpgcheck: false,
-                priority: None,
-            });
-        }
-            }
-        }
+        return Err(DNF4_UNSUPPORTED_MESSAGE.to_string());
     }
 
+    let mut entries = load_repo_entries().await?;
     parse_apt_repos(&mut entries);
 
     Ok(entries)
@@ -242,6 +714,7 @@ fn parse_apt_list_file(path: &Path, entries: &mut Vec<RepoEntry>) {
                     mirrorlist: None,
                     gpgcheck: true,
                     priority: None,
+                    system_owned: false,
                 });
             }
         }
@@ -276,6 +749,7 @@ fn parse_apt_sources_file(path: &Path, entries: &mut Vec<RepoEntry>) {
                 mirrorlist: None,
                 gpgcheck: true,
                 priority: None,
+                system_owned: false,
             });
         }
     };
@@ -306,57 +780,52 @@ fn parse_apt_sources_file(path: &Path, entries: &mut Vec<RepoEntry>) {
     flush_stanza(entries, &uris, &suites, enabled, stanza_idx);
 }
 
-/// Pure check: given all repo file contents as (path, content) pairs,
-/// determine if disabling `target_repo_id` in `target_file` would leave
-/// zero enabled repos system-wide.
+/// Pure check over dnf5's effective repo list: would disabling
+/// `target_repo_id` leave zero enabled repos system-wide?
 ///
-/// Checks the **resulting state after the toggle would apply**: if the
-/// target repo is currently enabled=1, subtracting 1 from the total
-/// enabled count across all files gives the post-toggle count. If that
-/// is zero, confirmation is required.
-///
-/// Accounts for repos in ALL files, not just the one being toggled —
-/// "zero enabled repos system-wide" means checking across every repo file.
-pub fn would_disable_last_enabled_repo(
-    all_contents: &[(&str, &str)],
-    target_file: &str,
-    target_repo_id: &str,
-) -> bool {
-    let mut total_enabled = 0usize;
-    let mut target_enabled = false;
+/// Uses effective `is_enabled`, so a repo disabled by an override is not
+/// counted as enabled and a repo enabled by an override is.
+pub fn would_disable_last_enabled_repo(repos: &[RepoEntry], target_repo_id: &str) -> bool {
+    let total_enabled = repos.iter().filter(|repo| repo.enabled).count();
+    let target_enabled = repos
+        .iter()
+        .any(|repo| repo.id == target_repo_id && repo.enabled);
 
-    for (path, content) in all_contents {
-        total_enabled += count_enabled_repos_in_content(content);
-        if *path == target_file && is_repo_enabled_in_content(content, target_repo_id) {
-            target_enabled = true;
-        }
-    }
-
-    target_enabled && total_enabled.saturating_sub(1) == 0
+    target_enabled && total_enabled == 1
 }
 
-/// Check if a specific repo section in `.repo` content has `enabled=1`.
-/// Tracks section boundaries so `enabled=1` in a different section
-/// is not attributed to the target repo.
-fn is_repo_enabled_in_content(content: &str, repo_id: &str) -> bool {
-    let target_header = format!("[{}]", repo_id);
-    let mut in_target = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_target = trimmed == target_header;
-            continue;
-        }
-        if in_target {
-            if let Some((key, value)) = trimmed.split_once('=') {
-                if key.trim() == "enabled" && value.trim() == "1" {
-                    return true;
-                }
-            }
-        }
+/// Pure check over dnf5's effective repo list: would deleting the target
+/// section (`whole_file = false`) or its whole file (`whole_file = true`)
+/// leave zero enabled repos system-wide?
+pub fn would_delete_last_enabled_repo(
+    repos: &[RepoEntry],
+    target_file: &str,
+    target_repo_id: &str,
+    whole_file: bool,
+) -> bool {
+    let total_enabled = repos.iter().filter(|repo| repo.enabled).count();
+    if total_enabled == 0 {
+        return false;
     }
-    false
+
+    let removed_enabled = if whole_file {
+        repos
+            .iter()
+            .filter(|repo| repo.enabled && repo.file_path == target_file)
+            .count()
+    } else {
+        usize::from(repos.iter().any(|repo| {
+            repo.enabled && repo.id == target_repo_id && repo.file_path == target_file
+        }))
+    };
+
+    total_enabled.saturating_sub(removed_enabled) == 0
+}
+
+/// Apt repositories keep the existing file-editing helper; dnf repos are
+/// toggled through dnf5's override file.
+fn is_apt_repo_path(path: &str) -> bool {
+    path.ends_with(".list") || path.ends_with(".sources") || path.ends_with(".sources.list")
 }
 
 /// Dispatch a named `lcp-admin` repo action via PolicyKit privilege escalation.
@@ -376,72 +845,70 @@ async fn run_repo_named_action(action: &str, params: &[String]) -> Result<(), St
     Ok(())
 }
 
-/// Enable or disable a specific repo in its file (.repo, .list, or .sources).
+/// Enable or disable a repository.
 ///
-/// Dispatches to `repo_toggle_enable` or `repo_toggle_disable` named actions
-/// instead of raw pkexec + sed. For disable operations, checks the
-/// zero-enabled-repos lockout: if disabling would leave zero enabled repos
-/// system-wide, requires explicit confirmation.
+/// dnf repos go through `dnf5 config-manager setopt <id>.enabled=1|0`
+/// (override file), never a file write — including repos whose config lives
+/// under the read-only `/usr/share/dnf5/repos.d`. Apt repos keep their
+/// existing `.list`/`.sources` helper path.
+///
+/// Every dnf toggle is verified against dnf5's effective state afterwards.
+/// For disable operations, the zero-enabled-repos lockout uses dnf5's
+/// effective enabled count and requires explicit confirmation.
 #[tauri::command]
 pub async fn toggle_repo(repo_id: String, enabled: bool, file_path: String, confirmed: bool) -> Result<String, String> {
-    // The path comes from the frontend, so it is checked against the directories
-    // the package manager uses before the file is touched with root rights.
-    ensure_repo_file_path(&file_path)?;
+    if is_apt_repo_path(&file_path) {
+        // The path comes from the frontend, so it is checked against the
+        // directories the package manager uses before the file is touched.
+        ensure_repo_file_path(&file_path)?;
+        let action = if enabled { "repo_toggle_enable" } else { "repo_toggle_disable" };
+        run_repo_named_action(
+            action,
+            &[String::from(&file_path), String::from(&repo_id)],
+        )
+        .await
+        .map_err(|e| format!("Failed to toggle repo: {e}"))?;
 
-    // Zero-enabled-repos lockout for disable operations: if disabling this repo
-    // would leave zero enabled repos system-wide, require confirmation.
-    if !enabled && !confirmed {
-        let all_contents = gather_all_repo_contents();
-        let all_contents_refs: Vec<(&str, &str)> = all_contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
-        if would_disable_last_enabled_repo(&all_contents_refs, &file_path, &repo_id) {
-            return Ok(
-                "CONFIRMATION_REQUIRED: Disabling this repository would leave no enabled \
-                 repositories system-wide. Future package updates would be impossible. \
-                 Do you want to proceed?"
-                    .to_string(),
-            );
-        }
+        log_to_file("INFO", &format!("Toggled apt repo {repo_id} enabled={enabled}"));
+        return Ok(String::new());
     }
 
-    let action = if enabled { "repo_toggle_enable" } else { "repo_toggle_disable" };
+    // Only a repo dnf5 itself reports may be passed to a privileged command.
+    let repos = load_repo_entries().await?;
+    let target = repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .ok_or_else(|| format!("dnf5 does not report a repository with id '{repo_id}'"))?;
+    if target.file_path != file_path {
+        return Err(format!(
+            "Repository '{repo_id}' is defined in '{}', not '{file_path}'",
+            target.file_path
+        ));
+    }
+
+    // Zero-enabled-repos lockout for disable operations.
+    if !enabled && !confirmed && would_disable_last_enabled_repo(&repos, &repo_id) {
+        return Ok(
+            "CONFIRMATION_REQUIRED: Disabling this repository would leave no enabled \
+             repositories system-wide. Future package updates would be impossible. \
+             Do you want to proceed?"
+                .to_string(),
+        );
+    }
+
     run_repo_named_action(
-        action,
-        &[String::from(&file_path), String::from(&repo_id)],
+        "repo_config_manager_set",
+        &[String::from(&repo_id), if enabled { "1" } else { "0" }.to_string()],
     )
     .await
     .map_err(|e| format!("Failed to toggle repo: {e}"))?;
 
+    verify_repo_enabled(&repo_id, enabled)
+        .await
+        .map_err(|e| format!("Failed to toggle repo: {e}"))?;
+
     log_to_file("INFO", &format!("Toggled repo {repo_id} enabled={enabled}"));
     Ok(String::new())
-}
-
-/// Gather the contents of all repository files for lockout checks.
-/// Reads every .repo, .list, and .sources file under the package manager dirs.
-fn gather_all_repo_contents() -> Vec<(String, String)> {
-    let mut contents = Vec::new();
-    // Same locations the repo scanner reads (list_repos): /etc/yum.repos.d/,
-    // /etc/apt/sources.list.d/, plus the standalone classic
-    // /etc/apt/sources.list — otherwise the lockout check could miss enabled
-    // repos defined there.
-    let dirs = ["/etc/yum.repos.d", "/etc/apt/sources.list.d"];
-    for dir in &dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if matches!(ext, "repo" | "list" | "sources") {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        contents.push((path.to_string_lossy().to_string(), content));
-                    }
-                }
-            }
-        }
-    }
-    // The classic standalone sources.list is not inside .list.d.
-    if let Ok(content) = std::fs::read_to_string("/etc/apt/sources.list") {
-        contents.push(("/etc/apt/sources.list".to_string(), content));
-    }
-    contents
 }
 
 /// Add a repo by URL using dnf config-manager or add-apt-repository.
@@ -487,14 +954,14 @@ pub async fn add_repo(url: String, confirmed: bool) -> Result<String, String> {
 
         // Post-add unsigned-repo detection: inspect repo files for disabled
         // signature verification. Surface a warning but never block or rewrite.
-        let unsigned_warning = if detect_unsigned_repos() {
+        let unsigned_warning = if detect_unsigned_repos().await {
             " WARNING: This repository does not use GPG signature verification. \
              Future updates from this source may not be authenticated."
         } else {
             ""
         };
 
-        return Ok(format!("{unsigned_warning}"));
+        return Ok(unsigned_warning.to_string());
     }
 
     if binary_exists("add-apt-repository").await {
@@ -507,56 +974,29 @@ pub async fn add_repo(url: String, confirmed: bool) -> Result<String, String> {
 
         log_to_file("INFO", &format!("Added repo: {url}"));
 
-        let unsigned_warning = if detect_unsigned_repos() {
-            " WARNING: This repository does not use GPG signature verification. \
-             Future updates from this source may not be authenticated."
-        } else {
-            ""
-        };
+        // apt sources keep their previous behaviour: the dnf5 signature scan
+        // does not apply to them.
+        let unsigned_warning = "";
 
-        return Ok(format!("{unsigned_warning}"));
+        return Ok(unsigned_warning.to_string());
     }
 
     Err("Neither dnf nor add-apt-repository is available on this system".to_string())
 }
 
-/// Scan repository files for unsigned indicators (`gpgcheck=0`,
-/// `repo_gpgcheck=0`). Returns `true` if any unsigned repo is found.
-///
-/// Checks /etc/yum.repos.d/*.repo files. Used after `add_repo` to surface a
-/// persistent unsigned-repository warning in the repo list — warning only,
-/// never blocking or rewriting.
-fn detect_unsigned_repos() -> bool {
-    if let Ok(dir) = std::fs::read_dir("/etc/yum.repos.d") {
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("repo") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if repo_has_unsigned_indicators(&content) {
-                        return true;
-                    }
-                }
-            }
+/// Warn when any repo dnf5 reports has signature verification off. Uses
+/// dnf5's own `pkg_gpgcheck`/`repo_gpgcheck`, so package-owned repos in
+/// `/usr/share/dnf5/repos.d` are covered too.
+async fn detect_unsigned_repos() -> bool {
+    match load_dnf5_repos().await {
+        Ok(repos) => repos
+            .iter()
+            .any(|repo| !repo.pkg_gpgcheck || !repo.repo_gpgcheck),
+        Err(e) => {
+            log_to_file("WARN", &format!("Unsigned-repository scan skipped: {e}"));
+            false
         }
     }
-    false
-}
-
-/// Check whether a single repo file's content contains unsigned indicators
-/// (`gpgcheck=0` or `repo_gpgcheck=0`). Pure function — unit-testable without
-/// touching the filesystem.
-fn repo_has_unsigned_indicators(content: &str) -> bool {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some((key, value)) = trimmed.split_once('=') {
-            if (key.trim() == "gpgcheck" || key.trim() == "repo_gpgcheck")
-                && value.trim() == "0"
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Run dnf makecache or apt-get update to refresh metadata
@@ -581,6 +1021,14 @@ pub async fn save_repo_details(
     gpgcheck: bool,
     priority: Option<u32>,
 ) -> Result<(), String> {
+    // dnf5 reports some repos from package-owned directories. They are
+    // toggle-only: writing their file would modify distribution content.
+    if is_system_owned_repo_path(&file_path) {
+        return Err(format!(
+            "The repository file '{file_path}' belongs to the distribution and cannot be edited here. Its enabled state can still be changed."
+        ));
+    }
+
     // the path comes from the frontend, so it is confined to the package
     // managers' own directories before anything reads or writes it
     ensure_repo_file_path(&file_path)?;
@@ -679,6 +1127,13 @@ pub async fn save_repo_details(
     crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
 
     crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
+
+    // dnf5 is authoritative: re-read the repo and compare every saved field.
+    verify_saved_repo_details(
+        &repo_id, &name, &baseurl, &metalink, &mirrorlist, gpgcheck, priority,
+    )
+    .await
+    .map_err(|e| format!("Failed to save repository details: {e}"))?;
 
     Ok(())
 }
@@ -923,14 +1378,16 @@ fn get_repo_probe_url(raw_url: &str) -> String {
 
 #[tauri::command]
 pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
-    let repo_dir = PathBuf::from("/etc/yum.repos.d");
-    if !repo_dir.exists() {
-        return Ok(vec![]);
+    if !binary_exists("dnf5").await {
+        if binary_exists("apt-get").await {
+            // apt hosts have no repomd repositories for this dnf-oriented probe.
+            return Ok(vec![]);
+        }
+        return Err(DNF4_UNSUPPORTED_MESSAGE.to_string());
     }
 
     let (releasever, basearch) = get_system_repo_vars();
     let mut diagnostics = Vec::new();
-    let dir_entries = fs::read_dir(&repo_dir).map_err(|e| format!("Failed to read /etc/yum.repos.d: {e}"))?;
 
     struct PendingProbe {
         repo_id: String,
@@ -942,164 +1399,92 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
 
     let mut pending_probes = Vec::new();
 
-    for entry in dir_entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("repo") {
+    // dnf5 is authoritative for ids, effective enabled state and config file
+    // paths. A repo disabled by an override is reported disabled even when
+    // its base file says enabled=1.
+    let repos = load_repo_entries().await?;
+    let loaded_files: std::collections::HashSet<&str> = repos
+        .iter()
+        .map(|repo| repo.file_path.as_str())
+        .collect();
+
+    for repo in &repos {
+        // apt entries have no repomd.xml to probe.
+        if is_apt_repo_path(&repo.file_path) {
             continue;
         }
-
-        let file_path = path.to_string_lossy().to_string();
-        let metadata = match fs::metadata(&path) {
-            Ok(m) => m,
-            Err(e) => {
-                diagnostics.push(RepoDiagnostic {
-                    repo_id: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                    name: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                    file_path: file_path.clone(),
-                    enabled: false,
-                    status: "corrupted".to_string(),
-                    latency_ms: None,
-                    http_status: None,
-                    repomd_valid: false,
-                    error_message: Some(format!("Cannot read metadata: {e}")),
-                    tested_url: None,
-                    is_empty_file: false,
-                    is_corrupted_syntax: true,
-                });
-                continue;
-            }
+        let raw_url = if !repo.baseurl.is_empty() {
+            repo.baseurl.split_whitespace().next().unwrap_or("")
+        } else if let Some(mirrorlist) = &repo.mirrorlist {
+            mirrorlist.as_str()
+        } else if let Some(metalink) = &repo.metalink {
+            metalink.as_str()
+        } else {
+            ""
+        };
+        let candidate_url = if raw_url.is_empty() {
+            None
+        } else {
+            Some(substitute_repo_vars(raw_url, &releasever, &basearch))
         };
 
-        if metadata.len() == 0 {
-            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            diagnostics.push(RepoDiagnostic {
-                repo_id: filename.clone(),
-                name: filename,
-                file_path: file_path.clone(),
-                enabled: false,
-                status: "empty".to_string(),
-                latency_ms: None,
-                http_status: None,
-                repomd_valid: false,
-                error_message: Some("Repository file is 0 bytes (empty and corrupted)".to_string()),
-                tested_url: None,
-                is_empty_file: true,
-                is_corrupted_syntax: true,
-            });
+        pending_probes.push(PendingProbe {
+            repo_id: repo.id.clone(),
+            name: repo.name.clone(),
+            file_path: repo.file_path.clone(),
+            enabled: repo.enabled,
+            candidate_url,
+        });
+    }
+
+    // Diagnostic pass: repo files on disk that dnf5 did not load. An empty,
+    // unreadable or syntactically invalid file is skipped by dnf5 silently,
+    // so it would otherwise be invisible in this list.
+    for dir in REPO_READ_ONLY_DIRS
+        .iter()
+        .copied()
+        .chain(std::iter::once(USER_REPO_DIR))
+    {
+        let Ok(entries) = fs::read_dir(dir) else {
             continue;
-        }
-
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                diagnostics.push(RepoDiagnostic {
-                    repo_id: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                    name: path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-                    file_path: file_path.clone(),
-                    enabled: false,
-                    status: "corrupted".to_string(),
-                    latency_ms: None,
-                    http_status: None,
-                    repomd_valid: false,
-                    error_message: Some(format!("Could not read file content: {e}")),
-                    tested_url: None,
-                    is_empty_file: false,
-                    is_corrupted_syntax: true,
-                });
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("repo") {
                 continue;
             }
-        };
-
-        let mut current_id = String::new();
-        let mut current_name = String::new();
-        let mut current_baseurl = String::new();
-        let mut current_enabled = true;
-        let mut current_metalink: Option<String> = None;
-        let mut current_mirrorlist: Option<String> = None;
-        let mut in_section = false;
-        let mut sections_found = 0;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('[') && line.ends_with(']') {
-                if in_section && !current_id.is_empty() {
-                    sections_found += 1;
-                    let cand = if !current_baseurl.is_empty() {
-                        Some(substitute_repo_vars(&current_baseurl, &releasever, &basearch))
-                    } else if let Some(ref ml) = current_mirrorlist {
-                        Some(substitute_repo_vars(ml, &releasever, &basearch))
-                    } else if let Some(ref mt) = current_metalink {
-                        Some(substitute_repo_vars(mt, &releasever, &basearch))
-                    } else {
-                        None
-                    };
-
-                    pending_probes.push(PendingProbe {
-                        repo_id: current_id.clone(),
-                        name: if current_name.is_empty() { current_id.clone() } else { current_name.clone() },
-                        file_path: file_path.clone(),
-                        enabled: current_enabled,
-                        candidate_url: cand,
-                    });
-                }
-                current_id = line[1..line.len() - 1].to_string();
-                current_name = String::new();
-                current_baseurl = String::new();
-                current_enabled = true;
-                current_metalink = None;
-                current_mirrorlist = None;
-                in_section = true;
-            } else if in_section {
-                if let Some((key, val)) = line.split_once('=') {
-                    let key = key.trim().to_lowercase();
-                    let val = val.trim().to_string();
-                    match key.as_str() {
-                        "name" => current_name = val,
-                        "baseurl" => current_baseurl = val,
-                        "enabled" => current_enabled = val == "1" || val == "true",
-                        "metalink" => current_metalink = Some(val),
-                        "mirrorlist" => current_mirrorlist = Some(val),
-                        _ => {}
-                    }
-                }
+            let file_path = path.to_string_lossy().to_string();
+            if loaded_files.contains(file_path.as_str()) {
+                continue;
             }
-        }
-
-        if in_section && !current_id.is_empty() {
-            sections_found += 1;
-            let cand = if !current_baseurl.is_empty() {
-                Some(substitute_repo_vars(&current_baseurl, &releasever, &basearch))
-            } else if let Some(ref ml) = current_mirrorlist {
-                Some(substitute_repo_vars(ml, &releasever, &basearch))
-            } else if let Some(ref mt) = current_metalink {
-                Some(substitute_repo_vars(mt, &releasever, &basearch))
-            } else {
-                None
+            let filename = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let (empty, message) = match fs::metadata(&path) {
+                Err(e) => (false, format!("Cannot read metadata: {e}")),
+                Ok(metadata) if metadata.len() == 0 => (
+                    true,
+                    "Repository file is 0 bytes (empty and corrupted)".to_string(),
+                ),
+                Ok(_) => (
+                    false,
+                    "dnf5 did not load any repository from this file (unreadable or invalid syntax)"
+                        .to_string(),
+                ),
             };
-
-            pending_probes.push(PendingProbe {
-                repo_id: current_id.clone(),
-                name: if current_name.is_empty() { current_id.clone() } else { current_name.clone() },
-                file_path: file_path.clone(),
-                enabled: current_enabled,
-                candidate_url: cand,
-            });
-        }
-
-        if sections_found == 0 {
-            let filename = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
             diagnostics.push(RepoDiagnostic {
                 repo_id: filename.clone(),
                 name: filename,
                 file_path: file_path.clone(),
                 enabled: false,
-                status: "corrupted".to_string(),
+                status: if empty { "empty" } else { "corrupted" }.to_string(),
                 latency_ms: None,
                 http_status: None,
                 repomd_valid: false,
-                error_message: Some("No valid [repo] section headers found in file".to_string()),
+                error_message: Some(message),
                 tested_url: None,
-                is_empty_file: false,
+                is_empty_file: empty,
                 is_corrupted_syntax: true,
             });
         }
@@ -1278,64 +1663,192 @@ pub async fn validate_all_repos() -> Result<Vec<RepoDiagnostic>, String> {
     Ok(diagnostics)
 }
 
-/// Pure check: given all repo file contents as (path, content) pairs,
-/// determine if deleting `target_file` would leave zero enabled repos
-/// system-wide.
+/// Name of the package that owns `path`, when the distribution's package
+/// manager says the file belongs to one.
 ///
-/// Counts all enabled repos across all files, subtracts any enabled repos
-/// that exist only in `target_file`. If the result is zero, confirmation is
-/// required before deleting.
-pub fn would_delete_last_enabled_repo(
-    all_contents: &[(&str, &str)],
-    target_file: &str,
-) -> bool {
-    let mut total_enabled = 0usize;
-    let mut target_enabled = 0usize;
+/// A package-owned repository file is not the panel's to delete: removing it
+/// leaves the package with a missing file and the next update puts it back.
+/// Both probes are unprivileged and take one absolute path operand.
+async fn repo_file_package_owner(path: &str, apt_target: bool) -> Option<String> {
+    let output = if apt_target {
+        // `dpkg-query -S` prints "<package>: <path>" for an owned file.
+        tokio::process::Command::new("dpkg-query")
+            .args(["-S", path])
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("rpm")
+            .args(["-q", "-f", path, "--queryformat", "%{NAME}\n"])
+            .output()
+            .await
+    };
 
-    for (path, content) in all_contents {
-        let file_enabled = count_enabled_repos_in_content(content);
-        total_enabled += file_enabled;
-        if *path == target_file {
-            target_enabled = file_enabled;
+    let Ok(output) = output else { return None };
+    if !output.status.success() {
+        // "not owned by any package" is a normal, non-fatal answer.
+        return None;
+    }
+    let report = String::from_utf8_lossy(&output.stdout);
+    let first_line = report.lines().next().unwrap_or("").trim();
+    let owner = if apt_target {
+        first_line.split(':').next().unwrap_or("").trim()
+    } else {
+        first_line
+    };
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
+/// Refuse a deletion that could damage the host, whatever the caller asked for.
+///
+/// The frontend disables Delete for system-owned entries, but the command is
+/// the trust boundary: a stale or hand-crafted call must hit the same wall.
+///
+/// * the id is a distribution family (`fedora`, `updates`, `rpmfusion-…`) —
+///   never deletable, wherever the file lives;
+/// * the file is owned by an installed package — the panel may switch such a
+///   repository on or off, but deleting the file breaks the package and the
+///   next update restores it;
+/// * a whole-file delete would also remove a protected section that shares the
+///   file (multi-repo files are only edited section by section).
+fn deletion_refusal(
+    repo_id: &str,
+    whole_file: bool,
+    section_ids: &[&str],
+    package_owner: Option<&str>,
+) -> Result<(), String> {
+    if repo_id_is_protected(repo_id) {
+        return Err(format!(
+            "'{repo_id}' is a distribution repository. The panel will not delete it: removing \
+             it can leave this host without working package updates."
+        ));
+    }
+
+    if let Some(owner) = package_owner {
+        return Err(format!(
+            "'{repo_id}' belongs to the installed package '{owner}'. Deleting the file would \
+             leave that package broken and the next update would restore it. Remove the package \
+             instead — its file goes with it."
+        ));
+    }
+
+    if whole_file {
+        if let Some(protected) = section_ids
+            .iter()
+            .copied()
+            .find(|id| repo_id_is_protected(id))
+        {
+            return Err(format!(
+                "'{repo_id}' shares its file with the distribution repository '{protected}'. \
+                 Deleting the file would remove that repository too."
+            ));
         }
     }
 
-    total_enabled.saturating_sub(target_enabled) == 0 && total_enabled > 0
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_repo(repo_id: String, file_path: String, confirmed: bool) -> Result<String, String> {
+    // Package-owned dnf repo files are read-only for the panel.
+    if is_system_owned_repo_path(&file_path) {
+        return Err(format!(
+            "The repository file '{file_path}' belongs to the distribution and cannot be deleted here."
+        ));
+    }
+
     // The path comes from the frontend, so it is checked against the directories
     // the package manager uses before the file is deleted with root rights.
     ensure_repo_file_path(&file_path)?;
-    let path = std::path::Path::new(&file_path);
+    let path = Path::new(&file_path);
     if !path.exists() {
         return Ok(String::new());
     }
 
-    // Zero-enabled-repos lockout for delete: if deleting this file would leave
-    // zero enabled repos system-wide, require confirmation.
-    if !confirmed {
-        let all_contents = gather_all_repo_contents();
-        let all_contents_refs: Vec<(&str, &str)> = all_contents.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
-        if would_delete_last_enabled_repo(&all_contents_refs, &file_path) {
-            return Ok(
-                "CONFIRMATION_REQUIRED: Deleting this repository would leave no enabled \
-                 repositories system-wide. Future package updates would be impossible. \
-                 Do you want to proceed?"
-                    .to_string(),
-            );
-        }
-    }
-
+    let apt_target = is_apt_repo_path(&file_path);
     let content = fs::read_to_string(path).unwrap_or_default();
     let sections: Vec<&str> = content
         .lines()
         .map(|l| l.trim())
         .filter(|l| l.starts_with('[') && l.ends_with(']'))
         .collect();
+    let whole_file = sections.len() <= 1;
 
-    if sections.is_empty() || sections.len() <= 1 {
+    // Distribution families, package-owned files and multi-repo files that
+    // carry a protected section are refused here, before the confirmation
+    // dialog, so the call fails with a reason instead of offering a delete
+    // that must not happen.
+    let section_ids: Vec<&str> = sections
+        .iter()
+        .map(|section| section.trim_matches(['[', ']']))
+        .collect();
+    let package_owner = repo_file_package_owner(&file_path, apt_target).await;
+    if let Err(refusal) = deletion_refusal(
+        &repo_id,
+        whole_file,
+        &section_ids,
+        package_owner.as_deref(),
+    ) {
+        log_to_file(
+            "WARN",
+            &format!("Refused to delete {repo_id} at {file_path}: {refusal}"),
+        );
+        return Err(refusal);
+    }
+
+    // Authoritative view for the lockout and the target check: dnf5's
+    // effective state for dnf repos, the parsed apt sources for apt ones.
+    let repos = if apt_target {
+        let mut entries = Vec::new();
+        parse_apt_repos(&mut entries);
+        entries
+    } else {
+        load_repo_entries().await?
+    };
+
+    if !apt_target
+        && !repos
+            .iter()
+            .any(|repo| repo.id == repo_id && repo.file_path == file_path)
+    {
+        return Err(format!(
+            "dnf5 does not report repository '{repo_id}' in '{file_path}'"
+        ));
+    }
+
+    // Always preview first. The first call (`confirmed = false`) never
+    // touches the system; the second call carries the user's decision.
+    if !confirmed {
+        let lockout = would_delete_last_enabled_repo(&repos, &file_path, &repo_id, whole_file);
+        let detail = if lockout {
+            "Deleting this repository would leave no enabled repositories \
+             system-wide. Future package updates would be impossible. \
+             Do you want to proceed?"
+        } else {
+            "This removes the repository configuration from the system. \
+             Do you want to proceed?"
+        };
+        return Ok(format!("CONFIRMATION_REQUIRED: {detail}"));
+    }
+
+    // dnf5's override for this id is stopped first, through the verified
+    // config-manager mechanism: a leftover `[id]` section would otherwise
+    // outlive the repository file.
+    if !apt_target {
+        for option in repo_override_options(&repo_id, Path::new(DNF5_CONFIG_MANAGER_OVERRIDE)) {
+            run_repo_named_action(
+                "repo_config_manager_unset",
+                &[repo_id.clone(), option.clone()],
+            )
+            .await
+            .map_err(|e| format!("Failed to remove repository override '{option}': {e}"))?;
+        }
+    }
+
+    if whole_file {
         // Whole-file deletion: dispatch to repo_delete named action.
         run_repo_named_action(
             "repo_delete",
@@ -1344,35 +1857,38 @@ pub async fn delete_repo(repo_id: String, file_path: String, confirmed: bool) ->
         .await
         .map_err(|e| format!("Failed to delete repo file: {e}"))?;
         log_to_file("INFO", &format!("Deleted repo file: {}", file_path));
-        return Ok(String::new());
-    }
+    } else {
+        let mut new_lines = Vec::new();
+        let mut skipping = false;
+        let target_header = format!("[{}]", repo_id);
 
-    let mut new_lines = Vec::new();
-    let mut skipping = false;
-    let target_header = format!("[{}]", repo_id);
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                skipping = trimmed == target_header;
+            }
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if trimmed == target_header {
-                skipping = true;
-            } else {
-                skipping = false;
+            if !skipping {
+                new_lines.push(line);
             }
         }
 
-        if !skipping {
-            new_lines.push(line);
-        }
+        let final_content = new_lines.join("\n") + "\n";
+        // The content policy (F-2) also guards the delete flow's rewrite: the
+        // remaining sections pass the same body validation before the privileged
+        // write sees them.
+        crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
+        crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
+        log_to_file("INFO", &format!("Deleted repo section [{}] from {}", repo_id, file_path));
     }
 
-    let final_content = new_lines.join("\n") + "\n";
-    // The content policy (F-2) also guards the delete flow's rewrite: the
-    // remaining sections pass the same body validation before the privileged
-    // write sees them.
-    crate::utils::privilege::ensure_repo_file_content(&file_path, &final_content)?;
-    crate::utils::privilege::write_file_as_root(&file_path, &final_content).await?;
-    log_to_file("INFO", &format!("Deleted repo section [{}] from {}", repo_id, file_path));
+    // dnf5 must no longer report the id at all.
+    if !apt_target {
+        verify_repo_absent(&repo_id)
+            .await
+            .map_err(|e| format!("Failed to delete repo: {e}"))?;
+    }
+
     Ok(String::new())
 }
 
@@ -1412,130 +1928,401 @@ pub async fn bulk_disable_repos(repo_targets: Vec<(String, String)>) -> Result<u
 #[cfg(test)]
 mod repo_lockout_tests {
     use super::{
-        add_repo, detect_unsigned_repos, is_repo_enabled_in_content,
-        repo_has_unsigned_indicators, would_delete_last_enabled_repo,
-        would_disable_last_enabled_repo,
+        add_repo, deletion_refusal, effective_state_from_list_json, normalize_repo_value,
+        parse_dnf5_repos, parse_repo_config_dump, repo_override_options, saved_field_matches,
+        saved_list_field_matches, split_repo_list, would_delete_last_enabled_repo,
+        would_disable_last_enabled_repo, Dnf5RepoInfo, RepoEntry,
     };
+
+    const FEDORA45: &str = include_str!("fixtures/fedora45.json");
+    const DUMP_FEDORA45: &str = include_str!("fixtures/dump-fedora45.txt");
+    const DUMP_MULTIBASEURL: &str = include_str!("fixtures/dump-multibaseurl.txt");
+    const FEDORA44: &str = include_str!("fixtures/fedora44.json");
+    const OVERRIDE_MISMATCH: &str = include_str!("fixtures/override-mismatch.json");
+
+    fn repo(id: &str, file: &str, enabled: bool) -> RepoEntry {
+        RepoEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            baseurl: String::new(),
+            enabled,
+            file_path: file.to_string(),
+            metalink: None,
+            mirrorlist: None,
+            gpgcheck: true,
+            priority: None,
+            system_owned: file.starts_with("/usr/share/dnf5/repos.d")
+                || file.starts_with("/etc/distro.repos.d"),
+        }
+    }
+
+    // ── dnf5 JSON parsing ─────────────────────────────────────────────────
+
+    #[test]
+    fn fedora45_fixture_maps_effective_state_and_system_owned() {
+        let repos = parse_dnf5_repos(FEDORA45).expect("fedora45 fixture must parse");
+        assert_eq!(repos.len(), 5);
+
+        let fedora = repos.iter().find(|r| r.id == "fedora").unwrap();
+        assert!(fedora.is_enabled);
+        assert_eq!(fedora.repo_file_path, "/etc/yum.repos.d/fedora.repo");
+        assert_eq!(fedora.base_url.len(), 1);
+
+        let testing = repos.iter().find(|r| r.id == "updates-testing").unwrap();
+        assert!(!testing.is_enabled, "disabled repo must report is_enabled=false");
+        assert_eq!(testing.metalink, "https://mirrors.fedoraproject.org/metalink?repo=updates-testing-f45&arch=x86_64");
+
+        let entry = repos
+            .iter()
+            .find(|r| r.id == "fedora-cisco-openh264")
+            .unwrap()
+            .to_entry();
+        assert!(entry.system_owned, "a /usr/share/dnf5/repos.d file is system-owned");
+        assert_eq!(entry.file_path, "/usr/share/dnf5/repos.d/fedora-cisco-openh264.repo");
+
+        let copr = repos
+            .iter()
+            .find(|r| r.id == "copr:copr.fedorainfracloud.org:group_user:project")
+            .unwrap()
+            .to_entry();
+        assert!(!copr.system_owned, "a /etc/yum.repos.d COPR file is user-editable");
+    }
+
+    #[test]
+    fn fedora44_fixture_tolerates_missing_optional_fields() {
+        let repos = parse_dnf5_repos(FEDORA44).expect("fedora44 fixture must parse");
+        assert_eq!(repos.len(), 2);
+        let fedora = repos.iter().find(|r| r.id == "fedora").unwrap();
+        assert!(fedora.is_enabled);
+        assert_eq!(fedora.priority, None);
+        assert!(!fedora.pkg_gpgcheck, "missing pkg_gpgcheck defaults to false");
+        assert_eq!(fedora.repo_file_path, "/etc/yum.repos.d/fedora.repo");
+    }
+
+    #[test]
+    fn override_fixture_wins_over_the_file_content() {
+        let repos = parse_dnf5_repos(OVERRIDE_MISMATCH).expect("fixture must parse");
+        let onlyoffice = repos.iter().find(|r| r.id == "onlyoffice").unwrap();
+        assert!(
+            !onlyoffice.is_enabled,
+            "the override (enabled=0) must decide the effective state even when the base file says enabled=1"
+        );
+    }
+
+    #[test]
+    fn effective_state_accepts_one_matching_repo() {
+        let listed = r#"[
+            {"id":"fedora","name":"Fedora","is_enabled":true},
+            {"id":"updates-testing","name":"Testing","is_enabled":false}
+        ]"#;
+        assert_eq!(effective_state_from_list_json(listed, "fedora").unwrap(), true);
+        assert_eq!(
+            effective_state_from_list_json(listed, "updates-testing").unwrap(),
+            false
+        );
+    }
+
+    #[test]
+    fn effective_state_rejects_unknown_id() {
+        let listed = r#"[{"id":"fedora","is_enabled":true}]"#;
+        let error = effective_state_from_list_json(listed, "does-not-exist").unwrap_err();
+        assert!(error.contains("does-not-exist"), "error must name the id: {error}");
+    }
+
+    #[test]
+    fn effective_state_rejects_duplicate_ids() {
+        let duplicate = r#"[
+            {"id":"dup","is_enabled":true},
+            {"id":"dup","is_enabled":false}
+        ]"#;
+        assert!(
+            effective_state_from_list_json(duplicate, "dup").is_err(),
+            "two entries with the same id must not be treated as a valid state"
+        );
+    }
+
+    #[test]
+    fn unreadable_json_is_an_error_not_an_empty_list() {
+        assert!(parse_dnf5_repos("not json").is_err());
+        assert!(parse_dnf5_repos("").is_err());
+    }
+
+    // ── lockouts over dnf5's effective list ───────────────────────────────
 
     #[test]
     fn would_disable_last_enabled_repo_returns_false_when_multiple_enabled() {
-        let contents = [
-            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
-            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", true),
+            repo("updates", "/etc/yum.repos.d/fedora.repo", true),
         ];
-        assert!(
-            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
-            "disabling one of two enabled repos must not require confirmation"
-        );
+        assert!(!would_disable_last_enabled_repo(&repos, "fedora"));
     }
 
     #[test]
     fn would_disable_last_enabled_repo_returns_true_when_single_enabled() {
-        let contents = [("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n")];
-        assert!(
-            would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
-            "disabling the only enabled repo must require confirmation"
-        );
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", true),
+            repo("updates", "/etc/yum.repos.d/fedora.repo", false),
+        ];
+        assert!(would_disable_last_enabled_repo(&repos, "fedora"));
     }
 
     #[test]
     fn would_disable_last_enabled_repo_returns_false_when_target_not_enabled() {
-        let contents = [
-            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=0\n"),
-            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", false),
+            repo("updates", "/etc/yum.repos.d/fedora.repo", true),
         ];
-        assert!(
-            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
-            "disabling an already-disabled repo must not require confirmation"
-        );
+        assert!(!would_disable_last_enabled_repo(&repos, "fedora"));
     }
 
     #[test]
     fn would_disable_last_enabled_repo_checks_across_files() {
-        // Target file's repo is enabled, but another file also has an enabled repo
-        let contents = [
-            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
-            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", true),
+            repo("copr", "/etc/yum.repos.d/copr.repo", true),
         ];
+        assert!(!would_disable_last_enabled_repo(&repos, "fedora"));
+    }
+
+    #[test]
+    fn would_disable_last_enabled_repo_with_no_repos() {
+        assert!(!would_disable_last_enabled_repo(&[], "fedora"));
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_true_when_file_has_only_enabled_repo() {
+        let repos = [repo("fedora", "/etc/yum.repos.d/fedora.repo", true)];
+        assert!(would_delete_last_enabled_repo(
+            &repos,
+            "/etc/yum.repos.d/fedora.repo",
+            "fedora",
+            true
+        ));
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_false_when_other_files_have_enabled_repos() {
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", true),
+            repo("updates", "/etc/yum.repos.d/updates.repo", true),
+        ];
+        assert!(!would_delete_last_enabled_repo(
+            &repos,
+            "/etc/yum.repos.d/fedora.repo",
+            "fedora",
+            true
+        ));
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_returns_false_when_target_has_no_enabled_repos() {
+        let repos = [
+            repo("fedora", "/etc/yum.repos.d/fedora.repo", false),
+            repo("updates", "/etc/yum.repos.d/updates.repo", true),
+        ];
+        assert!(!would_delete_last_enabled_repo(
+            &repos,
+            "/etc/yum.repos.d/fedora.repo",
+            "fedora",
+            true
+        ));
+    }
+
+    #[test]
+    fn would_delete_last_enabled_repo_subtracts_only_the_target_section() {
+        // The file has two enabled sections; deleting one leaves the other.
+        let repos = [
+            repo("first", "/etc/yum.repos.d/multi.repo", true),
+            repo("second", "/etc/yum.repos.d/multi.repo", true),
+        ];
+        assert!(!would_delete_last_enabled_repo(
+            &repos,
+            "/etc/yum.repos.d/multi.repo",
+            "first",
+            false
+        ));
+        assert!(would_delete_last_enabled_repo(
+            &repos,
+            "/etc/yum.repos.d/multi.repo",
+            "first",
+            true
+        ));
+    }
+
+    // ── save verification ─────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_repo_value_collapses_whitespace() {
+        assert_eq!(
+            normalize_repo_value("  https://a/   https://b/  "),
+            "https://a/ https://b/"
+        );
+        assert_eq!(normalize_repo_value("line\nwrapped"), "line wrapped");
+        assert_eq!(normalize_repo_value(""), "");
+    }
+
+    #[test]
+    fn saved_field_matches_is_whitespace_tolerant() {
+        assert!(saved_field_matches(
+            "fedora",
+            "baseurl",
+            "https://a/ https://b/",
+            "https://a/\nhttps://b/"
+        ));
+        assert!(saved_field_matches("fedora", "name", "Fedora  45", "Fedora 45"));
+    }
+
+    #[test]
+    fn saved_field_matches_rejects_a_real_difference() {
+        assert!(!saved_field_matches(
+            "fedora",
+            "baseurl",
+            "https://actual/",
+            "https://different/"
+        ));
+        assert!(!saved_field_matches("fedora", "name", "", "Fedora"));
+    }
+
+    // ── config-manager dump parsing (save verification source) ─────────────
+
+    #[test]
+    fn dump_parser_reads_real_fedora_dump() {
+        let values = parse_repo_config_dump(DUMP_FEDORA45);
+        assert_eq!(values["name"], "Fedora 45 - x86_64");
+        assert_eq!(values["enabled"], "1");
+        assert_eq!(values["pkg_gpgcheck"], "1");
+        assert_eq!(values["priority"], "99");
+        assert_eq!(
+            values["metalink"],
+            "https://mirrors.fedoraproject.org/metalink?repo=fedora-45&arch=x86_64"
+        );
+        assert_eq!(
+            values["mirrorlist"], "",
+            "an unset string option prints as a bare key"
+        );
+        assert_eq!(values["baseurl"], "");
         assert!(
-            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo", "fedora"),
-            "system-wide check across all repo files must find the second enabled repo"
+            !values.contains_key("======== \"fedora\" repository configuration: ========"),
+            "the header line must not become a key"
         );
     }
 
     #[test]
-    fn would_disable_last_enabled_repo_empty_content() {
-        let contents = [("/etc/yum.repos.d/empty.repo", "")];
-        assert!(
-            !would_disable_last_enabled_repo(&contents, "/etc/yum.repos.d/empty.repo", "fedora"),
-            "empty file: no enabled repos, no confirmation needed"
+    fn dump_parser_keeps_comma_separated_baseurls() {
+        let values = parse_repo_config_dump(DUMP_MULTIBASEURL);
+        assert_eq!(
+            values["baseurl"],
+            "https://example.com/repo,https://example.com/repo2"
         );
+        assert_eq!(values["priority"], "42");
     }
 
     #[test]
-    fn is_repo_enabled_in_content_detects_enabled() {
-        assert!(
-            is_repo_enabled_in_content("[fedora]\nenabled=1\n", "fedora"),
-            "enabled=1 in target section must be detected"
+    fn split_repo_list_accepts_the_dumps_commas_and_the_files_spaces() {
+        assert_eq!(
+            split_repo_list("https://a/,https://b/"),
+            vec!["https://a/".to_string(), "https://b/".to_string()]
         );
-        assert!(
-            !is_repo_enabled_in_content("[fedora]\nenabled=0\n", "fedora"),
-            "enabled=0 must not be detected as enabled"
+        assert_eq!(
+            split_repo_list("https://a/\nhttps://b/"),
+            vec!["https://a/".to_string(), "https://b/".to_string()]
         );
-        assert!(
-            !is_repo_enabled_in_content("[fedora]\nname=Fedora\n", "fedora"),
-            "no enabled key must not be detected as enabled"
+        assert_eq!(
+            split_repo_list("  https://a/ ,  https://b/ "),
+            split_repo_list("https://a/ https://b/")
         );
+        assert!(split_repo_list("").is_empty());
     }
 
     #[test]
-    fn is_repo_enabled_in_content_respects_section_boundaries() {
-        let contents = "[other]\nenabled=1\n[fedora]\nenabled=0\n";
+    fn saved_list_field_matches_is_separator_tolerant_but_keeps_order() {
+        // dnf5 prints base_url comma-separated; the panel writes spaces.
+        assert!(saved_list_field_matches(
+            "fedora",
+            "baseurl",
+            "https://a/,https://b/",
+            "https://a/ https://b/"
+        ));
         assert!(
-            !is_repo_enabled_in_content(contents, "fedora"),
-            "enabled=1 in a different section must not count for fedora"
+            !saved_list_field_matches("fedora", "baseurl", "https://a/,https://b/", "https://b/ https://a/"),
+            "a reordered list is a real difference"
         );
+        assert!(!saved_list_field_matches("fedora", "baseurl", "https://a/", "https://a/ https://b/"));
     }
 
     #[test]
-    fn repo_has_unsigned_indicators_detects_gpgcheck_zero() {
-        assert!(
-            repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\ngpgcheck=0\n"),
-            "gpgcheck=0 must be detected"
+    fn system_owned_entries_are_flagged_from_the_repo_file_path() {
+        let repos = parse_dnf5_repos(FEDORA45).unwrap();
+        let system_owned: Vec<Dnf5RepoInfo> = repos
+            .into_iter()
+            .filter(|repo| repo.to_entry().system_owned)
+            .collect();
+        assert_eq!(system_owned.len(), 1);
+        assert_eq!(system_owned[0].id, "fedora-cisco-openh264");
+    }
+
+    // ── override cleanup ──────────────────────────────────────────────────
+
+    #[test]
+    fn repo_override_options_reads_only_the_target_section() {
+        let dir = std::env::temp_dir().join(format!(
+            "lcp-repo-override-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("99-config_manager.repo");
+        std::fs::write(
+            &path,
+            "[onlyoffice]\nenabled=0\n\n[fedora]\nenabled=1\ngpgcheck=0\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            repo_override_options("onlyoffice", &path),
+            vec!["enabled".to_string()]
         );
-        assert!(
-            repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\nrepo_gpgcheck=0\n"),
-            "repo_gpgcheck=0 must be detected"
+        assert_eq!(
+            repo_override_options("fedora", &path),
+            vec!["enabled".to_string(), "gpgcheck".to_string()]
         );
+        assert!(repo_override_options("missing", &path).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn repo_has_unsigned_indicators_refuses_signed_repos() {
-        assert!(
-            !repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\ngpgcheck=1\n"),
-            "gpgcheck=1 must not be detected as unsigned"
+    fn repo_override_options_skips_names_unfit_for_an_operand() {
+        let dir = std::env::temp_dir().join(format!(
+            "lcp-repo-override-bad-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("99-config_manager.repo");
+        std::fs::write(
+            &path,
+            "[fedora]\nenabled=1\nBad Name=1\n--evil=1\nenabled=0\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            repo_override_options("fedora", &path),
+            vec!["enabled".to_string()],
+            "invalid option names are skipped and duplicates collapse"
         );
-        assert!(
-            !repo_has_unsigned_indicators("[repo]\nname=Test\nbaseurl=https://example.com\n"),
-            "no gpgcheck key must not be detected as unsigned"
-        );
-        assert!(
-            !repo_has_unsigned_indicators(""),
-            "empty content must not be detected as unsigned"
-        );
-        assert!(
-            !repo_has_unsigned_indicators("[repo]\nenabled=0\nname=Test\n"),
-            "disabled repo without gpgcheck=0 must not be detected"
-        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn detect_unsigned_repos_reads_system_dir() {
-        // detect_unsigned_repos reads /etc/yum.repos.d; it may return true or
-        // false depending on the system state. The important thing is that it
-        // doesn't panic.
-        let _ = detect_unsigned_repos();
+    fn repo_override_options_missing_file_is_empty() {
+        assert!(repo_override_options("fedora", std::path::Path::new(
+            "/nonexistent/99-config_manager.repo"
+        ))
+        .is_empty());
     }
+
+    // ── add_repo guards (unchanged behaviour) ─────────────────────────────
 
     #[tokio::test]
     async fn add_repo_returns_confirmation_required_when_not_confirmed() {
@@ -1556,74 +2343,85 @@ mod repo_lockout_tests {
     #[tokio::test]
     async fn add_repo_refuses_non_https_url() {
         let result = add_repo("http://download.fedoraproject.org/pub/".to_string(), true).await;
-        assert!(
-            result.is_err(),
-            "http URL must be refused: {result:?}"
-        );
+        assert!(result.is_err(), "http URL must be refused: {result:?}");
     }
 
     #[tokio::test]
     async fn add_repo_refuses_empty_url() {
         let result = add_repo("".to_string(), true).await;
+        assert!(result.is_err(), "empty URL must be refused: {result:?}");
+    }
+
+    // ── delete guards: critical repositories are never deletable ──────────
+
+    #[test]
+    fn delete_refuses_distribution_repository_families() {
+        for id in [
+            "fedora",
+            "fedora-source",
+            "updates",
+            "updates-testing-debuginfo",
+            "rpmfusion-free-updates",
+        ] {
+            let error = deletion_refusal(id, true, &[id], None).unwrap_err();
+            assert!(
+                error.contains("distribution repository"),
+                "{id} must be refused with the distribution reason: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_refuses_package_owned_files() {
+        let error = deletion_refusal(
+            "onlyoffice",
+            true,
+            &["onlyoffice"],
+            Some("onlyoffice-repo"),
+        )
+        .unwrap_err();
         assert!(
-            result.is_err(),
-            "empty URL must be refused: {result:?}"
+            error.contains("onlyoffice-repo") && error.contains("Remove the package"),
+            "the refusal must name the owning package and the way out: {error}"
         );
     }
 
     #[test]
-    fn would_delete_last_enabled_repo_returns_true_when_file_has_only_enabled_repo() {
-        let contents = [("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n")];
+    fn whole_file_delete_refuses_a_shared_protected_section() {
+        let error = deletion_refusal(
+            "docker-ce-stable",
+            true,
+            &["docker-ce-stable", "fedora-cisco-openh264"],
+            None,
+        )
+        .unwrap_err();
         assert!(
-            would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
-            "deleting the only enabled repo must require confirmation"
+            error.contains("fedora-cisco-openh264"),
+            "the refusal must name the protected section it would remove: {error}"
         );
     }
 
     #[test]
-    fn would_delete_last_enabled_repo_returns_false_when_other_files_have_enabled_repos() {
-        let contents = [
-            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=1\n"),
-            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
-        ];
-        assert!(
-            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
-            "deleting one of two files with enabled repos must not require confirmation"
-        );
+    fn section_delete_leaves_a_protected_sibling_alone() {
+        // Deleting one section rewrites the file; the protected sibling stays.
+        assert!(deletion_refusal(
+            "docker-ce-test",
+            false,
+            &["docker-ce-test", "fedora-cisco-openh264"],
+            None,
+        )
+        .is_ok());
     }
 
     #[test]
-    fn would_delete_last_enabled_repo_returns_false_when_target_has_no_enabled_repos() {
-        let contents = [
-            ("/etc/yum.repos.d/fedora.repo", "[fedora]\nenabled=0\n"),
-            ("/etc/yum.repos.d/updates.repo", "[updates]\nenabled=1\n"),
-        ];
-        assert!(
-            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/fedora.repo"),
-            "deleting a file with no enabled repos must not require confirmation"
-        );
-    }
-
-    #[test]
-    fn would_delete_last_enabled_repo_returns_false_when_no_enabled_repos() {
-        let contents = [("/etc/yum.repos.d/empty.repo", "")];
-        assert!(
-            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/empty.repo"),
-            "no enabled repos at all must not require confirmation"
-        );
-    }
-
-    #[test]
-    fn would_delete_last_enabled_repo_subtracts_target_file_repos() {
-        // Target file has 2 enabled repos, another file has 1 enabled repo.
-        // Deleting target leaves 1 enabled repo → no confirmation needed.
-        let contents = [
-            ("/etc/yum.repos.d/multi.repo", "[r1]\nenabled=1\n[r2]\nenabled=1\n"),
-            ("/etc/yum.repos.d/single.repo", "[s1]\nenabled=1\n"),
-        ];
-        assert!(
-            !would_delete_last_enabled_repo(&contents, "/etc/yum.repos.d/multi.repo"),
-            "deleting multi-enabled file leaves other enabled repos → no confirmation"
-        );
+    fn ordinary_user_repositories_remain_deletable() {
+        assert!(deletion_refusal("beekeeper-studio", true, &["beekeeper-studio"], None).is_ok());
+        assert!(deletion_refusal(
+            "copr:copr.fedorainfracloud.org:group_user:project",
+            true,
+            &["copr:copr.fedorainfracloud.org:group_user:project"],
+            None,
+        )
+        .is_ok());
     }
 }

@@ -1088,6 +1088,80 @@ pub(crate) const REPO_ALLOWED_DIRS: [&str; 3] = [
     "/tmp/lcp-admin-test-fixture/etc/apt/sources.list.d",
 ];
 
+/// dnf5 repo directories whose files are owned by packages or the
+/// distribution. dnf5 loads them, but the panel only ever toggles such a repo
+/// through `config-manager setopt` (the override file) — it never writes or
+/// deletes the file itself.
+pub const REPO_READ_ONLY_DIRS: [&str; 2] = ["/usr/share/dnf5/repos.d", "/etc/distro.repos.d"];
+
+/// The one dnf repo directory the panel may write. Kept separate from
+/// `REPO_ALLOWED_DIRS`, which also contains apt and dnf override paths.
+pub const USER_REPO_DIR: &str = "/etc/yum.repos.d";
+
+/// True when `path` lives in a package-owned dnf repository directory.
+///
+/// Lexical on purpose: the check runs on paths dnf5 reports and on paths the
+/// frontend sends back, before any root action. `Path::starts_with` compares
+/// whole components, so `/usr/share/dnf5/repos.d-evil` does not match.
+pub fn is_system_owned_repo_path(path: &str) -> bool {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return false;
+    }
+    REPO_READ_ONLY_DIRS
+        .iter()
+        .any(|dir| candidate.starts_with(dir))
+}
+
+/// True when `option` is a safe dnf option name for the
+/// `<repo_id>.<option>` operand of `config-manager unsetopt`.
+///
+/// The value becomes part of one argv element (never a shell word), but a
+/// name with `=`, whitespace or a leading dash would still change the
+/// operand's meaning, so only `[a-z][a-z0-9_]*` is accepted.
+pub fn repo_override_option_valid(option: &str) -> bool {
+    if option.is_empty() || option.len() > 64 {
+        return false;
+    }
+    let mut chars = option.chars();
+    let starts_with_letter = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    starts_with_letter
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// True when `repo_id` is safe inside the `<repo_id>.<option>` operand.
+///
+/// dnf repo ids are not restricted to the INI section shape used by
+/// `ensure_repo_section_id`: real ids contain `-`, `.`, `:` and `+` (COPR
+/// ids for example). This predicate keeps exactly that set and nothing that
+/// could be read as a separate operand or a path.
+pub fn repo_override_id_valid(repo_id: &str) -> bool {
+    !repo_id.is_empty()
+        && repo_id.len() <= 128
+        && !repo_id.starts_with('-')
+        && repo_id.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '+')
+        })
+}
+
+/// Repo id prefixes that identify the distribution's own repository families.
+///
+/// Real ids in these families vary by release and by variant
+/// (`fedora`, `fedora-source`, `updates-testing-debuginfo`, …), so the
+/// predicate matches the family prefix rather than an exact list. A repository
+/// with one of these ids is never deletable from the panel, wherever its file
+/// happens to live: removing it can leave the host without working updates.
+pub const PROTECTED_REPO_ID_PREFIXES: [&str; 3] = ["fedora", "updates", "rpmfusion-"];
+
+/// True when `repo_id` belongs to a distribution repository family.
+pub fn repo_id_is_protected(repo_id: &str) -> bool {
+    let id = repo_id.trim();
+    !id.is_empty()
+        && PROTECTED_REPO_ID_PREFIXES
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+}
+
 /// Upper bound for `[section]` ids.
 const REPO_SECTION_MAX: usize = 64;
 
@@ -3925,6 +3999,7 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "repo_config_manager_set", "repo_config_manager_unset",
     "firewall_zone_rule", "firewall_rich_rule",
     "firewall_panic",
     "firewall_interface_zone",
@@ -4114,6 +4189,15 @@ const HELPER_REPO_MAKECACHE_ACTIONS: &[&str] = &["repo_makecache"];
 /// (dnf clean expire-cache --repo <repo_id> or apt-get clean).
 /// Validated by `ensure_safe_operand`.
 const HELPER_REPO_CLEAN_CACHE_ACTIONS: &[&str] = &["repo_clean_cache"];
+
+/// `repo_config_manager_set <repo_id> <0|1>` — writes dnf5's own
+/// `<repo_id>.enabled` override via `config-manager setopt`. The panel never
+/// edits a dnf repo file to enable or disable it.
+const HELPER_REPO_CONFIG_MANAGER_SET_ACTIONS: &[&str] = &["repo_config_manager_set"];
+
+/// `repo_config_manager_unset <repo_id> <option>` — removes one option from
+/// dnf5's override section for `<repo_id>` via `config-manager unsetopt`.
+const HELPER_REPO_CONFIG_MANAGER_UNSET_ACTIONS: &[&str] = &["repo_config_manager_unset"];
 
 /// `firewall_panic <enable|disable>` — firewalld panic mode. ufw is
 /// refused by the helper before any command. The trailing `confirm` is the
@@ -4808,6 +4892,62 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         }
         let repo_id = &args[1];
         ensure_safe_operand(repo_id, "repository id")?;
+        return Ok(());
+    }
+    if HELPER_REPO_CONFIG_MANAGER_SET_ACTIONS.contains(&action.as_str()) {
+        // args: [action, repo_id, 0|1] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repository id and 0 or 1",
+            ));
+        }
+        let repo_id = &args[1];
+        let value = &args[2];
+        ensure_safe_operand(repo_id, "repository id")?;
+        if !repo_override_id_valid(repo_id) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                repo_id,
+                "the repository id contains characters config-manager cannot read",
+            ));
+        }
+        if value != "0" && value != "1" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                value,
+                "the enabled value must be exactly 0 or 1",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_REPO_CONFIG_MANAGER_UNSET_ACTIONS.contains(&action.as_str()) {
+        // args: [action, repo_id, option] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repository id and an option name",
+            ));
+        }
+        let repo_id = &args[1];
+        let option = &args[2];
+        ensure_safe_operand(repo_id, "repository id")?;
+        if !repo_override_id_valid(repo_id) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                repo_id,
+                "the repository id contains characters config-manager cannot read",
+            ));
+        }
+        if !repo_override_option_valid(option) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                option,
+                "the option name must be lowercase letters, digits and underscores",
+            ));
+        }
         return Ok(());
     }
     if HELPER_FIREWALL_PANIC_ACTIONS.contains(&action.as_str()) {
@@ -6104,8 +6244,9 @@ mod firewall_ordering_tests {
 #[cfg(test)]
 mod argument_policy_tests {
     use super::{
-        ensure_arguments_for_program as check, ensure_program_allowed, is_uuid,
-        nmcli_import_allowed_dirs, nmcli_import_path_valid,
+        ensure_arguments_for_program as check, ensure_program_allowed, is_system_owned_repo_path,
+        is_uuid, nmcli_import_allowed_dirs, nmcli_import_path_valid, repo_id_is_protected,
+        repo_override_id_valid, repo_override_option_valid,
     };
 
     #[test]
@@ -6114,6 +6255,70 @@ mod argument_policy_tests {
             ensure_program_allowed("/usr/bin/smartctl").is_err(),
             "the generic smartctl channel must be closed; SMART named actions are the only root path"
         );
+    }
+
+    #[test]
+    fn system_owned_repo_paths_are_the_package_owned_dnf_dirs() {
+        assert!(is_system_owned_repo_path("/usr/share/dnf5/repos.d/fedora.repo"));
+        assert!(is_system_owned_repo_path("/etc/distro.repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path("/etc/yum.repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path(
+            "/usr/share/dnf5/repos.d-evil/fedora.repo"
+        ));
+        assert!(!is_system_owned_repo_path("usr/share/dnf5/repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path(""));
+    }
+
+    #[test]
+    fn repo_override_option_names_are_restricted_to_ini_shapes() {
+        assert!(repo_override_option_valid("enabled"));
+        assert!(repo_override_option_valid("repo_gpgcheck"));
+        assert!(repo_override_option_valid("metadata_expire"));
+        assert!(!repo_override_option_valid(""));
+        assert!(!repo_override_option_valid("Enabled"));
+        assert!(!repo_override_option_valid("enabled=1"));
+        assert!(!repo_override_option_valid("--enabled"));
+        assert!(!repo_override_option_valid("enabled extra"));
+        assert!(!repo_override_option_valid("enabled\r"));
+        assert!(!repo_override_option_valid("enabled\0"));
+        assert!(!repo_override_option_valid("é"));
+    }
+
+    #[test]
+    fn repo_override_ids_allow_real_dnf_id_alphabet() {
+        assert!(repo_override_id_valid("fedora"));
+        assert!(repo_override_id_valid("rpmfusion-free-updates"));
+        assert!(repo_override_id_valid("copr:copr.fedorainfracloud.org:group_user:project"));
+        assert!(repo_override_id_valid("42"));
+        assert!(!repo_override_id_valid(""));
+        assert!(!repo_override_id_valid("fedora extra"));
+        assert!(!repo_override_id_valid("fedora/../../x"));
+        assert!(!repo_override_id_valid("fedora\nenabled=1"));
+        assert!(!repo_override_id_valid("fedora\renabled=1"));
+        assert!(!repo_override_id_valid("fedora\0enabled=1"));
+        assert!(!repo_override_id_valid("--fedora"));
+    }
+
+    #[test]
+    fn protected_repo_ids_cover_the_distribution_families_only() {
+        // every release/variant of the distribution's own repositories
+        assert!(repo_id_is_protected("fedora"));
+        assert!(repo_id_is_protected("fedora-debuginfo"));
+        assert!(repo_id_is_protected("fedora-source"));
+        assert!(repo_id_is_protected("fedora-cisco-openh264"));
+        assert!(repo_id_is_protected("updates"));
+        assert!(repo_id_is_protected("updates-testing-debuginfo"));
+        assert!(repo_id_is_protected("rpmfusion-free"));
+        assert!(repo_id_is_protected("rpmfusion-nonfree-steam-source"));
+        // user, vendor and COPR repositories stay deletable
+        assert!(!repo_id_is_protected(""));
+        assert!(!repo_id_is_protected("beekeeper-studio"));
+        assert!(!repo_id_is_protected("google-chrome"));
+        assert!(!repo_id_is_protected(
+            "copr:copr.fedorainfracloud.org:group_user:project"
+        ));
+        // COPR ids mention the word but do not start with a protected family
+        assert!(!repo_id_is_protected("my-fedora-mirror"));
     }
 
     #[test]
@@ -6847,6 +7052,37 @@ mod argument_policy_tests {
         refused("lcp-admin", &["repo_delete"]);
         refused("lcp-admin", &["repo_delete", "--evil"]);
         refused("lcp-admin", &["repo_delete", ""]);
+    }
+
+    #[test]
+    fn repo_config_manager_set_dispatch_validates_id_and_value() {
+        ok("lcp-admin", &["repo_config_manager_set", "fedora", "1"]);
+        ok("lcp-admin", &["repo_config_manager_set", "fedora", "0"]);
+        ok(
+            "lcp-admin",
+            &["repo_config_manager_set", "copr:copr.fedorainfracloud.org:group_user:project", "1"],
+        );
+        refused("lcp-admin", &["repo_config_manager_set", "fedora"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora", "2"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora", "true"]);
+        refused("lcp-admin", &["repo_config_manager_set", "--evil", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora extra", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora/../../x", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set"]);
+    }
+
+    #[test]
+    fn repo_config_manager_unset_dispatch_validates_id_and_option() {
+        ok("lcp-admin", &["repo_config_manager_unset", "fedora", "enabled"]);
+        ok("lcp-admin", &["repo_config_manager_unset", "fedora", "gpgcheck"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "enabled=1"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "--evil"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "Enabled"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", ""]);
+        refused("lcp-admin", &["repo_config_manager_unset", "", "enabled"]);
+        refused("lcp-admin", &["repo_config_manager_unset"]);
     }
 
     #[test]

@@ -30,6 +30,8 @@
     mirrorlist: string | null;
     gpgcheck: boolean;
     priority: number | null;
+    /** dnf5 reports this repo from a package-owned directory; the file is read-only. */
+    system_owned: boolean;
   }
 
   interface SpeedResult {
@@ -63,6 +65,7 @@
 
   let repos = $state<RepoEntry[]>([]);
   let loading = $state(false);
+  let loadError = $state<string | null>(null);
   let filter = $state('');
   let statusFilter = $state<'all' | 'enabled' | 'disabled' | 'healthy' | 'errors' | 'slow' | 'unreachable'>('all');
   let showAddDialog = $state(false);
@@ -142,13 +145,17 @@
 
   async function loadRepos() {
     loading = true;
+    loadError = null;
     statusStore.setBusy('Loading repos…');
     try {
       repos = await invoke<RepoEntry[]>('list_repos');
-      statusStore.setLastCommand('dnf repolist -v', 0, true);
+      statusStore.setLastCommand('dnf5 repo info --all --json', 0, true);
     } catch (e) {
-      uiStore.addToast(`Failed to load repos: ${e}`, 'error');
-      statusStore.setLastCommand('dnf repolist -v', 1, false);
+      // dnf4-only hosts answer with one plain-language message; show it as-is
+      // instead of prefixing a second error layer.
+      loadError = String(e);
+      repos = [];
+      statusStore.setLastCommand('dnf5 repo info --all --json', 1, false);
     } finally {
       loading = false;
       statusStore.clearBusy();
@@ -205,10 +212,10 @@
         `Repo "${repo.name}" ${newEnabled ? 'enabled' : 'disabled'}`,
         'success'
       );
-      statusStore.setLastCommand(`dnf config-manager --${newEnabled ? 'enable' : 'disable'} ${repo.id}`, 0, true);
+      statusStore.setLastCommand(`dnf5 config-manager setopt ${repo.id}.enabled=${newEnabled ? '1' : '0'}`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to toggle repo: ${e}`, 'error');
-      statusStore.setLastCommand(`dnf config-manager --${newEnabled ? 'enable' : 'disable'} ${repo.id}`, 1, false);
+      statusStore.setLastCommand(`dnf5 config-manager setopt ${repo.id}.enabled=${newEnabled ? '1' : '0'}`, 1, false);
     } finally {
       togglingId = null;
     }
@@ -216,28 +223,29 @@
 
   async function toggleRepoConfirmed(repo: RepoEntry) {
     statusStore.setBusy(`Toggling repository ${repo.name || repo.id}…`);
+    const newEnabled = !repo.enabled;
     try {
       await invoke('toggle_repo', {
         repoId: repo.id,
-        enabled: !repo.enabled,
+        enabled: newEnabled,
         filePath: repo.file_path,
         confirmed: true,
       });
-      repo.enabled = !repo.enabled;
+      repo.enabled = newEnabled;
       repos = [...repos]; // trigger reactivity
       uiStore.addToast(
-        `Repo "${repo.name}" ${!repo.enabled ? 'enabled' : 'disabled'}`,
+        `Repo "${repo.name}" ${newEnabled ? 'enabled' : 'disabled'}`,
         'success'
       );
       statusStore.setLastCommand(
-        `dnf config-manager --${!repo.enabled ? 'enable' : 'disable'} ${repo.id}`,
+        `dnf5 config-manager setopt ${repo.id}.enabled=${newEnabled ? '1' : '0'}`,
         0,
         true
       );
     } catch (e) {
       uiStore.addToast(`Failed to toggle repo: ${e}`, 'error');
       statusStore.setLastCommand(
-        `dnf config-manager --${!repo.enabled ? 'enable' : 'disable'} ${repo.id}`,
+        `dnf5 config-manager setopt ${repo.id}.enabled=${newEnabled ? '1' : '0'}`,
         1,
         false
       );
@@ -246,48 +254,33 @@
     }
   }
 
-  function confirmDeleteRepo(repo: { id: string; file_path: string; name?: string }) {
+  async function confirmDeleteRepo(repo: { id: string; file_path: string; name?: string; system_owned?: boolean }) {
     const displayName = repo.name || repo.id;
-    uiStore.confirm(
-      `Delete Repository "${displayName}"?`,
-      `Are you sure you want to remove this repository configuration from "${repo.file_path}"? This requires root privilege and cannot be undone.`,
-      async () => {
-        statusStore.setBusy(`Deleting repository ${displayName}...`);
-        try {
-          // The backend returns a CONFIRMATION_REQUIRED advisory (not an
-          // error) when deleting this file would leave zero enabled repos
-          // system-wide.
-          const result: string = await invoke('delete_repo', {
-            repoId: repo.id,
-            filePath: repo.file_path,
-            confirmed: false,
-          });
-          if (result.startsWith('CONFIRMATION_REQUIRED:')) {
-            statusStore.clearBusy();
-            uiStore.confirm(
-              'Delete Last Enabled Repository?',
-              result.slice('CONFIRMATION_REQUIRED:'.length).trim(),
-              () => deleteRepoConfirmed(repo),
-              true
-            );
-            return;
-          }
-          uiStore.addToast(`Repository "${displayName}" deleted successfully`, 'success');
-          await loadRepos();
-          if (diagnostics.length > 0) {
-            diagnostics = diagnostics.filter(d => !(d.repo_id === repo.id && d.file_path === repo.file_path));
-          }
-          if (editOpen && selectedRepo?.id === repo.id) {
-            editOpen = false;
-          }
-        } catch (e) {
-          uiStore.addToast(`Failed to delete repo: ${e}`, 'error');
-        } finally {
-          statusStore.clearBusy();
-        }
-      },
-      true
-    );
+    if (repo.system_owned) return;
+    // The backend always answers the unconfirmed call with a preview and never
+    // changes anything; the answer also says when this would leave no enabled
+    // repo system-wide.
+    statusStore.setBusy(`Preparing to delete ${displayName}…`);
+    try {
+      const preview: string = await invoke('delete_repo', {
+        repoId: repo.id,
+        filePath: repo.file_path,
+        confirmed: false,
+      });
+      const detail = preview.startsWith('CONFIRMATION_REQUIRED:')
+        ? preview.slice('CONFIRMATION_REQUIRED:'.length).trim()
+        : `Are you sure you want to remove this repository configuration from "${repo.file_path}"? This requires root privilege and cannot be undone.`;
+      uiStore.confirm(
+        `Delete Repository "${displayName}"?`,
+        detail,
+        () => deleteRepoConfirmed(repo),
+        true
+      );
+    } catch (e) {
+      uiStore.addToast(`Failed to delete repo: ${e}`, 'error');
+    } finally {
+      statusStore.clearBusy();
+    }
   }
 
   async function deleteRepoConfirmed(repo: { id: string; file_path: string; name?: string }) {
@@ -303,6 +296,9 @@
       await loadRepos();
       if (diagnostics.length > 0) {
         diagnostics = diagnostics.filter(d => !(d.repo_id === repo.id && d.file_path === repo.file_path));
+      }
+      if (editOpen && selectedRepo?.id === repo.id) {
+        editOpen = false;
       }
     } catch (e) {
       uiStore.addToast(`Failed to delete repo: ${e}`, 'error');
@@ -446,6 +442,10 @@
 
   async function saveRepo() {
     if (!selectedRepo) return;
+    if (selectedRepo.system_owned) {
+      uiStore.addToast('This repository file belongs to the distribution and is read-only here. You can still enable or disable it.', 'info');
+      return;
+    }
     saving = true;
     statusStore.setBusy('Saving repository changes…');
     try {
@@ -462,10 +462,10 @@
       uiStore.addToast(`Repository "${selectedRepo.id}" updated`, 'success');
       editOpen = false;
       await loadRepos();
-      statusStore.setLastCommand(`nano ${selectedRepo.file_path}`, 0, true);
+      statusStore.setLastCommand(`dnf5 repo info --all ${selectedRepo.id} --json`, 0, true);
     } catch (e) {
       uiStore.addToast(`Failed to save repository: ${e}`, 'error');
-      statusStore.setLastCommand(`nano ${selectedRepo.file_path}`, 1, false);
+      statusStore.setLastCommand(`dnf5 repo info --all ${selectedRepo.id} --json`, 1, false);
     } finally {
       saving = false;
       statusStore.clearBusy();
@@ -541,6 +541,20 @@
   {#if activeTab === 'copr'}
     <CoprBrowser />
   {:else}
+
+  {#if loadError}
+    <div class="card" style="padding: 14px 18px; margin-bottom: 16px; display: flex; align-items: flex-start; gap: 12px; border: 1px solid var(--color-border);">
+      <AlertTriangle size={18} style="color: var(--color-warning); flex-shrink: 0; margin-top: 2px;" />
+      <div>
+        <div style="font-weight: 700; font-size: 13.5px; color: var(--color-text-primary); margin-bottom: 4px;">
+          Repository management unavailable
+        </div>
+        <div style="font-size: 13px; color: var(--color-text-secondary);">
+          {loadError}
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Diagnostics & Mirror Health Overview Banner -->
   {#if diagnostics.length > 0}
@@ -676,6 +690,18 @@
         <Skeleton height="54px" borderRadius="8px" />
         <Skeleton height="54px" borderRadius="8px" />
       </div>
+    {:else if loadError}
+      <div class="empty-state" style="padding: 64px 32px;">
+        <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+          <Database size={32} class="empty-state-icon" style="margin:0" />
+        </div>
+        <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">
+          No repository list to show
+        </span>
+        <span style="color:var(--color-text-muted); margin-top:8px;">
+          {loadError}
+        </span>
+      </div>
     {:else if filteredRepos.length === 0}
       <div class="empty-state" style="padding: 64px 32px;">
         <div style="width:64px; height:64px; border-radius:50%; background:var(--color-bg-raised); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
@@ -685,7 +711,7 @@
           {filter ? 'No matching repositories found' : (statusFilter === 'errors' ? 'No Dead or Corrupted Repositories' : (statusFilter === 'slow' ? 'No Slow Repositories' : (statusFilter === 'disabled' ? 'No Disabled Repositories' : (statusFilter === 'enabled' ? 'No Enabled Repositories' : 'No Repositories'))))}
         </span>
         <span style="color:var(--color-text-muted); margin-top:8px;">
-          {filter ? 'Try adjusting your search criteria.' : (statusFilter !== 'all' ? 'All repositories match your current healthy operating criteria.' : 'No repositories found in /etc/yum.repos.d/.')}
+          {filter ? 'Try adjusting your search criteria.' : (statusFilter !== 'all' ? 'All repositories match your current healthy operating criteria.' : 'No repositories reported by dnf5.')}
         </span>
         {#if !filter && statusFilter === 'all'}
           <Button variant="outline" style="margin-top:24px;" onclick={() => showAddDialog = true}>
@@ -714,8 +740,13 @@
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <tr class:disabled-row={!repo.enabled} onclick={() => openEditDrawer(repo)} style="cursor: pointer;">
               <td style="max-width:230px;">
-                <div style="font-weight:600; color:var(--color-text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.name}>
-                  {repo.name}
+                <div style="font-weight:600; color:var(--color-text-primary); display:flex; align-items:center; gap:6px;" title={repo.name}>
+                  <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{repo.name}</span>
+                  {#if repo.system_owned}
+                    <span class="badge badge-muted" style="font-size:10px; flex-shrink:0;" title="Provided by your distribution — the file is read-only, but the repo can still be enabled or disabled">
+                      System
+                    </span>
+                  {/if}
                 </div>
                 <div style="font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={repo.file_path}>
                   {repo.file_path.split('/').pop()}
@@ -805,7 +836,12 @@
                       <Activity size={14} /> Test Mirror Speeds
                     </button>
                     <div style="height:1px; background:var(--color-border); margin:4px 0;"></div>
-                    <button class="menu-item text-danger" onclick={() => confirmDeleteRepo(repo)}>
+                    <button
+                      class="menu-item text-danger"
+                      onclick={() => !repo.system_owned && confirmDeleteRepo(repo)}
+                      disabled={repo.system_owned}
+                      title={repo.system_owned ? 'This file belongs to your distribution and cannot be deleted here' : 'Delete this repository'}
+                    >
                       <Trash2 size={14} /> Delete Repository
                     </button>
                   </KebabMenu>
@@ -886,38 +922,48 @@
         </div>
       </div>
 
+      <!-- Read-only notice for distribution-owned repositories -->
+      {#if selectedRepo.system_owned}
+        <div style="display:flex; align-items:flex-start; gap:8px; background:rgba(255,255,255,0.03); border:1px solid var(--color-border); border-radius:8px; padding:10px 12px; font-size:12px; color:var(--color-text-secondary);">
+          <ShieldAlert size={15} style="color:var(--color-warning); flex-shrink:0; margin-top:1px;" />
+          <span>
+            This repository is provided by your distribution. Its file is read-only here, so the fields below cannot be changed. You can still enable or disable it from the repository list.
+          </span>
+        </div>
+      {/if}
+
       <!-- Form Inputs -->
       <div style="display:flex; flex-direction:column; gap:12px;">
         <div>
           <label class="form-label" for="repo-name">Display Name</label>
-          <input id="repo-name" class="input" type="text" bind:value={editName} />
+          <input id="repo-name" class="input" type="text" bind:value={editName} disabled={selectedRepo.system_owned} />
         </div>
 
         <div>
           <label class="form-label" for="repo-baseurl">Base URL (Base Mirror URL)</label>
-          <input id="repo-baseurl" class="input" type="text" bind:value={editBaseurl} placeholder="e.g. http://download.fedoraproject.org/pub/fedora/..." />
+          <input id="repo-baseurl" class="input" type="text" bind:value={editBaseurl} placeholder="e.g. http://download.fedoraproject.org/pub/fedora/..." disabled={selectedRepo.system_owned} />
         </div>
 
         <div>
           <label class="form-label" for="repo-metalink">Metalink URL</label>
-          <input id="repo-metalink" class="input" type="text" bind:value={editMetalink} placeholder="e.g. https://mirrors.fedoraproject.org/metalink?repo=..." />
+          <input id="repo-metalink" class="input" type="text" bind:value={editMetalink} placeholder="e.g. https://mirrors.fedoraproject.org/metalink?repo=..." disabled={selectedRepo.system_owned} />
         </div>
 
         <div>
           <label class="form-label" for="repo-mirrorlist">Mirrorlist URL</label>
-          <input id="repo-mirrorlist" class="input" type="text" bind:value={editMirrorlist} placeholder="e.g. http://mirrors.fedoraproject.org/mirrorlist?repo=..." />
+          <input id="repo-mirrorlist" class="input" type="text" bind:value={editMirrorlist} placeholder="e.g. http://mirrors.fedoraproject.org/mirrorlist?repo=..." disabled={selectedRepo.system_owned} />
         </div>
 
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:center;">
           <div>
             <label class="form-label" for="repo-priority">Priority (1-99, lower is higher)</label>
-            <input id="repo-priority" class="input" type="number" min="1" max="99" bind:value={editPriority} placeholder="99" />
+            <input id="repo-priority" class="input" type="number" min="1" max="99" bind:value={editPriority} placeholder="99" disabled={selectedRepo.system_owned} />
           </div>
 
           <div style="display:flex; flex-direction:column; gap:4px; justify-content:center;">
             <span class="form-label">GPG Key Verification</span>
             <div style="display:flex; align-items:center; gap:8px;">
-              <Toggle bind:checked={editGpgcheck} />
+              <Toggle bind:checked={editGpgcheck} disabled={selectedRepo.system_owned} />
               <span style="font-size:13px; color:var(--color-text-secondary);">
                 {editGpgcheck ? 'Enabled' : 'Disabled'}
               </span>
@@ -986,15 +1032,16 @@
         <button
           type="button"
           class="btn btn-ghost btn-sm text-danger"
-          onclick={() => selectedRepo && confirmDeleteRepo(selectedRepo)}
-          title="Delete this repository"
+          onclick={() => selectedRepo && !selectedRepo.system_owned && confirmDeleteRepo(selectedRepo)}
+          disabled={selectedRepo.system_owned}
+          title={selectedRepo.system_owned ? 'This file belongs to your distribution and cannot be deleted here' : 'Delete this repository'}
         >
           <Trash2 size={14} /> Delete Repo
         </button>
 
         <div style="display:flex; gap:8px;">
           <Button variant="ghost" onclick={() => editOpen = false} disabled={saving}>Cancel</Button>
-          <Button variant="primary" onclick={saveRepo} disabled={saving || !editName.trim()}>
+          <Button variant="primary" onclick={saveRepo} disabled={saving || selectedRepo.system_owned || !editName.trim()}>
             {#if saving}<RefreshCw size={14} class="animate-spin-slow" />{/if}
             Save Changes
           </Button>

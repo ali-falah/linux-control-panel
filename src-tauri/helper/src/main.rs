@@ -2704,6 +2704,7 @@ const ROOT_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "repo_config_manager_set", "repo_config_manager_unset",
     "firewall_zone_rule", "firewall_rich_rule",
     "firewall_panic",
     "firewall_interface_zone",
@@ -3283,6 +3284,22 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly one repository id."
+                ))
+            }
+        } else if requested == "repo_config_manager_set" {
+            if args.len() == 3 {
+                repo_config_manager_set_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repository id and 0 or 1."
+                ))
+            }
+        } else if requested == "repo_config_manager_unset" {
+            if args.len() == 3 {
+                repo_config_manager_unset_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repository id and an option name."
                 ))
             }
         } else if args.len() == 2 {
@@ -5169,6 +5186,95 @@ fn repo_clean_cache_action(repo_id: &str) -> Result<(), String> {
         Err(failure) => Err(format!("lcp-admin: {}", failure.reason())),
     }
 }
+
+/// The `repo_config_manager_set <repo_id> <0|1>` action: writes dnf5's own
+/// `<repo_id>.enabled` override with `config-manager setopt`.
+///
+/// This is the only channel the panel uses to enable or disable a dnf repo.
+/// It never edits the repository file, so a repo whose configuration lives
+/// under the package-owned `/usr/share/dnf5/repos.d` toggles correctly while
+/// that file stays read-only.
+///
+/// No fallback: the app only calls this on a host where dnf5 is the package
+/// manager, and `dnf4`/`apt` do not implement the same override file. A
+/// failure is surfaced as-is.
+fn repo_config_manager_set_action(repo_id: &str, value: &str) -> Result<(), String> {
+    repo_config_manager_set_action_with(run_repo_program, repo_id, value)
+}
+
+/// Testable core of the set action: validation happens before `run` is
+/// called, and `run` receives the exact argv the helper would execute.
+fn repo_config_manager_set_action_with(
+    run: impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+    repo_id: &str,
+    value: &str,
+) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{ensure_safe_operand, repo_override_id_valid};
+    ensure_safe_operand(repo_id, "repository id")?;
+    if !repo_override_id_valid(repo_id) {
+        return Err(format!(
+            "lcp-admin: the repository id contains characters config-manager cannot read: {repo_id}"
+        ));
+    }
+    if value != "0" && value != "1" {
+        return Err(format!(
+            "lcp-admin: the enabled value must be 0 or 1, got: {value}"
+        ));
+    }
+
+    let option = format!("{repo_id}.enabled={value}");
+    run(
+        "dnf5",
+        &[
+            "config-manager",
+            "setopt",
+            &option,
+            "--create-missing-dir",
+        ],
+        "dnf5 config-manager setopt",
+    )
+    .map_err(|failure| format!("lcp-admin: {}", failure.reason()))
+}
+
+/// The `repo_config_manager_unset <repo_id> <option>` action: removes one
+/// option from dnf5's override section for `<repo_id>` with
+/// `config-manager unsetopt`. Used by delete cleanup so an override cannot
+/// outlive the repository file.
+///
+/// No fallback for the same reason as `repo_config_manager_set_action`.
+fn repo_config_manager_unset_action(repo_id: &str, option: &str) -> Result<(), String> {
+    repo_config_manager_unset_action_with(run_repo_program, repo_id, option)
+}
+
+/// Testable core of the unset action — see `repo_config_manager_set_action_with`.
+fn repo_config_manager_unset_action_with(
+    run: impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+    repo_id: &str,
+    option: &str,
+) -> Result<(), String> {
+    use root_policy::{ensure_safe_operand, repo_override_id_valid, repo_override_option_valid};
+    ensure_safe_operand(repo_id, "repository id")?;
+    if !repo_override_id_valid(repo_id) {
+        return Err(format!(
+            "lcp-admin: the repository id contains characters config-manager cannot read: {repo_id}"
+        ));
+    }
+    if !repo_override_option_valid(option) {
+        return Err(format!(
+            "lcp-admin: the option name must be lowercase letters, digits and underscores, got: {option}"
+        ));
+    }
+
+    let operand = format!("{repo_id}.{option}");
+    run(
+        "dnf5",
+        &["config-manager", "unsetopt", &operand],
+        "dnf5 config-manager unsetopt",
+    )
+    .map_err(|failure| format!("lcp-admin: {}", failure.reason()))
+}
 /// The `write_repo_file <path>` action: writes the repository-manager's one
 /// allowed root-owned file kind — a `.repo`/`.list`/`.sources` file in one of
 /// the package manager's own repository directories.
@@ -5800,6 +5906,8 @@ mod root_actions_gate_tests {
             "repo_delete",
             "repo_makecache",
             "repo_clean_cache",
+            "repo_config_manager_set",
+            "repo_config_manager_unset",
         ] {
             assert!(ROOT_ACTIONS.contains(&action), "gate lost '{action}'");
         }
@@ -6066,6 +6174,137 @@ mod repo_add_action_tests {
                 "repo_add must not silently overwrite: {args:?}"
             );
         }
+    }
+
+}
+
+/// Argument-shape tests for the two config-manager actions. The injected
+/// runner records argv; no dnf5 is spawned and no override file is touched.
+#[cfg(test)]
+mod repo_config_manager_action_tests {
+    use super::{
+        repo_config_manager_set_action_with, repo_config_manager_unset_action_with,
+        RepoProgramFailure,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Call = (String, Vec<String>, String);
+    type Recorder = Rc<RefCell<Vec<Call>>>;
+
+    /// A runner that records every call and always succeeds.
+    fn recording() -> (
+        impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+        Recorder,
+    ) {
+        let calls: Recorder = Rc::new(RefCell::new(Vec::new()));
+        let sink = calls.clone();
+        let run = move |program: &str, args: &[&str], label: &str| {
+            sink.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                label.to_string(),
+            ));
+            Ok(())
+        };
+        (run, calls)
+    }
+
+    #[test]
+    fn setopt_argv_is_exact_and_uses_dnf5() {
+        let (run, calls) = recording();
+        repo_config_manager_set_action_with(run, "fedora", "1").unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![(
+                "dnf5".to_string(),
+                vec![
+                    "config-manager".to_string(),
+                    "setopt".to_string(),
+                    "fedora.enabled=1".to_string(),
+                    "--create-missing-dir".to_string(),
+                ],
+                "dnf5 config-manager setopt".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn setopt_refuses_values_other_than_0_or_1_before_spawning() {
+        for value in ["", "2", "true", "yes", "0 ", "-1"] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_set_action_with(run, "fedora", value);
+            assert!(result.is_err(), "value {value:?} must be refused");
+            assert!(calls.borrow().is_empty(), "value {value:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn setopt_refuses_unsafe_repo_ids_before_spawning() {
+        for id in [
+            "",
+            "-fedora",
+            "fedora extra",
+            "fedora/../../x",
+            "fedora\nx",
+            "fedora\rx",
+            "fedora\0x",
+        ] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_set_action_with(run, id, "1");
+            assert!(result.is_err(), "id {id:?} must be refused");
+            assert!(calls.borrow().is_empty(), "id {id:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn unsetopt_argv_is_exact_and_uses_dnf5() {
+        let (run, calls) = recording();
+        repo_config_manager_unset_action_with(run, "fedora", "enabled").unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![(
+                "dnf5".to_string(),
+                vec![
+                    "config-manager".to_string(),
+                    "unsetopt".to_string(),
+                    "fedora.enabled".to_string(),
+                ],
+                "dnf5 config-manager unsetopt".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn unsetopt_refuses_unsafe_option_names_before_spawning() {
+        for option in [
+            "",
+            "Enabled",
+            "enabled=1",
+            "--enabled",
+            "enabled extra",
+            "enabled\r",
+            "enabled\0",
+        ] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_unset_action_with(run, "fedora", option);
+            assert!(result.is_err(), "option {option:?} must be refused");
+            assert!(calls.borrow().is_empty(), "option {option:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn config_manager_failures_keep_their_reason() {
+        let run = |_: &str, _: &[&str], _: &str| {
+            Err::<(), _>(RepoProgramFailure::Failed(
+                "override file is read-only".to_string(),
+            ))
+        };
+        let error = repo_config_manager_set_action_with(run, "fedora", "0").unwrap_err();
+        assert!(
+            error.contains("override file is read-only"),
+            "the dnf5 reason must be preserved: {error}"
+        );
     }
 }
 
