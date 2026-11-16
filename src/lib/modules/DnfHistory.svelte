@@ -342,12 +342,15 @@
 
   // ─── Check Updates ─────────────────────────────────────────────────────────
 
+  let lastCheckedAt = $state('');
+
   async function checkUpdates() {
     dnfStore.resetUpgradeView();
     loadingUpdates = true;
     statusStore.setBusy('Checking for updates…');
     try {
       await refreshUpdates();
+      lastCheckedAt = new Date().toLocaleTimeString();
       // The advisories decide which updates are security relevant — they are
       // read in the background, the list is usable right away.
       void dnfStore.loadAdvisories();
@@ -771,6 +774,9 @@
         <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
       </button>
     {:else if activeTab === 'updates'}
+      {#if lastCheckedAt}
+        <span class="check-age">checked {lastCheckedAt}</span>
+      {/if}
       <Button variant="outline" size="sm" onclick={checkUpdates} disabled={loadingUpdates}>
         <RefreshCw size={13} class={loadingUpdates ? 'animate-spin-slow' : ''} /> Check
       </Button>
@@ -814,9 +820,6 @@
           label="Filter transactions by action"
         />
       {:else if activeTab === 'updates'}
-        <span style="font-size:13px; color:var(--color-text-secondary);">
-          {updates.length} update{updates.length !== 1 ? 's' : ''} available · {totalListSize} total
-        </span>
         {#if updates.length > 0}
           <Button variant="outline" size="sm" onclick={startUpgradeAll} disabled={dnfStore.isUpgrading}>
             <RefreshCw size={13} class={dnfStore.isUpgrading ? 'animate-spin-slow' : ''} />
@@ -865,16 +868,6 @@
         {/if}
       </button>
 
-      <span class="selection-summary">
-        {selectedUpdates.size} of {updates.length} selected
-        {#if filteredUpdates.length !== updates.length}
-          · {filteredUpdates.length} shown
-        {/if}
-        {#if totalSelectedSize !== '0 B'}
-          · {totalSelectedSize} selected
-        {/if}
-      </span>
-
       <FilterChips
         options={[
           { id: 'all', label: 'All', count: updates.length },
@@ -918,8 +911,13 @@
             </h3>
             <div style="display:flex; align-items:center; gap:8px;">
               {#if dnfStore.isUpgrading}
-                <Button variant="outline" size="sm" onclick={() => dnfStore.cancelUpgrade()}>
-                  <Ban size={13} /> Cancel
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onclick={() => dnfStore.cancelUpgrade()}
+                  title="Closing the view does not stop dnf; this asks the process to terminate, which may not reach it through the privilege layer."
+                >
+                  <Ban size={13} /> Stop watching
                 </Button>
               {:else}
                 {#if aiStore.enabled}
@@ -927,6 +925,13 @@
                     <Sparkles size={13} style="color:var(--color-accent);" /> AI Explain Conflict
                   </Button>
                 {/if}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onclick={() => { dnfStore.resetUpgradeView(); activeTab = 'history'; loadHistory(); }}
+                >
+                  <History size={13} /> View in History
+                </Button>
                 <Button variant="outline" size="sm" onclick={() => { dnfStore.resetUpgradeView(); checkUpdates(); }}>
                   Back to Package List
                 </Button>
@@ -938,7 +943,7 @@
           {#if dnfStore.hangWarning}
             <div class="hang-warning">
               <AlertTriangle size={14} />
-              <span>No output for 60+ seconds — the upgrade may be downloading large packages or waiting on a slow mirror. You can Cancel or wait.</span>
+              <span>No output for 60+ seconds — the upgrade may be downloading large packages or waiting on a slow mirror. You can stop watching or wait.</span>
             </div>
           {/if}
 
@@ -2067,5 +2072,10 @@
     background: transparent;
     border: 0;
     padding: 0;
+  }
+
+  .check-age {
+    color: var(--color-text-muted);
+    font-size: 11.5px;
   }
 </style>

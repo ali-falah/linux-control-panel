@@ -929,10 +929,11 @@ pub async fn dnf_run_upgrade(
     }
 
     if is_dnf {
-        // The verification preview runs with the same privileges as the
-        // transaction that follows, so the user can never approve a different
-        // transaction than the one that is applied.
-        let preview = run_dnf_dry_run(&packages, Some(&auth)).await?;
+        // Verify against the same unprivileged preview the user reviewed in
+        // the confirmation modal. The privileged route wraps the helper, whose
+        // captured output is not guaranteed to be the dnf transaction text —
+        // parsing it there produced a false "No updates are available".
+        let preview = run_dnf_dry_run(&packages, None).await?;
         if preview.packages.is_empty() {
             return Err("No updates are available in the current transaction. No changes were made.".to_string());
         }
@@ -1001,6 +1002,9 @@ pub async fn dnf_run_upgrade(
         // preview while the real transaction would have succeeded.
         args.push(String::from("--setopt=timeout=120"));
         args.push(String::from("--color=never"));
+        // refresh the root cache in the same run, otherwise the transaction
+        // can be empty even though the unprivileged preview listed updates.
+        args.push(String::from("--refresh"));
     } else {
         program = "/usr/bin/apt-get";
         if !packages.is_empty() {
@@ -1360,6 +1364,10 @@ async fn run_dnf_dry_run(
 
     let mut args: Vec<String> = vec![
         String::from("--color=never"),
+        // dnf5 keeps a per-user metadata cache and a separate root cache; a
+        // stale root cache makes "upgrade <pkg>" report "Nothing to do" for a
+        // package the unprivileged list shows as available.
+        String::from("--refresh"),
         String::from("upgrade"),
         String::from("--best"),
         String::from("--assumeno"),

@@ -2536,7 +2536,7 @@ fn check_dnf(args: &[String]) -> Result<(), String> {
                 // non-interactive and best-package selection on the update page;
                 // --color=never keeps captured output free of ANSI escapes
                 "-y" | "--best" | "--assumeno" | "--showduplicates" | "--only-upgrade"
-                | "--color=never" => {}
+                | "--color=never" | "--refresh" => {}
                 // the only --setopt key: digits-only default repo timeout
                 _ if is_dnf_timeout_setopt(arg) => {}
                 // restrict one call to a single repository id

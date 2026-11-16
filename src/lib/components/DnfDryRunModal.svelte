@@ -167,6 +167,13 @@
             </div>
           </div>
 
+          {#if dnfStore.dryRunResult.packages.some(pkg => /^(kernel|linux-firmware|glibc|systemd|dbus|selinux)/.test(pkg.name))}
+            <div class="reboot-hint">
+              <AlertTriangle size={14} />
+              <span>A kernel or core system package is part of this transaction — reboot after it finishes to use the new version.</span>
+            </div>
+          {/if}
+
           <!-- Danger Callout if removals detected -->
           {#if dnfStore.dryRunResult.to_remove_count > 0}
             <div class="danger-warning-banner">
@@ -896,5 +903,18 @@
     gap: 8px;
     color: var(--color-text-muted);
     text-align: center;
+  }
+
+  .reboot-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    background: var(--color-warning-muted);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    border-left: 3px solid var(--color-warning);
   }
 </style>
