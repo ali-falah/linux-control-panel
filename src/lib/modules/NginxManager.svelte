@@ -2001,30 +2001,30 @@
 
       <div class="tab-actions">
         {#if activeTab === 'sites'}
-          <button class="header-refresh-btn" onclick={loadSites} disabled={sitesLoading} id="nginx-refresh-sites">
-            <RefreshCw size={13} class={sitesLoading ? 'animate-spin-slow' : ''} /> Refresh
+          <button class="header-refresh-btn" onclick={loadSites} disabled={sitesLoading} id="nginx-refresh-sites" title="Reload sites" aria-label="Reload sites">
+            <RefreshCw size={13} class={sitesLoading ? 'animate-spin-slow' : ''} />
           </button>
           <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
             <Plus size={13} /> New Site
           </Button>
-          <Button variant="primary" class="btn-sm" onclick={() => (showProxyWizard = true)} id="nginx-new-proxy">
+          <Button variant="outline" class="btn-sm" onclick={() => (showProxyWizard = true)} id="nginx-new-proxy">
             <Globe size={13} /> New Proxy
           </Button>
         {:else if activeTab === 'editor'}
-          <button class="header-refresh-btn" onclick={loadConfigs} disabled={editorLoading} id="nginx-refresh-configs">
-            <RefreshCw size={13} class={editorLoading ? 'animate-spin-slow' : ''} /> Refresh
+          <button class="header-refresh-btn" onclick={loadConfigs} disabled={editorLoading} id="nginx-refresh-configs" title="Reload configuration files" aria-label="Reload configuration files">
+            <RefreshCw size={13} class={editorLoading ? 'animate-spin-slow' : ''} />
           </button>
           <Button variant="outline" class="btn-sm" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
             <ArchiveRestore size={13} /> Backups ({backups.length})
           </Button>
         {:else if activeTab === 'www'}
-          <button class="header-refresh-btn" onclick={loadWww} disabled={wwwLoading} id="nginx-refresh-www"><RefreshCw size={13} class={wwwLoading ? 'animate-spin-slow' : ''} /> Refresh</button>
+          <button class="header-refresh-btn" onclick={loadWww} disabled={wwwLoading} id="nginx-refresh-www" title="Reload web root" aria-label="Reload web root"><RefreshCw size={13} class={wwwLoading ? 'animate-spin-slow' : ''} /></button>
           <Button variant="primary" class="btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
             <FolderPlus size={13} /> New Dir
           </Button>
         {:else if activeTab === 'logs'}
           <div style="width: 260px; max-width: 280px; flex-shrink: 0;">
-            <Select bind:value={selectedLog} onchange={() => loadLog()} id="nginx-log-select" ariaLabel="Log file">
+            <Select bind:value={selectedLog} onchange={() => loadLog()} size="sm" id="nginx-log-select" ariaLabel="Log file">
               {#if selectedLog && !logFiles.includes(selectedLog)}
                 <option value={selectedLog}>{selectedLog.split('/').pop()} • Custom</option>
               {/if}
@@ -2039,22 +2039,30 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <button class="header-refresh-btn" onclick={() => loadLog()} disabled={logLoading} id="nginx-log-refresh">
-              <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
+            <button class="header-refresh-btn" onclick={() => loadLog()} disabled={logLoading} id="nginx-log-refresh" title="Reload this log" aria-label="Reload this log">
+              <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} />
             </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
               <Clock size={13} /> {logAutoRefresh ? 'Live: On' : 'Live: Off'}
             </Button>
-            <button class="export-action-btn" onclick={exportLog} id="nginx-log-export">
-              <Download size={13} /> Export
+            <button class="export-action-btn" onclick={exportLog} id="nginx-log-export" title="Export this log" aria-label="Export this log">
+              <Download size={13} />
+              <ChevronDown size={11} style="opacity:0.7;" />
             </button>
-            <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
-              <Trash2 size={13} /> Clear
-            </Button>
+            <KebabMenu align="right" title="Log actions">
+              <button
+                class="menu-item"
+                style="color: var(--color-error);"
+                onclick={confirmClearLog}
+                id="nginx-log-clear"
+              >
+                <Trash2 size={13} /> Clear log
+              </button>
+            </KebabMenu>
           </div>
         {:else if activeTab === 'ssl'}
-          <button class="header-refresh-btn" onclick={loadSslCerts} disabled={sslLoading} id="nginx-refresh-ssl">
-            <RefreshCw size={13} class={sslLoading ? 'animate-spin-slow' : ''} /> Refresh
+          <button class="header-refresh-btn" onclick={loadSslCerts} disabled={sslLoading} id="nginx-refresh-ssl" title="Reload certificates" aria-label="Reload certificates">
+            <RefreshCw size={13} class={sslLoading ? 'animate-spin-slow' : ''} />
           </button>
         {/if}
       </div>
@@ -2153,11 +2161,22 @@
 
                 <div class="service-btns">
                   {#each nginxServiceActions as { action, label, danger, icon: Icon }}
+                    {@const wrongState =
+                      (action === 'start' && serviceStatus?.active) ||
+                      (action === 'stop' && !serviceStatus?.active) ||
+                      (action === 'reload' && !serviceStatus?.active)}
                     <Button
                       variant={danger ? 'danger' : 'outline'}
                       class="btn-sm"
                       onclick={() => requestServiceAction(action)}
-                      disabled={serviceLoading}
+                      disabled={serviceLoading || wrongState}
+                      title={action === 'start' && serviceStatus?.active
+                        ? 'nginx is already running'
+                        : action === 'stop' && !serviceStatus?.active
+                          ? 'nginx is already stopped'
+                          : action === 'reload' && !serviceStatus?.active
+                            ? 'Start nginx before reloading it'
+                            : `${label} nginx`}
                       id={`nginx-svc-${action}`}
                     >
                       {#if serviceLoading}
