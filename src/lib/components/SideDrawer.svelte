@@ -306,11 +306,12 @@
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.03em;
-    padding: 0 7px;
-    height: 22px;
+    padding: 0 9px;
+    /* match the 28px icon buttons beside it */
+    height: 28px;
     display: inline-flex;
     align-items: center;
-    border-radius: 4px;
+    border-radius: 6px;
     flex-shrink: 0;
   }
   

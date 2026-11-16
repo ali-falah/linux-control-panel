@@ -2025,18 +2025,24 @@ pub struct NginxLogAnalytics {
 }
 
 #[tauri::command]
-pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, String> {
+pub async fn nginx_get_log_analytics(
+    path: String,
+    full: Option<bool>,
+) -> Result<NginxLogAnalytics, String> {
     nginx_log_path_valid(&path)?;
 
+    // A bounded sample by default; "full" reads up to a hard ceiling so an
+    // audit can cover the whole file without loading a multi-GB log at once.
+    let limit = if full.unwrap_or(false) { 200_000usize } else { 15_000usize };
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        content = read_log_tail_as_root(&path, 15000)
+        content = read_log_tail_as_root(&path, limit)
             .await
             .map_err(|error| format!("Could not read {path}: {error}"))?;
     } else {
         // 1. Read through the validated privileged-reader path
-        if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
+        if let Ok(tail) = read_log_tail_as_root(&path, limit).await {
             content = tail;
         }
 
@@ -2050,8 +2056,8 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
         // 3. Seamless Rotated Log Merging for Analytics
         if path == "/var/log/nginx/access.log" || path == "/var/log/nginx/error.log" {
             let current_count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            if current_count < 15000 {
-                let needed = 15000 - current_count;
+            if current_count < limit {
+                let needed = limit - current_count;
                 let prefix = if path.contains("access") { "access.log-" } else { "error.log-" };
                 if let Ok(rotated_path) = find_rotated_log_as_root(prefix).await {
                         if !rotated_path.is_empty() {
@@ -2206,7 +2212,7 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
                         let month = match parts[1].to_ascii_lowercase().as_str() {
                             "jan" => "01", "feb" => "02", "mar" => "03", "apr" => "04",
                             "may" => "05", "jun" => "06", "jul" => "07", "aug" => "08",
-                            "sep" => "09", "oct" => "10", "nov" => "11", otherwise => "12",
+                            "sep" => "09", "oct" => "10", "nov" => "11", _otherwise => "12",
                         };
                         let normalised = format!(
                             "{}-{}-{} {}:{}:{}",
@@ -2412,27 +2418,24 @@ async fn find_rotated_log_as_root(prefix: &str) -> Result<String, String> {
         return Err("Invalid log prefix.".to_string());
     }
 
-    let args = vec![
-        String::from("/var/log/nginx"),
-        String::from("-maxdepth"),
-        String::from("1"),
-        String::from("-name"),
-        format!("{prefix}*"),
-        String::from("-type"),
-        String::from("f"),
-    ];
-    let output = run_privileged_output("/usr/bin/find", &args, &RootAuth::Polkit).await?;
+    // `ls -la /var/log/nginx` is the log-reader shape the argument policy
+    // allows (`find` is a migrating generalist and is refused). Names sort
+    // chronologically because logrotate appends `YYYYMMDD`.
+    let args = vec![String::from("-la"), String::from("/var/log/nginx")];
+    let output = run_privileged_output("/usr/bin/ls", &args, &RootAuth::Polkit).await?;
     if !output.status.success() {
         return Err("Could not list the rotated log files.".to_string());
     }
+
     let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
+        .filter(|line| line.starts_with('-'))
+        .filter_map(ls_name_column)
+        .filter(|name| name.starts_with(prefix))
+        .map(|name| format!("/var/log/nginx/{name}"))
         .collect();
     files.sort();
-    files.reverse();
-    Ok(files.first().cloned().unwrap_or_default())
+    Ok(files.pop().unwrap_or_default())
 }
 
 

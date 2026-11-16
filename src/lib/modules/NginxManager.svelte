@@ -229,6 +229,8 @@
   let analyticsData = $state<NginxLogAnalytics | null>(null);
   let analyticsLoading = $state(false);
   let analyticsLogFile = $state('/var/log/nginx/access.log');
+  let analyticsFull = $state(false);
+  let analyticsUpdatedAt = $state('');
 
   // Overview
   let serviceStatus = $state<NginxServiceStatus | null>(null);
@@ -342,6 +344,21 @@
   let logAutoRefresh = $state(false);
   let logInterval: ReturnType<typeof setInterval> | null = null;
   let logViewMode = $state<'structured' | 'raw'>('structured');
+  let rawWrap = $state(true);
+
+  /** Thin severity accent for raw lines — the text itself stays untouched. */
+  function rawLineSeverity(line: string): string {
+    if (/\[(error|crit|emerg|alert)\]/.test(line)) return 'sev-5';
+    if (/\[warn\]/.test(line)) return 'sev-4';
+    const status = line.match(/"\s+(\d{3})\s+/);
+    if (status) {
+      const code = Number(status[1]);
+      if (code >= 500) return 'sev-5';
+      if (code >= 400) return 'sev-4';
+    }
+    return '';
+  }
+
   let logStatusFilter = $state<'all' | '2xx' | '3xx' | '4xx' | '5xx'>('all');
   let timeRange = $state('all');
   let customStartDate = $state('');
@@ -585,6 +602,13 @@
       .filter(line => line.toLowerCase().includes(query))
       .join('\n');
   });
+
+  const rawLines = $derived(rawLogContent.split('\n'));
+
+  /** Newest rotated access log, offered when the active log is empty. */
+  const newestAccessArchive = $derived(
+    logFiles.find(file => /\/access\.log-/.test(file)) ?? ''
+  );
 
   const filteredLogEntries = $derived.by(() => {
     let list = parsedLogEntries;
@@ -1704,6 +1728,56 @@
 
   // ─── SSL ───────────────────────────────────────────────────────────────────
 
+  async function exportAnalytics() {
+    if (!analyticsData) return;
+    const data = analyticsData;
+    const rows: (string | number)[][] = [
+      ['Metric', 'Value'],
+      ['File', analyticsLogFile],
+      ['Mode', analyticsFull ? 'full file (up to 200k lines)' : 'newest 15,000 lines'],
+      ['Lines in sample', data.sample_lines],
+      ['First entry', data.first_entry],
+      ['Last entry', data.last_entry],
+      ['Total requests', data.total_requests],
+      ['Unique client IPs', data.unique_ips],
+      ['Bytes sent', data.total_bytes_sent],
+      ['2xx', data.status_2xx],
+      ['3xx', data.status_3xx],
+      ['4xx', data.status_4xx],
+      ['5xx', data.status_5xx],
+      ['Success rate %', data.success_rate.toFixed(1)],
+      ['Error rate %', data.error_rate.toFixed(1)],
+      [],
+      ['Top client IPs', 'Hits'],
+      ...data.top_ips,
+      [],
+      ['Top paths', 'Hits'],
+      ...data.top_paths,
+      [],
+      ['Top methods', 'Hits'],
+      ...data.top_methods,
+      [],
+      ['Top referrers', 'Hits'],
+      ...data.top_referrers,
+      [],
+      ['Top user agents', 'Hits'],
+      ...data.top_user_agents,
+      [],
+      ['Hour', 'Requests'],
+      ...data.hourly_traffic,
+    ];
+    const csv = rows
+      .map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    try {
+      const filename = `nginx-analytics-${analyticsLogFile.split('/').pop() ?? 'access.log'}.csv`;
+      await invoke<string>('export_journal_logs_to_file', { filename, content: csv });
+      uiStore.addToast(`Exported ${filename} to Downloads.`, 'success');
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
+  }
+
   async function loadSslCerts() {
     sslLoading = true;
     try {
@@ -1751,8 +1825,16 @@
   async function loadAnalytics(notify = false) {
     analyticsLoading = true;
     try {
-      analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', { path: analyticsLogFile });
-      statusStore.setLastCommand(`tail -n 15000 ${analyticsLogFile}`, 0, true);
+      analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', {
+        path: analyticsLogFile,
+        full: analyticsFull,
+      });
+      analyticsUpdatedAt = new Date().toLocaleTimeString();
+      statusStore.setLastCommand(
+        `${analyticsFull ? 'full scan' : 'tail -n 15000'} ${analyticsLogFile}`,
+        0,
+        true,
+      );
       lastLoadedAnalyticsLog = analyticsLogFile;
       if (notify) {
         uiStore.addToast(`Refreshed telemetry from ${analyticsLogFile.split('/').pop()}`, 'info');
@@ -2510,7 +2592,7 @@
                               <div class="site-routing-tags">
                                 {#if site.domains}
                                   {#each site.domains as dom}
-                                    <span class="site-meta-pill domain" title="Configured Server Name">
+                                    <span class="site-meta-pill domain" title={`Server name: ${dom}`}>
                                       <Globe size={10} />
                                       <span>{dom}</span>
                                     </span>
@@ -2518,7 +2600,7 @@
                                 {/if}
                                 {#if site.proxies}
                                   {#each site.proxies as prx}
-                                    <span class="site-meta-pill proxy" title="Reverse Proxy Target">
+                                    <span class="site-meta-pill proxy" title={`Proxy target: ${prx}`}>
                                       <ArrowUpRight size={10} />
                                       <span>{prx}</span>
                                     </span>
@@ -2546,15 +2628,14 @@
                             {/if}
 
                             {#if !site.has_ssl}
-                              <button 
-                                type="button" 
-                                class="btn-quick-ssl-badge" 
-                                onclick={() => openQuickSsl(site)} 
-                                title="Issue automated Let's Encrypt SSL certificate via Certbot"
+                              <Button
+                                variant="outline"
+                                size="xs"
+                                onclick={() => openQuickSsl(site)}
+                                title="Issue an automated Let's Encrypt certificate with Certbot"
                               >
-                                <Sparkles size={10} />
-                                <span>Get SSL</span>
-                              </button>
+                                <Lock size={11} /> SSL
+                              </Button>
                             {/if}
                           </div>
                         </td>
@@ -3087,6 +3168,11 @@
           {:else if logViewMode === 'structured'}
             <div class="structured-log-stream">
               {#each filteredLogEntries as entry, idx}
+                {@const dayKey = entry.formattedTime?.slice(0, 10) ?? ''}
+                {@const prevDayKey = idx > 0 ? (filteredLogEntries[idx - 1].formattedTime?.slice(0, 10) ?? '') : ''}
+                {#if dayKey && dayKey !== prevDayKey}
+                  <div class="log-day-separator"><span>{dayKey}</span></div>
+                {/if}
                 {#if entry.type === 'access'}
                   <div 
                     class="log-row-card access-card"
@@ -3217,16 +3303,41 @@
             <div class="raw-terminal-view">
               <div class="raw-terminal-header">
                 <span>
-                  {selectedLog} — {rawLogContent.split('\n').filter(line => line.trim()).length} lines
+                  {selectedLog} — {rawLines.filter(line => line.trim()).length} lines
+                  <em class="raw-filter-note">raw file content, unmodified</em>
                   {#if logStatusFilter !== 'all'}
                     <em class="raw-filter-note">status filter applies to the structured view</em>
                   {/if}
                 </span>
-                <Button variant="outline" class="btn-sm" onclick={() => copyLogLine(rawLogContent)}>
-                  <Copy size={12} /> Copy shown
-                </Button>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onclick={() => (rawWrap = !rawWrap)}
+                    title={rawWrap ? 'Wrap long lines: on' : 'Wrap long lines: off'}
+                  >
+                    <WrapText size={12} /> {rawWrap ? 'Wrap on' : 'Wrap off'}
+                  </Button>
+                  <Button variant="outline" size="sm" onclick={() => copyLogLine(rawLogContent)}>
+                    <Copy size={12} /> Copy shown
+                  </Button>
+                </div>
               </div>
-              <pre class="log-view raw-code-body">{rawLogContent || '(empty)'}</pre>
+
+              <div class="raw-viewport" class:wrap={rawWrap}>
+                {#each rawLines as line, index}
+                  <div
+                    class="raw-line {rawLineSeverity(line)}"
+                    title={line || 'blank line'}
+                  >
+                    <span class="raw-gutter" aria-hidden="true">{index + 1}</span>
+                    <span class="raw-text">{line || '\u00A0'}</span>
+                  </div>
+                {/each}
+                {#if rawLines.length === 0}
+                  <div class="raw-line"><span class="raw-gutter" aria-hidden="true">1</span><span class="raw-text text-muted">(empty)</span></div>
+                {/if}
+              </div>
             </div>
           {/if}
         </div>
@@ -3280,9 +3391,23 @@
                 </span>
               </span>
 
-              <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
+              <Button
+                variant={analyticsFull ? 'primary' : 'outline'}
+                size="sm"
+                onclick={() => { analyticsFull = !analyticsFull; loadAnalytics(true); }}
+                disabled={analyticsLoading}
+                title={analyticsFull
+                  ? 'Analysing the full file (up to 200,000 lines) — click for the newest 15,000'
+                  : 'Analysing the newest 15,000 lines — click to scan the full file (up to 200,000)'}
+              >
+                {analyticsFull ? 'Full file' : 'Sample'}
+              </Button>
+              <Button variant="outline" size="sm" onclick={exportAnalytics} disabled={!analyticsData}>
+                <Download size={12} /> Export CSV
+              </Button>
+              <span class="analytics-updated">{analyticsUpdatedAt ? `Updated ${analyticsUpdatedAt}` : ''}</span>
+              <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data" aria-label="Refresh analytics data">
                 <RefreshCw size={12} class={analyticsLoading ? 'animate-spin-slow' : ''} />
-                <span>Refresh</span>
               </button>
             </div>
           </div>
@@ -3316,20 +3441,37 @@
           {#if analyticsLoading}
             <div class="center-state" style="padding:60px 0;"><div class="spinner"></div></div>
           {:else if analyticsData}
-            <p class="analytics-trust-note">
-              Totals cover the sampled window above, not the full log history.
-              {#if analyticsLogFile.includes('error')}
-                This is an error log: the cards count events by severity, not HTTP requests.
-              {/if}
-            </p>
             {#if analyticsData.total_requests === 0}
-              <div class="analytics-zero-banner" role="status">
-                <AlertTriangle size={14} />
-                <span>
-                  No access-log entries were parsed from this file. Check that nginx uses the
-                  combined log format, or choose another file.
-                </span>
+              <!-- One message, one block: the trust note would only repeat it. -->
+              <div class="analytics-empty" role="status">
+                <AlertTriangle size={16} />
+                <div>
+                  <strong>No access-log entries in this sample</strong>
+                  <p>
+                    {analyticsFull
+                      ? 'This file contains no combined-format access entries.'
+                      : 'The newest 15,000 lines of this file contain no combined-format access entries.'}
+                    Check that nginx uses the combined log format, or choose another file.
+                  </p>
+                  {#if !analyticsLogFile.includes('-') && newestAccessArchive}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      style="margin-top:8px;"
+                      onclick={() => { analyticsLogFile = newestAccessArchive; loadAnalytics(true); }}
+                    >
+                      Analyse {newestAccessArchive.split('/').pop()}
+                    </Button>
+                  {/if}
+                </div>
               </div>
+            {:else}
+              <p class="analytics-trust-note">
+                Totals cover the sampled window above, not the full log history.
+                {#if analyticsLogFile.includes('error')}
+                  This is an error log: the cards count events by severity, not HTTP requests.
+                {/if}
+              </p>
             {/if}
             <!-- ─── 5 Large Hero KPI Cards ──────────────────────────────── -->
             <div class="analytics-kpi-grid">
@@ -3383,7 +3525,7 @@
               <!-- KPI 4: Success Rate (2xx/3xx) -->
               <div class="analytics-kpi-card card">
                 <div class="analytics-kpi-header">
-                  <span class="analytics-kpi-label">Success Rate</span>
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Clean Events' : 'Success Rate'}</span>
                   <div class="analytics-kpi-icon-wrap green">
                     <CheckCircle size={18} />
                   </div>
@@ -3398,14 +3540,18 @@
               <!-- KPI 5: Error Rate (4xx/5xx) -->
               <div class="analytics-kpi-card card">
                 <div class="analytics-kpi-header">
-                  <span class="analytics-kpi-label">Error Rate</span>
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Warn / Error Events' : 'Error Rate'}</span>
                   <div class="analytics-kpi-icon-wrap amber">
                     <AlertTriangle size={18} />
                   </div>
                 </div>
                 <div class="analytics-kpi-value {analyticsData.error_rate > 5 ? 'red' : 'amber'}">{analyticsData.error_rate.toFixed(1)}%</div>
                 <div class="analytics-kpi-footer">
-                  <span class="analytics-kpi-subtext">{(analyticsData.status_4xx + analyticsData.status_5xx).toLocaleString()} 4xx/5xx responses</span>
+                  <span class="analytics-kpi-subtext">
+                    <span class="text-warn">{analyticsData.status_4xx.toLocaleString()} 4xx</span>
+                    ·
+                    <span class="text-error">{analyticsData.status_5xx.toLocaleString()} 5xx</span>
+                  </span>
                   <span class="analytics-kpi-tag {analyticsData.error_rate > 5 ? 'red' : 'amber'}">
                     {analyticsData.error_rate > 5 ? 'Elevated' : 'Normal'}
                   </span>
@@ -4187,51 +4333,69 @@
   {/snippet}
 
   <div class="new-site-form">
-    <Input
-      id="nginx-site-name"
-      label="Server name (domain)"
-      bind:value={newSite.server_name}
-      placeholder="example.com"
-    />
-    <Input
-      id="nginx-site-port"
-      label="Port"
-      type="number"
-      min={1}
-      max={65535}
-      bind:value={newSite.port}
-    />
-
-    <div class="check-row">
-      <span>Reverse proxy</span>
-      <Toggle checked={newSite.is_proxy} onchange={(value) => (newSite.is_proxy = value)} />
-    </div>
-
-    {#if newSite.is_proxy}
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Identity</h4>
       <Input
-        id="nginx-site-proxy-url"
-        label="Proxy target URL"
-        bind:value={newSite.proxy_url}
-        placeholder="http://localhost:3000"
+        id="nginx-site-name"
+        label="Server name (domain)"
+        bind:value={newSite.server_name}
+        placeholder="example.com"
       />
-    {:else}
       <Input
-        id="nginx-site-root"
-        label="Root directory"
-        bind:value={newSite.root_dir}
-        placeholder="/var/www/html"
+        id="nginx-site-port"
+        label="Port"
+        type="number"
+        min={1}
+        max={65535}
+        bind:value={newSite.port}
       />
-      <Input id="nginx-site-index" label="Index file" bind:value={newSite.index_file} />
-    {/if}
+    </section>
 
-    <div class="check-row">
-      <span>Include 404 error page</span>
-      <Toggle checked={newSite.enable_404} onchange={(value) => (newSite.enable_404 = value)} />
-    </div>
-    <div class="check-row">
-      <span>Include 50x error pages</span>
-      <Toggle checked={newSite.enable_50x} onchange={(value) => (newSite.enable_50x = value)} />
-    </div>
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Content</h4>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">Reverse proxy</span>
+          <span class="toggle-row-hint">Forward requests to an app instead of serving files.</span>
+        </div>
+        <Toggle checked={newSite.is_proxy} onchange={(value) => (newSite.is_proxy = value)} />
+      </div>
+
+      {#if newSite.is_proxy}
+        <Input
+          id="nginx-site-proxy-url"
+          label="Proxy target URL"
+          bind:value={newSite.proxy_url}
+          placeholder="http://localhost:3000"
+        />
+      {:else}
+        <Input
+          id="nginx-site-root"
+          label="Root directory"
+          bind:value={newSite.root_dir}
+          placeholder="/var/www/html"
+        />
+        <Input id="nginx-site-index" label="Index file" bind:value={newSite.index_file} />
+      {/if}
+    </section>
+
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Error pages</h4>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">404 page</span>
+          <span class="toggle-row-hint">Serve a custom page for missing files.</span>
+        </div>
+        <Toggle checked={newSite.enable_404} onchange={(value) => (newSite.enable_404 = value)} />
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">50x pages</span>
+          <span class="toggle-row-hint">Serve a custom page for server errors.</span>
+        </div>
+        <Toggle checked={newSite.enable_50x} onchange={(value) => (newSite.enable_50x = value)} />
+      </div>
+    </section>
   </div>
 </SideDrawer>
 
@@ -4731,21 +4895,26 @@
   }.site-meta-pill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 1.5px 6px;
-    border-radius: 4px;
+    gap: 5px;
+    max-width: 260px;
+    padding: 2px 8px;
+    border-radius: 999px;
     font-size: 10.5px;
     font-family: var(--font-mono);
-    line-height: 1.3;
+    line-height: 1.35;
     font-weight: 500;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    overflow: hidden;
+  }.site-meta-pill > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }.site-meta-pill.domain {
-    background: rgba(0, 218, 243, 0.08);
-    color: var(--color-accent);
-    border: 1px solid rgba(0, 218, 243, 0.2);
+    color: var(--color-text-accent);
   }.site-meta-pill.proxy {
-    background: rgba(168, 85, 247, 0.1);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.25);
+    color: var(--color-text-secondary);
   }.site-ports-cell {
     display: flex;
     align-items: center;
@@ -4768,25 +4937,6 @@
     background: rgba(16, 185, 129, 0.1);
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.25);
-  }.btn-quick-ssl-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 10.5px;
-    font-weight: 600;
-    background: linear-gradient(135deg, rgba(236, 72, 153, 0.15), rgba(168, 85, 247, 0.15));
-    color: #f472b6;
-    border: 1px dashed rgba(236, 72, 153, 0.4);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }.btn-quick-ssl-badge:hover {
-    background: linear-gradient(135deg, rgba(236, 72, 153, 0.35), rgba(168, 85, 247, 0.35));
-    color: #ffffff;
-    border-color: #f472b6;
-    transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(236, 72, 153, 0.25);
   }/* ─── Inspector & Drawer Utilities ───────────────────────────────────── */ .inspect-meta-card {
     display: flex;
     flex-direction: column;
@@ -6087,6 +6237,62 @@
     margin: 0;
     height: 100%;
     min-height: 350px;
+  }
+
+  .raw-viewport {
+    flex: 1;
+    min-height: 350px;
+    max-height: calc(100vh - 300px);
+    overflow: auto;
+    padding: 8px 0;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+  }
+
+  .raw-line {
+    display: flex;
+    gap: 12px;
+    padding: 0 12px;
+    white-space: pre;
+  }
+
+  .raw-viewport.wrap .raw-line {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .raw-viewport.wrap .raw-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .raw-gutter {
+    position: sticky;
+    left: 0;
+    flex: 0 0 52px;
+    text-align: right;
+    color: var(--color-text-muted);
+    opacity: 0.55;
+    user-select: none;
+    background: var(--color-bg-base);
+  }
+
+  .raw-text {
+    color: var(--color-text-secondary);
+  }
+
+  .raw-line.sev-4 {
+    border-left: 2px solid var(--color-warning);
+    background: var(--color-warning-muted);
+  }
+
+  .raw-line.sev-5 {
+    border-left: 2px solid var(--color-error);
+    background: var(--color-error-muted);
   }/* ── Explicit Light Mode High-Contrast Overrides ── */ :global(html.light-mode) .log-row-card, :global([data-theme="light"]) .log-row-card {
     background: #FFFFFF !important;
     border: 1px solid #CBD5E1 !important;
@@ -6213,4 +6419,116 @@
     max-width: 600px;
     min-width: 400px;
     color: var(--color-text-secondary);
-  }.modal-footer { display: flex; justify-content: flex-end; margin-top: 20px; }.modal-wide .modal-output { max-width: 700px; min-width: 500px; }</style>
+  }.modal-footer { display: flex; justify-content: flex-end; margin-top: 20px; }.modal-wide .modal-output { max-width: 700px; min-width: 500px; }
+  /* ─── Analytics trust + empty state ─────────────────────────────── */
+  .analytics-trust-note {
+    margin: 0 0 12px;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+  }
+
+  .analytics-updated {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .analytics-empty {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    border-radius: 8px;
+    background: var(--color-warning-muted);
+    border-left: 3px solid var(--color-warning);
+    color: var(--color-text-secondary);
+  }
+
+  .analytics-empty strong {
+    display: block;
+    color: var(--color-text-primary);
+    font-size: 12.5px;
+    margin-bottom: 2px;
+  }
+
+  .analytics-empty p {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+
+  .log-day-separator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0 6px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .log-day-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  /* ─── New Site drawer ───────────────────────────────────────────── */
+  .new-site-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .drawer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+  }
+
+  .drawer-section-title {
+    margin: 0;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 0;
+  }
+
+  .toggle-row + .toggle-row {
+    border-top: 1px solid var(--color-border);
+    padding-top: 10px;
+  }
+
+  .toggle-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .toggle-row-label {
+    font-size: 12.5px;
+    color: var(--color-text-primary);
+  }
+
+  .toggle-row-hint {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+</style>
