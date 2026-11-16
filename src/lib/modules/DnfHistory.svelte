@@ -3,6 +3,8 @@
   import FilterChips from '../components/ui/FilterChips.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
+  import SideDrawer from '../components/SideDrawer.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import Table from '../components/ui/Table.svelte';
   import CodeEditor from '../components/CodeEditor.svelte';
@@ -16,7 +18,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
-  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert, Copy, Terminal } from '@lucide/svelte';
   import Select from '../components/ui/Select.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -84,17 +86,36 @@
 
   let dnfLogContent = $state('');
   let loadingLog = $state(false);
+  let historyDetail = $state<DnfHistoryEntry | null>(null);
+  let historyDetailOpen = $state(false);
   let logPageSize = $state(100);
   let logCurrentPage = $state(1);
+  let logQuery = $state('');
+  let logLevel = $state<'all' | 'error' | 'warn' | 'info'>('all');
 
   let logLines = $derived(dnfLogContent ? dnfLogContent.split('\n') : []);
-  let totalLogPages = $derived(Math.max(1, Math.ceil(logLines.length / logPageSize)));
+
+  /** Search + severity filter over the log before pagination. */
+  let filteredLogLines = $derived.by(() => {
+    const query = logQuery.trim().toLowerCase();
+    return logLines.filter(line => {
+      if (!line.trim()) return false;
+      const lower = line.toLowerCase();
+      if (query && !lower.includes(query)) return false;
+      if (logLevel === 'error' && !/error|crit|emerg|fail/.test(lower)) return false;
+      if (logLevel === 'warn' && !/warn|timeout|retry|deprecat/.test(lower)) return false;
+      if (logLevel === 'info' && /error|crit|emerg|fail|warn/.test(lower)) return false;
+      return true;
+    });
+  });
+
+  let totalLogPages = $derived(Math.max(1, Math.ceil(filteredLogLines.length / logPageSize)));
 
   let paginatedLogContent = $derived(() => {
-    if (logLines.length === 0) return 'Loading or no logs found...';
+    if (filteredLogLines.length === 0) return 'No log lines match this filter.';
     const start = (logCurrentPage - 1) * logPageSize;
     const end = start + logPageSize;
-    return logLines.slice(start, end).join('\n');
+    return filteredLogLines.slice(start, end).join('\n');
   });
 
   function setLogPage(p: number) {
@@ -333,7 +354,27 @@
     ).sort((a, b) => b.id - a.id)
   );
 
+  /** dnf history stores one letter: show the verb admins actually read. */
+  function actionLabel(action: string): string {
+    switch ((action || '').toUpperCase()) {
+      case 'I': return 'Install';
+      case 'U': return 'Upgrade';
+      case 'E': return 'Erase';
+      case 'R': return 'Reinstall';
+      case 'D': return 'Downgrade';
+      default: return action || 'Transaction';
+    }
+  }
+
   function actionBadge(action: string): string {
+    // `dnf history` reports one letter; map that before the word forms.
+    switch ((action || '').toUpperCase()) {
+      case 'I': return 'badge-success';
+      case 'U': return 'badge-info';
+      case 'E': return 'badge-error';
+      case 'D': return 'badge-warning';
+      case 'R': return 'badge-info';
+    }
     const a = action.toLowerCase();
     if (a.includes('install')) return 'badge-success';
     if (a.includes('remove') || a.includes('erase')) return 'badge-error';
@@ -401,6 +442,85 @@
   let pkgQuery = $state('');
   let pkgOutput = $state('');
   let pkgLoading = $state(false);
+  let pkgMode = $state<'search' | 'info' | 'versions'>('search');
+  let pkgRaw = $state(false);
+
+  interface PkgResult {
+    name: string;
+    arch: string;
+    version: string;
+    repo: string;
+    summary: string;
+    installed?: boolean;
+  }
+
+  interface DnfSearchResult extends PkgResult {
+    installed: boolean;
+  }
+
+  let pkgSearchResults = $state<DnfSearchResult[]>([]);
+
+  /** Turn dnf's human output into rows; the raw text stays one click away. */
+  const pkgResults = $derived.by((): PkgResult[] => {
+    const results: PkgResult[] = [];
+    if (!pkgOutput || pkgOutput.startsWith('Error:')) return results;
+
+    if (pkgMode === 'search') {
+      for (const line of pkgOutput.split('\n')) {
+        // dnf search puts two or more spaces (or a colon) between name.arch
+        // and the summary; the summary itself contains single spaces.
+        const match = line.match(/^\s*(\S+?)\.([a-z0-9_]+)(?:\s*:\s*|\s{2,})(.+)$/i);
+        if (!match) continue;
+        results.push({ name: match[1], arch: match[2], version: '', repo: '', summary: match[3].trim() });
+      }
+    } else if (pkgMode === 'versions') {
+      for (const line of pkgOutput.split('\n')) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 3) continue;
+        const nameArch = cols[0].match(/^(.+?)\.([a-z0-9_]+)$/i);
+        if (!nameArch) continue;
+        results.push({
+          name: nameArch[1],
+          arch: nameArch[2],
+          version: cols[1],
+          repo: cols[2],
+          summary: '',
+        });
+      }
+    } else {
+      let current: Partial<PkgResult> | null = null;
+      const commit = () => {
+        if (current?.name) {
+          results.push({ name: current.name, arch: current.arch ?? '', version: current.version ?? '', repo: current.repo ?? '', summary: current.summary ?? '' });
+        }
+        current = null;
+      };
+      for (const line of pkgOutput.split('\n')) {
+        const trimmed = line.trim();
+        if (/^(Installed|Available) Packages$/.test(trimmed)) { commit(); continue; }
+        if (trimmed.startsWith('Name') && trimmed.includes(':')) {
+          commit();
+          current = { name: trimmed.split(':')[1].trim() };
+        } else if (current && trimmed.startsWith('Version') && trimmed.includes(':')) {
+          current.version = trimmed.split(':')[1].trim();
+        } else if (current && trimmed.startsWith('Release') && trimmed.includes(':')) {
+          current.version = `${current.version ?? ''}-${trimmed.split(':')[1].trim()}`;
+        } else if (current && trimmed.startsWith('Architecture') && trimmed.includes(':')) {
+          current.arch = trimmed.split(':')[1].trim();
+        } else if (current && trimmed.startsWith('Repository') && trimmed.includes(':')) {
+          current.repo = trimmed.split(':')[1].trim();
+        } else if (current && trimmed.startsWith('Summary') && trimmed.includes(':')) {
+          current.summary = trimmed.split(':').slice(1).join(':').trim();
+        }
+      }
+      commit();
+    }
+    return results;
+  });
+
+  const pkgRows = $derived<PkgResult[]>(
+    pkgMode === 'search' && pkgSearchResults.length > 0 ? pkgSearchResults : pkgResults
+  );
 
   async function runPkgCmd(cmd: string) {
     if (!pkgQuery.trim()) return;
@@ -408,13 +528,32 @@
     pkgOutput = '';
     statusStore.setBusy(`Running dnf ${cmd}…`);
     try {
+      pkgMode = cmd as typeof pkgMode;
+      pkgRaw = false;
       if (cmd === 'search') {
-        pkgOutput = await invoke('dnf_search_packages', { query: pkgQuery });
-        statusStore.setLastCommand(`dnf search ${pkgQuery}`, 0, true);
+        try {
+          pkgSearchResults = await invoke<DnfSearchResult[]>('dnf_search_packages_structured', {
+            query: pkgQuery,
+          });
+        } catch {
+          // repoquery is the richer path; fall back to plain search text.
+          pkgSearchResults = [];
+        }
+        if (pkgSearchResults.length > 0) {
+          pkgOutput = pkgSearchResults
+            .map(row => `${row.name}.${row.arch}  ${row.version}  ${row.repo} — ${row.summary}`)
+            .join('\n');
+          statusStore.setLastCommand(`dnf repoquery --available ${pkgQuery}`, 0, true);
+        } else {
+          pkgOutput = await invoke('dnf_search_packages', { query: pkgQuery });
+          statusStore.setLastCommand(`dnf search ${pkgQuery}`, 0, true);
+        }
       } else if (cmd === 'info') {
+        pkgSearchResults = [];
         pkgOutput = await invoke('dnf_package_info', { pkg: pkgQuery });
         statusStore.setLastCommand(`dnf info ${pkgQuery}`, 0, true);
       } else if (cmd === 'versions') {
+        pkgSearchResults = [];
         pkgOutput = await invoke('dnf_list_versions', { pkg: pkgQuery });
         statusStore.setLastCommand(`dnf list --showduplicates ${pkgQuery}`, 0, true);
       }
@@ -790,13 +929,22 @@
                       <span title={updateTooltip(pkg)}>{pkg.package}</span>
                       {#if dnfStore.advisoriesFor(pkg.package, pkg.arch, pkg.version).length > 0}
                         {@const advisory = dnfStore.advisoriesFor(pkg.package, pkg.arch, pkg.version)[0]}
-                        <span
-                          class="badge {advisory.kind === 'security' ? 'badge-error' : 'badge-muted'}"
-                          title={advisory.id + (advisory.severity ? ` (${advisory.severity})` : '')}
-                        >
-                          <ShieldAlert size={10} />
-                          {advisory.kind === 'security' ? 'Security' : advisory.kind}
-                        </span>
+                        {@const advisoryLabel = advisory.kind === 'security'
+                          ? 'Security'
+                          : advisory.kind === 'bugfix'
+                            ? 'Bugfix'
+                            : advisory.kind === 'enhancement'
+                              ? 'Enhancement'
+                              : ''}
+                        {#if advisoryLabel}
+                          <span
+                            class="badge {advisory.kind === 'security' ? 'badge-error' : 'badge-muted'}"
+                            title={`${advisory.id}${advisory.severity ? ` (${advisory.severity})` : ''}`}
+                          >
+                            <ShieldAlert size={10} />
+                            {advisoryLabel}
+                          </span>
+                        {/if}
                       {/if}
                     </td>
                     <td style="font-family:var(--font-mono); font-size:12px; white-space:nowrap;">{pkg.version}</td>
@@ -859,10 +1007,16 @@
                     <Calendar size={12} /> {formatToLocalDate(entry.date)}
                   </div>
                 </td>
-                <td><span class="badge {actionBadge(entry.action)}">{entry.action || 'Transaction'}</span></td>
+                <td><span class="badge {actionBadge(entry.action)}" title={entry.action}>{actionLabel(entry.action)}</span></td>
                 <td style="text-align:right; font-weight:500;">{entry.altered}</td>
                 <td style="text-align:right">
                   <KebabMenu>
+                    <button
+                      class="menu-item"
+                      onclick={(e) => { e.stopPropagation(); historyDetail = entry; historyDetailOpen = true; }}
+                    >
+                      <Info size={14} /> Transaction details
+                    </button>
                     <button class="menu-item danger"
                       onclick={(e) => { e.stopPropagation(); confirmUndo(entry); }}
                       disabled={undoingId === entry.id}
@@ -884,10 +1038,84 @@
 
   <!-- ── Find Packages Tab ──────────────────────────────────────────────────── -->
   {:else if activeTab === 'packages'}
-    <div class="card" style="display:flex; flex-direction:column; gap:16px; flex:1; min-height:0;">
-      <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
-        <CodeEditor value={pkgOutput || 'Enter a package name and select an action to view output...'} readonly={true} height="100%" />
-      </div>
+    <div class="card" style="display:flex; flex-direction:column; gap:12px; flex:1; min-height:0; overflow:hidden;">
+      {#if pkgOutput.startsWith('Error:')}
+        <div class="pkg-error" role="alert">
+          <AlertTriangle size={15} />
+          <span>{pkgOutput}</span>
+        </div>
+      {:else if pkgLoading}
+        <div class="center-state"><div class="spinner"></div></div>
+      {:else if pkgRows.length > 0 && !pkgRaw}
+        <div class="pkg-results-bar">
+          <span>{pkgRows.length} package{pkgRows.length === 1 ? '' : 's'}</span>
+          <Button variant="ghost" size="xs" onclick={() => (pkgRaw = true)}>
+            <Terminal size={12} /> Raw output
+          </Button>
+        </div>
+        <div style="flex:1; min-height:0; overflow:auto;">
+          <Table actionParams={{ sortable: false }}>
+            <thead>
+              <tr>
+                <th style="width:26%">Package</th>
+                <th style="width:10%">Arch</th>
+                <th style="width:18%">Version</th>
+                {#if pkgMode === 'search'}
+                  <th style="width:10%">Installed</th>
+                {/if}
+                <th style="width:{pkgMode === 'search' ? '36%' : '38%'}">{pkgMode === 'versions' ? 'Repository' : 'Summary / Repository'}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each pkgRows as pkg}
+                <tr>
+                  <td style="font-weight:600; font-family:var(--font-mono); font-size:12px;">
+                    {pkg.name}
+                    <button
+                      type="button"
+                      class="pkg-copy"
+                      title="Copy package name"
+                      onclick={() => { navigator.clipboard.writeText(pkg.name); uiStore.addToast(`Copied ${pkg.name}`, 'info', 2000); }}
+                    >
+                      <Copy size={11} />
+                    </button>
+                  </td>
+                  <td style="color:var(--color-text-secondary);">{pkg.arch || '—'}</td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px;">{pkg.version || '—'}</td>
+                  {#if pkgMode === 'search'}
+                    <td>
+                      {#if pkg.installed}
+                        <span class="badge badge-success">Installed</span>
+                      {:else}
+                        <span class="badge badge-muted">Not installed</span>
+                      {/if}
+                    </td>
+                  {/if}
+                  <td style="color:var(--color-text-secondary);">{pkgMode === 'versions' ? (pkg.repo || '—') : (pkg.summary || pkg.repo || '—')}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </Table>
+        </div>
+      {:else if !pkgOutput}
+        <EmptyState
+          icon={Search}
+          title="Find a package"
+          description="Type a name above and choose Search for matching packages, Info for details, or Versions for every available build."
+          actionLabel="Try btop"
+          onAction={() => { pkgQuery = 'btop'; runPkgCmd('search'); }}
+        />
+      {:else}
+        {#if pkgRows.length > 0 && pkgRaw}
+          <div class="pkg-results-bar">
+            <span>raw dnf output</span>
+            <Button variant="ghost" size="xs" onclick={() => (pkgRaw = false)}>Parsed view</Button>
+          </div>
+        {/if}
+        <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
+          <CodeEditor value={pkgOutput} readonly={true} height="100%" />
+        </div>
+      {/if}
     </div>
 
   <!-- ── Maintenance Tab ────────────────────────────────────────────────────── -->
@@ -1001,6 +1229,21 @@
   <!-- ── DNF Logs Tab ───────────────────────────────────────────────────────── -->
   {:else if activeTab === 'logs'}
     <div class="card" style="display:flex; flex-direction:column; flex:1; min-height:0; padding:0; border:none; background:transparent; gap:12px;">
+      <div class="dnf-log-controls">
+        <SearchBar bind:value={logQuery} placeholder="Filter log lines (error, timeout, package name…)" style="margin:0; max-width:360px;" />
+        <FilterChips
+          options={[
+            { id: 'all', label: 'All', count: logLines.filter(line => line.trim()).length },
+            { id: 'error', label: 'Errors' },
+            { id: 'warn', label: 'Warnings' },
+            { id: 'info', label: 'Info' },
+          ]}
+          bind:value={logLevel}
+          label="Filter log lines by severity"
+        />
+        <span class="dnf-log-count">{filteredLogLines.length.toLocaleString()} matching lines</span>
+      </div>
+
       <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden;">
         <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
       </div>
@@ -1009,7 +1252,7 @@
       {#if logLines.length > 0}
         <div class="pagination-bar">
           <div class="pagination-info">
-            Showing {(logCurrentPage - 1) * logPageSize + 1}–{Math.min(logCurrentPage * logPageSize, logLines.length)} of {logLines.length.toLocaleString()} log lines
+            Showing {(logCurrentPage - 1) * logPageSize + 1}–{Math.min(logCurrentPage * logPageSize, filteredLogLines.length)} of {filteredLogLines.length.toLocaleString()} log lines
           </div>
 
           <div class="pagination-controls">
@@ -1047,6 +1290,47 @@
     </div>
   {/if}
 </div>
+<SideDrawer
+  bind:isOpen={historyDetailOpen}
+  title={historyDetail ? `Transaction #${historyDetail.id}` : 'Transaction'}
+  subtitle="dnf history entry"
+  width="480px"
+>
+  {#if historyDetail}
+    <div class="history-detail">
+      <div class="history-detail-row">
+        <span>Command</span>
+        <code>{historyDetail.command || '—'}</code>
+      </div>
+      <div class="history-detail-row">
+        <span>Date</span>
+        <strong>{formatToLocalDate(historyDetail.date)}</strong>
+      </div>
+      <div class="history-detail-row">
+        <span>Action</span>
+        <span class="badge {actionBadge(historyDetail.action)}" title={historyDetail.action}>
+          {actionLabel(historyDetail.action)}
+        </span>
+      </div>
+      <div class="history-detail-row">
+        <span>Packages altered</span>
+        <strong>{historyDetail.altered}</strong>
+      </div>
+      <p class="history-detail-hint">
+        A rollback reverts this transaction with `dnf history undo` — review the confirmation before applying it.
+      </p>
+      <Button
+        variant="danger"
+        size="sm"
+        onclick={() => { historyDetailOpen = false; confirmUndo(historyDetail!); }}
+        disabled={undoingId === historyDetail.id}
+      >
+        <Undo2 size={13} /> Roll back this transaction
+      </Button>
+    </div>
+  {/if}
+</SideDrawer>
+
 <DnfDryRunModal onConfirm={() => selectedUpdates.clear()} />
 
 <style>
@@ -1321,6 +1605,82 @@
     align-items: center;
     text-align: center;
     gap: 8px;
+    color: var(--color-text-muted);
+  }
+
+  .pkg-results-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+  }
+
+  .pkg-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--color-error-muted);
+    color: var(--color-error);
+    font-size: 12px;
+  }
+
+  .pkg-copy {
+    margin-left: 6px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 1px 3px;
+    border-radius: 4px;
+  }
+
+  .pkg-copy:hover {
+    color: var(--color-accent);
+    background: var(--color-bg-hover);
+  }
+
+  .dnf-log-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .dnf-log-count {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .history-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .history-detail-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12.5px;
+    color: var(--color-text-muted);
+  }
+
+  .history-detail-row code {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+  }
+
+  .history-detail-hint {
+    margin: 4px 0 0;
+    font-size: 11.5px;
     color: var(--color-text-muted);
   }
 </style>

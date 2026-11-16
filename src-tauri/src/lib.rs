@@ -16,7 +16,7 @@ use commands::{
     },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
-        dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
+        dnf_package_info, dnf_search_packages, dnf_search_packages_structured, list_dnf_history, undo_transaction,
         dnf_check_updates, dnf_update_advisories, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
@@ -197,6 +197,7 @@ pub fn run() {
             list_dnf_history,
             undo_transaction,
             dnf_search_packages,
+            dnf_search_packages_structured,
             dnf_package_info,
             dnf_list_versions,
             dnf_clean_all,

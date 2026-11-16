@@ -712,6 +712,7 @@ pub mod tokio {
         capture_stdout: bool,
         capture_stderr: bool,
         current_dir: Option<PathBuf>,
+        envs: Vec<(String, String)>,
     }
 
     impl Command {
@@ -722,6 +723,7 @@ pub mod tokio {
                 capture_stdout: false,
                 capture_stderr: false,
                 current_dir: None,
+                envs: Vec::new(),
             }
         }
 
@@ -743,6 +745,14 @@ pub mod tokio {
 
         pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
             self.current_dir = Some(dir.as_ref().to_path_buf());
+            self
+        }
+
+        pub fn env<K: AsRef<OsStr>, V: AsRef<OsStr>>(&mut self, key: K, value: V) -> &mut Self {
+            self.envs.push((
+                key.as_ref().to_string_lossy().to_string(),
+                value.as_ref().to_string_lossy().to_string(),
+            ));
             self
         }
 
@@ -780,6 +790,9 @@ pub mod tokio {
                 None => {
                 cmd.args(&self.args);
             }
+            }
+            for (key, value) in &self.envs {
+                cmd.env(key, value);
             }
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
@@ -823,6 +836,9 @@ pub mod tokio {
                 None => {
                 cmd.args(&self.args);
             }
+            }
+            for (key, value) in &self.envs {
+                cmd.env(key, value);
             }
             if self.capture_stdout { cmd.stdout(Stdio::piped()); }
             if self.capture_stderr { cmd.stderr(Stdio::piped()); }

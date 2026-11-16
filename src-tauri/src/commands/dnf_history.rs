@@ -245,7 +245,9 @@ pub async fn undo_transaction(id: u32, confirmed: Option<bool>) -> Result<String
 pub async fn dnf_search_packages(query: String) -> Result<String, String> {
     if crate::binary_exists("dnf").await {
         let output = Command::new("dnf")
-            .args(["search", &query])
+            .args(["--color=never", "search", &query])
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -264,11 +266,103 @@ pub async fn dnf_search_packages(query: String) -> Result<String, String> {
     Err("Neither dnf nor apt-cache is available".to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnfSearchResult {
+    pub name: String,
+    pub version: String,
+    pub repo: String,
+    pub arch: String,
+    pub summary: String,
+    pub installed: bool,
+}
+
+/// Structured package search: one row per available build, with whether the
+/// name is installed locally. Read-only and unprivileged.
+#[tauri::command]
+pub async fn dnf_search_packages_structured(query: String) -> Result<Vec<DnfSearchResult>, String> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 128 {
+        return Err("Enter a package name to search for.".to_string());
+    }
+    if query.starts_with('-')
+        || query.chars().any(|c| c.is_control() || c.is_whitespace())
+        || !query
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '*' | ':' | '@' | '/'))
+    {
+        return Err("Search only accepts a single package name or glob (letters, digits, . _ + - * : @ /).".to_string());
+    }
+
+    let format = "%{name}|%{evr}|%{reponame}|%{arch}|%{summary}\n";
+    // Unprivileged read: a direct process (no root channel, no policy
+    // argument list) so the queryformat operand stays legal.
+    let output = ::tokio::process::Command::new("dnf")
+        .args([
+            "--color=never",
+            "repoquery",
+            "--available",
+            "--queryformat",
+            format,
+            query,
+        ])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .output()
+        .await
+        .map_err(|e| format!("Could not query the repositories: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "dnf repoquery failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut installed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(rpm) = ::tokio::process::Command::new("rpm")
+        .args(["-qa", "--queryformat", "%{NAME}\n"])
+        .output()
+        .await
+    {
+        if rpm.status.success() {
+            for name in String::from_utf8_lossy(&rpm.stdout).lines() {
+                installed.insert(name.trim().to_string());
+            }
+        }
+    }
+
+    let mut results: Vec<DnfSearchResult> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let columns: Vec<&str> = line.splitn(5, '|').collect();
+        if columns.len() < 5 {
+            continue;
+        }
+        let name = columns[0].trim();
+        if name.is_empty() {
+            continue;
+        }
+        results.push(DnfSearchResult {
+            name: name.to_string(),
+            version: columns[1].trim().to_string(),
+            repo: columns[2].trim().to_string(),
+            arch: columns[3].trim().to_string(),
+            summary: columns[4].trim().to_string(),
+            installed: installed.contains(name),
+        });
+    }
+
+    results.sort_by(|a, b| a.name.cmp(&b.name).then(a.arch.cmp(&b.arch)).then(a.version.cmp(&b.version)));
+    results.dedup_by(|a, b| a.name == b.name && a.arch == b.arch && a.version == b.version);
+    Ok(results)
+}
+
 #[tauri::command]
 pub async fn dnf_package_info(pkg: String) -> Result<String, String> {
     if crate::binary_exists("dnf").await {
         let output = Command::new("dnf")
-            .args(["info", &pkg])
+            .args(["--color=never", "info", &pkg])
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -291,7 +385,9 @@ pub async fn dnf_package_info(pkg: String) -> Result<String, String> {
 pub async fn dnf_list_versions(pkg: String) -> Result<String, String> {
     if crate::binary_exists("dnf").await {
         let output = Command::new("dnf")
-            .args(["list", "--showduplicates", &pkg])
+            .args(["--color=never", "list", "--showduplicates", &pkg])
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -460,8 +556,9 @@ fn format_log_lines(content: &str) -> String {
 pub async fn dnf_check_updates() -> Result<Vec<DnfUpdateEntry>, String> {
     if crate::binary_exists("dnf").await {
         let output = Command::new("dnf")
-            .arg("info")
-            .arg("--upgrades")
+            .args(["--color=never", "info", "--upgrades"])
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .output()
             .await
             .map_err(|e| e.to_string())?;
@@ -822,11 +919,13 @@ pub async fn dnf_run_upgrade(
     }
 
     // ── Launch the upgrade with administrator rights ─────────────────────────
-    // stdbuf keeps the output line buffered so the progress is streamed live.
-    let mut args: Vec<String> = vec![String::from("-oL"), String::from("-eL")];
+    // No stdbuf: it is a migrating generalist the root channel refuses. dnf is
+    // Python, so PYTHONUNBUFFERED gives the same live progress without it.
+    let mut args: Vec<String> = Vec::new();
+    let program: &str;
 
     if is_dnf {
-        args.push(String::from("/usr/bin/dnf"));
+        program = "/usr/bin/dnf";
         args.push(String::from("upgrade"));
         args.push(String::from("--best"));
         args.push(String::from("-y"));
@@ -840,8 +939,9 @@ pub async fn dnf_run_upgrade(
         // Same option as the preview — otherwise a slow mirror can fail the
         // preview while the real transaction would have succeeded.
         args.push(String::from("--setopt=timeout=120"));
+        args.push(String::from("--color=never"));
     } else {
-        args.push(String::from("/usr/bin/apt-get"));
+        program = "/usr/bin/apt-get";
         if !packages.is_empty() {
             args.push(String::from("install"));
             args.push(String::from("--only-upgrade"));
@@ -853,7 +953,8 @@ pub async fn dnf_run_upgrade(
         }
     }
 
-    let (mut cmd, password) = build_privileged_tokio_command("/usr/bin/stdbuf", &args, &auth)?;
+    let (mut cmd, password) = build_privileged_tokio_command(program, &args, &auth)?;
+    cmd.env("PYTHONUNBUFFERED", "1").env("LC_ALL", "C").env("LANG", "C");
 
     cmd.stdout(Stdio::piped())
        .stderr(Stdio::piped());
@@ -1315,9 +1416,9 @@ pub async fn dnf_update_advisories() -> Result<Vec<DnfPackageAdvisory>, String> 
     }
 
     let output = Command::new("dnf")
-        .arg("updateinfo")
-        .arg("list")
-        .arg("--available")
+        .args(["--color=never", "updateinfo", "list", "--available"])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
         .output()
         .await
         .map_err(|e| format!("Could not read the available advisories: {e}"))?;

@@ -2533,8 +2533,10 @@ fn check_dnf(args: &[String]) -> Result<(), String> {
         let arg = args[index].as_str();
         if arg.starts_with('-') {
             match arg {
-                // non-interactive and best-package selection on the update page
-                "-y" | "--best" | "--assumeno" | "--showduplicates" | "--only-upgrade" => {}
+                // non-interactive and best-package selection on the update page;
+                // --color=never keeps captured output free of ANSI escapes
+                "-y" | "--best" | "--assumeno" | "--showduplicates" | "--only-upgrade"
+                | "--color=never" => {}
                 // the only --setopt key: digits-only default repo timeout
                 _ if is_dnf_timeout_setopt(arg) => {}
                 // restrict one call to a single repository id
