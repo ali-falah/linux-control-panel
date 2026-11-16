@@ -107,11 +107,20 @@ async fn nginx_installed() -> bool {
 
 async fn run_nginx_test() -> NginxTestResult {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    // nginx -t needs root: it opens /var/log/nginx/error.log and /run/nginx.pid
-    let output = Command::new("pkexec")
-        .args(["nginx", "-t"])
-        .output()
-        .await;
+    // `nginx -t` needs root: it opens /var/log/nginx/error.log and /run/nginx.pid.
+    // It travels the validated privileged route (program allow list, argument
+    // rules, trusted binary, admin mode) instead of a raw pkexec spawn.
+    let Some(nginx) = rp::resolve_root_program("nginx") else {
+        return NginxTestResult {
+            passed: false,
+            output: "nginx was not found on this system.".to_string(),
+            timestamp,
+        };
+    };
+    let args = vec![String::from("-t")];
+    let output =
+        crate::utils::privilege::run_privileged_output(&nginx, &args, &crate::utils::privilege::RootAuth::Polkit)
+            .await;
 
     match output {
         Ok(o) => {
@@ -130,11 +139,6 @@ async fn run_nginx_test() -> NginxTestResult {
             timestamp,
         },
     }
-}
-
-/// Write content to a path safely as root
-async fn pkexec_write(path: &str, content: &str) -> Result<(), String> {
-    crate::utils::privilege::write_file_as_root(path, content).await
 }
 
 // ─── The `lcp-admin` named-action runners ─────────────────────────────────────
@@ -396,19 +400,22 @@ pub async fn nginx_check_installed() -> NginxInstallInfo {
         };
     }
 
-    // nginx -v also triggers a log-file open; run via pkexec to avoid the
-    // "could not open error log" alert polluting the version string.
-    let ver = Command::new("pkexec")
-        .args(["nginx", "-v"])
-        .output()
-        .await
-        .ok()
-        .map(|o| {
-            // nginx prints version to stderr
-            let s = String::from_utf8_lossy(&o.stderr).to_string();
-            s.trim().to_string()
-        })
-        .unwrap_or_default();
+    // `nginx -v` only prints its version — no log file is opened, so it needs
+    // no privileges at all. Resolve the binary the same way as the write path
+    // (no user PATH lookup) and run it as the current user.
+    let ver = match rp::resolve_root_program("nginx") {
+        Some(nginx) => Command::new(nginx)
+            .args(["-v"])
+            .output()
+            .await
+            .ok()
+            .map(|o| {
+                // nginx prints version to stderr
+                String::from_utf8_lossy(&o.stderr).trim().to_string()
+            })
+            .unwrap_or_default(),
+        None => String::new(),
+    };
 
     NginxInstallInfo {
         installed: true,
@@ -876,15 +883,102 @@ async fn nginx_toggle_site_conf_d(name: String, enable: bool) -> Result<NginxTes
     Ok(test)
 }
 
+/// A hostname as nginx accepts it in `server_name`: labels of letters, digits,
+/// hyphen and underscore, optionally one leading wildcard (`*.example.com`).
+/// Anything that could terminate the directive (`;`, braces, `#`, quotes,
+/// whitespace, newlines) is refused — this value is interpolated into the file.
+fn server_name_valid(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+    let host = name.strip_prefix("*.").unwrap_or(name);
+    if host.is_empty() {
+        return false;
+    }
+    host.split('.').all(|label| {
+        let alnum_or_underscore = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().next().is_some_and(alnum_or_underscore)
+            && label.chars().last().is_some_and(alnum_or_underscore)
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    })
+}
+
+/// A single file name safe for the nginx config tree, derived from the domain.
+fn site_file_stem(server_name: &str) -> String {
+    let stem: String = server_name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let stem = stem.trim_matches('.').to_string();
+    if stem.is_empty() {
+        "site".to_string()
+    } else {
+        stem.chars().take(100).collect()
+    }
+}
+
+/// Server-side validation for the New Site form. The webview is not the trust
+/// boundary: the values below are written into a root-owned config file.
+fn validate_new_site(config: &NewSiteConfig) -> Result<(), String> {
+    if !server_name_valid(&config.server_name) {
+        return Err(format!(
+            "'{}' is not a valid server name. Use a hostname such as example.com or *.example.com.",
+            config.server_name
+        ));
+    }
+    if config.port == 0 {
+        return Err("The port must be between 1 and 65535.".to_string());
+    }
+
+    let unsafe_directive = |value: &str| {
+        value.chars().any(|c| c.is_control())
+            || value.contains(';')
+            || value.contains('{')
+            || value.contains('}')
+            || value.contains('#')
+            || value.contains('"')
+    };
+
+    if config.is_proxy {
+        let proxy = config.proxy_url.trim();
+        if !(proxy.starts_with("http://") || proxy.starts_with("https://")) {
+            return Err("The proxy URL must start with http:// or https://.".to_string());
+        }
+        if proxy.len() > 2048 || proxy.chars().any(char::is_whitespace) || unsafe_directive(proxy) {
+            return Err("The proxy URL contains characters nginx cannot take in one value.".to_string());
+        }
+    } else {
+        let root = config.root_dir.trim();
+        if !root.starts_with('/') || unsafe_directive(root) || root.chars().any(char::is_whitespace) {
+            return Err("The document root must be an absolute path without spaces or control characters.".to_string());
+        }
+        let index = config.index_file.trim();
+        if index.is_empty()
+            || index.len() > 128
+            || index.contains('/')
+            || unsafe_directive(index)
+            || index.chars().any(char::is_whitespace)
+        {
+            return Err("The index file must be a plain file name such as index.html.".to_string());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn nginx_create_site(config: NewSiteConfig) -> Result<String, String> {
     if !nginx_installed().await {
         return Err("nginx not installed".to_string());
     }
+    validate_new_site(&config)?;
 
-    let safe_name = config
-        .server_name
-        .replace(['/', ' ', '\0'], "_");
+    let safe_name = site_file_stem(&config.server_name);
 
     let confd_layout = detect_nginx_layout().await == NginxLayout::ConfD;
     let path = if confd_layout {
@@ -1052,11 +1146,18 @@ pub async fn nginx_delete_site(name: String, path: String) -> Result<(), String>
     }
 
     let test = run_nginx_test().await;
-    if test.passed {
-        let _ = nginx_reload_as_root().await;
-    }
-
     log_to_file("INFO", &format!("nginx_delete_site {name} ({clean_path})"));
+    if !test.passed {
+        return Err(format!(
+            "The site was removed, but `nginx -t` now fails. Check the remaining configuration:\n{}",
+            test.output
+        ));
+    }
+    if let Err(error) = nginx_reload_as_root().await {
+        return Err(format!(
+            "The site was removed and `nginx -t` passes, but nginx was not reloaded: {error}"
+        ));
+    }
     Ok(())
 }
 
@@ -1070,16 +1171,17 @@ pub async fn nginx_clone_site(
         return Err("nginx not installed".to_string());
     }
 
+    // The source is a read of a root-owned configuration file: keep it inside
+    // the same tree the editor writes, never an arbitrary path.
+    rp::nginx_config_path_valid(&source_path)?;
     let source = tokio::fs::read_to_string(&source_path)
         .await
         .map_err(|e| format!("Failed to read source config {source_path}: {e}"))?;
 
-    let safe_name = new_name.trim().replace(['/', ' ', '\0'], "_");
-    let safe_name = if safe_name.ends_with(".conf") {
-        safe_name
-    } else {
-        format!("{safe_name}.conf")
-    };
+    let requested = new_name.trim();
+    let stem = requested.strip_suffix(".conf").unwrap_or(requested);
+    rp::nginx_site_name_valid(stem)?;
+    let safe_name = format!("{stem}.conf");
 
     let target_dir = if source_path.contains("sites-available") {
         "/etc/nginx/sites-available"
@@ -1095,6 +1197,12 @@ pub async fn nginx_clone_site(
 
     let final_content = if let Some(ref nd) = new_domain {
         if !nd.trim().is_empty() {
+            if !server_name_valid(nd) {
+                return Err(format!(
+                    "'{}' is not a valid server name for the clone.",
+                    nd.trim()
+                ));
+            }
             let mut modified_lines = Vec::new();
             let mut replaced = false;
             for line in source.lines() {
@@ -1188,6 +1296,10 @@ pub async fn nginx_list_configs() -> Result<Vec<NginxConfigFile>, String> {
 
 #[tauri::command]
 pub async fn nginx_read_config(path: String) -> Result<String, String> {
+    // Same confinement as the write path: nginx.conf or a plain child of the
+    // configuration directories. The command is the trust boundary, not the
+    // file picker in the webview.
+    rp::nginx_config_path_valid(&path)?;
     tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("Failed to read {path}: {e}"))
@@ -1265,8 +1377,21 @@ pub async fn nginx_list_backups() -> Result<Vec<NginxBackup>, String> {
             (String::new(), without_bak.to_string())
         };
 
+        // The backup stores only the file name, so pick the live directory
+        // that actually holds it instead of always guessing /etc/nginx.
+        let candidates = [
+            format!("/etc/nginx/{orig_name}"),
+            format!("/etc/nginx/conf.d/{orig_name}"),
+            format!("/etc/nginx/sites-available/{orig_name}"),
+        ];
+        let original_path = candidates
+            .iter()
+            .find(|candidate| Path::new(candidate).exists())
+            .cloned()
+            .unwrap_or_else(|| candidates[0].clone());
+
         backups.push(NginxBackup {
-            original_path: format!("/etc/nginx/{orig_name}"),
+            original_path,
             backup_path: path.to_string_lossy().to_string(),
             timestamp: ts,
             filename,
@@ -1301,7 +1426,12 @@ pub async fn nginx_restore_backup(backup_path: String, original_path: String) ->
 // ─── Commands: WWW Files Browser ──────────────────────────────────────────────
 
 fn build_www_entry_sync(path: &std::path::Path) -> Option<WwwEntry> {
-    let meta = std::fs::metadata(path).ok()?;
+    // symlink_metadata: a link under the web root must never be followed —
+    // it can point outside /var/www, and a loop would recurse forever.
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        return None;
+    }
     let name = path.file_name()?.to_string_lossy().to_string();
     let is_dir = meta.is_dir();
     let size = if is_dir { 0 } else { meta.len() };
@@ -1363,9 +1493,7 @@ pub async fn nginx_list_www() -> Result<Vec<WwwEntry>, String> {
 
 #[tauri::command]
 pub async fn nginx_read_www_file(path: String) -> Result<String, String> {
-    if !path.starts_with("/var/www/") {
-        return Err("Path must be under /var/www/".to_string());
-    }
+    crate::utils::root_policy::var_www_path_valid(&path)?;
 
     let content = tokio::fs::read(&path)
         .await
@@ -1473,21 +1601,31 @@ pub async fn nginx_upload_www_file(src_path: String, dest_dir: String) -> Result
 
 // ─── Commands: Log Viewer ─────────────────────────────────────────────────────
 
+/// The one log directory this panel reads. Lexical: no traversal, no control
+/// characters; the privileged reader applies the same rules on its side.
+fn nginx_log_path_valid(path: &str) -> Result<(), String> {
+    if !path.starts_with("/var/log/nginx/") {
+        return Err("Log path must be under /var/log/nginx/.".to_string());
+    }
+    if path.contains("..") || path.contains('\n') || path.contains('\r') || path.contains('\0') {
+        return Err("Invalid log path.".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) -> Result<String, String> {
-    let allowed_prefix = "/var/log/nginx/";
-    if !path.starts_with(allowed_prefix) && !path.starts_with("/var/log/") {
-        return Err("Log path must be under /var/log/".to_string());
-    }
+    nginx_log_path_valid(&path)?;
 
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        // Read the compressed log with a validated argument list — no shell,
-        // so a file name can never be interpreted as a command.
-        if let Ok(tail) = read_log_tail_as_root(&path, lines as usize).await {
-            content = tail;
-        }
+        // Archived logs need a privileged decompression, and this build has no
+        // validated action for it yet. Say so instead of returning an empty
+        // viewer.
+        return read_log_tail_as_root(&path, lines as usize)
+            .await
+            .map_err(|_| archived_log_message(&path));
     } else {
         // 1. Read the requested active file through the validated
         // privileged-reader path (the same mechanism the `.gz` branch uses)
@@ -1550,15 +1688,24 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
 
 #[tauri::command]
 pub async fn nginx_clear_log(path: String) -> Result<(), String> {
-    let allowed_prefix = "/var/log/nginx/";
-    if !path.starts_with(allowed_prefix) && !path.starts_with("/var/log/") {
-        return Err("Log path must be under /var/log/".to_string());
-    }
+    nginx_log_path_valid(&path)?;
 
-    pkexec_write(&path, "").await?;
+    // Truncating a root-owned log needs a validated privileged action; the
+    // generic write path is gated off (hardening phase 3). Refuse loudly so
+    // the UI can explain it instead of showing an unrelated bash error.
+    Err(format!(
+        "Clearing {} needs a privileged truncate action that is not available in this build. \
+         Run `sudo truncate -s 0 {}` from a terminal, or rotate the log with logrotate.",
+        path, path
+    ))
+}
 
-    log_to_file("INFO", &format!("nginx_clear_log {path}"));
-    Ok(())
+fn archived_log_message(path: &str) -> String {
+    format!(
+        "{} is an archived (.gz) log. Reading it needs a privileged decompression that this \
+         build does not provide yet — open it from a terminal with `zless {}`.",
+        path, path
+    )
 }
 
 #[tauri::command]
@@ -1669,7 +1816,19 @@ pub async fn nginx_list_ssl_certs() -> Result<Vec<SslCert>, String> {
 
     let mut entries = match tokio::fs::read_dir(live_dir).await {
         Ok(e) => e,
-        Err(_) => return Ok(vec![]),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            // /etc/letsencrypt/live is 0700 root on every certbot host, so this
+            // is the normal case for an unprivileged panel — say so instead of
+            // showing an empty certificate list.
+            return Err(
+                "Certificates live in /etc/letsencrypt/live, which only root can read. \
+                 Reading them needs a privileged action that this build does not provide yet; \
+                 use `sudo certbot certificates` for the expiry list."
+                    .to_string(),
+            );
+        }
+        Err(error) => return Err(format!("Could not read {live_dir}: {error}")),
     };
 
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1872,18 +2031,12 @@ pub struct NginxLogAnalytics {
 
 #[tauri::command]
 pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, String> {
-    let allowed_prefix = "/var/log/nginx/";
-    if !path.starts_with(allowed_prefix) {
-        return Err("Log path must be under /var/log/nginx/".to_string());
-    }
+    nginx_log_path_valid(&path)?;
 
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        // Validated argument list instead of a shell command.
-        if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
-            content = tail;
-        }
+        return Err(archived_log_message(&path));
     } else {
         // 1. Read through the validated privileged-reader path
         if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
@@ -2290,12 +2443,7 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
 async fn read_log_tail_as_root(path: &str, lines: usize) -> Result<String, String> {
     use crate::utils::privilege::{run_privileged_output, RootAuth};
 
-    if !path.starts_with("/var/log/") {
-        return Err("Log path must be under /var/log/".to_string());
-    }
-    if path.contains('\n') || path.contains('\r') || path.contains('\0') {
-        return Err("Invalid log path.".to_string());
-    }
+    nginx_log_path_valid(path)?;
 
     if path.ends_with(".gz") {
         let args = vec![String::from("-dc"), path.to_string()];
@@ -2348,6 +2496,78 @@ async fn find_rotated_log_as_root(prefix: &str) -> Result<String, String> {
     Ok(files.first().cloned().unwrap_or_default())
 }
 
+
+#[cfg(test)]
+mod nginx_input_tests {
+    use super::{
+        nginx_log_path_valid, server_name_valid, site_file_stem, validate_new_site, NewSiteConfig,
+    };
+
+    fn site(server_name: &str, root: &str, index: &str) -> NewSiteConfig {
+        NewSiteConfig {
+            server_name: server_name.to_string(),
+            root_dir: root.to_string(),
+            port: 80,
+            is_proxy: false,
+            proxy_url: String::new(),
+            index_file: index.to_string(),
+            enable_404: false,
+            enable_50x: false,
+        }
+    }
+
+    #[test]
+    fn server_names_stop_directive_injection() {
+        assert!(server_name_valid("example.com"));
+        assert!(server_name_valid("*.example.com"));
+        assert!(server_name_valid("my_app.internal"));
+        assert!(!server_name_valid(""));
+        assert!(!server_name_valid("example.com;"));
+        assert!(!server_name_valid("example.com { }"));
+        assert!(!server_name_valid("example.com\nlisten 0.0.0.0:80"));
+        assert!(!server_name_valid("exa mple.com"));
+        assert!(!server_name_valid("*. "));
+        assert!(!server_name_valid("-bad.example.com"));
+    }
+
+    #[test]
+    fn file_stems_never_escape_conf_d() {
+        assert_eq!(site_file_stem("example.com"), "example.com");
+        assert_eq!(site_file_stem("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(site_file_stem("*.example.com"), "_.example.com");
+        assert_eq!(site_file_stem(""), "site");
+    }
+
+    #[test]
+    fn new_site_rejects_injected_or_malformed_values() {
+        assert!(validate_new_site(&site("example.com", "/var/www/example", "index.html")).is_ok());
+        assert!(validate_new_site(&site("example.com;", "/var/www/x", "index.html")).is_err());
+        assert!(validate_new_site(&site("example.com", "relative/path", "index.html")).is_err());
+        assert!(validate_new_site(&site("example.com", "/var/www/x;rm", "index.html")).is_err());
+        assert!(validate_new_site(&site("example.com", "/var/www/x", "../index")).is_err());
+
+        let proxy = NewSiteConfig {
+            is_proxy: true,
+            proxy_url: "file:///etc/shadow".to_string(),
+            ..site("example.com", "", "")
+        };
+        assert!(validate_new_site(&proxy).is_err());
+        let proxy_ok = NewSiteConfig {
+            is_proxy: true,
+            proxy_url: "http://127.0.0.1:3000".to_string(),
+            ..site("example.com", "", "")
+        };
+        assert!(validate_new_site(&proxy_ok).is_ok());
+    }
+
+    #[test]
+    fn log_paths_stay_inside_the_nginx_log_directory() {
+        assert!(nginx_log_path_valid("/var/log/nginx/access.log-20250101.gz").is_ok());
+        assert!(nginx_log_path_valid("/var/log/nginx/../../etc/shadow").is_err());
+        assert!(nginx_log_path_valid("/var/log/messages").is_err());
+        assert!(nginx_log_path_valid("/var/log/nginx/a\nb").is_err());
+    }
+}
 
 #[cfg(test)]
 mod nginx_layout_tests {

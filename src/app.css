@@ -1074,6 +1074,20 @@ input[type="password"]::placeholder {
   color: var(--color-text-muted);
 }
 
+/* Same rule for the other one-word colour helpers: modules use them, and a
+   class defined only inside another module's scoped <style> silently does
+   nothing when reused here. */
+.text-accent { color: var(--color-accent); }
+.text-success { color: var(--color-success); }
+.text-warn { color: var(--color-warning); }
+.text-error { color: var(--color-error); }
+
+/* Invalid field state, shared by every form that reports a validation error. */
+.input-error {
+  border-color: var(--color-error) !important;
+  box-shadow: 0 0 0 1px var(--color-error-muted);
+}
+
 /* ─── Search Bar ─────────────────────────────────────────────────────── */
 .search-bar {
   display: flex;

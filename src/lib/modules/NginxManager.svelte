@@ -12,12 +12,13 @@
   import Toggle from '../components/ui/Toggle.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
   import ContextMenu from '../components/ui/ContextMenu.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { 
     Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield, 
-    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle, 
+    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle, ShieldAlert,
     Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download, Copy, ListFilter, 
     ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2, 
     TerminalSquare, Filter, Search, Sparkles, Bot, Zap, TrendingUp, Radio, HardDrive, Compass, Layers, PieChart, ArrowUpRight, WrapText
@@ -247,6 +248,7 @@
 
   // Sites
   let sites = $state<NginxSite[]>([]);
+  let sitesError = $state<string | null>(null);
   let sitesLoading = $state(false);
   let showNewSiteForm = $state(false);
   let newSite = $state<NewSiteConfig>({
@@ -331,6 +333,7 @@
   let logFiles = $state<string[]>([]);
   let selectedLog = $state('');
   let logContent = $state('');
+  let logError = $state<string | null>(null);
   let logLoading = $state(false);
   let logFilter = $state('');
   let logAutoRefresh = $state(false);
@@ -560,6 +563,17 @@
       .reverse();
   });
 
+  // Raw mode keeps the search box useful; the status category is a property of
+  // the parsed entries, so it is only meaningful in the structured view.
+  const rawLogContent = $derived.by(() => {
+    const query = logFilter.trim().toLowerCase();
+    if (!query) return logContent;
+    return logContent
+      .split('\n')
+      .filter(line => line.toLowerCase().includes(query))
+      .join('\n');
+  });
+
   const filteredLogEntries = $derived.by(() => {
     let list = parsedLogEntries;
     if (logStatusFilter !== 'all') {
@@ -623,6 +637,7 @@
 
   // SSL
   let sslCerts = $state<SslCert[]>([]);
+  let sslError = $state<string | null>(null);
   let sslLoading = $state(false);
   let renewingCert = $state('');
 
@@ -785,8 +800,10 @@
     sitesLoading = true;
     try {
       sites = await invoke<NginxSite[]>('nginx_list_sites');
+      sitesError = null;
       statusStore.setLastCommand('ls /etc/nginx/conf.d/ /etc/nginx/sites-available/', 0, true);
     } catch (e) {
+      sitesError = String(e);
       uiStore.addToast(`Failed to load sites: ${e}`, 'error');
       statusStore.setLastCommand('ls /etc/nginx/conf.d/', 1, false);
     } finally {
@@ -936,6 +953,43 @@
     return list;
   });
 
+  type SiteSortKey = 'name' | 'ports' | 'status';
+  let siteSortKey = $state<SiteSortKey>('name');
+  let siteSortAsc = $state(true);
+
+  function sortSitesBy(key: SiteSortKey) {
+    if (siteSortKey === key) siteSortAsc = !siteSortAsc;
+    else {
+      siteSortKey = key;
+      siteSortAsc = true;
+    }
+  }
+
+  function siteAriaSort(key: SiteSortKey): 'ascending' | 'descending' | 'none' {
+    if (siteSortKey !== key) return 'none';
+    return siteSortAsc ? 'ascending' : 'descending';
+  }
+
+  function siteSortIndicator(key: SiteSortKey): string {
+    if (siteSortKey !== key) return '↕';
+    return siteSortAsc ? '↑' : '↓';
+  }
+
+  const visibleSites = $derived.by(() => {
+    const direction = siteSortAsc ? 1 : -1;
+    return [...filteredSites].sort((a, b) => {
+      let order = 0;
+      if (siteSortKey === 'name') {
+        order = a.name.localeCompare(b.name);
+      } else if (siteSortKey === 'ports') {
+        order = (a.ports?.[0] ?? '').localeCompare(b.ports?.[0] ?? '', undefined, { numeric: true });
+      } else {
+        order = Number(a.enabled) - Number(b.enabled);
+      }
+      return order * direction || a.name.localeCompare(b.name);
+    });
+  });
+
   async function openSiteInEditor(site: NginxSite) {
     activeTab = 'editor';
     if (configs.length === 0) {
@@ -1081,6 +1135,20 @@
   }
 
   async function selectConfig(cfg: NginxConfigFile) {
+    // Never throw away unsaved work by switching files.
+    if (selectedConfig && selectedConfig.path !== cfg.path && hasChanges()) {
+      uiStore.confirm(
+        'Discard unsaved changes?',
+        `"${selectedConfig.name}" has unsaved changes. Opening "${cfg.name}" will discard them.`,
+        () => void openConfig(cfg),
+        true
+      );
+      return;
+    }
+    await openConfig(cfg);
+  }
+
+  async function openConfig(cfg: NginxConfigFile) {
     editorLoading = true;
     selectedConfig = cfg;
     showDiff = false;
@@ -1227,7 +1295,13 @@
   }
 
   async function viewWwwFile(entry: WwwEntry) {
-    if (entry.is_dir) { toggleExpand(entry.path); return; }
+    if (entry.is_dir) {
+      // Select the folder first: its actions (subfolder/upload/rename/delete)
+      // live in the panel that renders for a directory entry.
+      selectedWwwEntry = entry;
+      toggleExpand(entry.path);
+      return;
+    }
     selectedWwwEntry = entry;
     wwwFileContent = '';
     wwwFileLoading = true;
@@ -1258,7 +1332,10 @@
   }
 
   async function createDir() {
-    if (!newDirName.trim()) return;
+    if (!newDirName.trim()) {
+      uiStore.addToast('Enter a folder name first.', 'warning');
+      return;
+    }
     const full = `${newDirParent}/${newDirName}`.replace(/\/\//g, '/');
     try {
       await invoke('nginx_create_www_dir', { path: full });
@@ -1506,6 +1583,23 @@
 
   // ─── Logs ──────────────────────────────────────────────────────────────────
 
+  /** Badge colour for an nginx error-log level: only real errors are red. */
+  function logLevelClass(level?: string): string {
+    switch ((level || '').toLowerCase()) {
+      case 'emerg':
+      case 'alert':
+      case 'crit':
+      case 'error':
+        return 'status-5xx';
+      case 'warn':
+        return 'status-4xx';
+      case 'notice':
+        return 'status-2xx';
+      default:
+        return 'status-3xx';
+    }
+  }
+
   async function loadLogFiles() {
     try {
       logFiles = await invoke<string[]>('nginx_list_log_files');
@@ -1522,21 +1616,23 @@
     }
   }
 
-  async function loadLog() {
+  async function loadLog(silent = false) {
     if (!selectedLog && logFiles.length > 0) {
       selectedLog = logFiles[0];
     }
     if (!selectedLog) return;
-    logLoading = true;
+    if (!silent) logLoading = true;
     try {
       logContent = await invoke<string>('nginx_read_log', {
         path: selectedLog,
         lines: 500,
         filter: null,
       });
+      logError = null;
       statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 0, true);
     } catch (e) {
       logContent = '';
+      logError = String(e);
       uiStore.addToast(`Failed to read log: ${e}`, 'error');
       statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 1, false);
     } finally {
@@ -1547,11 +1643,20 @@
   function toggleAutoRefresh() {
     logAutoRefresh = !logAutoRefresh;
     if (logAutoRefresh) {
-      logInterval = setInterval(() => loadLog(), 5000);
+      // silent reload: no spinner, so the stream does not blink every 5s
+      logInterval = setInterval(() => loadLog(true), 5000);
     } else {
       if (logInterval) { clearInterval(logInterval); logInterval = null; }
     }
   }
+
+  $effect(() => {
+    if (activeNav !== 'logs' && logInterval) {
+      clearInterval(logInterval);
+      logInterval = null;
+      logAutoRefresh = false;
+    }
+  });
 
   function confirmClearLog() {
     if (!selectedLog) return;
@@ -1591,8 +1696,10 @@
     sslLoading = true;
     try {
       sslCerts = await invoke<SslCert[]>('nginx_list_ssl_certs');
+      sslError = null;
       statusStore.setLastCommand('certbot certificates', 0, true);
     } catch (e) {
+      sslError = String(e);
       uiStore.addToast(`Failed to load certs: ${e}`, 'error');
       statusStore.setLastCommand('certbot certificates', 1, false);
     } finally {
@@ -1681,15 +1788,42 @@
     }
   }
 
-  const tabDefs = $derived([
+  // Five destinations; the seventh tab set collapses into scope switches.
+  const navTabs: { id: string; label: string; icon: any }[] = [
     { id: 'overview', label: 'Overview', icon: Activity },
-    { id: 'sites',    label: 'Sites',    icon: Globe },
-    { id: 'editor',   label: 'Config Editor', icon: FileCode },
-    { id: 'www',      label: 'WWW Files', icon: FolderOpen },
-    { id: 'logs',     label: 'Logs',     icon: FileText },
-    { id: 'analytics',label: 'Analytics',icon: BarChart2 },
-    { id: 'ssl',      label: 'SSL / Certs', icon: Lock },
-  ] as { id: typeof activeTab; label: string; icon: any }[]);
+    { id: 'sites', label: 'Sites', icon: Globe },
+    { id: 'files', label: 'Files', icon: FolderOpen },
+    { id: 'logs', label: 'Logs', icon: FileText },
+    { id: 'ssl', label: 'Certificates', icon: Lock },
+  ];
+
+  const fileScopes: { id: string; label: string; icon: any }[] = [
+    { id: 'editor', label: 'Configuration', icon: FileCode },
+    { id: 'www', label: 'Web root', icon: FolderOpen },
+  ];
+
+  const logScopes: { id: string; label: string; icon: any }[] = [
+    { id: 'logs', label: 'Stream', icon: FileText },
+    { id: 'analytics', label: 'Analytics', icon: BarChart2 },
+  ];
+
+  const activeNav = $derived(
+    activeTab === 'editor' || activeTab === 'www'
+      ? 'files'
+      : activeTab === 'analytics'
+        ? 'logs'
+        : activeTab
+  );
+
+  function selectNav(id: string) {
+    if (id === 'files') {
+      activeTab = activeTab === 'www' ? 'www' : 'editor';
+    } else if (id === 'logs') {
+      activeTab = activeTab === 'analytics' ? 'analytics' : 'logs';
+    } else {
+      activeTab = id as typeof activeTab;
+    }
+  }
 
   $effect(() => {
     if (uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)) {
@@ -1741,10 +1875,16 @@
     subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
     icon={Server} 
   >
-    {#if activeTab === 'logs'}
-      <!-- Range Selector (Journal Logs Style) placed in Page Header -->
+    <TabGroup
+      size="sm"
+      tabs={navTabs}
+      activeTab={activeNav}
+      onchange={selectNav}
+    />
+
+    {#if activeNav === 'logs'}
       <div class="custom-range-container">
-        <Select bind:value={timeRange} onchange={handleRangeChange} size="sm" style="width: 140px;">
+        <Select bind:value={timeRange} onchange={handleRangeChange} size="sm" style="width: 140px;" ariaLabel="Log time range">
           <option value="all">All Logs</option>
           <option value="1">Last 24 Hours</option>
           <option value="3">Last 3 Days</option>
@@ -1758,39 +1898,18 @@
             <div class="popover-row">
               <span class="popover-label">From</span>
               <DatePicker bind:value={customStartDate} placeholder="Start date" />
-              <input
-                type="time"
-                bind:value={customStartTime}
-                class="log-dt"
-              />
+              <input type="time" bind:value={customStartTime} class="log-dt" />
             </div>
             <div class="popover-row" style="margin-top: 10px;">
               <span class="popover-label">To</span>
               <DatePicker bind:value={customEndDate} placeholder="End date" />
-              <input
-                type="time"
-                bind:value={customEndTime}
-                class="log-dt"
-              />
+              <input type="time" bind:value={customEndTime} class="log-dt" />
             </div>
             <div class="popover-actions">
-              <button
-                type="button"
-                class="popover-btn apply-btn"
-                onclick={() => {
-                  showCustomPopover = false;
-                }}
-              >
+              <button type="button" class="popover-btn apply-btn" onclick={() => { showCustomPopover = false; }}>
                 Apply
               </button>
-              <button
-                type="button"
-                class="popover-btn cancel-btn"
-                onclick={() => {
-                  showCustomPopover = false;
-                  if (!customStartDate) timeRange = 'all';
-                }}
-              >
+              <button type="button" class="popover-btn cancel-btn" onclick={() => { showCustomPopover = false; if (!customStartDate) timeRange = 'all'; }}>
                 Cancel
               </button>
             </div>
@@ -1798,7 +1917,6 @@
         {/if}
       </div>
     {/if}
-
     {#if aiStore.enabled && installInfo?.installed}
       <Button variant="outline" size="sm" onclick={() => showAiNginxPromptBox = !showAiNginxPromptBox} title="Generate NGINX configuration block with AI">
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Config Generator
@@ -1861,18 +1979,24 @@
       </Button>
     </div>
   {:else}
-    <!-- ─── Controls: Tabs & Actions ─── -->
+    <!-- ─── Controls: tab-local filters and actions ─── -->
     <div class="controls-row">
-      <div class="tab-bar">
-        {#each tabDefs as tab}
-          <button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
-            onclick={() => (activeTab = tab.id)}
-            id={`nginx-tab-${tab.id}`}
-          >
-            <tab.icon size={14} />
-            {tab.label}
-          </button>
-        {/each}
+      <div class="nginx-tab-scope">
+        {#if activeNav === 'files'}
+          <TabGroup
+            size="sm"
+            tabs={fileScopes}
+            activeTab={activeTab}
+            onchange={(id) => (activeTab = id as typeof activeTab)}
+          />
+        {:else if activeNav === 'logs'}
+          <TabGroup
+            size="sm"
+            tabs={logScopes}
+            activeTab={activeTab}
+            onchange={(id) => (activeTab = id as typeof activeTab)}
+          />
+        {/if}
       </div>
 
       <div class="tab-actions">
@@ -1900,7 +2024,7 @@
           </Button>
         {:else if activeTab === 'logs'}
           <div style="width: 260px; max-width: 280px; flex-shrink: 0;">
-            <Select bind:value={selectedLog} onchange={loadLog} id="nginx-log-select">
+            <Select bind:value={selectedLog} onchange={() => loadLog()} id="nginx-log-select" ariaLabel="Log file">
               {#if selectedLog && !logFiles.includes(selectedLog)}
                 <option value={selectedLog}>{selectedLog.split('/').pop()} • Custom</option>
               {/if}
@@ -1915,7 +2039,7 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <button class="header-refresh-btn" onclick={loadLog} disabled={logLoading} id="nginx-log-refresh">
+            <button class="header-refresh-btn" onclick={() => loadLog()} disabled={logLoading} id="nginx-log-refresh">
               <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
             </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
@@ -2073,9 +2197,12 @@
               </div>
 
               {#if testResult}
-                <div class="test-result {testResult.passed ? 'test-pass' : 'test-fail'}">
+                {@const needsAdmin = !testResult.passed && testResult.output.includes('Admin mode is off')}
+                <div class="test-result {testResult.passed ? 'test-pass' : needsAdmin ? 'test-warn' : 'test-fail'}">
                   {#if testResult.passed}
                     <CheckCircle size={17} /> <span>Configuration Syntax OK</span>
+                  {:else if needsAdmin}
+                    <ShieldAlert size={17} /> <span>Test needs administrator mode</span>
                   {:else}
                     <XCircle size={17} /> <span>Configuration Syntax Error</span>
                   {/if}
@@ -2135,7 +2262,7 @@
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;">
                 <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Ports:</span>
                 {#each detectedOverviewPorts as p}
-                  <span class="port-badge {p.includes('SSL') ? 'ssl' : 'plain'}">{p}</span>
+                  <span class="port-badge {p === '443' ? 'ssl' : 'plain'}">{p}</span>
                 {/each}
                 {#if totalProxiesCount > 0}
                   <span class="site-meta-pill proxy" style="margin-left:auto;">
@@ -2232,96 +2359,6 @@
             </div>
           </div>
 
-          <!-- Bottom: Configured Virtual Hosts Preview Table -->
-          <div class="card ov-card">
-            <div class="ov-card-header">
-              <div class="ov-card-title">
-                <Globe size={16} class="text-accent" />
-                <span>Configured Virtual Hosts</span>
-                <span class="badge badge-muted" style="margin-left:6px;">{sites.length} total</span>
-              </div>
-              <Button variant="outline" class="btn-sm" onclick={() => activeTab = 'sites'}>
-                <span>Open Sites Manager</span>
-                <ArrowUpRight size={13} />
-              </Button>
-            </div>
-
-            {#if sites.length === 0}
-              <div class="empty-state" style="padding:24px;">No virtual hosts loaded yet.</div>
-            {:else}
-              <div class="ov-sites-mini-table-wrap">
-                <table class="ov-sites-mini-table">
-                  <thead>
-                    <tr>
-                      <th>Virtual Host</th>
-                      <th>Ports &amp; SSL</th>
-                      <th>Source</th>
-                      <th>Status</th>
-                      <th style="text-align:right;">Quick Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each sites as site}
-                      <tr>
-                        <td>
-                          <div style="display:flex; align-items:center; gap:8px;">
-                            <Globe size={13} class="text-accent" />
-                            <strong>{site.name}</strong>
-                            {#if site.domains && site.domains.length > 0}
-                              {#each site.domains as dom}
-                                <span class="site-meta-pill domain" style="font-size:10px;">{dom}</span>
-                              {/each}
-                            {/if}
-                            {#if site.proxies && site.proxies.length > 0}
-                              {#each site.proxies as prx}
-                                <span class="site-meta-pill proxy" style="font-size:10px;">{prx}</span>
-                              {/each}
-                            {/if}
-                          </div>
-                        </td>
-                        <td>
-                          <div style="display:flex; align-items:center; gap:4px;">
-                            {#if site.ports && site.ports.length > 0}
-                              {#each site.ports as p}
-                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}" style="font-size:10px; padding:1px 5px;">
-                                  {#if p.includes('SSL') || site.has_ssl}<Lock size={9} />{/if}
-                                  {p}
-                                </span>
-                              {/each}
-                            {:else}
-                              <span class="port-badge plain" style="font-size:10px; padding:1px 5px;">80</span>
-                            {/if}
-                          </div>
-                        </td>
-                        <td><span class="badge badge-muted" style="font-size:10.5px;">{site.source}</span></td>
-                        <td>
-                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}" style="font-size:10.5px;">
-                            {site.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
-                        </td>
-                        <td style="text-align:right;">
-                          <div style="display:flex; justify-content:flex-end; gap:6px;">
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInspector(site)} title="Quick Inspect">
-                              <Eye size={11} />
-                              <span>Inspect</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInEditor(site)} title="Edit Config">
-                              <FileCode size={11} />
-                              <span>Edit</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => jumpToSiteLogs(site, 'analytics')} title="View Logs">
-                              <BarChart2 size={11} />
-                              <span>Logs</span>
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {/if}
-          </div>
         </div>
 
       <!-- ══ SITES ══════════════════════════════════════════════════════════ -->
@@ -2329,95 +2366,24 @@
         <div class="tab-section">
 
 
-          {#if showNewSiteForm}
-            <div class="card new-site-form">
-              <h4 class="form-title">Create New Site</h4>
-              <div class="form-grid">
-                <label class="form-field">
-                  <span>Server Name (domain)</span>
-                  <input type="text" bind:value={newSite.server_name} placeholder="example.com" id="nginx-site-name" />
-                </label>
-                <label class="form-field">
-                  <span>Port</span>
-                  <input type="number" bind:value={newSite.port} min={1} max={65535} id="nginx-site-port" />
-                </label>
-                <label class="form-field form-toggle">
-                  <span>Reverse Proxy</span>
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.is_proxy}
-                    onclick={() => newSite.is_proxy = !newSite.is_proxy}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.is_proxy}
-                    aria-label="Toggle Reverse Proxy"
-                    id="nginx-site-proxy"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                </label>
-                {#if newSite.is_proxy}
-                  <label class="form-field form-full">
-                    <span>Proxy Target URL</span>
-                    <input type="text" bind:value={newSite.proxy_url} placeholder="http://localhost:3000" id="nginx-site-proxy-url" />
-                  </label>
-                {:else}
-                  <label class="form-field">
-                    <span>Root Directory</span>
-                    <input type="text" bind:value={newSite.root_dir} placeholder="/var/www/html" id="nginx-site-root" />
-                  </label>
-                  <label class="form-field">
-                    <span>Index File</span>
-                    <input type="text" bind:value={newSite.index_file} id="nginx-site-index" />
-                  </label>
-                {/if}
-                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.enable_404}
-                    onclick={() => newSite.enable_404 = !newSite.enable_404}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.enable_404}
-                    aria-label="Toggle custom 404 page"
-                    id="nginx-site-404"
-                    style="transform: scale(0.8);"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                  Include 404 error page
-                </label>
-                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.enable_50x}
-                    onclick={() => newSite.enable_50x = !newSite.enable_50x}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.enable_50x}
-                    aria-label="Toggle custom 50x page"
-                    id="nginx-site-50x"
-                    style="transform: scale(0.8);"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                  Include 50x error pages
-                </label>
-              </div>
-              <div class="form-actions">
-                <Button variant="ghost" class="" onclick={() => (showNewSiteForm = false)}>Cancel</Button>
-                <Button variant="primary" class="" onclick={createSite} disabled={newSiteLoading} id="nginx-create-site-submit">
-                  {#if newSiteLoading}<div class="spinner-sm"></div>{/if}
-                  Create Site
-                </Button>
-              </div>
-            </div>
-          {/if}
-
           {#if sitesLoading}
             <div class="center-state"><div class="spinner"></div></div>
+          {:else if sitesError}
+            <EmptyState
+              icon={Server}
+              title="Could not load site configurations"
+              description={sitesError}
+              actionLabel="Retry"
+              onAction={loadSites}
+            />
           {:else if sites.length === 0}
-            <div class="empty-state">No site configurations found</div>
+            <EmptyState
+              icon={Globe}
+              title="No site configurations found"
+              description="Create a virtual host to serve a site, or add a reverse proxy for an app on this machine."
+              actionLabel="New Site"
+              onAction={() => (showNewSiteForm = true)}
+            />
           {:else}
             <!-- Sites Toolbar -->
             <div class="sites-toolbar">
@@ -2435,16 +2401,48 @@
               />
             </div>
 
-            <div class="table-wrap">
-              <table use:tableFeatures>
+            <Table
+              tableAction={tableFeatures}
+              actionParams={{ sortable: false }}
+              class="sites-table"
+              style="border:none; border-radius:0;"
+            >
                 <thead>
                   <tr>
-                    <th>Site &amp; Routing</th>
-                    <th>Ports &amp; SSL</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                    <th>Configuration Path</th>
-                    <th style="text-align:right;">Actions</th>
+                    <th
+                      style="width:34%"
+                      class:sort-asc={siteSortKey === 'name' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'name' && !siteSortAsc}
+                      aria-sort={siteAriaSort('name')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('name')}>
+                        Site &amp; Routing <span class="sort-indicator">{siteSortIndicator('name')}</span>
+                      </button>
+                    </th>
+                    <th
+                      style="width:16%"
+                      class:sort-asc={siteSortKey === 'ports' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'ports' && !siteSortAsc}
+                      aria-sort={siteAriaSort('ports')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('ports')}>
+                        Ports &amp; SSL <span class="sort-indicator">{siteSortIndicator('ports')}</span>
+                      </button>
+                    </th>
+                    <th style="width:10%">Source</th>
+                    <th
+                      style="width:12%"
+                      class:sort-asc={siteSortKey === 'status' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'status' && !siteSortAsc}
+                      aria-sort={siteAriaSort('status')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('status')}>
+                        Status <span class="sort-indicator">{siteSortIndicator('status')}</span>
+                      </button>
+                    </th>
+                    <th style="width:18%">Configuration Path</th>
+                    <!-- The table density control floats in this corner; the label stays for screen readers. -->
+                    <th style="width:10%; text-align:right" aria-label="Actions"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2455,7 +2453,7 @@
                       </td>
                     </tr>
                   {:else}
-                    {#each filteredSites as site}
+                    {#each visibleSites as site}
                       <tr class="site-row" oncontextmenu={(e) => handleSiteContextMenu(e, site)}>
                         <!-- Column 1: Site Name & Routing -->
                         <td class="site-name-cell-wrapper">
@@ -2503,8 +2501,8 @@
                           <div class="site-ports-cell">
                             {#if site.ports && site.ports.length > 0}
                               {#each site.ports as p}
-                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}">
-                                  {#if p.includes('SSL') || site.has_ssl}
+                                <span class="port-badge {p === '443' || site.has_ssl ? 'ssl' : 'plain'}">
+                                  {#if p === '443' || site.has_ssl}
                                     <Lock size={10} />
                                   {/if}
                                   <span>{p}</span>
@@ -2533,9 +2531,12 @@
 
                         <!-- Column 4: Status -->
                         <td>
-                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}">
-                            {site.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
+                          <Toggle
+                            checked={site.enabled}
+                            disabled={toggleLoadingFor === site.name}
+                            title={`${site.enabled ? 'Disable' : 'Enable'} ${site.name}`}
+                            onclick={() => toggleSite(site)}
+                          />
                         </td>
 
                         <!-- Column 5: Path -->
@@ -2624,8 +2625,7 @@
                     {/each}
                   {/if}
                 </tbody>
-              </table>
-            </div>
+            </Table>
           {/if}
         </div>
 
@@ -2648,7 +2648,7 @@
                       class="file-item"
                       class:selected={selectedConfig?.path === cfg.path}
                       onclick={() => selectConfig(cfg)}
-                      id={`nginx-cfg-${cfg.name}`}
+                      id={`nginx-cfg-${cfg.path}`}
                     >
                       <FileCode size={12} />
                       <span>{cfg.name}</span>
@@ -2719,30 +2719,6 @@
             {/if}
           </div>
 
-          <!-- Backups panel -->
-          {#if showBackups}
-            <div class="backups-panel">
-              <div class="editor-sidebar-header">
-                <span>Backups</span>
-                <Button variant="ghost" class=" btn-sm" onclick={() => (showBackups = false)}>✕</Button>
-              </div>
-              {#if backupsLoading}
-                <div class="center-state"><div class="spinner-sm"></div></div>
-              {:else if backups.length === 0}
-                <p class="empty-state">No backups yet</p>
-              {:else}
-                {#each backups as bk}
-                  <div class="backup-item">
-                    <div class="backup-name">{bk.filename}</div>
-                    <div class="backup-ts">{bk.timestamp}</div>
-                    <Button variant="outline" size="sm" onclick={() => restoreBackup(bk)} id={`nginx-restore-${bk.filename}`}>
-                      <ArchiveRestore size={11} /> Restore
-                    </Button>
-                  </div>
-                {/each}
-              {/if}
-            </div>
-          {/if}
         </div>
 
       <!-- ══ WWW FILES ══════════════════════════════════════════════════════ -->
@@ -2760,7 +2736,7 @@
               <div class="www-tree-header-actions">
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; }} 
                   title="New Folder" 
                   id="nginx-new-folder-top"
@@ -2769,7 +2745,7 @@
                 </Button>
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={() => uploadFile('/var/www')} 
                   title="Upload File" 
                   id="nginx-upload-top"
@@ -2778,7 +2754,7 @@
                 </Button>
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={loadWww} 
                   title="Refresh Files" 
                   id="nginx-refresh-www-top"
@@ -2791,8 +2767,8 @@
             {#if showNewDirForm}
               <div class="new-dir-form">
                 <input type="text" bind:value={newDirName} placeholder="Folder name..." id="nginx-new-dir-name" />
-                <Button variant="primary" class="btn-xs" onclick={createDir} id="nginx-create-dir">Create</Button>
-                <Button variant="ghost" class="btn-xs" onclick={() => (showNewDirForm = false)}>✕</Button>
+                <Button variant="primary" size="xs" onclick={createDir} id="nginx-create-dir">Create</Button>
+                <Button variant="ghost" size="xs" onclick={() => (showNewDirForm = false)}>✕</Button>
               </div>
             {/if}
             {#if wwwLoading}
@@ -3061,6 +3037,14 @@
 
           {#if logLoading}
             <div class="center-state"><div class="spinner"></div></div>
+          {:else if logError}
+            <EmptyState
+              icon={FileText}
+              title="Could not read this log"
+              description={logError}
+              actionLabel="Retry"
+              onAction={() => loadLog()}
+            />
           {:else if filteredLogEntries.length === 0}
             <div class="editor-empty" style="min-height: 280px;">
               <FileText size={36} style="color: var(--color-text-muted);" />
@@ -3159,7 +3143,7 @@
                     onkeydown={(e) => { if (e.key === 'Enter') expandedLogIndex = expandedLogIndex === idx ? null : idx; }}
                   >
                     <div class="log-row-main">
-                      <span class="status-code-badge status-5xx">
+                      <span class="status-code-badge {logLevelClass(entry.logLevel)}">
                         [{entry.logLevel?.toUpperCase()}]
                       </span>
                       <span class="log-error-msg" title={entry.errorMessage}>
@@ -3199,12 +3183,17 @@
             <!-- Raw Mode -->
             <div class="raw-terminal-view">
               <div class="raw-terminal-header">
-                <span>{selectedLog} — {filteredLogEntries.length} entries</span>
-                <Button variant="outline" class="btn-sm" onclick={() => copyLogLine(logContent)}>
-                  <Copy size={12} /> Copy All
+                <span>
+                  {selectedLog} — {rawLogContent.split('\n').filter(line => line.trim()).length} lines
+                  {#if logStatusFilter !== 'all'}
+                    <em class="raw-filter-note">status filter applies to the structured view</em>
+                  {/if}
+                </span>
+                <Button variant="outline" class="btn-sm" onclick={() => copyLogLine(rawLogContent)}>
+                  <Copy size={12} /> Copy shown
                 </Button>
               </div>
-              <pre class="log-view raw-code-body">{logContent || '(empty)'}</pre>
+              <pre class="log-view raw-code-body">{rawLogContent || '(empty)'}</pre>
             </div>
           {/if}
         </div>
@@ -3227,7 +3216,7 @@
             <div class="analytics-header-right">
               <div style="display:flex; align-items:center; gap:8px;">
                 <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Log Source:</span>
-                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} size="sm" style="width:260px;">
+                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} size="sm" style="width:260px;" ariaLabel="Analytics log file">
                   {#if analyticsLogFile && !logFiles.includes(analyticsLogFile)}
                     <option value={analyticsLogFile}>{analyticsLogFile.split('/').pop()} • Custom</option>
                   {/if}
@@ -3688,8 +3677,20 @@
             </div>
             {#if sslLoading}
               <div class="center-state"><div class="spinner"></div></div>
+            {:else if sslError}
+              <EmptyState
+                icon={Lock}
+                title="Certificates are not readable here"
+                description={sslError}
+                actionLabel="Retry"
+                onAction={loadSslCerts}
+              />
             {:else if sslCerts.length === 0}
-              <div class="empty-state">No certificates found in /etc/letsencrypt/live/</div>
+              <EmptyState
+                icon={Lock}
+                title="No certificates found"
+                description="certbot has not issued a certificate on this host yet."
+              />
             {:else}
             <div class="ssl-grid">
               {#each sslCerts as cert}
@@ -3738,7 +3739,7 @@
       class="tree-item {selectedWwwEntry?.path === entry.path ? 'tree-selected' : ''}"
       onclick={() => viewWwwFile(entry)}
       oncontextmenu={(e) => handleWwwContextMenu(e, entry)}
-      id={`nginx-www-${entry.name}-${depth}`}
+      id={`nginx-www-${entry.path}`}
       title="Click to view • Right-click for options"
     >
       {#if entry.is_dir}
@@ -3758,7 +3759,7 @@
           bind:value={renameValue}
           onkeydown={(e) => { if (e.key === 'Enter') doRename(); if (e.key === 'Escape') renamingEntry = null; }}
           onclick={(e) => e.stopPropagation()}
-          id={`nginx-rename-${entry.name}`}
+          id={`nginx-rename-${entry.path}`}
           autofocus
         />
       {:else}
@@ -4072,6 +4073,109 @@
       {/if}
     </div>
   {/if}
+</SideDrawer>
+
+<!-- ══ BACKUPS DRAWER ═══════════════════════════════════════════════════════ -->
+<SideDrawer
+  bind:isOpen={showBackups}
+  title="Configuration backups"
+  subtitle="One revision is kept for every write"
+  width="460px"
+>
+  {#if backupsLoading}
+    <div class="center-state"><div class="spinner-sm"></div></div>
+  {:else if backups.length === 0}
+    <EmptyState
+      icon={ArchiveRestore}
+      title="No backups yet"
+      description="Every configuration write creates one revision here, so you can restore the previous version."
+    />
+  {:else}
+    <div class="backups-list">
+      {#each backups as bk}
+        <div class="backup-item">
+          <div>
+            <div class="backup-name">{bk.filename}</div>
+            <div class="backup-ts">{bk.timestamp}</div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={() => restoreBackup(bk)}
+            id={`nginx-restore-${bk.filename}`}
+          >
+            <ArchiveRestore size={11} /> Restore
+          </Button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</SideDrawer>
+
+<!-- ══ NEW SITE DRAWER ══════════════════════════════════════════════════════ -->
+<SideDrawer
+  bind:isOpen={showNewSiteForm}
+  title="New site"
+  subtitle="Virtual host configuration"
+  width="520px"
+>
+  {#snippet headerActions()}
+    <Button variant="ghost" size="sm" onclick={() => (showNewSiteForm = false)} disabled={newSiteLoading}>
+      Cancel
+    </Button>
+    <Button variant="primary" size="sm" onclick={createSite} disabled={newSiteLoading}>
+      {#if newSiteLoading}<div class="spinner-sm"></div>{/if}
+      Create site
+    </Button>
+  {/snippet}
+
+  <div class="new-site-form">
+    <Input
+      id="nginx-site-name"
+      label="Server name (domain)"
+      bind:value={newSite.server_name}
+      placeholder="example.com"
+    />
+    <Input
+      id="nginx-site-port"
+      label="Port"
+      type="number"
+      min={1}
+      max={65535}
+      bind:value={newSite.port}
+    />
+
+    <div class="check-row">
+      <span>Reverse proxy</span>
+      <Toggle checked={newSite.is_proxy} onchange={(value) => (newSite.is_proxy = value)} />
+    </div>
+
+    {#if newSite.is_proxy}
+      <Input
+        id="nginx-site-proxy-url"
+        label="Proxy target URL"
+        bind:value={newSite.proxy_url}
+        placeholder="http://localhost:3000"
+      />
+    {:else}
+      <Input
+        id="nginx-site-root"
+        label="Root directory"
+        bind:value={newSite.root_dir}
+        placeholder="/var/www/html"
+      />
+      <Input id="nginx-site-index" label="Index file" bind:value={newSite.index_file} />
+    {/if}
+
+    <div class="check-row">
+      <span>Include 404 error page</span>
+      <Toggle checked={newSite.enable_404} onchange={(value) => (newSite.enable_404 = value)} />
+    </div>
+    <div class="check-row">
+      <span>Include 50x error pages</span>
+      <Toggle checked={newSite.enable_50x} onchange={(value) => (newSite.enable_50x = value)} />
+    </div>
+  </div>
 </SideDrawer>
 
 <!-- ══ CLONE SITE DRAWER ═════════════════════════════════════════════════════ -->
@@ -4389,9 +4493,13 @@
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.25);
   }.test-fail {
-    background: rgba(244, 63, 94, 0.1);
+    background: var(--color-error-muted);
     color: var(--color-error);
-    border: 1px solid rgba(244, 63, 94, 0.25);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+  }.test-warn {
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+    border: 1px solid rgba(245, 158, 11, 0.3);
   }.test-output-wrap {
     position: relative;
     background: var(--color-bg-base);
@@ -4477,31 +4585,6 @@
   }.ov-env-btn code {
     font-family: var(--font-mono);
     color: var(--color-text-secondary);
-  }.ov-sites-mini-table-wrap {
-    overflow-x: auto;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: var(--color-bg-base);
-  }.ov-sites-mini-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }.ov-sites-mini-table th {
-    text-align: left;
-    padding: 8px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    border-bottom: 1px solid var(--color-border);
-    background: rgba(255, 255, 255, 0.02);
-  }.ov-sites-mini-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-  }.ov-sites-mini-table tr:last-child td {
-    border-bottom: none;
-  }.ov-sites-mini-table tr:hover {
-    background: rgba(255, 255, 255, 0.02);
   }.version-display {
     font-family: var(--font-mono);
     font-size: 13px;
@@ -4887,7 +4970,7 @@
     font-size: 12px;
     background: rgba(0,0,0,0.2);
     padding: 12px 0;
-  }.diff-line { display: flex; gap: 12px; padding: 1px 16px; }.diff-add { background: rgba(16,185,129,0.1); color: var(--color-success); }.diff-remove { background: rgba(244,63,94,0.1); color: var(--color-error); }.diff-same { color: var(--color-text-muted); }.diff-marker { width: 14px; flex-shrink: 0; font-weight: 700; }.diff-text { white-space: pre-wrap; word-break: break-all; }/* Backups panel */ .backups-panel {
+  }.diff-line { display: flex; gap: 12px; padding: 1px 16px; }.diff-add { background: rgba(16,185,129,0.1); color: var(--color-success); }.diff-remove { background: rgba(244,63,94,0.1); color: var(--color-error); }.diff-same { color: var(--color-text-muted); }.diff-marker { width: 14px; flex-shrink: 0; font-weight: 700; }.diff-text { white-space: pre-wrap; word-break: break-all; }/* Backups drawer */ .backups-list { display: flex; flex-direction: column; gap: 10px; } .backups-panel {
     width: 250px;
     min-width: 250px;
     border-left: 1px solid var(--color-border);
