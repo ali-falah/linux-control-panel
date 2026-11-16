@@ -55,6 +55,67 @@ pub struct DnfHistoryEntry {
     pub altered: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnfHistoryPackage {
+    pub action: String,
+    pub nevra: String,
+    pub repo: String,
+}
+
+/// One transaction's package list (`dnf history info <id>`). Read-only.
+#[tauri::command]
+pub async fn dnf_history_info(id: u32) -> Result<Vec<DnfHistoryPackage>, String> {
+    let output = ::tokio::process::Command::new("dnf")
+        .args(["--color=never", "history", "info", &id.to_string()])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .output()
+        .await
+        .map_err(|e| format!("Could not read transaction #{id}: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "dnf could not read transaction #{id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut packages = Vec::new();
+    let mut in_packages = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Packages Altered") {
+            in_packages = true;
+            continue;
+        }
+        if in_packages && trimmed.ends_with(':') && !trimmed.contains(' ') {
+            break;
+        }
+        if !in_packages || trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, ' ');
+        let action = parts.next().unwrap_or("").to_string();
+        let rest = parts.next().unwrap_or("").trim();
+        if action.is_empty() || rest.is_empty() {
+            continue;
+        }
+        let (nevra, repo) = match rest.split_once(" @") {
+            Some((nevra, repo)) => (nevra.trim(), repo.trim()),
+            None => (rest, ""),
+        };
+        packages.push(DnfHistoryPackage {
+            action,
+            nevra: nevra.to_string(),
+            repo: repo.to_string(),
+        });
+    }
+
+    Ok(packages)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DnfUpdateEntry {
     pub package: String,

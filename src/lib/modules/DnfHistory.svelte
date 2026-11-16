@@ -18,7 +18,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
-  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert, Copy, Terminal } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert, Copy, Terminal, WrapText } from '@lucide/svelte';
   import Select from '../components/ui/Select.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
@@ -33,6 +33,12 @@
     date: string;
     action: string;
     altered: number;
+  }
+
+  interface DnfHistoryPackage {
+    action: string;
+    nevra: string;
+    repo: string;
   }
 
   interface DnfUpdateEntry {
@@ -88,8 +94,51 @@
   let loadingLog = $state(false);
   let historyDetail = $state<DnfHistoryEntry | null>(null);
   let historyDetailOpen = $state(false);
+  let historyPackages = $state<DnfHistoryPackage[]>([]);
+  let historyPackagesLoading = $state(false);
+  let historyActionFilter = $state<'all' | 'install' | 'upgrade' | 'erase'>('all');
+
+  async function openHistoryDetails(entry: DnfHistoryEntry) {
+    historyDetail = entry;
+    historyDetailOpen = true;
+    historyPackages = [];
+    historyPackagesLoading = true;
+    try {
+      historyPackages = await invoke<DnfHistoryPackage[]>('dnf_history_info', { id: entry.id });
+    } catch (e) {
+      historyPackages = [];
+      uiStore.addToast(`Could not read transaction #${entry.id}: ${e}`, 'error');
+    } finally {
+      historyPackagesLoading = false;
+    }
+  }
   let logPageSize = $state(100);
   let logCurrentPage = $state(1);
+  let logFollow = $state(false);
+  let logFollowTimer: ReturnType<typeof setInterval> | null = null;
+  let logRawView = $state(false);
+  let logWrap = $state(true);
+
+  interface DnfLogRow {
+    stamp: string;
+    message: string;
+    level: 'error' | 'warn' | 'info';
+  }
+
+  function dnfLogLevel(message: string): 'error' | 'warn' | 'info' {
+    if (/curl error|\berror\b|failed|failure|critical/i.test(message)) return 'error';
+    if (/warn|timeout|retry|deprecat/i.test(message)) return 'warn';
+    return 'info';
+  }
+
+  function parseDnfLogLine(line: string): DnfLogRow {
+    const match = line.match(/^\[([^\]]+)\][^ ]*\s+(.*?)\s+dnf5\[\d+\]:\s*(.*)$/);
+    if (match) {
+      return { stamp: match[1], message: match[3], level: dnfLogLevel(match[3]) };
+    }
+    return { stamp: '', message: line, level: 'info' };
+  }
+
   let logQuery = $state('');
   let logLevel = $state<'all' | 'error' | 'warn' | 'info'>('all');
 
@@ -112,11 +161,25 @@
   let totalLogPages = $derived(Math.max(1, Math.ceil(filteredLogLines.length / logPageSize)));
 
   let paginatedLogContent = $derived(() => {
+    if (logLines.length === 0) return 'No log file content — /var/log/dnf.log is empty or missing.';
     if (filteredLogLines.length === 0) return 'No log lines match this filter.';
     const start = (logCurrentPage - 1) * logPageSize;
     const end = start + logPageSize;
     return filteredLogLines.slice(start, end).join('\n');
   });
+
+  function toggleLogFollow() {
+    logFollow = !logFollow;
+    if (logFollow) {
+      logFollowTimer = setInterval(async () => {
+        await loadDnfLog();
+        logCurrentPage = totalLogPages;
+      }, 5000);
+    } else if (logFollowTimer) {
+      clearInterval(logFollowTimer);
+      logFollowTimer = null;
+    }
+  }
 
   function setLogPage(p: number) {
     if (p < 1) logCurrentPage = 1;
@@ -169,6 +232,12 @@
 
   let selectAllUpdates = $derived(
     updates.length > 0 && selectedUpdates.size === updates.length
+  );
+  const visibleLogRows = $derived(
+    paginatedLogContent()
+      .split('\n')
+      .filter((line, index, all) => line.trim() !== '' || (index === 0 && all.length > 1))
+      .map(parseDnfLogLine)
   );
 
   // ─── Update list filters ────────────────────────────────────────────────────
@@ -240,6 +309,7 @@
         .reduce((acc, u) => acc + parseSize(u.size), 0)
     )
   );
+
 
   // A machine with many updates would render hundreds of table rows at once.
   // The list is therefore filled step by step — the selection and the totals
@@ -353,6 +423,29 @@
       h.action.toLowerCase().includes(historySearch.toLowerCase())
     ).sort((a, b) => b.id - a.id)
   );
+
+  const historyActionFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'install', label: 'Install' },
+    { id: 'upgrade', label: 'Upgrade' },
+    { id: 'erase', label: 'Erase' },
+  ] as const;
+
+  /** Apply the action filter, then group the rows by calendar day. */
+  let historyGroups = $derived.by(() => {
+    const list = filteredHistory.filter(entry => {
+      if (historyActionFilter === 'all') return true;
+      return actionLabel(entry.action).toLowerCase() === historyActionFilter;
+    });
+    const groups = new Map<string, DnfHistoryEntry[]>();
+    for (const entry of list) {
+      const day = formatToLocalDate(entry.date).slice(0, 10);
+      const bucket = groups.get(day);
+      if (bucket) bucket.push(entry);
+      else groups.set(day, [entry]);
+    }
+    return [...groups.entries()];
+  });
 
   /** dnf history stores one letter: show the verb admins actually read. */
   function actionLabel(action: string): string {
@@ -570,6 +663,7 @@
 
   let maintRunning = $state(false);
   let maintOutput = $state('');
+  let maintLast = $state<{ name: string; at: string; ok: boolean } | null>(null);
 
   // Lock status
   let lockInfo = $state<DnfLockInfo | null>(null);
@@ -628,10 +722,12 @@
     statusStore.setBusy(`Running ${cmdName}…`);
     try {
       const out = await invoke<string>(tauriCmd);
+      maintLast = { name: cmdName, at: new Date().toLocaleTimeString(), ok: true };
       uiStore.addToast(`${cmdName} completed successfully`, 'success');
       statusStore.setLastCommand(cmdName, 0, true);
       maintOutput = out || 'Command completed with no output.';
     } catch (e) {
+      maintLast = { name: cmdName, at: new Date().toLocaleTimeString(), ok: false };
       uiStore.addToast(`${cmdName} failed: ${e}`, 'error');
       statusStore.setLastCommand(cmdName, 1, false);
       maintOutput = `Error: ${e}`;
@@ -640,6 +736,14 @@
       statusStore.clearBusy();
     }
   }
+
+  $effect(() => {
+    if (activeTab !== 'logs' && logFollowTimer) {
+      clearInterval(logFollowTimer);
+      logFollowTimer = null;
+      logFollow = false;
+    }
+  });
 
   // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -703,7 +807,12 @@
 
     <div class="tab-actions">
       {#if activeTab === 'history'}
-        <SearchBar bind:value={historySearch} placeholder="Search history by command or action…" style="margin: 0;" />
+        <SearchBar bind:value={historySearch} placeholder="Search history by command or action…" style="margin: 0; max-width: 320px;" />
+        <FilterChips
+          options={[...historyActionFilters]}
+          bind:value={historyActionFilter}
+          label="Filter transactions by action"
+        />
       {:else if activeTab === 'updates'}
         <span style="font-size:13px; color:var(--color-text-secondary);">
           {updates.length} update{updates.length !== 1 ? 's' : ''} available · {totalListSize} total
@@ -977,7 +1086,7 @@
           <RefreshCw size={24} class="animate-spin-slow" style="color:var(--color-accent)" />
           <span style="font-weight:500">Loading DNF history…</span>
         </div>
-      {:else if filteredHistory.length === 0}
+      {:else if historyGroups.length === 0}
         <div class="empty-state" style="padding: 64px 32px;">
           <History size={32} class="empty-state-icon" style="margin:0 auto 16px;" />
           <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No History Found</span>
@@ -998,7 +1107,11 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredHistory as entry (entry.id)}
+            {#each historyGroups as [day, dayEntries] (day)}
+              <tr class="history-day-row">
+                <td colspan="6">{day}</td>
+              </tr>
+              {#each dayEntries as entry (entry.id)}
               <tr>
                 <td><code style="font-size:11px; color:var(--color-text-accent)">#{entry.id}</code></td>
                 <td><div style="font-weight:500; font-family:var(--font-mono); font-size:12px;">{entry.command || '—'}</div></td>
@@ -1013,7 +1126,7 @@
                   <KebabMenu>
                     <button
                       class="menu-item"
-                      onclick={(e) => { e.stopPropagation(); historyDetail = entry; historyDetailOpen = true; }}
+                      onclick={(e) => { e.stopPropagation(); openHistoryDetails(entry); }}
                     >
                       <Info size={14} /> Transaction details
                     </button>
@@ -1030,6 +1143,7 @@
                   </KebabMenu>
                 </td>
               </tr>
+              {/each}
             {/each}
           </tbody>
         </Table>
@@ -1220,6 +1334,12 @@
       </div>
 
       {#if maintOutput}
+        {#if maintLast}
+          <div class="maint-last-run">
+            <span>Last run: <strong>{maintLast.name}</strong> at {maintLast.at}</span>
+            <span class="badge {maintLast.ok ? 'badge-success' : 'badge-error'}">{maintLast.ok ? 'Succeeded' : 'Failed'}</span>
+          </div>
+        {/if}
         <div style="display:flex; flex-direction:column; height:280px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
           <CodeEditor value={maintOutput} readonly={true} height="100%" />
         </div>
@@ -1228,9 +1348,15 @@
 
   <!-- ── DNF Logs Tab ───────────────────────────────────────────────────────── -->
   {:else if activeTab === 'logs'}
-    <div class="card" style="display:flex; flex-direction:column; flex:1; min-height:0; padding:0; border:none; background:transparent; gap:12px;">
+    <div class="dnf-logs-tab">
       <div class="dnf-log-controls">
-        <SearchBar bind:value={logQuery} placeholder="Filter log lines (error, timeout, package name…)" style="margin:0; max-width:360px;" />
+        <SearchBar
+          bind:value={logQuery}
+          count={filteredLogLines.length}
+          total={logLines.length}
+          placeholder="Filter log lines…"
+          style="margin:0; flex:1 1 280px; max-width:460px;"
+        />
         <FilterChips
           options={[
             { id: 'all', label: 'All', count: logLines.filter(line => line.trim()).length },
@@ -1241,12 +1367,55 @@
           bind:value={logLevel}
           label="Filter log lines by severity"
         />
-        <span class="dnf-log-count">{filteredLogLines.length.toLocaleString()} matching lines</span>
+        <div class="dnf-log-actions">
+          <Button variant={logRawView ? 'primary' : 'outline'} size="sm" onclick={() => (logRawView = !logRawView)}>
+            {logRawView ? 'Raw' : 'Rows'}
+          </Button>
+          {#if !logRawView}
+            <button
+              type="button"
+              class="dnf-log-icon-btn"
+              class:active={logWrap}
+              onclick={() => (logWrap = !logWrap)}
+              title={logWrap ? 'Wrap long lines (on)' : 'Wrap long lines (off)'}
+              aria-label="Toggle line wrapping"
+              aria-pressed={logWrap}
+            >
+              <WrapText size={14} />
+            </button>
+          {/if}
+          <Button variant={logFollow ? 'primary' : 'outline'} size="sm" onclick={toggleLogFollow}>
+            {logFollow ? 'Following' : 'Follow live'}
+          </Button>
+        </div>
       </div>
 
-      <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden;">
-        <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
-      </div>
+      {#if logRawView}
+        <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden;">
+          <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
+        </div>
+      {:else}
+        <div class="dnf-log-view" class:wrap={logWrap}>
+          {#each visibleLogRows as row, index}
+            <div class="dnf-log-row level-{row.level}">
+              <span class="dnf-log-no" aria-hidden="true">{(logCurrentPage - 1) * logPageSize + index + 1}</span>
+              <span class="dnf-log-time" title={row.stamp}>{row.stamp || '—'}</span>
+              <span class="dnf-log-level">
+                {#if row.level === 'error'}Error{:else if row.level === 'warn'}Warn{:else}Info{/if}
+              </span>
+              <span class="dnf-log-msg">{row.message}</span>
+              <button
+                type="button"
+                class="dnf-log-copy"
+                title="Copy this line"
+                onclick={() => { navigator.clipboard.writeText(row.message); uiStore.addToast('Line copied', 'info', 2000); }}
+              >
+                <Copy size={11} />
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
 
       <!-- Pagination Toolbar -->
       {#if logLines.length > 0}
@@ -1316,6 +1485,23 @@
         <span>Packages altered</span>
         <strong>{historyDetail.altered}</strong>
       </div>
+      <div class="history-detail-packages">
+        <div class="history-detail-subhead">Packages altered</div>
+        {#if historyPackagesLoading}
+          <div class="history-detail-hint">Reading the transaction…</div>
+        {:else if historyPackages.length === 0}
+          <div class="history-detail-hint">dnf did not list packages for this transaction.</div>
+        {:else}
+          {#each historyPackages as pkg}
+            <div class="history-package-row">
+              <span class="badge {actionBadge(pkg.action)}">{pkg.action}</span>
+              <code title={pkg.nevra}>{pkg.nevra}</code>
+              <span class="history-package-repo">{pkg.repo}</span>
+            </div>
+          {/each}
+        {/if}
+      </div>
+
       <p class="history-detail-hint">
         A rollback reverts this transaction with `dnf history undo` — review the confirmation before applying it.
       </p>
@@ -1645,12 +1831,48 @@
   .dnf-log-controls {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     flex-wrap: wrap;
+    /* Its own surface, clearly apart from the log table below. */
+    padding: 8px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    margin-bottom: 12px;
+  }
+
+  .dnf-log-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .dnf-log-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+
+  .dnf-log-icon-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .dnf-log-icon-btn.active {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
 
   .dnf-log-count {
-    margin-left: auto;
     font-size: 11px;
     color: var(--color-text-muted);
   }
@@ -1682,5 +1904,168 @@
     margin: 4px 0 0;
     font-size: 11.5px;
     color: var(--color-text-muted);
+  }
+
+
+  .history-day-row td {
+    padding: 8px 12px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    background: var(--color-bg-raised);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .history-detail-packages {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 12px;
+  }
+
+  .history-detail-subhead {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .history-package-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+  }
+
+  .history-package-row code {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+  }
+
+  .history-package-repo {
+    color: var(--color-text-muted);
+    font-size: 10.5px;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .maint-last-run {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    padding: 6px 2px;
+  }
+
+  .dnf-log-view {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    margin-top: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .dnf-log-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    border-left: 2px solid transparent;
+  }
+
+  .dnf-log-row:last-child {
+    border-bottom: none;
+  }
+
+  .dnf-log-row.level-error {
+    border-left-color: var(--color-error);
+    background: var(--color-error-muted);
+  }
+
+  .dnf-log-row.level-warn {
+    border-left-color: var(--color-warning);
+    background: var(--color-warning-muted);
+  }
+
+  .dnf-log-no {
+    flex: 0 0 48px;
+    text-align: right;
+    color: var(--color-text-muted);
+    opacity: 0.6;
+    user-select: none;
+  }
+
+  .dnf-log-time {
+    flex: 0 0 172px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .dnf-log-level {
+    flex: 0 0 42px;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    padding-top: 1px;
+  }
+
+  .dnf-log-row.level-error .dnf-log-level { color: var(--color-error); }
+  .dnf-log-row.level-warn .dnf-log-level { color: var(--color-warning); }
+
+  .dnf-log-msg {
+    flex: 1;
+    min-width: 0;
+    color: var(--color-text-secondary);
+    white-space: pre;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dnf-log-view.wrap .dnf-log-msg {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .dnf-log-copy {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    opacity: 0;
+    padding: 0 2px;
+  }
+
+  .dnf-log-row:hover .dnf-log-copy {
+    opacity: 1;
+  }
+
+  /* The tab itself is only a container: no card surface, so the toolbar and
+     the log panel read as two separate surfaces. */
+  .dnf-logs-tab {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    gap: 12px;
+    background: transparent;
+    border: 0;
+    padding: 0;
   }
 </style>
