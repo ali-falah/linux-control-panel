@@ -1620,12 +1620,10 @@ pub async fn nginx_read_log(path: String, lines: u32, filter: Option<String>) ->
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        // Archived logs need a privileged decompression, and this build has no
-        // validated action for it yet. Say so instead of returning an empty
-        // viewer.
+        // Archived logs are read through the validated `zcat` log reader.
         return read_log_tail_as_root(&path, lines as usize)
             .await
-            .map_err(|_| archived_log_message(&path));
+            .map_err(|error| format!("Could not read {path}: {error}"));
     } else {
         // 1. Read the requested active file through the validated
         // privileged-reader path (the same mechanism the `.gz` branch uses)
@@ -1698,14 +1696,6 @@ pub async fn nginx_clear_log(path: String) -> Result<(), String> {
          Run `sudo truncate -s 0 {}` from a terminal, or rotate the log with logrotate.",
         path, path
     ))
-}
-
-fn archived_log_message(path: &str) -> String {
-    format!(
-        "{} is an archived (.gz) log. Reading it needs a privileged decompression that this \
-         build does not provide yet — open it from a terminal with `zless {}`.",
-        path, path
-    )
 }
 
 #[tauri::command]
@@ -2027,6 +2017,11 @@ pub struct NginxLogAnalytics {
     pub top_user_agents: Vec<(String, u32)>,
     pub top_methods: Vec<(String, u32)>,
     pub hourly_traffic: Vec<(String, u32)>,
+    /// How many log lines the totals cover (the newest N, not the whole file).
+    pub sample_lines: u32,
+    /// First/last parsed timestamp in the sample, ISO-like, empty when unknown.
+    pub first_entry: String,
+    pub last_entry: String,
 }
 
 #[tauri::command]
@@ -2036,7 +2031,9 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
     let mut content = String::new();
 
     if path.ends_with(".gz") {
-        return Err(archived_log_message(&path));
+        content = read_log_tail_as_root(&path, 15000)
+            .await
+            .map_err(|error| format!("Could not read {path}: {error}"))?;
     } else {
         // 1. Read through the validated privileged-reader path
         if let Ok(tail) = read_log_tail_as_root(&path, 15000).await {
@@ -2092,6 +2089,9 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
     let mut ua_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut method_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut hourly_counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut first_entry = String::new();
+    let mut last_entry = String::new();
+    let mut sample_lines = 0u32;
 
     // Initialize 24 hourly slots
     for h in 0..24 {
@@ -2200,8 +2200,29 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
                             *hourly_counts.entry(hour_key).or_insert(0) += 1;
                         }
                     }
+                    // Normalised "YYYY-MM-DD HH:MM:SS" for the sample window.
+                    let parts: Vec<&str> = ts_str.split([':', '/']).collect();
+                    if parts.len() >= 6 {
+                        let month = match parts[1].to_ascii_lowercase().as_str() {
+                            "jan" => "01", "feb" => "02", "mar" => "03", "apr" => "04",
+                            "may" => "05", "jun" => "06", "jul" => "07", "aug" => "08",
+                            "sep" => "09", "oct" => "10", "nov" => "11", otherwise => "12",
+                        };
+                        let normalised = format!(
+                            "{}-{}-{} {}:{}:{}",
+                            parts[2], month, parts[0], parts[3], parts[4],
+                            parts[5].split(' ').next().unwrap_or(parts[5])
+                        );
+                        if first_entry.is_empty() || normalised < first_entry {
+                            first_entry = normalised.clone();
+                        }
+                        if normalised > last_entry {
+                            last_entry = normalised;
+                        }
+                    }
                 }
             }
+            sample_lines += 1;
 
             // Request: "GET /api/v1/metrics HTTP/1.1"
             if let Some(req_start) = rest.find('"') {
@@ -2284,103 +2305,6 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
         }
     }
 
-    // ── Fallback Realistic Profiles if Log is Empty / Unpopulated on Dev System ──
-    if total_requests == 0 {
-        if is_error_log {
-            // Distinct NGINX Error Log Profile
-            total_requests = 184;
-            total_bytes_sent = 0;
-            status_2xx = 12;  // Service notices
-            status_3xx = 0;
-            status_4xx = 48;  // 4xx Warnings
-            status_5xx = 124; // 5xx Errors / Upstream failures
-
-            ip_counts.insert("192.168.1.50".to_string(), 68);
-            ip_counts.insert("10.0.0.12".to_string(), 44);
-            ip_counts.insert("172.16.0.4".to_string(), 32);
-            ip_counts.insert("192.168.1.105".to_string(), 28);
-            ip_counts.insert("127.0.0.1".to_string(), 12);
-
-            path_counts.insert("connect() failed (111: Connection refused) [upstream 127.0.0.1:8080]".to_string(), 74);
-            path_counts.insert("/api/v1/auth/login [401 Unauthorized attempt]".to_string(), 38);
-            path_counts.insert("open() \"/var/www/favicon.ico\" failed (2: No such file or directory)".to_string(), 32);
-            path_counts.insert("client body buffered to fastcgi temp file".to_string(), 24);
-            path_counts.insert("upstream timed out (110: Connection timed out)".to_string(), 16);
-
-            referrer_counts.insert("Upstream: http://127.0.0.1:8080".to_string(), 74);
-            referrer_counts.insert("Local Worker Process".to_string(), 56);
-            referrer_counts.insert("Client SSL Handshake Fault".to_string(), 38);
-            referrer_counts.insert("FastCGI Backend Buffer".to_string(), 16);
-
-            ua_counts.insert("Fatal / 502 Bad Gateway".to_string(), 74);
-            ua_counts.insert("Warning / Client Auth Failure".to_string(), 38);
-            ua_counts.insert("File Not Found (404 Error)".to_string(), 32);
-            ua_counts.insert("Buffer Threshold Notice".to_string(), 24);
-            ua_counts.insert("Service Restart Notice".to_string(), 16);
-
-            method_counts.insert("POST".to_string(), 92);
-            method_counts.insert("GET".to_string(), 78);
-            method_counts.insert("PUT".to_string(), 14);
-
-            let error_hourly_mock = [
-                2, 1, 0, 0, 1, 3, 8, 14, 22, 28, 19, 15, 
-                12, 16, 18, 11, 6, 4, 3, 2, 2, 1, 1, 0
-            ];
-            for (h, count) in error_hourly_mock.iter().enumerate() {
-                hourly_counts.insert(format!("{:02}:00", h), *count);
-            }
-        } else {
-            // Standard NGINX Access Traffic Profile
-            total_requests = 14280;
-            total_bytes_sent = 384_920_000;
-            status_2xx = 13620;
-            status_3xx = 410;
-            status_4xx = 210;
-            status_5xx = 40;
-
-            ip_counts.insert("192.168.1.105".to_string(), 4120);
-            ip_counts.insert("192.168.1.42".to_string(), 2890);
-            ip_counts.insert("10.0.0.15".to_string(), 1940);
-            ip_counts.insert("172.16.4.88".to_string(), 1250);
-            ip_counts.insert("192.168.1.200".to_string(), 980);
-            ip_counts.insert("127.0.0.1".to_string(), 740);
-
-            path_counts.insert("/".to_string(), 3820);
-            path_counts.insert("/api/v1/status".to_string(), 2910);
-            path_counts.insert("/assets/index.js".to_string(), 2150);
-            path_counts.insert("/assets/index.css".to_string(), 1890);
-            path_counts.insert("/api/v1/auth/login".to_string(), 1120);
-            path_counts.insert("/favicon.ico".to_string(), 850);
-            path_counts.insert("/healthz".to_string(), 620);
-
-            referrer_counts.insert("Direct / None".to_string(), 8920);
-            referrer_counts.insert("https://google.com/".to_string(), 3120);
-            referrer_counts.insert("https://github.com/".to_string(), 1420);
-            referrer_counts.insert("https://duckduckgo.com/".to_string(), 820);
-
-            ua_counts.insert("Google Chrome".to_string(), 6840);
-            ua_counts.insert("Mozilla Firefox".to_string(), 3950);
-            ua_counts.insert("Apple Safari".to_string(), 1840);
-            ua_counts.insert("cURL Client".to_string(), 920);
-            ua_counts.insert("Python Script / Requests".to_string(), 480);
-            ua_counts.insert("Search Engine Bot / Crawler".to_string(), 250);
-
-            method_counts.insert("GET".to_string(), 11840);
-            method_counts.insert("POST".to_string(), 1920);
-            method_counts.insert("PUT".to_string(), 310);
-            method_counts.insert("DELETE".to_string(), 120);
-            method_counts.insert("HEAD".to_string(), 90);
-
-            let hourly_mock = [
-                120, 95, 60, 45, 80, 140, 310, 580, 890, 1120, 1280, 1190, 
-                1040, 1150, 1290, 1340, 1210, 980, 820, 690, 540, 410, 280, 190
-            ];
-            for (h, count) in hourly_mock.iter().enumerate() {
-                hourly_counts.insert(format!("{:02}:00", h), *count);
-            }
-        }
-    }
-
     let unique_ips = ip_counts.len() as u32;
 
     let mut top_ips: Vec<_> = ip_counts.into_iter().collect();
@@ -2409,7 +2333,7 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
     let success_rate = if total_requests > 0 {
         (success_count as f32 / total_requests as f32) * 100.0
     } else {
-        100.0
+        0.0
     };
     let error_rate = if total_requests > 0 {
         (error_count as f32 / total_requests as f32) * 100.0
@@ -2433,6 +2357,9 @@ pub async fn nginx_get_log_analytics(path: String) -> Result<NginxLogAnalytics, 
         top_user_agents,
         top_methods,
         hourly_traffic,
+        sample_lines,
+        first_entry,
+        last_entry,
     })
 }
 
@@ -2446,8 +2373,20 @@ async fn read_log_tail_as_root(path: &str, lines: usize) -> Result<String, Strin
     nginx_log_path_valid(path)?;
 
     if path.ends_with(".gz") {
-        let args = vec![String::from("-dc"), path.to_string()];
-        let output = run_privileged_output("/usr/bin/gzip", &args, &RootAuth::Polkit).await?;
+        // `zcat` is the log-reader the argument policy allow-lists (gzip is a
+        // migrating generalist and is refused); it decompresses to stdout.
+        // Try it unprivileged first: rotated logs are often world-readable and
+        // must not need administrator mode.
+        if let Ok(output) = Command::new("/usr/bin/zcat").arg(path).output().await {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                let all: Vec<&str> = text.lines().collect();
+                let start = all.len().saturating_sub(lines);
+                return Ok(all[start..].join("\n"));
+            }
+        }
+        let args = vec![path.to_string()];
+        let output = run_privileged_output("/usr/bin/zcat", &args, &RootAuth::Polkit).await?;
         if !output.status.success() {
             return Err(format!("Could not read {path}"));
         }

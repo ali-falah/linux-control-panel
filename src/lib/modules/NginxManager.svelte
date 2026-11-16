@@ -84,6 +84,9 @@
     top_user_agents: [string, number][];
     top_methods: [string, number][];
     hourly_traffic: [string, number][];
+    sample_lines: number;
+    first_entry: string;
+    last_entry: string;
   }
 
   // ─── State ────────────────────────────────────────────────────────────────
@@ -436,6 +439,14 @@
     }
   }
 
+  /** "2026-10-23 12:44:48" — archived logs span days, so the row needs the date. */
+  function formatLogMoment(date: Date | null, fallback: string): string {
+    if (!date) return fallback;
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+      `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
   function parseLogLine(line: string): ParsedLogEntry {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -497,13 +508,14 @@
         else clientBrowser = userAgent.split(' ')[0].substring(0, 15);
       }
 
+      const accessDate = parseLogDate(rawTime);
       return {
         raw: line,
         type: 'access',
         ip,
         timestamp: rawTime,
-        formattedTime,
-        date: parseLogDate(rawTime),
+        formattedTime: formatLogMoment(accessDate, formattedTime),
+        date: accessDate,
         method,
         path,
         httpVersion: httpVer,
@@ -538,7 +550,7 @@
         raw: line,
         type: 'error',
         timestamp,
-        formattedTime: timestamp.split(' ')[1] || timestamp,
+        formattedTime: formatLogMoment(parseLogDate(timestamp), timestamp),
         date: parseLogDate(timestamp),
         logLevel: level,
         errorMessage: message,
@@ -1848,7 +1860,9 @@
       } else if (currentTab === 'www' && !loadedTabs.has('www')) {
         loadedTabs.add('www');
         loadWww();
-      } else if (currentTab === 'logs' && !loadedTabs.has('logs')) {
+      } else if (currentTab === 'logs') {
+        // Always re-list: the set depends on the current privileges, so a
+        // refresh after enabling admin mode must pick up the new files.
         loadedTabs.add('logs');
         loadLogFiles();
       } else if (currentTab === 'analytics') {
@@ -2039,7 +2053,7 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <button class="header-refresh-btn" onclick={() => loadLog()} disabled={logLoading} id="nginx-log-refresh" title="Reload this log" aria-label="Reload this log">
+            <button class="header-refresh-btn" onclick={() => loadLogFiles()} disabled={logLoading} id="nginx-log-refresh" title="Reload log files and this log" aria-label="Reload log files and this log">
               <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} />
             </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
@@ -2073,7 +2087,7 @@
 
       <!-- ══ OVERVIEW ══════════════════════════════════════════════════════ -->
       {#if activeTab === 'overview'}
-        <div class="tab-section overview-section" style="display:flex; flex-direction:column; gap:20px;">
+        <div class="tab-section overview-section" style="display:flex; flex-direction:column; gap:14px;">
           <!-- Top Action Ribbon -->
           <div class="ov-action-ribbon">
             <div class="ov-ribbon-left">
@@ -3254,7 +3268,16 @@
 
               <span class="analytics-sample-badge">
                 <Radio size={11} class="text-accent pulsing" />
-                <span>{analyticsLogFile.includes('error') ? 'Error Event Diagnostics' : 'Sample: 15,000 requests'}</span>
+                <span>
+                  {#if analyticsData}
+                    {analyticsData.sample_lines.toLocaleString()} lines
+                    {#if analyticsData.first_entry}
+                      · {analyticsData.first_entry} → {analyticsData.last_entry}
+                    {/if}
+                  {:else}
+                    newest 15,000 lines
+                  {/if}
+                </span>
               </span>
 
               <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
@@ -3293,6 +3316,21 @@
           {#if analyticsLoading}
             <div class="center-state" style="padding:60px 0;"><div class="spinner"></div></div>
           {:else if analyticsData}
+            <p class="analytics-trust-note">
+              Totals cover the sampled window above, not the full log history.
+              {#if analyticsLogFile.includes('error')}
+                This is an error log: the cards count events by severity, not HTTP requests.
+              {/if}
+            </p>
+            {#if analyticsData.total_requests === 0}
+              <div class="analytics-zero-banner" role="status">
+                <AlertTriangle size={14} />
+                <span>
+                  No access-log entries were parsed from this file. Check that nginx uses the
+                  combined log format, or choose another file.
+                </span>
+              </div>
+            {/if}
             <!-- ─── 5 Large Hero KPI Cards ──────────────────────────────── -->
             <div class="analytics-kpi-grid">
               <!-- KPI 1: Total Requests / Error Events -->
@@ -4355,13 +4393,13 @@
     padding: 12px 16px;
   }.ni-cmd-label { font-size: 12px; color: var(--color-text-muted); white-space: nowrap; }.ni-cmd code { font-family: var(--font-mono); font-size: 13px; color: var(--color-accent-soft); }/* ─── Tab Bar ────────────────────────────────────────────────────────── */ /* ─── Spinners ───────────────────────────────────────────────────────── */ .spinner {
     width: 24px; height: 24px;
-    border: 2px solid rgba(255,255,255,0.1);
+    border: 2px solid var(--color-border);
     border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }.spinner-sm {
     width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,0.1);
+    border: 2px solid var(--color-border);
     border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -4723,7 +4761,7 @@
     font-family: var(--font-mono);
     font-weight: 600;
   }.port-badge.plain {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     color: var(--color-text-secondary);
     border: 1px solid var(--color-border);
   }.port-badge.ssl {
@@ -5020,7 +5058,7 @@
     justify-content: space-between;
     padding: 10px 14px;
     border-bottom: 1px solid var(--color-border);
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     flex-shrink: 0;
   }.www-tree-title {
     display: flex;
@@ -5062,7 +5100,7 @@
     margin: 1px 4px;
     transition: all 0.12s ease;
   }.tree-item:hover { 
-    background: rgba(255, 255, 255, 0.05); 
+    background: var(--color-bg-raised);
     color: var(--color-text-primary); 
   }.tree-item.tree-selected { 
     background: rgba(0, 218, 243, 0.12); 
@@ -5094,7 +5132,7 @@
     font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--color-text-muted);
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--color-bg-raised);
     padding: 2px 7px;
     border-radius: 4px;
     overflow: hidden;
@@ -5142,7 +5180,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 14px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
     gap: 10px;
@@ -5209,7 +5247,7 @@
     width: 100%;
     transition: background 0.1s ease;
   }.code-row:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--color-bg-raised);
   }.code-row .gutter-num {
     padding: 0 12px 0 10px;
     min-width: 48px;
@@ -5265,7 +5303,7 @@
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--color-text-muted);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     padding: 3px 8px;
     border-radius: 5px;
   }.analytics-header-right {
@@ -5372,7 +5410,7 @@
     height: 18px;
     border-radius: 6px;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     margin-bottom: 14px;
     box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
   }.status-seg { height: 100%; transition: width 0.4s ease; }.status-seg.seg-2xx { background: linear-gradient(90deg, #059669, #10b981); }.status-seg.seg-3xx { background: linear-gradient(90deg, #0284c7, #38bdf8); }.status-seg.seg-4xx { background: linear-gradient(90deg, #d97706, #f59e0b); }.status-seg.seg-5xx { background: linear-gradient(90deg, #dc2626, #f87171); }.status-seg-empty {
@@ -5389,7 +5427,7 @@
   }.status-pill-card {
     padding: 10px 14px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
@@ -5435,7 +5473,7 @@
     height: 90px;
     display: flex;
     align-items: flex-end;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--color-bg-raised);
     border-radius: 4px;
     overflow: visible;
     position: relative;
@@ -5461,7 +5499,7 @@
     font-family: var(--font-mono);
     padding: 4px 8px;
     border-radius: 6px;
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.18));
+    border: 1px solid var(--color-border, var(--color-border));
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     white-space: nowrap;
     z-index: 9999;
@@ -5476,7 +5514,7 @@
     transform: translateX(-50%);
     border-width: 4px;
     border-style: solid;
-    border-color: var(--color-border, rgba(255, 255, 255, 0.18)) transparent transparent transparent;
+    border-color: var(--color-border, var(--color-border)) transparent transparent transparent;
   }.hourly-bar-tooltip .tooltip-time {
     color: var(--color-accent, #00daf3);
     font-weight: 700;
@@ -5518,7 +5556,7 @@
     text-align: left;
   }.analytics-table td {
     padding: 7px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid var(--color-bg-raised);
     vertical-align: middle;
   }.analytics-rank {
     font-family: var(--font-mono);
@@ -5537,7 +5575,7 @@
     font-weight: 700;
     padding: 1px 4px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     color: var(--color-text-muted);
   }.analytics-sub-badge.public {
     background: rgba(168, 85, 247, 0.15);
@@ -5556,7 +5594,7 @@
     flex: 1;
     height: 6px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     overflow: hidden;
   }.analytics-prog-bar.cyan { background: #00daf3; }.analytics-prog-bar.purple { background: #a855f7; }.analytics-prog-bar.green { background: #10b981; }.analytics-prog-bar.blue { background: #3b82f6; }.analytics-prog-pct {
     font-size: 10.5px;
@@ -5574,7 +5612,7 @@
     border-radius: 4px;
     transition: all 0.12s;
   }.analytics-copy-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-bg-hover);
     color: var(--color-text-primary);
   }/* Methods & Referrers */ .analytics-methods-container {
     display: flex;
@@ -5598,7 +5636,7 @@
     padding: 2px 6px;
     border-radius: 4px;
     text-transform: uppercase;
-  }.analytics-method-tag.method-get { background: rgba(16, 185, 129, 0.18); color: #34d399; }.analytics-method-tag.method-post { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }.analytics-method-tag.method-put { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }.analytics-method-tag.method-delete { background: rgba(239, 68, 68, 0.18); color: #f87171; }.analytics-method-tag.method-head { background: rgba(168, 85, 247, 0.18); color: #c084fc; }.analytics-method-tag.method-options { background: rgba(255, 255, 255, 0.12); color: var(--color-text-secondary); }.analytics-method-count {
+  }.analytics-method-tag.method-get { background: rgba(16, 185, 129, 0.18); color: #34d399; }.analytics-method-tag.method-post { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }.analytics-method-tag.method-put { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }.analytics-method-tag.method-delete { background: rgba(239, 68, 68, 0.18); color: #f87171; }.analytics-method-tag.method-head { background: rgba(168, 85, 247, 0.18); color: #c084fc; }.analytics-method-tag.method-options { background: var(--color-bg-hover); color: var(--color-text-secondary); }.analytics-method-count {
     font-size: 10.5px;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -5612,7 +5650,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 4px 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-radius: 5px;
     font-size: 11.5px;
   }.analytics-ref-name {
@@ -5636,7 +5674,7 @@
     flex-direction: column;
     gap: 4px;
     padding: 6px 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-radius: 6px;
   }.analytics-ua-info {
     display: flex;
@@ -5776,7 +5814,7 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 14px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid var(--color-bg-hover);
     padding-top: 10px;
   }.popover-btn {
     font-family: inherit;
@@ -5793,7 +5831,7 @@
   }.apply-btn:hover {
     background: #00b9cf;
   }.cancel-btn {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     color: var(--color-text-secondary);
   }.cancel-btn:hover {
     background: rgba(255, 255, 255, 0.15);
@@ -5803,7 +5841,7 @@
     height: 6px;
     border-radius: 50%;
   }.pill-dot.green { background: var(--color-success); }.pill-dot.blue { background: var(--color-info); }.pill-dot.amber { background: var(--color-warning); }.pill-dot.red { background: var(--color-error); }.pill-badge {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     padding: 1px 5px;
     border-radius: 4px;
     font-size: 10px;
@@ -5855,7 +5893,7 @@
     overflow: hidden;
   }.log-row-card:hover {
     border-color: var(--color-border-hover, #334155);
-    background: var(--color-bg-hover, rgba(255, 255, 255, 0.03));
+    background: var(--color-bg-hover, var(--color-bg-raised));
   }.log-row-card.expanded {
     border-color: var(--color-accent, #00daf3);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);

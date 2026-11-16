@@ -434,8 +434,7 @@
 
   <div class="card module-content-scroll" style="padding:0">
     {#if view === 'users'}
-      <div class="table-wrap" style="border:none; border-radius:0">
-        <table use:tableFeatures>
+      <Table tableAction={tableFeatures} actionParams={{ sortable: false }} style="border:none; border-radius:0;">
           <thead>
             <tr>
               <th>Username</th>
@@ -506,11 +505,9 @@
               </tr>
             {/each}
           </tbody>
-        </table>
-      </div>
+      </Table>
     {:else if view === 'groups'}
-      <div class="table-wrap" style="border:none; border-radius:0">
-        <table use:tableFeatures>
+      <Table tableAction={tableFeatures} actionParams={{ sortable: false }} style="border:none; border-radius:0;">
           <thead>
             <tr>
               <th>Group Name</th>
@@ -545,11 +542,9 @@
               </tr>
             {/each}
           </tbody>
-        </table>
-      </div>
+      </Table>
     {:else if view === 'sessions'}
-      <div class="table-wrap" style="border:none; border-radius:0">
-        <table use:tableFeatures>
+      <Table tableAction={tableFeatures} actionParams={{ sortable: false }} style="border:none; border-radius:0;">
           <thead>
             <tr>
               <th>Session ID</th>
@@ -595,8 +590,7 @@
               <tr><td colspan="7" style="text-align:center; padding:24px; color:var(--color-text-muted)">No active sessions found</td></tr>
             {/if}
           </tbody>
-        </table>
-      </div>
+      </Table>
     {/if}
   </div>
 </div>

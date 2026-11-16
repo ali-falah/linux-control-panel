@@ -1082,6 +1082,15 @@ input[type="password"]::placeholder {
 .text-warn { color: var(--color-warning); }
 .text-error { color: var(--color-error); }
 
+/* Keyboard focus must be visible on every custom control, not only the ones
+   that happen to define it. :where() keeps specificity at zero so component
+   styles still win where they exist. */
+:where(button, [role="button"], a[href]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 /* Invalid field state, shared by every form that reports a validation error. */
 .input-error {
   border-color: var(--color-error) !important;

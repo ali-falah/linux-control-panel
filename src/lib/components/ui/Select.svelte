@@ -186,6 +186,12 @@
       style={dropdownStyle}
       role="listbox"
       tabindex="-1"
+      onwheel={(event) => {
+        // A fixed-position listbox does not reliably scroll on wheel in
+        // WebKitGTK; drive it explicitly and keep the page still.
+        event.preventDefault();
+        event.currentTarget.scrollTop += event.deltaY;
+      }}
     >
       {#each options as opt}
         <button
