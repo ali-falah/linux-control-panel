@@ -95,6 +95,7 @@ class DnfStore {
   isUpgrading = $state(false);
   upgradeFinished = $state(false);
   upgradeSuccess = $state(false);
+  upgradeNoChanges = $state(false);
   upgradeOutput = $state('');
   packagesBeingUpgraded = $state<string[]>([]);
   /** Advisories per NEVRA — marks security updates and explains why. */
@@ -164,7 +165,10 @@ class DnfStore {
       this.unlistenFinished = await listen<boolean>('dnf-upgrade-finished', (event) => {
         this.isUpgrading = false;
         this.upgradeFinished = true;
-        this.upgradeSuccess = event.payload;
+        // "Nothing to do." is exit 0 but no transaction: never call it success.
+        const noChanges = event.payload && /Nothing to do\./i.test(this.upgradeOutput);
+        this.upgradeNoChanges = noChanges;
+        this.upgradeSuccess = event.payload && !noChanges;
         this.upgradeSummary = this.buildSummary(this.upgradeOutput, 0, event.payload);
         this.hangWarning = false;
         if (this.hangCheckInterval) {
@@ -173,7 +177,13 @@ class DnfStore {
         }
         statusStore.clearBusy();
 
-        if (event.payload) {
+        if (noChanges) {
+          uiStore.addToast(
+            'No changes were applied — the package manager sees no newer version. Check the mirrors or refresh metadata.',
+            'warning',
+          );
+          statusStore.setLastCommand('dnf upgrade -y', 0, true);
+        } else if (event.payload) {
           uiStore.addToast('DNF upgrade completed successfully', 'success');
           statusStore.setLastCommand('dnf upgrade -y', 0, true);
           void refreshHelperInstalled();
@@ -214,6 +224,7 @@ class DnfStore {
     this.isUpgrading = true;
     this.upgradeFinished = false;
     this.upgradeSuccess = false;
+    this.upgradeNoChanges = false;
     this.upgradeOutput = `Starting DNF upgrade for ${packages.length} package(s)…\n`;
     this.pendingCr = false;
     this.hangWarning = false;
@@ -239,6 +250,7 @@ class DnfStore {
         this.isUpgrading = false;
         this.upgradeFinished = false;
         this.upgradeSuccess = false;
+        this.upgradeNoChanges = false;
         this.hangWarning = false;
         if (this.hangCheckInterval) {
           clearInterval(this.hangCheckInterval);
@@ -258,6 +270,7 @@ class DnfStore {
       this.isUpgrading = false;
       this.upgradeFinished = true;
       this.upgradeSuccess = false;
+      this.upgradeNoChanges = false;
       this.hangWarning = false;
       if (this.hangCheckInterval) {
         clearInterval(this.hangCheckInterval);
@@ -281,6 +294,7 @@ class DnfStore {
     this.upgradeOutput = '';
     this.upgradeFinished = false;
     this.upgradeSuccess = false;
+    this.upgradeNoChanges = false;
     this.packagesBeingUpgraded = [];
     this.upgradeSummary = null;
   }

@@ -18,8 +18,11 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { History, RefreshCw, Undo2, Calendar, Package, Search } from '@lucide/svelte';
   import { Trash2, Info, ListTree, CheckCircle, Database, XCircle } from '@lucide/svelte';
-  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert, Copy, Terminal, WrapText } from '@lucide/svelte';
+  import { AlertTriangle, Lock, Ban, Sparkles, ShieldAlert, Copy, Terminal, WrapText, ChevronDown } from '@lucide/svelte';
   import Select from '../components/ui/Select.svelte';
+  import DatePicker from '../components/ui/DatePicker.svelte';
+  import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
+  import { highlightSegments } from '../utils/highlight.ts';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { dnfStore } from '../stores/dnfStore.svelte.ts';
@@ -97,6 +100,120 @@
   let historyPackages = $state<DnfHistoryPackage[]>([]);
   let historyPackagesLoading = $state(false);
   let historyActionFilter = $state<'all' | 'install' | 'upgrade' | 'erase'>('all');
+  // Date range is a preset selector (same control as Journal logs) instead of
+  // two raw date inputs; "all" is the default so history is never hidden.
+  let historyRange = $state('all');
+  let historyRangeBeforeCustom = $state('all');
+  let lastNonCustomHistoryRange = $state('all');
+  let historyCustomStart = $state('');
+  let historyCustomEnd = $state('');
+  let historyCustomOpen = $state(false);
+
+  /** Local midnight (or end of day) of a YYYY-MM-DD value, as a timestamp. */
+  function historyBound(value: string, endOfDay = false): number {
+    if (!value) return NaN;
+    return new Date(`${value}T${endOfDay ? '23:59:59' : '00:00:00'}`).getTime();
+  }
+
+  /** Timestamp of a history entry; dnf reports UTC without a zone marker. */
+  function historyEntryTime(entry: DnfHistoryEntry): number {
+    let iso = (entry.date || '').trim();
+    if (!iso) return NaN;
+    if (!iso.includes('T')) iso = iso.replace(' ', 'T');
+    if (!iso.endsWith('Z') && !iso.includes('+')) iso += 'Z';
+    return new Date(iso).getTime();
+  }
+
+  function shortDate(value: string): string {
+    const [y, m, d] = value.split('-');
+    return y && m && d ? `${m}/${d}/${y}` : value;
+  }
+
+  let historyRangeLabel = $derived(
+    historyCustomStart
+      ? `${shortDate(historyCustomStart)} - ${shortDate(historyCustomEnd || historyCustomStart)}`
+      : 'Custom Range...'
+  );
+
+  let historyCustomValid = $derived(
+    Boolean(historyCustomStart && historyCustomEnd && historyCustomStart <= historyCustomEnd)
+  );
+
+  /** Active bounds; NaN means "unbounded on this side". */
+  let historyBounds = $derived.by(() => {
+    if (historyRange === 'custom') {
+      return {
+        start: historyBound(historyCustomStart),
+        end: historyBound(historyCustomEnd, true),
+      };
+    }
+    if (historyRange === 'all') return { start: NaN, end: NaN };
+    const days = parseInt(historyRange, 10);
+    if (!Number.isFinite(days)) return { start: NaN, end: NaN };
+    return { start: Date.now() - days * 86_400_000, end: NaN };
+  });
+
+  // Remember the preset the user came from so Cancel restores it.
+  $effect(() => {
+    if (historyRange !== 'custom') lastNonCustomHistoryRange = historyRange;
+  });
+
+  function handleHistoryRangeChange() {
+    if (historyRange === 'custom') {
+      historyRangeBeforeCustom = lastNonCustomHistoryRange;
+      // One tick later: the click that picked the option must not close the
+      // popover through a bubbling document handler.
+      setTimeout(() => { historyCustomOpen = true; }, 0);
+    } else {
+      historyCustomOpen = false;
+    }
+  }
+
+  function applyHistoryRange() {
+    if (!historyCustomValid) {
+      uiStore.addToast('Choose a start and end date with start before end', 'warning');
+      return;
+    }
+    historyCustomOpen = false;
+  }
+
+  function cancelHistoryRange() {
+    historyCustomOpen = false;
+    historyRange = historyRangeBeforeCustom;
+  }
+
+  // ── Right-click menu on history rows (same actions as the Actions column) ──
+  let historyMenu = $state<{ open: boolean; x: number; y: number; entry: DnfHistoryEntry | null }>({
+    open: false,
+    x: 0,
+    y: 0,
+    entry: null,
+  });
+
+  function openHistoryContextMenu(event: MouseEvent, entry: DnfHistoryEntry) {
+    event.preventDefault();
+    historyMenu = { open: true, x: event.clientX, y: event.clientY, entry };
+  }
+
+  let historyContextItems: ContextMenuItem[] = $derived.by(() => {
+    const entry = historyMenu.entry;
+    if (!entry) return [];
+    const rollingBack = undoingId === entry.id;
+    return [
+      {
+        label: 'Transaction details',
+        icon: Info,
+        action: () => { void openHistoryDetails(entry); },
+      },
+      {
+        label: rollingBack ? 'Rolling back…' : 'Undo Transaction',
+        icon: Undo2,
+        danger: true,
+        disabled: rollingBack,
+        action: () => confirmUndo(entry),
+      },
+    ];
+  });
 
   async function openHistoryDetails(entry: DnfHistoryEntry) {
     historyDetail = entry;
@@ -113,6 +230,7 @@
     }
   }
   let logPageSize = $state(100);
+  let logPageSizeValue = $state('100');
   let logCurrentPage = $state(1);
   let logFollow = $state(false);
   let logFollowTimer: ReturnType<typeof setInterval> | null = null;
@@ -436,7 +554,11 @@
 
   /** Apply the action filter, then group the rows by calendar day. */
   let historyGroups = $derived.by(() => {
+    const { start, end } = historyBounds;
     const list = filteredHistory.filter(entry => {
+      const time = historyEntryTime(entry);
+      if (Number.isFinite(start) && time < start) return false;
+      if (Number.isFinite(end) && time > end) return false;
       if (historyActionFilter === 'all') return true;
       return actionLabel(entry.action).toLowerCase() === historyActionFilter;
     });
@@ -667,6 +789,7 @@
   let maintRunning = $state(false);
   let maintOutput = $state('');
   let maintLast = $state<{ name: string; at: string; ok: boolean } | null>(null);
+  let maintLastByCmd = $state<Record<string, { at: string; ok: boolean }>>({});
 
   // Lock status
   let lockInfo = $state<DnfLockInfo | null>(null);
@@ -726,11 +849,13 @@
     try {
       const out = await invoke<string>(tauriCmd);
       maintLast = { name: cmdName, at: new Date().toLocaleTimeString(), ok: true };
+      maintLastByCmd[cmdName] = { at: maintLast.at, ok: true };
       uiStore.addToast(`${cmdName} completed successfully`, 'success');
       statusStore.setLastCommand(cmdName, 0, true);
       maintOutput = out || 'Command completed with no output.';
     } catch (e) {
       maintLast = { name: cmdName, at: new Date().toLocaleTimeString(), ok: false };
+      maintLastByCmd[cmdName] = { at: maintLast.at, ok: false };
       uiStore.addToast(`${cmdName} failed: ${e}`, 'error');
       statusStore.setLastCommand(cmdName, 1, false);
       maintOutput = `Error: ${e}`;
@@ -770,6 +895,48 @@
 <div class="module-page">
   <PageHeader title="Packages & Updates" subtitle="Manage packages, view history, and perform system upgrades" icon={Package}>
     {#if activeTab === 'history'}
+      <div class="custom-range-container">
+        <Select
+          class="history-range-select {historyRange === 'custom' ? 'is-custom' : ''}"
+          size="sm"
+          ariaLabel="Filter transactions by date range"
+          bind:value={historyRange}
+          onchange={handleHistoryRangeChange}
+        >
+          <option value="all">All time</option>
+          <option value="1">Last 24 Hours</option>
+          <option value="3">Last 3 Days</option>
+          <option value="7">Last 7 Days</option>
+          <option value="30">Last 30 Days</option>
+          <option value="custom">{historyRangeLabel}</option>
+        </Select>
+
+        {#if historyRange === 'custom' && historyCustomOpen}
+          <div class="custom-range-popover">
+            <div class="popover-row">
+              <span class="popover-label">From</span>
+              <DatePicker bind:value={historyCustomStart} placeholder="Start date" />
+            </div>
+            <div class="popover-row" style="margin-top: 10px;">
+              <span class="popover-label">To</span>
+              <DatePicker bind:value={historyCustomEnd} placeholder="End date" />
+            </div>
+            <div class="popover-actions">
+              <button
+                type="button"
+                class="popover-btn apply-btn"
+                disabled={!historyCustomValid}
+                onclick={applyHistoryRange}
+              >
+                Apply
+              </button>
+              <button type="button" class="popover-btn cancel-btn" onclick={cancelHistoryRange}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
       <button class="header-refresh-btn" onclick={loadHistory} disabled={loadingHistory}>
         <RefreshCw size={13} class={loadingHistory ? 'animate-spin-slow' : ''} /> Refresh
       </button>
@@ -804,7 +971,7 @@
   <!-- Tab bar + actions row -->
   <div class="controls-row">
     <div class="tab-bar">
-      {#each [['updates','Updates'],['history','Transaction History'],['packages','Find Packages'],['maintenance','Maintenance'],['logs','System Package Logs']] as [id, label]}
+      {#each [['updates','Updates'],['history','History'],['packages','Packages'],['maintenance','Maintenance'],['logs','Logs']] as [id, label]}
         <button class="tab-btn {activeTab === id ? 'active' : ''}" onclick={() => activeTab = id as Tab}>
           {label}
         </button>
@@ -901,6 +1068,9 @@
               {#if dnfStore.isUpgrading}
                 <RefreshCw size={15} class="animate-spin-slow" style="color:var(--color-accent)" />
                 Upgrading Packages…
+              {:else if dnfStore.upgradeNoChanges}
+                <AlertTriangle size={15} style="color:var(--color-warning)" />
+                No changes applied
               {:else if dnfStore.upgradeSuccess}
                 <CheckCircle size={15} style="color:var(--color-success)" />
                 Upgrade Complete
@@ -947,8 +1117,21 @@
             </div>
           {/if}
 
+          <!-- A zero-package transaction is not a success: explain why instead
+               of showing an all-zero summary grid. -->
+          {#if dnfStore.upgradeFinished && dnfStore.upgradeNoChanges}
+            <div class="noop-hint">
+              <AlertTriangle size={14} />
+              <span>
+                dnf had no transaction to run, so nothing was changed. The update list is built
+                from your own metadata cache, while the transaction runs as root, whose cache may
+                still be older. Refresh the metadata in Maintenance, then check again.
+              </span>
+            </div>
+          {/if}
+
           <!-- Summary of the finished transaction -->
-          {#if dnfStore.upgradeSummary}
+          {#if dnfStore.upgradeSummary && !dnfStore.upgradeNoChanges}
             <div class="upgrade-summary">
               <div class="summary-item">
                 <span class="summary-value">{dnfStore.upgradeSummary.applied}</span>
@@ -1096,7 +1279,15 @@
           <History size={32} class="empty-state-icon" style="margin:0 auto 16px;" />
           <span style="font-size:16px; font-weight:600; color:var(--color-text-primary)">No History Found</span>
           <span style="color:var(--color-text-muted); margin-top:8px;">
-            {historySearch ? 'No history matches your search.' : 'No DNF history found.'}
+            {#if Number.isFinite(historyBounds.start) || Number.isFinite(historyBounds.end)}
+              No transactions in the selected date range.
+            {:else if historyActionFilter !== 'all'}
+              No transactions match this action filter.
+            {:else if historySearch}
+              No history matches your search.
+            {:else}
+              No DNF history found.
+            {/if}
           </span>
         </div>
       {:else}
@@ -1117,7 +1308,7 @@
                 <td colspan="6">{day}</td>
               </tr>
               {#each dayEntries as entry (entry.id)}
-              <tr>
+              <tr oncontextmenu={(e) => openHistoryContextMenu(e, entry)}>
                 <td><code style="font-size:11px; color:var(--color-text-accent)">#{entry.id}</code></td>
                 <td><div style="font-weight:500; font-family:var(--font-mono); font-size:12px;">{entry.command || '—'}</div></td>
                 <td>
@@ -1232,7 +1423,7 @@
           </div>
         {/if}
         <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
-          <CodeEditor value={pkgOutput} readonly={true} height="100%" />
+          <pre class="plain-text-view">{pkgOutput}</pre>
         </div>
       {/if}
     </div>
@@ -1276,6 +1467,8 @@
       <!-- Maintenance actions -->
       <div style="display:flex; flex-direction:column; gap:12px;">
 
+        <div class="maint-group-label">Clean up</div>
+
         <!-- Clear Cache -->
         <div class="maint-card maint-card-neutral">
           <div class="maint-card-icon icon-danger">
@@ -1283,6 +1476,9 @@
           </div>
           <div class="maint-card-body">
             <div class="maint-card-title">Clear DNF Cache</div>
+            {#if maintLastByCmd['dnf clean all']}
+              <div class="maint-card-last">Last run {maintLastByCmd['dnf clean all'].at} · <span class="text-{maintLastByCmd['dnf clean all'].ok ? 'success' : 'error'}">{maintLastByCmd['dnf clean all'].ok ? 'succeeded' : 'failed'}</span></div>
+            {/if}
             <div class="maint-card-desc">Removes all cached repository data and downloaded packages. Resolves "metadata doesn't match" errors.</div>
             <Button variant="outline" size="sm" class="btn-danger"
               onclick={() => confirmMaintenance('dnf clean all', 'dnf_clean_all', 'Are you sure you want to clear the DNF cache?\n\nThis will remove all cached repository data and downloaded packages. A polkit password prompt will appear.')}
@@ -1299,6 +1495,9 @@
           </div>
           <div class="maint-card-body">
             <div class="maint-card-title">Autoremove Unused Packages</div>
+            {#if maintLastByCmd['dnf autoremove']}
+              <div class="maint-card-last">Last run {maintLastByCmd['dnf autoremove'].at} · <span class="text-{maintLastByCmd['dnf autoremove'].ok ? 'success' : 'error'}">{maintLastByCmd['dnf autoremove'].ok ? 'succeeded' : 'failed'}</span></div>
+            {/if}
             <div class="maint-card-desc">Removes packages installed as dependencies but no longer needed. Review the output carefully before confirming.</div>
             <Button variant="outline" size="sm" class="btn-warning"
               onclick={() => confirmMaintenance('dnf autoremove', 'dnf_autoremove', 'Are you sure you want to autoremove unused packages?\n\nWARNING: This can sometimes remove critical packages if dependencies were mismanaged. Review the output carefully. A polkit password prompt will appear.')}
@@ -1308,6 +1507,8 @@
           </div>
         </div>
 
+        <div class="maint-group-label">Inspect</div>
+
         <!-- Check Health -->
         <div class="maint-card maint-card-neutral">
           <div class="maint-card-icon icon-success">
@@ -1315,12 +1516,17 @@
           </div>
           <div class="maint-card-body">
             <div class="maint-card-title">Check System Health</div>
+            {#if maintLastByCmd['dnf check']}
+              <div class="maint-card-last">Last run {maintLastByCmd['dnf check'].at} · <span class="text-{maintLastByCmd['dnf check'].ok ? 'success' : 'error'}">{maintLastByCmd['dnf check'].ok ? 'succeeded' : 'failed'}</span></div>
+            {/if}
             <div class="maint-card-desc">Checks the local RPM database for problems — duplicates, broken dependencies, and missing files.</div>
             <Button variant="outline" size="sm" onclick={() => runMaintenance('dnf check', 'dnf_check')} disabled={maintRunning}>
               <CheckCircle size={13} /> Run dnf check
             </Button>
           </div>
         </div>
+
+        <div class="maint-group-label">Refresh</div>
 
         <!-- Makecache -->
         <div class="maint-card maint-card-neutral">
@@ -1329,6 +1535,9 @@
           </div>
           <div class="maint-card-body">
             <div class="maint-card-title">Refresh Metadata (Makecache)</div>
+            {#if maintLastByCmd['dnf makecache']}
+              <div class="maint-card-last">Last run {maintLastByCmd['dnf makecache'].at} · <span class="text-{maintLastByCmd['dnf makecache'].ok ? 'success' : 'error'}">{maintLastByCmd['dnf makecache'].ok ? 'succeeded' : 'failed'}</span></div>
+            {/if}
             <div class="maint-card-desc">Forces DNF to connect to repositories and download the latest package lists and metadata.</div>
             <Button variant="outline" size="sm" onclick={() => runMaintenance('dnf makecache', 'dnf_makecache_cmd')} disabled={maintRunning}>
               <Database size={13} /> Run dnf makecache
@@ -1346,7 +1555,7 @@
           </div>
         {/if}
         <div style="display:flex; flex-direction:column; height:280px; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
-          <CodeEditor value={maintOutput} readonly={true} height="100%" />
+          <pre class="plain-text-view">{maintOutput}</pre>
         </div>
       {/if}
     </div>
@@ -1389,81 +1598,133 @@
               <WrapText size={14} />
             </button>
           {/if}
+          <button
+            type="button"
+            class="dnf-log-icon-btn"
+            onclick={() => { logCurrentPage = totalLogPages; }}
+            title="Jump to the latest page"
+            aria-label="Jump to the latest page"
+            disabled={logCurrentPage === totalLogPages}
+          >
+            <ChevronDown size={14} />
+          </button>
           <Button variant={logFollow ? 'primary' : 'outline'} size="sm" onclick={toggleLogFollow}>
             {logFollow ? 'Following' : 'Follow live'}
           </Button>
         </div>
       </div>
 
-      {#if logRawView}
-        <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:10px; overflow:hidden;">
-          <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
-        </div>
-      {:else}
-        <div class="dnf-log-view" class:wrap={logWrap}>
-          {#each visibleLogRows as row, index}
-            <div class="dnf-log-row level-{row.level}">
-              <span class="dnf-log-no" aria-hidden="true">{(logCurrentPage - 1) * logPageSize + index + 1}</span>
-              <span class="dnf-log-time" title={row.stamp}>{row.stamp || '—'}</span>
-              <span class="dnf-log-level">
-                {#if row.level === 'error'}Error{:else if row.level === 'warn'}Warn{:else}Info{/if}
-              </span>
-              <span class="dnf-log-msg">{row.message}</span>
-              <button
-                type="button"
-                class="dnf-log-copy"
-                title="Copy this line"
-                onclick={() => { navigator.clipboard.writeText(row.message); uiStore.addToast('Line copied', 'info', 2000); }}
-              >
-                <Copy size={11} />
-              </button>
-            </div>
-          {/each}
-        </div>
-      {/if}
-
-      <!-- Pagination Toolbar -->
-      {#if logLines.length > 0}
-        <div class="pagination-bar">
-          <div class="pagination-info">
-            Showing {(logCurrentPage - 1) * logPageSize + 1}–{Math.min(logCurrentPage * logPageSize, filteredLogLines.length)} of {filteredLogLines.length.toLocaleString()} log lines
+      <div class="dnf-log-surface">
+        {#if logRawView}
+          <div class="dnf-log-raw">
+            <CodeEditor value={paginatedLogContent()} readonly={true} height="100%" />
           </div>
-
-          <div class="pagination-controls">
-            <Button variant="outline" size="sm" onclick={() => setLogPage(1)} disabled={logCurrentPage === 1}>
-              &laquo; First
-            </Button>
-            <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage - 1)} disabled={logCurrentPage === 1}>
-              &lsaquo; Prev
-            </Button>
-
-            <span class="pagination-page-indicator">
-              Page <strong>{logCurrentPage}</strong> of <strong>{totalLogPages}</strong>
+        {:else if filteredLogLines.length === 0}
+          <div class="dnf-log-empty">
+            <Terminal size={22} />
+            <span>
+              {logLines.length === 0
+                ? 'No log content — /var/log/dnf.log is empty or missing.'
+                : 'No log lines match the current search or severity filter.'}
             </span>
-
-            <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage + 1)} disabled={logCurrentPage === totalLogPages}>
-              Next &rsaquo;
-            </Button>
-            <Button variant="outline" size="sm" onclick={() => setLogPage(totalLogPages)} disabled={logCurrentPage === totalLogPages}>
-              Last &raquo;
-            </Button>
-
-            <select
-              value={logPageSize}
-              onchange={(e) => { logPageSize = parseInt((e.target as HTMLSelectElement).value); logCurrentPage = 1; }}
-              class="pagination-size-select"
-            >
-              <option value={50}>50 / page</option>
-              <option value={100}>100 / page</option>
-              <option value={200}>200 / page</option>
-              <option value={500}>500 / page</option>
-            </select>
+            {#if logLines.length > 0}
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={() => { logQuery = ''; logLevel = 'all'; }}
+              >
+                Clear filters
+              </Button>
+            {/if}
           </div>
-        </div>
-      {/if}
+        {:else}
+          <div class="dnf-log-view" class:wrap={logWrap}>
+            {#each visibleLogRows as row, index}
+              <div class="dnf-log-row level-{row.level}">
+                <span class="dnf-log-no" aria-hidden="true">{(logCurrentPage - 1) * logPageSize + index + 1}</span>
+                <span class="dnf-log-time" title={row.stamp}>{row.stamp || '—'}</span>
+                <span class="dnf-log-level">
+                  {#if row.level === 'error'}Error{:else if row.level === 'warn'}Warn{:else}Info{/if}
+                </span>
+                <span class="dnf-log-msg">
+                  {#each highlightSegments(row.message, logQuery.trim()) as part}
+                    {#if part.hit}<mark class="dnf-log-hit">{part.text}</mark>{:else}{part.text}{/if}
+                  {/each}
+                </span>
+                <button
+                  type="button"
+                  class="dnf-log-copy"
+                  title="Copy this line"
+                  onclick={() => { navigator.clipboard.writeText(row.message); uiStore.addToast('Line copied', 'info', 2000); }}
+                >
+                  <Copy size={11} />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Pagination Toolbar (inside the log surface) -->
+        {#if filteredLogLines.length > 0}
+          <div class="pagination-bar dnf-log-pager">
+            <div class="pagination-info">
+              Showing {(logCurrentPage - 1) * logPageSize + 1}–{Math.min(logCurrentPage * logPageSize, filteredLogLines.length)} of {filteredLogLines.length.toLocaleString()} log lines
+            </div>
+
+            <div class="pagination-controls">
+              <Button variant="outline" size="sm" onclick={() => setLogPage(1)} disabled={logCurrentPage === 1}>
+                &laquo; First
+              </Button>
+              <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage - 1)} disabled={logCurrentPage === 1}>
+                &lsaquo; Prev
+              </Button>
+
+              <span class="pagination-page-indicator">
+                Page <strong>{logCurrentPage}</strong> of <strong>{totalLogPages}</strong>
+              </span>
+
+              <Button variant="outline" size="sm" onclick={() => setLogPage(logCurrentPage + 1)} disabled={logCurrentPage === totalLogPages}>
+                Next &rsaquo;
+              </Button>
+              <Button variant="outline" size="sm" onclick={() => setLogPage(totalLogPages)} disabled={logCurrentPage === totalLogPages}>
+                Last &raquo;
+              </Button>
+
+              <span class="pagination-size">
+                <Select
+                  size="sm"
+                  ariaLabel="Log lines per page"
+                  bind:value={logPageSizeValue}
+                  onchange={() => {
+                    logPageSize = parseInt(logPageSizeValue, 10);
+                    logCurrentPage = 1;
+                  }}
+                >
+                  <option value="50">50 / page</option>
+                  <option value="100">100 / page</option>
+                  <option value="200">200 / page</option>
+                  <option value="500">500 / page</option>
+                </Select>
+              </span>
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
+<!-- Right-click menu for a history row: same actions as the Actions column. -->
+<ContextMenu
+  bind:isOpen={historyMenu.open}
+  x={historyMenu.x}
+  y={historyMenu.y}
+  title={`Transaction #${historyMenu.entry?.id ?? ''}`}
+  subtitle={historyMenu.entry
+    ? `${historyMenu.entry.command || actionLabel(historyMenu.entry.action)} · ${formatToLocalDate(historyMenu.entry.date)}`
+    : ''}
+  items={historyContextItems}
+/>
+
 <SideDrawer
   bind:isOpen={historyDetailOpen}
   title={historyDetail ? `Transaction #${historyDetail.id}` : 'Transaction'}
@@ -1474,7 +1735,20 @@
     <div class="history-detail">
       <div class="history-detail-row">
         <span>Command</span>
-        <code>{historyDetail.command || '—'}</code>
+        <span style="display:flex; align-items:center; gap:6px; min-width:0;">
+          <code>{historyDetail.command || '—'}</code>
+          {#if historyDetail.command}
+            <button
+              type="button"
+              class="dnf-log-copy"
+              style="opacity:1;"
+              title="Copy the transaction command"
+              onclick={() => { navigator.clipboard.writeText(historyDetail!.command); uiStore.addToast('Command copied', 'info', 2000); }}
+            >
+              <Copy size={11} />
+            </button>
+          {/if}
+        </span>
       </div>
       <div class="history-detail-row">
         <span>Date</span>
@@ -1692,20 +1966,10 @@
     color: var(--color-text-primary);
   }
 
-  .pagination-size-select {
-    background: var(--color-bg-input, rgba(0,0,0,0.2));
-    border: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-    font-size: 12px;
-    padding: 4px 8px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-
-  :global(html.light-mode) .pagination-size-select {
-    background: #F8FAFC;
-    border-color: #CBD5E1;
-    color: #0F172A;
+  .pagination-size {
+    display: inline-flex;
+    width: 116px;
+    flex-shrink: 0;
   }
 
   /* ── Non-scrollable upgrade terminal ─────────────────────────────────── */
@@ -1971,16 +2235,48 @@
     padding: 6px 2px;
   }
 
+  .dnf-log-surface {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    overflow: hidden;
+  }
+
+  :global(html.light-mode) .dnf-log-surface {
+    background: #FFFFFF;
+    border-color: #E2E8F0;
+  }
+
+  .dnf-log-raw {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .dnf-log-view {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    background: var(--color-bg-card);
+    border: 0;
+    border-radius: 0;
+    background: transparent;
     margin-top: 0;
     font-family: var(--font-mono);
     font-size: 11.5px;
+  }
+
+  .dnf-log-pager {
+    flex-shrink: 0;
+    border: 0;
+    border-top: 1px solid var(--color-border);
+    border-radius: 0;
+    background: transparent;
   }
 
   .dnf-log-row {
@@ -2077,5 +2373,192 @@
   .check-age {
     color: var(--color-text-muted);
     font-size: 11.5px;
+  }
+
+  .dnf-log-hit {
+    background: var(--color-accent-muted);
+    color: var(--color-text-primary);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  .dnf-log-icon-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .maint-group-label {
+    margin: 6px 0 -2px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .maint-card-last {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+  }
+
+  /* ── History date-range popover (same pattern as Journal logs) ────────── */
+  .custom-range-container {
+    position: relative;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  :global(.history-range-select) {
+    width: 130px;
+    flex: 0 0 130px;
+    transition: width 0.18s ease, flex-basis 0.18s ease;
+  }
+
+  :global(.history-range-select.is-custom) {
+    width: 250px;
+    flex: 0 0 250px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.history-range-select) { transition: none; }
+  }
+
+  .custom-range-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 100;
+    width: 310px;
+    background: var(--color-bg-popover, var(--color-bg-card));
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 14px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
+  }
+
+  .popover-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .popover-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--color-text-muted);
+  }
+
+  .popover-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  .popover-btn {
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .popover-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+
+  .apply-btn {
+    background: var(--color-accent);
+    color: var(--color-text-on-accent);
+  }
+
+  .apply-btn:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+
+  .apply-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .cancel-btn {
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+  }
+
+  .cancel-btn:hover {
+    background: var(--color-active-bg);
+    color: var(--color-text-primary);
+  }
+
+  /* The history toolbar carries the most controls; let it wrap instead of
+     clipping the range selector on narrow windows. */
+  .controls-row :global(.tab-actions) {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .plain-text-view {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    background: var(--color-bg-base);
+    color: var(--color-text-secondary);
+    border: 0;
+    border-radius: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .noop-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 32%, transparent);
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  .noop-hint :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .dnf-log-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+    padding: 32px;
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--color-text-muted);
+  }
+
+  .dnf-log-empty :global(svg) {
+    color: var(--color-text-muted);
+    opacity: 0.7;
   }
 </style>
