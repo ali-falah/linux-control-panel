@@ -72,9 +72,10 @@ use commands::{
     },
     device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test, device_get_pci_driver, device_set_module_state},
     app_manager::{
-        list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
+        list_desktop_apps, get_app_meta, get_app_metas, get_app_details, uninstall_app,
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
-        scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
+        scan_local_appimages, register_appimage, read_appimage_icon, delete_appimage,
+        launch_desktop_app, reveal_in_file_manager
     },
     system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, count_journal_entries, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
@@ -366,6 +367,7 @@ pub fn run() {
             // App Manager
             list_desktop_apps,
             get_app_meta,
+            get_app_metas,
             get_app_details,
             uninstall_app,
             get_flatpak_permissions,
@@ -373,6 +375,8 @@ pub fn run() {
             get_app_dependencies,
             scan_local_appimages,
             register_appimage,
+            read_appimage_icon,
+            delete_appimage,
             launch_desktop_app,
             reveal_in_file_manager,
             // System Info

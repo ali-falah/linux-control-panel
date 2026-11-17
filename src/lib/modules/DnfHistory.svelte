@@ -62,7 +62,17 @@
   // ─── Tab State ───────────────────────────────────────────────────────────────
 
   type Tab = 'updates' | 'history' | 'packages' | 'maintenance' | 'logs';
-  let activeTab = $state<Tab>('updates');
+  // Another module can send the user to a specific tab ("View in History" from
+  // the App Manager), so the requested tab wins over the default.
+  const REQUESTED_TABS: Tab[] = ['updates', 'history', 'packages', 'maintenance', 'logs'];
+  let activeTab = $state<Tab>(
+    uiStore.targetSubTab && REQUESTED_TABS.includes(uiStore.targetSubTab as Tab)
+      ? (uiStore.targetSubTab as Tab)
+      : 'updates'
+  );
+  if (uiStore.targetSubTab && REQUESTED_TABS.includes(uiStore.targetSubTab as Tab)) {
+    uiStore.targetSubTab = null;
+  }
 
   // ─── Date Formatter ─────────────────────────────────────────────────────────
 
