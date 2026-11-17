@@ -38,6 +38,20 @@ pub struct Pm2Process {
     pub env_vars: HashMap<String, String>,
     pub version: Option<String>,
     pub created_at: Option<u64>,
+    pub namespace: String,
+    pub interpreter: Option<String>,
+    pub node_version: Option<String>,
+    pub max_memory_restart: Option<String>,
+    /// PM2 modules such as pm2-logrotate are processes too, but they are not
+    /// part of the application fleet and must not trigger drift/restart alarms.
+    pub is_module: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pm2DumpInfo {
+    pub exists: bool,
+    pub modified: Option<u64>,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +469,23 @@ pub async fn pm2_list_processes() -> Result<Vec<Pm2Process>, String> {
             let err_log_path = env_obj.and_then(|e| e.get("pm_err_log_path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let version = env_obj.and_then(|e| e.get("version")).and_then(|v| v.as_str()).map(|s| s.to_string());
             let created_at = env_obj.and_then(|e| e.get("created_at")).and_then(|v| v.as_u64());
+            let namespace = env_obj
+                .and_then(|e| e.get("namespace"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let interpreter = env_obj
+                .and_then(|e| e.get("exec_interpreter"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let node_version = env_obj
+                .and_then(|e| e.get("node_version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let max_memory_restart = env_obj
+                .and_then(|e| e.get("max_memory_restart"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             // Node args
             let mut node_args = Vec::new();
@@ -495,6 +526,13 @@ pub async fn pm2_list_processes() -> Result<Vec<Pm2Process>, String> {
                 }
             }
 
+            // `axm_options` exists on ordinary apps too (it carries PM2 agent
+            // settings), so it must not be used as the module test. PM2
+            // modules are named `pm2-*` and run from PM2's own node_modules.
+            let is_module = name.starts_with("pm2-")
+                || script_path.contains("/.pm2/node_modules/")
+                || script_path.contains("/node_modules/pm2-");
+
             result.push(Pm2Process {
                 pm_id,
                 name,
@@ -517,6 +555,11 @@ pub async fn pm2_list_processes() -> Result<Vec<Pm2Process>, String> {
                 env_vars,
                 version,
                 created_at,
+                namespace,
+                interpreter,
+                node_version,
+                max_memory_restart,
+                is_module,
             });
         }
     }
@@ -789,6 +832,59 @@ pub async fn pm2_get_saved_dump_apps() -> Result<Vec<Pm2SavedDumpApp>, String> {
     }
 
     Ok(saved_apps)
+}
+
+#[tauri::command]
+pub async fn pm2_get_dump_info() -> Result<Pm2DumpInfo, String> {
+    let dump_file = PathBuf::from(get_pm2_home()).join("dump.pm2");
+    match fs::metadata(&dump_file) {
+        Ok(meta) => Ok(Pm2DumpInfo {
+            exists: true,
+            modified: meta
+                .modified()
+                .ok()
+                .and_then(|time| {
+                    time.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_secs())
+                }),
+            size: meta.len(),
+        }),
+        Err(_) => Ok(Pm2DumpInfo {
+            exists: false,
+            modified: None,
+            size: 0,
+        }),
+    }
+}
+
+/// Change the number of cluster instances for one application.
+#[tauri::command]
+pub async fn pm2_scale(name: String, instances: i32) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_process_name(name) || name.starts_with('-') {
+        return Err("The application name is invalid for scaling.".to_string());
+    }
+    if !(1..=64).contains(&instances) {
+        return Err("Instances must be between 1 and 64.".to_string());
+    }
+
+    let out = create_pm2_cmd()
+        .args(["scale", name, &instances.to_string()])
+        .output()
+        .await;
+    match out {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(format!("Scaled '{name}' to {instances} instance(s)"))
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                Err(format!("PM2 scale failed: {} {}", err.trim(), stdout.trim()))
+            }
+        }
+        Err(error) => Err(format!("Failed to execute PM2 scale: {error}")),
+    }
 }
 
 #[tauri::command]
@@ -1354,6 +1450,14 @@ mod pm2_validation_tests {
         assert!(validate_ecosystem_path("relative.pm2.json", false).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scale_rejects_invalid_inputs_before_starting_pm2() {
+        assert!(super::pm2_scale("".to_string(), 2).await.is_err());
+        assert!(super::pm2_scale("--help".to_string(), 2).await.is_err());
+        assert!(super::pm2_scale("api".to_string(), 0).await.is_err());
+        assert!(super::pm2_scale("api".to_string(), 65).await.is_err());
     }
 
     #[test]
