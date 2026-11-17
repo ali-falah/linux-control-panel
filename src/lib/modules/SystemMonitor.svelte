@@ -1,8 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { Activity, Cpu, Database, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, Layers, CornerDownRight, Search, Filter, Network, PanelLeftClose, PanelLeftOpen } from '@lucide/svelte';
-  import { RefreshCw, Skull, Loader, Wifi, Play, Pause } from '@lucide/svelte';
+  import { Activity, Cpu, HardDrive, TerminalSquare, Copy, Check, ChevronRight, ChevronDown, CornerDownRight, Network } from '@lucide/svelte';
+  import { RefreshCw, Skull, Loader, Wifi, Play, Pause, UnfoldVertical, FoldVertical, MemoryStick, ChartColumn } from '@lucide/svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -12,6 +12,8 @@
   import Card from '../components/ui/Card.svelte';
   import Table from '../components/ui/Table.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
+  import FilterChips, { type FilterOption } from '../components/ui/FilterChips.svelte';
+  import Badge from '../components/ui/Badge.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
   import {
     PROCESS_PRIORITY_MAX,
@@ -27,22 +29,15 @@
     type SmartHealthReport,
   } from '../utils/smartHealth';
 
-  let currentTab = $state<'overview' | 'processes'>(
-    uiStore.targetSubTab === 'processes' ? 'processes' : 'overview'
-  );
-  let currentUser = $state('unknown');
-  let resourceSidebarCollapsed = $state<boolean>((() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('app_monitor_resources_collapsed') === 'true';
-    }
-    return false;
-  })());
+  type MonitorTab = 'resources' | 'network' | 'processes';
 
-  $effect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('app_monitor_resources_collapsed', String(resourceSidebarCollapsed));
-    }
-  });
+  function normalizeTab(value: string | null): MonitorTab {
+    if (value === 'processes' || value === 'network') return value;
+    return 'resources';
+  }
+
+  let currentTab = $state<MonitorTab>(normalizeTab(uiStore.targetSubTab));
+  let currentUser = $state('unknown');
 
   // Overview Stats
   let stats = $state<any>(null);
@@ -77,8 +72,16 @@
   let processSearch = $state(uiStore.processSearchQuery || '');
 
   $effect(() => {
-    if (uiStore.targetSubTab === 'processes' || uiStore.targetSubTab === 'overview') {
-      currentTab = uiStore.targetSubTab;
+    const target = uiStore.targetSubTab;
+    if (
+      target === 'processes' ||
+      target === 'network' ||
+      target === 'resources' ||
+      target === 'overview'
+    ) {
+      currentTab = target === 'overview' ? 'resources' : target;
+      // The tab request is one-shot; a later visit starts on the default tab.
+      uiStore.targetSubTab = null;
     }
     if (uiStore.processSearchQuery !== undefined && uiStore.processSearchQuery !== null) {
       processSearch = uiStore.processSearchQuery;
@@ -90,8 +93,17 @@
 
   let isRefreshing = $state(false);
   let isPaused = $state(false);
-  let processCategoryFilter = $state<'all' | 'user' | 'cpu' | 'mem'>('all');
+  let lastUpdated = $state<Date | null>(null);
+  let networkError = $state<string | null>(null);
+  let processFilter = $state<'all' | 'mine' | 'system' | 'high-cpu'>('all');
+  let connSortKey = $state<'protocol' | 'local' | 'remote' | 'state' | 'pid' | 'process' | null>(null);
+  let connSortAsc = $state<boolean>(true);
   let expandedTreePids = $state<Set<number>>(new Set([1]));
+
+  // Polls can overlap when a scan is slow; one in flight per domain is enough.
+  let statsInFlight = false;
+  let processInFlight = false;
+  let networkInFlight = false;
 
   // Process Inspector Drawer State
   let isProcessDrawerOpen = $state(false);
@@ -141,9 +153,21 @@
     isProcessDrawerOpen = true;
   }
 
+  function canManageProcess(proc: any) {
+    // `owned` comes from the backend; older rows without it keep the old
+    // behaviour and let the backend refuse.
+    return proc?.owned !== false;
+  }
+
+  function canSignalPid(pid?: number | null) {
+    if (!pid || pid <= 100) return false;
+    const target = processes.find((process) => process.pid === pid);
+    return !target || canManageProcess(target);
+  }
+
   async function applyRenice() {
     if (!inspectedProcess) return;
-    if (!canReniceProcess(inspectedProcess.user ?? '', currentUser)) {
+    if (!canManageProcess(inspectedProcess) || !canReniceProcess(inspectedProcess.user ?? '', currentUser)) {
       uiStore.addToast('You can only change the priority of your own processes.', 'error');
       return;
     }
@@ -199,6 +223,11 @@
       uiStore.addToast(`PID ${pid} is a critical system process and cannot be signaled.`, 'warning');
       return;
     }
+    const target = processes.find((process) => process.pid === pid);
+    if (target && !canManageProcess(target)) {
+      uiStore.addToast(`PID ${pid} belongs to another user; administrator rights are required.`, 'warning');
+      return;
+    }
     try {
       const res: string = await invoke('kill_process', { pid, signal });
       uiStore.addToast(res, 'info');
@@ -212,7 +241,14 @@
   }
 
   function killProcessTree(parentPid: number, parentName: string) {
-    const children = processes.filter(p => p.ppid === parentPid && p.pid !== parentPid);
+    const parent = processes.find((process) => process.pid === parentPid);
+    if (parent && !canManageProcess(parent)) {
+      uiStore.addToast('This process belongs to another user; administrator rights are required.', 'warning');
+      return;
+    }
+    const children = processes.filter(
+      (process) => process.ppid === parentPid && process.pid !== parentPid && canManageProcess(process)
+    );
     const totalCount = children.length + 1;
     uiStore.confirm(
       `Terminate Process Tree`,
@@ -298,8 +334,7 @@
     if (conn.pid) {
       loadingProcessDetails = true;
       try {
-        const list: any[] = await invoke('get_process_list');
-        detailedProcess = list.find(p => p.pid === conn.pid) || null;
+        detailedProcess = await invoke<any | null>('get_process_details', { pid: conn.pid });
       } catch (err) {
         console.error("Error loading process details:", err);
       } finally {
@@ -309,32 +344,47 @@
   }
 
   // Timers
-  let leftTimer: any;
-  let rightTimer: any;
+  let statsTimer: any;
+  let topTimer: any;
+  let networkTimer: any;
+  let interfacesTimer: any;
   let processesTimer: any;
 
   function clearTimers() {
-    clearInterval(leftTimer);
-    clearInterval(rightTimer);
+    clearInterval(statsTimer);
+    clearInterval(topTimer);
+    clearInterval(networkTimer);
+    clearInterval(interfacesTimer);
     clearInterval(processesTimer);
   }
 
   // Enhanced monitoring state
-  let showCores = $state(false);
-  let showTopConsumers = $state(false);
+  let consumerMetric = $state<'cpu' | 'mem'>('cpu');
   let connFilter = $state<'all' | 'listen' | 'estab' | 'external'>('all');
   let connSearch = $state('');
 
   // Top Consumers Derived
-  let topCpuProcesses = $derived.by(() => {
+  let topConsumers = $derived.by(() => {
     if (!processes || processes.length === 0) return [];
-    return [...processes].sort((a, b) => b.cpu_percent - a.cpu_percent).slice(0, 3);
+    const sorted = [...processes].sort((a, b) =>
+      consumerMetric === 'cpu'
+        ? (b.cpu_percent || 0) - (a.cpu_percent || 0)
+        : (b.mem_rss_mb || 0) - (a.mem_rss_mb || 0)
+    );
+    return sorted.slice(0, 5);
   });
 
-  let topMemProcesses = $derived.by(() => {
-    if (!processes || processes.length === 0) return [];
-    return [...processes].sort((a, b) => b.mem_rss_mb - a.mem_rss_mb).slice(0, 3);
-  });
+  function openProcessByPid(pid: number) {
+    processFilter = 'all';
+    processSearch = String(pid);
+    currentTab = 'processes';
+  }
+
+  function openAllProcesses() {
+    processFilter = 'all';
+    processSearch = '';
+    currentTab = 'processes';
+  }
 
   // Filtered Connections Derived
   let filteredConnections = $derived.by(() => {
@@ -346,15 +396,13 @@
     } else if (connFilter === 'estab') {
       list = list.filter(c => c.state && (c.state.toLowerCase().includes('estab') || c.state.toLowerCase().includes('connected')));
     } else if (connFilter === 'external') {
-      list = list.filter(c => {
-        const remote = c.remote_address || '';
-        return remote && !remote.startsWith('127.0.0.1') && !remote.startsWith('::1') && !remote.startsWith('0.0.0.0') && !remote.startsWith('*');
-      });
+      // The backend classifies the parsed remote host, including IPv6.
+      list = list.filter(c => c.remote_is_external);
     }
 
     if (connSearch.trim()) {
       const q = connSearch.toLowerCase();
-      list = list.filter(c => 
+      list = list.filter(c =>
         (c.local_address && c.local_address.toLowerCase().includes(q)) ||
         (c.remote_address && c.remote_address.toLowerCase().includes(q)) ||
         (c.process_name && c.process_name.toLowerCase().includes(q)) ||
@@ -362,50 +410,179 @@
         (c.protocol && c.protocol.toLowerCase().includes(q))
       );
     }
+
+    if (connSortKey) {
+      const direction = connSortAsc ? 1 : -1;
+      list = list.slice().sort((a, b) => {
+        let result = 0;
+        switch (connSortKey) {
+          case 'protocol':
+            result = (a.protocol || '').localeCompare(b.protocol || '');
+            break;
+          case 'local':
+            result =
+              (a.local_host || '').localeCompare(b.local_host || '') ||
+              (a.local_port ?? 0) - (b.local_port ?? 0);
+            break;
+          case 'remote':
+            result =
+              (a.remote_host || '').localeCompare(b.remote_host || '') ||
+              (a.remote_port ?? 0) - (b.remote_port ?? 0);
+            break;
+          case 'state':
+            result = (a.state || '').localeCompare(b.state || '');
+            break;
+          case 'pid':
+            result = (a.pid ?? 0) - (b.pid ?? 0);
+            break;
+          case 'process':
+            result = (a.process_name || '').localeCompare(b.process_name || '');
+            break;
+        }
+        if (result === 0) result = (a.local_address || '').localeCompare(b.local_address || '');
+        return result * direction;
+      });
+    }
     return list;
   });
 
   let connListenCount = $derived(activeConnections.filter(c => c.state && c.state.toLowerCase().includes('listen')).length);
   let connEstabCount = $derived(activeConnections.filter(c => c.state && (c.state.toLowerCase().includes('estab') || c.state.toLowerCase().includes('connected'))).length);
+  let connExternalCount = $derived(activeConnections.filter(c => c.remote_is_external).length);
+
+  let connFilterOptions = $derived.by(
+    (): FilterOption<'all' | 'listen' | 'estab' | 'external'>[] => [
+      { id: 'all', label: 'All', count: activeConnections.length },
+      { id: 'listen', label: 'Listen', count: connListenCount || undefined },
+      { id: 'estab', label: 'Estab', count: connEstabCount || undefined },
+      { id: 'external', label: 'External', count: connExternalCount || undefined }
+    ]
+  );
+
+  function toggleConnSort(key: 'protocol' | 'local' | 'remote' | 'state' | 'pid' | 'process') {
+    if (connSortKey === key) {
+      connSortAsc = !connSortAsc;
+    } else {
+      connSortKey = key;
+      connSortAsc = true;
+    }
+  }
+
+  function connectionStateVariant(state: string): 'success' | 'warning' | 'info' | 'muted' {
+    const value = (state || '').toUpperCase();
+    if (value.includes('LISTEN')) return 'warning';
+    if (value.includes('ESTAB')) return 'success';
+    if (value.includes('CLOSE') || value.includes('TIME') || value.includes('FIN')) return 'muted';
+    return 'info';
+  }
+
+  function interfaceMeta(name: string) {
+    return networkInterfaces.find((iface) => iface.name === name);
+  }
+
+  function formatEndpoint(host?: string | null, port?: number | null) {
+    if (!host) return '—';
+    const formatted = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+    return port != null ? `${formatted}:${port}` : formatted;
+  }
+
+  // Processes matching the filter; the tree builder runs on this subset.
+  let filteredProcesses = $derived.by(() => {
+    switch (processFilter) {
+      case 'mine':
+        return processes.filter((process) => process.owned !== false);
+      case 'system':
+        return processes.filter((process) => process.owned === false);
+      case 'high-cpu':
+        return processes.filter((process) => process.cpu_percent >= 10);
+      default:
+        return processes;
+    }
+  });
+
+  let processFilterOptions = $derived.by(
+    (): FilterOption<'all' | 'mine' | 'system' | 'high-cpu'>[] => {
+      const mine = processes.filter((p) => p.owned !== false).length;
+      const system = processes.filter((p) => p.owned === false).length;
+      const highCpu = processes.filter((p) => p.cpu_percent >= 10).length;
+      return [
+        { id: 'all', label: 'All', count: processes.length },
+        { id: 'mine', label: 'Mine', count: mine || undefined },
+        { id: 'system', label: 'System', count: system || undefined },
+        { id: 'high-cpu', label: 'High CPU', count: highCpu || undefined }
+      ];
+    }
+  );
 
   let statsError = $state<string | null>(null);
 
-  async function pollLeftAndCenter() {
+  async function pollStats() {
+    if (statsInFlight) return;
+    statsInFlight = true;
     try {
-      const [sysStats, temp, procList] = await Promise.all([
+      const [sysStats, temp] = await Promise.all([
         invoke('get_system_stats'),
-        invoke('get_cpu_temperature'),
-        invoke('get_process_list')
+        invoke('get_cpu_temperature')
       ]);
-      statsError = null;
-      stats = sysStats;
+      const next = sysStats as any;
+      stats = next;
       cpuTemp = temp as number | null;
-      processes = procList as any[];
-      cpuHistory = [...cpuHistory.slice(1), stats.cpu_percent];
-      ramHistory = [...ramHistory.slice(1), stats.ram_percent];
-      swapHistory = [...swapHistory.slice(1), stats.swap_percent];
+      statsError = null;
+      lastUpdated = new Date();
+      cpuHistory = [...cpuHistory.slice(1), next.cpu_percent];
+      ramHistory = [...ramHistory.slice(1), next.ram_percent];
+      swapHistory = [...swapHistory.slice(1), next.swap_percent];
     } catch (e) {
       statsError = e instanceof Error ? e.message : String(e);
+    } finally {
+      statsInFlight = false;
     }
     await fetchDiskIo();
   }
 
-  async function pollRight() {
+  async function pollInterfaces() {
     try {
       networkInterfaces = await invoke('get_network_interfaces');
-    } catch(e) {}
-    await Promise.all([
-      fetchNetworkTraffic(),
-      fetchActiveConnections()
-    ]);
+    } catch (e) {
+      // Interfaces change rarely; keep the last known list.
+      console.warn('Could not refresh network interfaces', e);
+    }
+  }
+
+  async function pollNetwork() {
+    if (networkInFlight) return;
+    networkInFlight = true;
+    try {
+      const results = await Promise.allSettled([
+        fetchNetworkTraffic(),
+        fetchActiveConnections()
+      ]);
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed && failed.status === 'rejected') {
+        networkError = failed.reason instanceof Error
+          ? failed.reason.message
+          : String(failed.reason);
+      } else {
+        networkError = null;
+      }
+      lastUpdated = new Date();
+    } finally {
+      networkInFlight = false;
+    }
   }
 
   async function pollProcesses() {
-    isRefreshing = true;
+    if (processInFlight) return;
+    processInFlight = true;
     try {
       processes = await invoke('get_process_list');
-    } catch(e) {}
-    isRefreshing = false;
+      lastUpdated = new Date();
+    } catch (e) {
+      // Keep the last list; a transient scan failure should not blank the table.
+      console.warn('Could not refresh the process list', e);
+    } finally {
+      processInFlight = false;
+    }
   }
 
   async function fetchDiskIo() {
@@ -440,49 +617,48 @@
   }
 
   async function fetchNetworkTraffic() {
-    try {
-      const newTraffic: any[] = await invoke('get_network_traffic');
-      const now = performance.now();
-      if (lastNetworkTime > 0 && lastNetworkData.length > 0) {
-        const deltaSec = (now - lastNetworkTime) / 1000;
-        let speeds: Record<string, { rxSpeed: number, txSpeed: number }> = {};
-        for (const current of newTraffic) {
-          const prev = lastNetworkData.find(t => t.interface === current.interface);
-          if (prev) {
-            const rxDiff = current.rx_bytes - prev.rx_bytes;
-            const txDiff = current.tx_bytes - prev.tx_bytes;
-            speeds[current.interface] = {
-              rxSpeed: Math.max(0, rxDiff / deltaSec),
-              txSpeed: Math.max(0, txDiff / deltaSec)
-            };
-          }
+    const newTraffic: any[] = await invoke('get_network_traffic');
+    const now = performance.now();
+    if (lastNetworkTime > 0 && lastNetworkData.length > 0) {
+      const deltaSec = (now - lastNetworkTime) / 1000;
+      let speeds: Record<string, { rxSpeed: number, txSpeed: number }> = {};
+      for (const current of newTraffic) {
+        const prev = lastNetworkData.find(t => t.interface === current.interface);
+        if (prev) {
+          const rxDiff = current.rx_bytes - prev.rx_bytes;
+          const txDiff = current.tx_bytes - prev.tx_bytes;
+          speeds[current.interface] = {
+            rxSpeed: Math.max(0, rxDiff / deltaSec),
+            txSpeed: Math.max(0, txDiff / deltaSec)
+          };
         }
-        networkSpeeds = speeds;
       }
-      lastNetworkData = newTraffic;
-      lastNetworkTime = now;
-      networkTraffic = newTraffic;
-    } catch (e) {
-      console.error(e);
+      networkSpeeds = speeds;
     }
+    lastNetworkData = newTraffic;
+    lastNetworkTime = now;
+    networkTraffic = newTraffic;
   }
 
   async function fetchActiveConnections() {
-    try {
-      activeConnections = await invoke('get_active_connections');
-    } catch(e) {
-      console.error(e);
-    }
+    activeConnections = await invoke('get_active_connections');
   }
 
   function restartTimers() {
     clearTimers();
     if (isPaused || uiStore.isThrottled) return;
-    if (currentTab === 'overview') {
-      pollLeftAndCenter();
-      pollRight();
-      leftTimer = setInterval(pollLeftAndCenter, 2000);
-      rightTimer = setInterval(pollRight, 3000);
+    if (currentTab === 'resources') {
+      // Stats are cheap; the process list is only needed for Top Consumers and
+      // is scanned less often.
+      pollStats();
+      pollProcesses();
+      statsTimer = setInterval(pollStats, 2000);
+      topTimer = setInterval(pollProcesses, 6000);
+    } else if (currentTab === 'network') {
+      pollInterfaces();
+      pollNetwork();
+      interfacesTimer = setInterval(pollInterfaces, 15000);
+      networkTimer = setInterval(pollNetwork, 3000);
     } else if (currentTab === 'processes') {
       pollProcesses();
       processesTimer = setInterval(pollProcesses, 3000);
@@ -545,15 +721,13 @@
       currentUser = await invoke('get_current_user');
       const history: any[] = await invoke('get_system_stats_history');
       if (history && history.length > 0) {
-        const cPcts = history.map(h => h.cpu_percent);
-        const rPcts = history.map(h => h.ram_percent);
-        if (cPcts.length < 40) {
-          cpuHistory = [...Array(40 - cPcts.length).fill(0), ...cPcts];
-          ramHistory = [...Array(40 - rPcts.length).fill(0), ...rPcts];
-        } else {
-          cpuHistory = cPcts.slice(-40);
-          ramHistory = rPcts.slice(-40);
-        }
+        const padHistory = (values: number[]) =>
+          values.length < 40
+            ? [...Array(40 - values.length).fill(0), ...values]
+            : values.slice(-40);
+        cpuHistory = padHistory(history.map((sample) => sample.cpu_percent));
+        ramHistory = padHistory(history.map((sample) => sample.ram_percent));
+        swapHistory = padHistory(history.map((sample) => sample.swap_percent));
       }
     } catch(e) {
       console.error(e);
@@ -684,10 +858,13 @@
   // Build parent-child process hierarchy for Tree View
   let treeVisibleProcesses = $derived.by(() => {
     const search = processSearch.toLowerCase().trim();
-    
+    // Filtering happens before the tree is built: a hidden parent simply makes
+    // its visible children roots instead of leaving them unreachable.
+    const source = filteredProcesses;
+
     // Map of all processes
     const map = new Map<number, any>();
-    for (const p of processes) {
+    for (const p of source) {
       map.set(p.pid, p);
     }
 
@@ -711,7 +888,7 @@
     const childrenMap = new Map<number, any[]>();
     let roots: any[] = [];
 
-    for (const p of processes) {
+    for (const p of source) {
       const parentId = p.ppid;
       if (parentId && map.has(parentId) && parentId !== p.pid) {
         if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
@@ -728,7 +905,7 @@
     let matchingAncestorPids = new Set<number>();
 
     if (search) {
-      for (const p of processes) {
+      for (const p of source) {
         const matches = p.name.toLowerCase().includes(search) ||
           p.pid.toString().includes(search) ||
           (p.cmdline && p.cmdline.toLowerCase().includes(search)) ||
@@ -790,8 +967,10 @@
   let procContainerHeight = $state(600);
   const PROC_OVERSCAN = 15;
 
+  // Rows contain two lines (name + command). These heights match the table
+  // density CSS; the row sets its own height so the virtualizer stays in sync.
   let procRowHeight = $derived(
-    uiStore.tableDensity === 'compact' ? 28 : (uiStore.tableDensity === 'spacious' ? 44 : 36)
+    uiStore.tableDensity === 'compact' ? 34 : (uiStore.tableDensity === 'spacious' ? 57 : 44)
   );
   let totalProcCount = $derived(treeVisibleProcesses.length);
 
@@ -834,8 +1013,13 @@
     // looked like a dead click
     isRefreshing = true;
     try {
-      if (currentTab === 'overview') {
-        await Promise.all([pollLeftAndCenter(), pollRight()]);
+      if (currentTab === 'resources') {
+        await Promise.all([pollStats(), pollProcesses()]);
+        if (statusStore.adminMode.on) {
+          void loadSmartHealth();
+        }
+      } else if (currentTab === 'network') {
+        await Promise.all([pollInterfaces(), pollNetwork()]);
       } else {
         await pollProcesses();
       }
@@ -849,12 +1033,20 @@
   <PageHeader title="Monitoring" subtitle="Real-time system health and process management." icon={Activity}>
     <TabGroup size="sm"
       tabs={[
-        { id: 'overview', label: 'Overview' },
-        { id: 'processes', label: 'Processes' }
+        { id: 'resources', label: 'Resources' },
+        { id: 'network', label: 'Network', count: activeConnections.length },
+        { id: 'processes', label: 'Processes', count: processes.length }
       ]}
       bind:activeTab={currentTab}
       style="margin-right: 8px;"
     />
+    <span class="live-status" title="Polling state and the last successful update">
+      <span class="live-dot" class:paused={isPaused}></span>
+      {isPaused ? 'Paused' : 'Live'}
+      {#if lastUpdated}
+        <span class="live-time">· {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+      {/if}
+    </span>
     <div style="display:flex; gap: 8px;">
       <Button size="sm" onclick={() => isPaused = !isPaused} variant={isPaused ? 'primary' : 'ghost'}>
         {#if isPaused}
@@ -871,199 +1063,191 @@
   </PageHeader>
 
   <div class="page-content">
-    {#if currentTab === 'overview'}
+    {#if currentTab === 'resources'}
       {#if stats}
-        <div class="monitor-layout" class:resources-collapsed={resourceSidebarCollapsed}>
-          <!-- COLUMN 1: Resource Usage & Disk I/O -->
-          {#if !resourceSidebarCollapsed}
-            <div class="monitor-column-left">
-              <!-- Core Resource Usage -->
-              <Card title="Core Resource Usage" icon={Cpu} class="monitor-panel">
-                {#snippet headerActions()}
-                  <button
-                    type="button"
-                    class="sidebar-collapse-toggle-btn"
-                    onclick={() => resourceSidebarCollapsed = true}
-                    title="Collapse sidebar (Expand Network & Connections to full width)"
-                    aria-label="Collapse sidebar"
-                  >
-                    <PanelLeftClose size={13} />
-                  </button>
-                {/snippet}
-                <div class="panel-scroll">
-                <!-- CPU -->
-                <div class="metric-block" style="display:flex; flex-direction:column; gap:8px;">
-                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600; align-items: center;">
-                    <span>CPU Usage</span>
-                    <span style="display: flex; gap: 8px; align-items: center;">
-                      {#if cpuTemp !== null}
-                        <span style="font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: {cpuTemp >= 85 ? 'rgba(239, 68, 68, 0.15)' : cpuTemp >= 70 ? 'rgba(245, 158, 11, 0.15)' : 'var(--color-bg-hover)'}; color: {cpuTemp >= 85 ? 'var(--color-error)' : cpuTemp >= 70 ? 'var(--color-warning)' : 'var(--color-text-primary)'}; font-family: var(--font-mono);">
-                          {cpuTemp.toFixed(0)}&deg;C
-                        </span>
-                      {/if}
-                      <span>{stats.cpu_percent.toFixed(1)}%</span>
-                    </span>
-                  </div>
-                  <div style="height: 60px; background: var(--color-bg-surface); border-radius: 8px; overflow:hidden; padding: 4px;">
-                    <svg viewBox="0 0 200 60" preserveAspectRatio="none" style="width: 100%; height: 100%;">
-                      <path d={generateSparkline(cpuHistory, 60, 200)} class="spark-fill cpu-fill" />
-                      <polyline points={generateSparklineStroke(cpuHistory, 60, 200)} class="spark-stroke cpu-stroke" fill="none" />
-                    </svg>
-                  </div>
-                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
-                    <button
-                      onclick={() => showCores = !showCores}
-                      style="background: transparent; border: none; padding: 0; color: var(--color-accent); cursor: pointer; font-size: 11px; text-decoration: underline; font-family: inherit;"
-                    >
-                      {stats.cpu_cores} Cores {showCores ? '▲' : '▼'}
-                    </button>
-                    <span>Load: {stats.load_1.toFixed(2)}, {stats.load_5.toFixed(2)}</span>
-                  </div>
+        {#if statsError}
+          <div class="monitor-load-error" style="flex:0 0 auto;" role="alert">
+            <span>Showing the last reading. Refresh failed: {statsError}</span>
+            <Button variant="outline" size="sm" onclick={() => pollStats()}>Retry</Button>
+          </div>
+        {/if}
+        <div class="resources-columns">
+          <div class="resources-main">
+            <Card title="CPU" icon={Cpu} class="monitor-panel">
+              <div class="panel-scroll" style="gap:10px;">
+                <div class="cpu-summary">
+                  <span class="metric-label">Usage</span>
+                  <span class="cpu-summary-values">
+                    {#if cpuTemp !== null}
+                      <span class="temp-badge" class:hot={cpuTemp >= 85} class:warm={cpuTemp >= 70}>
+                        {cpuTemp.toFixed(0)}&deg;C
+                      </span>
+                    {/if}
+                    <strong>{stats.cpu_percent.toFixed(1)}%</strong>
+                  </span>
                 </div>
-
-                <!-- CPU Cores Expandable Grid -->
-                {#if showCores && stats.cpu_per_core && stats.cpu_per_core.length > 0}
-                  <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 6px; padding: 8px; background: var(--color-bg-surface); border-radius: 6px; border: 1px solid var(--color-border-subtle);">
+                <div class="cpu-chart">
+                  <svg viewBox="0 0 200 70" preserveAspectRatio="none">
+                    <path d={generateSparkline(cpuHistory, 70, 200)} class="spark-fill cpu-fill" />
+                    <polyline
+                      points={generateSparklineStroke(cpuHistory, 70, 200)}
+                      class="spark-stroke cpu-stroke"
+                      fill="none"
+                    />
+                  </svg>
+                </div>
+                <div class="load-row">
+                  <span>{stats.cpu_cores} Cores</span>
+                  <span>Load {stats.load_1.toFixed(2)} / {stats.load_5.toFixed(2)} / {stats.load_15.toFixed(2)}</span>
+                </div>
+                {#if stats.cpu_per_core && stats.cpu_per_core.length > 0}
+                  <div class="core-grid" aria-label="Per-core CPU usage">
                     {#each stats.cpu_per_core as corePct, idx}
-                      <div style="display:flex; flex-direction:column; gap:2px; font-size:10px; font-family:var(--font-mono);">
-                        <div style="display:flex; justify-content:space-between; color:var(--color-text-muted);">
+                      <div class="core-tile" class:hot={corePct >= 70} class:warm={corePct >= 40}>
+                        <div class="core-head">
                           <span>C{idx}</span>
-                          <span>{corePct.toFixed(0)}%</span>
+                          <strong>{corePct.toFixed(0)}%</strong>
                         </div>
-                        <div class="progress-bg" style="height: 4px; background: var(--color-bg-hover);">
-                          <div class="progress-fill" style="width: {corePct}%; height: 100%; background: {corePct > 70 ? 'var(--color-error)' : corePct > 40 ? 'var(--color-warning)' : 'var(--color-accent)'};"></div>
-                        </div>
+                        <div class="core-bar"><span style="width: {corePct}%"></span></div>
                       </div>
                     {/each}
-                  </div>
-                {/if}
-                
-                <!-- Memory -->
-                <div class="metric-block" style="display:flex; flex-direction:column; gap:6px;">
-                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
-                    <span>Memory</span>
-                    <span>{stats.ram_percent.toFixed(1)}%</span>
-                  </div>
-                  <div class="progress-bg" style="height: 8px; background: var(--color-bg-surface); border-radius: 4px; overflow: hidden;">
-                    <div class="progress-fill ram-fill" style="width: {stats.ram_percent}%; height: 100%; transition: width 0.3s ease;"></div>
-                  </div>
-                  <div style="height: 36px; background: var(--color-bg-surface); border-radius: 6px; overflow:hidden; padding: 2px;">
-                    <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
-                      <polyline points={generateSparklineStroke(ramHistory, 36, 200)} style="stroke: var(--color-accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
-                    </svg>
-                  </div>
-                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
-                    <span>Used: {formatBytes(stats.ram_used_mb)}</span>
-                    <span>Total: {formatBytes(stats.ram_total_mb)}</span>
-                  </div>
-                </div>
-                
-                <!-- Swap -->
-                <div class="metric-block" style="display:flex; flex-direction:column; gap:6px;">
-                  <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
-                    <span>Swap Space</span>
-                    <span>{stats.swap_percent.toFixed(1)}%</span>
-                  </div>
-                  <div class="progress-bg" style="height: 8px; background: var(--color-bg-surface); border-radius: 4px; overflow: hidden;">
-                    <div class="progress-fill swap-fill" style="width: {stats.swap_percent}%; height: 100%; transition: width 0.3s ease;"></div>
-                  </div>
-                  <div style="height: 36px; background: var(--color-bg-surface); border-radius: 6px; overflow:hidden; padding: 2px;">
-                    <svg viewBox="0 0 200 36" preserveAspectRatio="none" style="width: 100%; height: 100%;">
-                      <polyline points={generateSparklineStroke(swapHistory, 36, 200)} style="stroke: var(--color-warning, #f59e0b); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;" />
-                    </svg>
-                  </div>
-                  <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--color-text-muted);">
-                    <span>Used: {formatBytes(stats.swap_used_mb)}</span>
-                    <span>Total: {formatBytes(stats.swap_total_mb)}</span>
-                  </div>
-                </div>
-
-                <!-- Top Resource Consumers Section -->
-                {#if topCpuProcesses.length > 0}
-                  <div style="border-top: 1px dashed var(--color-border); padding-top: 10px; margin-top: 4px; display:flex; flex-direction:column; gap:8px;">
-                    <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; display:flex; justify-content:space-between; align-items:center;">
-                      <button
-                        onclick={() => showTopConsumers = !showTopConsumers}
-                        style="background: transparent; border: none; padding: 0; color: var(--color-accent); font-size: 11px; font-weight: 700; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; font-family: inherit;"
-                      >
-                        Top Consumers {showTopConsumers ? '▲' : '▼'}
-                      </button>
-                      {#if showTopConsumers}
-                        <button 
-                          onclick={() => currentTab = 'processes'}
-                          style="background: transparent; border: none; padding: 0; color: var(--color-accent); font-size: 10px; cursor: pointer;"
-                        >
-                          View All &rarr;
-                        </button>
-                      {/if}
-                    </div>
-
-                    {#if showTopConsumers}
-                      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <!-- Top CPU -->
-                        <div style="background: var(--color-bg-surface); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
-                          <span style="font-size: 9px; font-weight:700; color: var(--color-info); text-transform: uppercase;">Top CPU</span>
-                          {#each topCpuProcesses as p}
-                            <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
-                              <span style="color:var(--color-text-primary); text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:85px;" title={p.name}>{p.name}</span>
-                              <span style="color:var(--color-info); font-weight:600;">{p.cpu_percent.toFixed(1)}%</span>
-                            </div>
-                          {/each}
-                        </div>
-
-                        <!-- Top RAM -->
-                        <div style="background: var(--color-bg-surface); padding: 6px 8px; border-radius: 6px; display:flex; flex-direction:column; gap:4px;">
-                          <span style="font-size: 9px; font-weight:700; color: var(--color-accent); text-transform: uppercase;">Top RAM</span>
-                          {#each topMemProcesses as p}
-                            <div style="display:flex; justify-content:space-between; font-size: 10px; font-family: var(--font-mono);">
-                              <span style="color:var(--color-text-primary); text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:85px;" title={p.name}>{p.name}</span>
-                              <span style="color:var(--color-accent); font-weight:600;">{p.mem_rss_mb > 1024 ? (p.mem_rss_mb/1024).toFixed(1) + 'GB' : p.mem_rss_mb.toFixed(0) + 'MB'}</span>
-                            </div>
-                          {/each}
-                        </div>
-                      </div>
-                    {/if}
                   </div>
                 {/if}
               </div>
             </Card>
 
-            <!-- Disk I/O -->
+            <Card title="Top Consumers" icon={ChartColumn} class="monitor-panel">
+              {#snippet headerActions()}
+                <button type="button" class="link-btn" onclick={openAllProcesses}>
+                  View all &rarr;
+                </button>
+              {/snippet}
+              <div class="consumer-switch" role="group" aria-label="Rank processes by">
+                <button
+                  type="button"
+                  class:active={consumerMetric === 'cpu'}
+                  onclick={() => consumerMetric = 'cpu'}
+                >
+                  CPU
+                </button>
+                <button
+                  type="button"
+                  class:active={consumerMetric === 'mem'}
+                  onclick={() => consumerMetric = 'mem'}
+                >
+                  Memory
+                </button>
+              </div>
+              {#if topConsumers.length > 0}
+                <div class="consumer-list">
+                  {#each topConsumers as proc, index (proc.pid)}
+                    <button
+                      type="button"
+                      class="consumer-row"
+                      onclick={() => openProcessByPid(proc.pid)}
+                      title={`${proc.cmdline || proc.name} — open PID ${proc.pid} in Processes`}
+                    >
+                      <span class="consumer-rank">{index + 1}</span>
+                      <span class="consumer-name">{proc.name}</span>
+                      <span class="consumer-pid">PID {proc.pid}</span>
+                      <span class="consumer-value" class:mem={consumerMetric === 'mem'}>
+                        {consumerMetric === 'cpu'
+                          ? `${proc.cpu_percent.toFixed(1)}%`
+                          : formatBytes(proc.mem_rss_mb)}
+                      </span>
+                      <span class="consumer-arrow"><ChevronRight size={13} /></span>
+                    </button>
+                  {/each}
+                </div>
+              {:else}
+                <span class="text-muted" style="font-size:11px;">Collecting process samples…</span>
+              {/if}
+            </Card>
+          </div>
+
+          <div class="resources-side">
+            <Card title="Memory & Swap" icon={MemoryStick} class="monitor-panel">
+              <div class="panel-scroll" style="gap:14px;">
+                <div class="metric-block">
+                  <div class="metric-row">
+                    <span>Memory</span>
+                    <strong>{stats.ram_percent.toFixed(1)}%</strong>
+                  </div>
+                  <div class="progress-bg">
+                    <div class="progress-fill ram-fill" style="width: {stats.ram_percent}%"></div>
+                  </div>
+                  <div class="mini-chart">
+                    <svg viewBox="0 0 200 30" preserveAspectRatio="none">
+                      <polyline points={generateSparklineStroke(ramHistory, 30, 200)} class="spark-stroke ram-stroke" />
+                    </svg>
+                  </div>
+                  <div class="metric-foot">
+                    <span>Used: {formatBytes(stats.ram_used_mb)}</span>
+                    <span>Total: {formatBytes(stats.ram_total_mb)}</span>
+                  </div>
+                </div>
+
+                {#if stats.swap_total_mb > 0}
+                  <div class="metric-block">
+                    <div class="metric-row">
+                      <span>Swap</span>
+                      <strong>{stats.swap_percent.toFixed(1)}%</strong>
+                    </div>
+                    <div class="progress-bg">
+                      <div class="progress-fill swap-fill" style="width: {stats.swap_percent}%"></div>
+                    </div>
+                    <div class="mini-chart">
+                      <svg viewBox="0 0 200 30" preserveAspectRatio="none">
+                        <polyline points={generateSparklineStroke(swapHistory, 30, 200)} class="spark-stroke swap-stroke" />
+                      </svg>
+                    </div>
+                    <div class="metric-foot">
+                      <span>Used: {formatBytes(stats.swap_used_mb)}</span>
+                      <span>Total: {formatBytes(stats.swap_total_mb)}</span>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="metric-row">
+                    <span>Swap</span>
+                    <span class="text-muted" style="font-size:11px;">Not configured</span>
+                  </div>
+                {/if}
+              </div>
+            </Card>
+
             <Card title="Disk I/O" icon={HardDrive} class="monitor-panel">
               <div class="panel-scroll" style="gap:10px;">
                 {#if diskIoStats.length > 0}
                   {#each diskIoStats as disk}
-                    <div style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; display:flex; flex-direction:column; gap:8px;">
-                      <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
-                        <div style="display:flex; align-items:center; gap:10px;">
-                          <div style="width:32px; height:32px; background: var(--color-module-icon-bg, var(--color-bg-raised)); border: 1px solid var(--color-border); border-radius: 6px; display:flex; align-items:center; justify-content:center; color:var(--color-accent);">
-                            <HardDrive size={16} />
-                          </div>
-                          <span style="font-weight:600; font-family:var(--font-mono); font-size:13px; color:var(--color-text-primary);">{disk.device}</span>
+                    <div class="disk-card">
+                      <div class="disk-head">
+                        <div class="disk-identity">
+                          <div class="disk-icon"><HardDrive size={16} /></div>
+                          <span class="disk-name">{disk.device}</span>
                         </div>
-                        <div style="display:flex; gap:16px;">
-                          <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                            <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; letter-spacing:0.05em;">READ</span>
-                            <strong style="color:var(--color-text-primary); font-size:12px; font-family:var(--font-mono);">{formatSpeed(diskIoSpeeds[disk.device]?.readSpeed || 0)}</strong>
+                        <div class="disk-speeds">
+                          <div class="disk-speed">
+                            <span>READ</span>
+                            <strong>{formatSpeed(diskIoSpeeds[disk.device]?.readSpeed || 0)}</strong>
                           </div>
-                          <div style="display:flex; flex-direction:column; align-items:flex-end;">
-                            <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; letter-spacing:0.05em;">WRITE</span>
-                            <strong style="color:var(--color-accent); font-size:12px; font-family:var(--font-mono);">{formatSpeed(diskIoSpeeds[disk.device]?.writeSpeed || 0)}</strong>
+                          <div class="disk-speed write">
+                            <span>WRITE</span>
+                            <strong>{formatSpeed(diskIoSpeeds[disk.device]?.writeSpeed || 0)}</strong>
                           </div>
                         </div>
                       </div>
-                      <div style="height:36px; width:100%; margin-top:4px; overflow:hidden;">
-                        <svg viewBox="0 0 300 36" preserveAspectRatio="none" style="width:100%; height:100%;">
+                      <div class="disk-chart">
+                        <svg viewBox="0 0 300 36" preserveAspectRatio="none">
                           <polyline
                             points={generateDynamicSparklineStroke(diskIoHistory[disk.device] || [], 36, 300)}
-                            style="stroke: var(--color-accent); stroke-width: 1.5px; fill: none; stroke-linejoin: round; stroke-linecap: round;"
+                            class="spark-stroke"
                           />
                         </svg>
                       </div>
                     </div>
                   {/each}
                 {:else}
-                  <span class="text-muted">Loading disk I/O metrics...</span>
+                  <span class="text-muted">Loading disk I/O metrics…</span>
                 {/if}
               </div>
             </Card>
@@ -1079,16 +1263,21 @@
                 {:else if smartReport && (smartReport.disks.length > 0 || smartReport.errors.length > 0)}
                   {#each smartReport.disks as disk}
                     {@const tone = smartHealthTone(disk.health_status)}
-                    <div style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; display:flex; flex-direction:column; gap:4px;">
-                      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-                        <span style="font-weight:600; font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary);">{disk.disk_path}</span>
-                        <span class="badge" style="font-size:10px; color:{tone === 'success' ? 'var(--color-success)' : tone === 'error' ? 'var(--color-error)' : 'var(--color-warning)'};">{disk.health_status}</span>
+                    <div class="smart-card">
+                      <div class="smart-head">
+                        <span class="smart-device">{disk.disk_path}</span>
+                        <span
+                          class="badge"
+                          style="font-size:10px; color:{tone === 'success' ? 'var(--color-success)' : tone === 'error' ? 'var(--color-error)' : 'var(--color-warning)'};"
+                        >
+                          {disk.health_status}
+                        </span>
                       </div>
                       <span class="text-muted" style="font-size:11px;">{disk.model}</span>
                     </div>
                   {/each}
                   {#each smartReport.errors as issue}
-                    <div role="alert" style="background: var(--color-bg-input); border: 1px solid var(--color-border); border-left: 3px solid var(--color-warning); border-radius: 8px; padding: 10px 12px; font-size:11px; color:var(--color-warning);">
+                    <div role="alert" class="smart-error">
                       {smartHealthIssueLabel(issue)}
                     </div>
                   {/each}
@@ -1098,135 +1287,143 @@
               </div>
             </Card>
           </div>
-          {/if}
+        </div>
+      {:else if statsError}
+        <div class="monitor-load-error" role="alert">
+          <span>Could not load system metrics: {statsError}</span>
+          <Button variant="outline" size="sm" onclick={() => pollStats()}>Retry</Button>
+        </div>
+      {:else}
+        <div class="loading-state">
+          <Loader size={24} class="animate-spin-slow" /> Loading system metrics...
+        </div>
+      {/if}
+    {/if}
 
-          <!-- COLUMN 2: Network & Connections -->
-          <Card title="Network & Connections" icon={Wifi} class="monitor-panel" style="display: flex; flex-direction: column; height: 100%; min-height: 0;">
-            {#snippet headerActions()}
-              {#if resourceSidebarCollapsed}
-                <button
-                  type="button"
-                  class="sidebar-collapse-toggle-btn expand-active"
-                  onclick={() => resourceSidebarCollapsed = false}
-                  title="Show Resource Usage Sidebar"
-                  aria-label="Show Resource Usage Sidebar"
+    {#if currentTab === 'network'}
+      {#if networkError}
+        <div class="monitor-load-error" style="flex:0 0 auto;" role="alert">
+          <span>Showing the last connections. Refresh failed: {networkError}</span>
+          <Button variant="outline" size="sm" onclick={() => pollNetwork()}>Retry</Button>
+        </div>
+      {/if}
+      <div class="network-grid">
+        <!-- Network & Connections -->
+        <Card title="Network & Connections" icon={Wifi} class="monitor-panel" style="display: flex; flex-direction: column; height: 100%; min-height: 0;">
+          {#snippet headerActions()}
+            <div class="iface-strip">
+              {#each shownInterfaces as iface}
+                {@const meta = interfaceMeta(iface.interface)}
+                <span
+                  class="iface-chip"
+                  title={`${iface.interface}${meta?.ip4 ? ` · ${meta.ip4}` : meta?.ip6 ? ` · ${meta.ip6}` : ''}`}
                 >
-                  <PanelLeftOpen size={13} />
-                  <span>Show Resources (CPU / Disks)</span>
-                </button>
-              {/if}
-            {/snippet}
-            <div style="display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0;">
-              <div>
-                <h4 style="margin: 0 0 8px; font-size: 10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--color-text-muted);">Interface Speeds</h4>
-                <div class="iface-speed-row">
-                  {#each shownInterfaces as iface}
-                    <div class="iface-speed-card">
-                      <div style="display:flex; align-items:center; gap:6px;">
-                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" style="color:var(--color-accent); flex-shrink:0;">
-                          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke-linecap="round" stroke-linejoin="round"/>
-                          <polyline points="22 4 12 14.01 9 11.01" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                        <span style="font-weight:600; font-family:var(--font-mono); font-size:12px; color:var(--color-text-primary);">{iface.interface}</span>
-                      </div>
-                      <div style="display:flex; align-items:center; gap:10px; font-size:10px; font-family:var(--font-mono);">
-                        <div>
-                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:2px;">DL</span>
-                          <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</strong>
-                        </div>
-                        <div>
-                          <span style="color:var(--color-text-muted); font-size:9px; font-weight:700; margin-right:2px;">UL</span>
-                          <strong style="color:var(--color-accent);">{formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</strong>
-                        </div>
-                      </div>
-                    </div>
-                  {/each}
-                  {#if shownInterfaces.length === 0}
-                    <span style="font-size:11px; color:var(--color-text-muted); font-style:italic;">No active network interfaces.</span>
+                  <span class="iface-dot"></span>
+                  <span class="iface-name">{iface.interface}</span>
+                  {#if meta?.ip4 || meta?.ip6}
+                    <span class="iface-ip">{meta.ip4 || meta.ip6}</span>
                   {/if}
-                </div>
-              </div>
-              <div style="display:flex; flex-direction:column; flex:1; min-height:0; gap:8px;">
-                <!-- Single Compact Toolbar Row: Title + Search Input + Filter Pills -->
-                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; margin-bottom: 2px;">
+                  <span class="iface-rates">
+                    <span title="Download">↓ {formatSpeed(networkSpeeds[iface.interface]?.rxSpeed || 0)}</span>
+                    <span title="Upload">↑ {formatSpeed(networkSpeeds[iface.interface]?.txSpeed || 0)}</span>
+                  </span>
+                </span>
+              {/each}
+              {#if shownInterfaces.length === 0}
+                <span class="iface-empty">No active interfaces</span>
+              {/if}
+            </div>
+          {/snippet}
+          <div style="display:flex; flex-direction:column; flex:1; min-height:0; gap:8px;">
+                <div class="network-toolbar">
                   <h4 style="margin: 0; font-size: 12px; color: var(--color-text-secondary); font-weight: 600; white-space: nowrap; flex-shrink: 0;">
-                    Connections <span style="font-size: 10px; color: var(--color-text-muted); font-weight: normal; margin-left: 2px;">({filteredConnections.length})</span>
+                    Connections
                   </h4>
 
-                  <!-- Connection Search Box -->
-                  <div style="flex: 1; min-width: 130px;">
+                  <div class="conn-search">
                     <input
                       type="text"
-                      placeholder="Search IP, port, PID, process..."
+                      placeholder="Search IP, port, PID, process…"
+                      aria-label="Search connections by IP, port, PID, or process"
                       bind:value={connSearch}
-                      style="width: 100%; background: var(--color-bg-surface); border: 1px solid var(--color-border); padding: 4px 8px; border-radius: 6px; font-size: 11px; color: var(--color-text-primary); outline: none;"
                     />
                   </div>
 
-                  <!-- Connection Filter Pills -->
-                  <div style="display: flex; gap: 3px; font-size: 10px; flex-shrink: 0;">
-                    <button
-                      onclick={() => connFilter = 'all'}
-                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'all' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'all' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
-                    >
-                      All ({activeConnections.length})
-                    </button>
-                    <button
-                      onclick={() => connFilter = 'listen'}
-                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'listen' ? 'var(--color-warning)' : 'var(--color-bg-hover)'}; color:{connFilter === 'listen' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
-                    >
-                      Listen ({connListenCount})
-                    </button>
-                    <button
-                      onclick={() => connFilter = 'estab'}
-                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'estab' ? 'var(--color-success)' : 'var(--color-bg-hover)'}; color:{connFilter === 'estab' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
-                    >
-                      Estab ({connEstabCount})
-                    </button>
-                    <button
-                      onclick={() => connFilter = 'external'}
-                      style="padding: 2px 7px; border-radius: 4px; border: none; cursor: pointer; background:{connFilter === 'external' ? 'var(--color-accent)' : 'var(--color-bg-hover)'}; color:{connFilter === 'external' ? 'var(--color-text-on-accent)' : 'var(--color-text-secondary)'}; font-weight: 600; transition: all 0.15s;"
-                    >
-                      External
-                    </button>
-                  </div>
+                  <FilterChips
+                    options={connFilterOptions}
+                    bind:value={connFilter}
+                    label="Filter connections"
+                    style="flex-shrink:0;"
+                  />
+                  <span class="network-count">
+                    {filteredConnections.length} shown
+                  </span>
                 </div>
 
                 <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--color-border); border-radius: 8px;">
-                  <Table tableAction={tableFeatures} class="active-conn-table" style="flex: 1; min-height: 0; overflow-y: auto;">
+                  <Table
+                    tableAction={tableFeatures}
+                    actionParams={{ sortable: false }}
+                    class="active-conn-table"
+                    style="flex: 1; min-height: 0; overflow-y: auto;"
+                  >
                     <thead>
                       <tr>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Proto</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Local</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Remote</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">State</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">PID</th>
-                        <th style="padding:6px; text-align:left; color:var(--color-text-secondary); cursor:pointer;">Process</th>
-                        <th style="padding:6px; text-align:right; color:var(--color-text-secondary);">Action</th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('protocol')}>
+                          <div class="th-content">Proto <span class="th-sort-icon">{connSortKey === 'protocol' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('local')}>
+                          <div class="th-content">Local <span class="th-sort-icon">{connSortKey === 'local' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('remote')}>
+                          <div class="th-content">Remote <span class="th-sort-icon">{connSortKey === 'remote' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('state')}>
+                          <div class="th-content">State <span class="th-sort-icon">{connSortKey === 'state' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('pid')}>
+                          <div class="th-content">PID <span class="th-sort-icon">{connSortKey === 'pid' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="sortable-th" onclick={() => toggleConnSort('process')}>
+                          <div class="th-content">Process <span class="th-sort-icon">{connSortKey === 'process' ? (connSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                        </th>
+                        <th class="col-actions" aria-label="Actions"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {#each filteredConnections as conn}
+                      {#each filteredConnections as conn (conn.protocol + conn.local_address + conn.remote_address + (conn.pid ?? ''))}
                         {@const isListen = conn.state && conn.state.toLowerCase().includes('listen')}
-                        <tr 
+                        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                        <tr
+                          tabindex="0"
                           style="border-bottom:1px solid var(--color-border-subtle); cursor: pointer; background: {isListen ? 'rgba(245, 158, 11, 0.04)' : 'transparent'};"
                           onclick={() => openConnectionDetails(conn)}
                           oncontextmenu={(e) => handleConnectionContextMenu(e, conn)}
+                          onkeydown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              openConnectionDetails(conn);
+                            }
+                          }}
                         >
                           <td style="padding:6px; color:var(--color-text-primary); font-family:var(--font-mono); font-size:11px;">{conn.protocol}</td>
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.local_address}>
-                            {conn.local_address}
+                            {formatEndpoint(conn.local_host, conn.local_port)}
                           </td>
                           <td style="padding:6px; color:var(--color-text-primary); word-break:break-all; font-family:var(--font-mono); font-size:11px;" title={conn.remote_address}>
-                            {conn.remote_address}
+                            {formatEndpoint(conn.remote_host, conn.remote_port)}
                           </td>
                           <td style="padding:6px;">
-                            <span style="font-size:10px; font-weight:700; padding:1px 5px; border-radius:4px; font-family:var(--font-mono); background:{isListen ? 'var(--color-warning-muted, rgba(245,158,11,0.15))' : 'var(--color-success-muted, rgba(34,197,94,0.15))'}; color:{isListen ? 'var(--color-warning)' : 'var(--color-success)'};">
-                              {conn.state}
-                            </span>
+                            <Badge variant={connectionStateVariant(conn.state)}>{conn.state}</Badge>
                           </td>
                           <td style="padding:6px; color:var(--color-text-muted); font-family:var(--font-mono); font-size:11px;">{conn.pid || '-'}</td>
-                          <td style="padding:6px; color:var(--color-text-secondary); font-size:11px;">{conn.process_name}</td>
+                          <td style="padding:6px; color:var(--color-text-secondary); font-size:11px;">
+                            {#if conn.process_name && conn.process_name !== 'N/A'}
+                              {conn.process_name}
+                            {:else}
+                              <span style="color:var(--color-text-muted);" title="The socket owner is only visible with administrator access">—</span>
+                            {/if}
+                          </td>
                           <td style="padding:6px; text-align:right;" onclick={(e) => e.stopPropagation()}>
                             <KebabMenu align="right">
                               <button
@@ -1239,6 +1436,10 @@
                               {#if conn.pid}
                                 <button
                                   class="menu-item danger"
+                                  disabled={!canSignalPid(conn.pid)}
+                                  title={canSignalPid(conn.pid)
+                                    ? 'Terminate the owning process'
+                                    : 'This process belongs to another user; administrator rights are required.'}
                                   onclick={() => killProcess(conn.pid, conn.process_name)}
                                 >
                                   <Skull size={14} style="color: var(--color-error);" />
@@ -1259,52 +1460,57 @@
                     </tbody>
                   </Table>
                 </div>
-              </div>
-            </div>
+          </div>
           </Card>
-        </div>
-      {:else if statsError}
-        <div class="monitor-load-error" role="alert">
-          <span>Could not load system metrics: {statsError}</span>
-          <Button variant="outline" size="sm" onclick={() => pollLeftAndCenter()}>Retry</Button>
-        </div>
-      {:else}
-        <div class="loading-state">
-          <Loader size={24} class="animate-spin-slow" /> Loading system metrics...
-        </div>
-      {/if}
-    {:else}
+      </div>
+    {/if}
+
+    {#if currentTab === 'processes'}
       <!-- Processes Tab (Pure Tree View) -->
       <div class="table-container" style="flex:1; min-height:0; display:flex; flex-direction:column;">
-        <div class="table-toolbar" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--color-bg-card);">
-          <!-- Left: Search Box -->
-          <div class="search-box" style="flex:1; min-width:240px; max-width:340px; position:relative;">
-            <input type="text" placeholder="Search processes by name, PID, or user..." bind:value={processSearch} />
+        <div class="table-toolbar process-toolbar">
+          <div class="search-box process-search">
+            <input
+              type="text"
+              placeholder="Search name, PID, or user…"
+              aria-label="Search processes by name, PID, or user"
+              bind:value={processSearch}
+            />
           </div>
 
-          <!-- Middle: Expand / Collapse Actions -->
-          <div style="display:flex; align-items:center; gap:6px;">
+          <FilterChips
+            options={processFilterOptions}
+            bind:value={processFilter}
+            label="Filter processes"
+            style="flex-shrink:0;"
+          />
+
+          <div class="process-tree-actions">
             <button
               type="button"
-              class="toolbar-tree-btn"
+              class="toolbar-icon-btn"
               onclick={expandAllTree}
-              title="Expand all process branches"
+              title="Expand all branches"
+              aria-label="Expand all branches"
             >
-              Expand All
+              <UnfoldVertical size={14} />
             </button>
             <button
               type="button"
-              class="toolbar-tree-btn"
+              class="toolbar-icon-btn"
               onclick={collapseAllTree}
-              title="Collapse all process branches"
+              title="Collapse all branches"
+              aria-label="Collapse all branches"
             >
-              Collapse All
+              <FoldVertical size={14} />
             </button>
           </div>
 
-          <!-- Right: Process Stats -->
-          <div class="toolbar-stats" style="font-size:12px; color:var(--color-text-muted);">
-            Showing <strong>{treeVisibleProcesses.length}</strong> processes ({processes.length} total)
+          <div
+            class="toolbar-stats"
+            title={`${treeVisibleProcesses.length} visible of ${filteredProcesses.length} matching (${processes.length} loaded)`}
+          >
+            {treeVisibleProcesses.length} / {filteredProcesses.length}
           </div>
         </div>
 
@@ -1350,7 +1556,7 @@
                 class:depth-3={item.depth >= 3}
                 onclick={() => item.hasChildren ? toggleTreeExpand(p.pid) : undefined}
                 oncontextmenu={(e) => handleProcContextMenu(e, p)}
-                style="cursor: {item.hasChildren ? 'pointer' : 'default'};"
+                style="cursor: {item.hasChildren ? 'pointer' : 'default'}; height: {procRowHeight}px;"
               >
                 <td class="col-pid" onclick={(e) => e.stopPropagation()}>
                   <div class="pid-badge-container">
@@ -1437,14 +1643,25 @@
                       Inspect Details
                     </button>
                     {#if p.pid > 100}
-                      <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 15, p.name)}>
-                        <Skull size={14} style="color: var(--color-error);" />
-                        Soft Kill (SIGTERM)
-                      </button>
-                      <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 9, p.name)}>
-                        <Skull size={14} style="color: var(--color-error);" />
-                        Force Kill (SIGKILL)
-                      </button>
+                      {#if canManageProcess(p)}
+                        <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 15, p.name)}>
+                          <Skull size={14} style="color: var(--color-error);" />
+                          Soft Kill (SIGTERM)
+                        </button>
+                        <button class="menu-item danger" onclick={() => sendProcessSignal(p.pid, 9, p.name)}>
+                          <Skull size={14} style="color: var(--color-error);" />
+                          Force Kill (SIGKILL)
+                        </button>
+                      {:else}
+                        <button
+                          class="menu-item"
+                          disabled
+                          title="This process belongs to another user; administrator rights are required."
+                        >
+                          <Skull size={14} style="color: var(--color-text-muted);" />
+                          Signals need administrator
+                        </button>
+                      {/if}
                     {/if}
                   </KebabMenu>
                 </td>
@@ -1483,7 +1700,10 @@
         }
         closeContextMenu();
       }}
-      disabled={!contextMenu.conn.pid}
+      disabled={!canSignalPid(contextMenu.conn.pid)}
+      title={canSignalPid(contextMenu.conn.pid)
+        ? 'Terminate the owning process'
+        : 'This process belongs to another user; administrator rights are required.'}
     >
       <Skull size={13} style="margin-right: 8px; color: var(--color-error);" />
       Kill Process
@@ -1646,17 +1866,23 @@
                   </div>
                 </div>
                 
-                <div style="margin-top: 12px; display:flex; justify-content:flex-end;">
-                  <Button 
-                    variant="danger" 
-                    size="sm"
-                    onclick={() => {
-                      isDrawerOpen = false;
-                      killProcess(detailedProcess.pid, detailedProcess.name);
-                    }}
-                  >
-                    <Skull size={13} style="margin-right: 4px;" /> Kill Process
-                  </Button>
+                <div style="margin-top: 12px; display:flex; justify-content:flex-end; align-items:center; gap:8px;">
+                  {#if detailedProcess.owned === false}
+                    <span style="font-size:11px; color:var(--color-warning);">
+                      Another user owns this process; killing it needs administrator rights.
+                    </span>
+                  {:else}
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onclick={() => {
+                        isDrawerOpen = false;
+                        killProcess(detailedProcess.pid, detailedProcess.name);
+                      }}
+                    >
+                      <Skull size={13} style="margin-right: 4px;" /> Kill Process
+                    </Button>
+                  {/if}
                 </div>
               </div>
             {:else}
@@ -1720,9 +1946,12 @@
             <button
               type="button"
               class="action-btn danger"
-              style="font-size:11px; display:flex; align-items:center; gap:4px; padding:4px 9px; border-radius:6px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); color:var(--color-error); cursor:pointer; font-weight:600;"
+              style="font-size:11px; display:flex; align-items:center; gap:4px; padding:4px 9px; border-radius:6px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); color:var(--color-error); cursor:{inspectedProcess.owned === false ? 'not-allowed' : 'pointer'}; font-weight:600; opacity:{inspectedProcess.owned === false ? 0.45 : 1};"
               onclick={() => killProcessTree(inspectedProcess.pid, inspectedProcess.name)}
-              title="Terminate parent process and all {inspectedChildProcesses.length} sub-processes"
+              disabled={inspectedProcess.owned === false}
+              title={inspectedProcess.owned === false
+                ? 'This process belongs to another user; administrator rights are required.'
+                : `Terminate parent process and all ${inspectedChildProcesses.length} sub-processes`}
             >
               <Skull size={12} /> Kill Tree ({inspectedChildProcesses.length + 1})
             </button>
@@ -1810,7 +2039,15 @@
         <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--color-text-muted); margin-bottom:10px;">
           Process Signals
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+        {#if inspectedProcess.owned === false}
+          <p style="margin:0 0 10px; font-size:11px; color:var(--color-warning);">
+            This process belongs to another user. Signals and priority changes need administrator rights.
+          </p>
+        {/if}
+        <fieldset
+          disabled={inspectedProcess.owned === false}
+          style="display:grid; grid-template-columns:1fr 1fr; gap:8px; border:none; margin:0; padding:0; min-width:0;"
+        >
           <button
             type="button"
             class="sig-btn"
@@ -1856,7 +2093,7 @@
           >
             <Skull size={14} /> Force Kill (SIGKILL)
           </button>
-        </div>
+        </fieldset>
       </div>
 
       <!-- Priority / Niceness Adjustment -->
@@ -1871,11 +2108,17 @@
             type="range" 
             min={PROCESS_PRIORITY_MIN}
             max={PROCESS_PRIORITY_MAX}
-            bind:value={inspectedProcessPriority} 
-            style="flex:1; accent-color:var(--color-accent); cursor:pointer;"
+            bind:value={inspectedProcessPriority}
+            disabled={inspectedProcess.owned === false}
+            style="flex:1; accent-color:var(--color-accent); cursor:{inspectedProcess.owned === false ? 'not-allowed' : 'pointer'};"
           />
           <span style="font-size:11px; color:var(--color-text-muted);">+19 (Idle)</span>
-          <Button variant="primary" style="padding: 4px 10px; font-size:11px; flex-shrink:0;" onclick={applyRenice} disabled={renicing}>
+          <Button
+            variant="primary"
+            style="padding: 4px 10px; font-size:11px; flex-shrink:0;"
+            onclick={applyRenice}
+            disabled={renicing || inspectedProcess.owned === false}
+          >
             {renicing ? 'Applying…' : 'Set Priority'}
           </Button>
         </div>
@@ -1951,37 +2194,95 @@
     height: 200px;
     color: var(--color-text-muted);
     font-size: 14px;
-  }/* Interface speed cards: one fixed height so a long interface name can never
-   stretch the row. Scoped to this page by design. */
-  .iface-speed-row {
+  }/* Interface speeds sit in the card header as compact chips. */
+  .iface-strip {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
     flex-wrap: wrap;
-    width: 100%;
-    align-items: flex-start;
+    min-width: 0;
   }
-  .iface-speed-card {
-    flex: 1 1 180px;
-    min-width: 180px;
-    height: 32px;
-    box-sizing: border-box;
-    overflow: hidden;
+  .iface-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
     background: var(--color-bg-input);
     border: 1px solid var(--color-border);
     border-radius: 6px;
-    padding: 6px 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .iface-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    flex-shrink: 0;
+  }
+  .iface-name {
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--color-text-primary);
+  }
+  .iface-ip {
+    color: var(--color-text-muted);
+    font-size: 9.5px;
+  }
+  .iface-rates {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
+    color: var(--color-accent);
+    font-size: 9.5px;
   }
-  .iface-speed-card > div {
-    min-width: 0;
+  .iface-rates span {
     white-space: nowrap;
   }
-  .iface-speed-card span {
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .iface-empty {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+  .network-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    flex-shrink: 0;
+  }
+  .conn-search {
+    flex: 1 1 220px;
+    min-width: 160px;
+    max-width: 340px;
+  }
+  .conn-search input {
+    width: 100%;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--color-text-primary);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .conn-search input:focus {
+    border-color: var(--color-accent);
+  }
+  .network-count {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
   .page-content {
     flex: 1;
@@ -1992,71 +2293,426 @@
     padding: 2px 8px 6px 8px;
     overflow: hidden;
   }
-  /* 2-column layout */ .monitor-layout {
-    display: grid;
-    grid-template-columns: minmax(260px, 4fr) minmax(0, 10fr);
-    gap: 10px;
-    align-items: stretch;
-    height: 100%;
-    min-height: 0;
-    width: 100%;
-    transition: grid-template-columns 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }.monitor-layout.resources-collapsed {
-    grid-template-columns: minmax(0, 1fr);
-  }.sidebar-collapse-toggle-btn {
+  .live-status {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 6px;
-    border-radius: 5px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--color-border);
+    gap: 6px;
+    margin-right: 10px;
+    font-size: 11px;
     color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-success);
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
+  }
+  .live-dot.paused {
+    background: var(--color-warning);
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
+  }
+  .live-time {
+    font-family: var(--font-mono);
+  }
+  .resources-columns {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: 10px;
+    align-items: start;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .resources-main,
+  .resources-side {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+  .resources-columns :global(.monitor-panel) {
+    height: auto;
+    min-height: 0;
+  }
+  .network-grid {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .network-grid :global(.monitor-panel) {
+    flex: 1;
+    min-height: 0;
+  }
+  @media (max-width: 1100px) {
+    .resources-columns {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .live-status {
+      display: none;
+    }
+  }
+  .cpu-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .metric-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .cpu-summary-values {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+  }
+  .cpu-summary-values strong {
+    font-size: 16px;
+    color: var(--color-text-primary);
+  }
+  .temp-badge {
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
     font-size: 11px;
     font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    user-select: none;
-  }.sidebar-collapse-toggle-btn:hover {
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-    transform: translateY(-0.5px);
-  }.sidebar-collapse-toggle-btn.expand-active {
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.1));
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-    font-weight: 600;
-    padding: 0 8px;
-  }:global(html.light-mode) .sidebar-collapse-toggle-btn {
-    background: #F1F5F9;
-    border-color: #CBD5E1;
-    color: #475569;
-  }:global(html.light-mode) .sidebar-collapse-toggle-btn:hover, :global(html.light-mode) .sidebar-collapse-toggle-btn.expand-active {
-    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
-    border-color: var(--color-accent);
-    color: var(--color-accent);
-  }.monitor-column-left {
-    /* One scroll owner (this column) with explicit floors: every row is at
-       least its content, then shares the leftover by weight — a content-sized
-       sibling can no longer push another panel to zero height. */
-    display: grid;
-    grid-template-rows: minmax(min-content, 1.5fr) minmax(min-content, 1fr) minmax(min-content, 0.8fr);
-    gap: 10px;
+  }
+  .temp-badge.warm {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--color-warning);
+  }
+  .temp-badge.hot {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--color-error);
+  }
+  .cpu-chart {
+    height: 70px;
+    padding: 4px;
+    background: var(--color-bg-surface);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .cpu-chart svg {
+    width: 100%;
     height: 100%;
-    min-height: 0;
-    overflow-y: auto;
-  }.monitor-column-left :global(.monitor-panel) {
-    /* grid stretches a card to its row; min-height:auto keeps the row's
-       min-content floor honest (the shared rule sets 0) */
-    height: auto;
-    min-height: auto;
-  }:global(.active-conn-table table thead th) {
+  }
+  .load-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .core-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
+    gap: 6px;
+  }
+  .core-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 5px 7px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 6px;
+  }
+  .core-head {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+  }
+  .core-head strong {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }
+  .core-bar {
+    height: 4px;
+    background: var(--color-bg-hover);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .core-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--color-accent);
+    transition: width 0.3s ease;
+  }
+  .core-tile.warm .core-bar span {
+    background: var(--color-warning);
+  }
+  .core-tile.hot .core-bar span {
+    background: var(--color-error);
+  }
+  .core-tile.warm .core-head strong {
+    color: var(--color-warning);
+  }
+  .core-tile.hot .core-head strong {
+    color: var(--color-error);
+  }
+  .metric-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .metric-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .metric-row strong {
+    font-family: var(--font-mono);
+  }
+  .metric-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .mini-chart {
+    height: 30px;
+    padding: 2px;
+    background: var(--color-bg-surface);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .mini-chart svg {
+    width: 100%;
+    height: 100%;
+  }
+  .ram-stroke {
+    stroke: var(--color-accent);
+    fill: none;
+  }
+  .swap-stroke {
+    stroke: var(--color-warning, #f59e0b);
+    fill: none;
+  }
+  .consumer-switch {
+    display: inline-flex;
+    align-self: flex-start;
+    gap: 2px;
+    padding: 2px;
+    margin-bottom: 8px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+  }
+  .consumer-switch button {
+    padding: 3px 8px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .consumer-switch button.active {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+  .consumer-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .consumer-row {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto auto 14px;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 4px;
+    border: none;
+    border-bottom: 1px solid var(--color-border-subtle);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .consumer-row:last-child {
+    border-bottom: none;
+  }
+  .consumer-row:hover {
+    background: var(--color-bg-hover);
+  }
+  .consumer-rank {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+    text-align: right;
+  }
+  .consumer-name {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .consumer-pid {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+  .consumer-value {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-info);
+    white-space: nowrap;
+  }
+  .consumer-value.mem {
+    color: var(--color-accent);
+  }
+  .consumer-arrow {
+    color: var(--color-text-muted);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  .consumer-row:hover .consumer-arrow {
+    opacity: 1;
+  }
+  .link-btn {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--color-accent);
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+  .disk-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+  .disk-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .disk-identity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .disk-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    background: var(--color-module-icon-bg, var(--color-bg-raised));
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    color: var(--color-accent);
+  }
+  .disk-name {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .disk-speeds {
+    display: flex;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  .disk-speed {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .disk-speed > span {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+  .disk-speed strong {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .disk-speed.write strong {
+    color: var(--color-accent);
+  }
+  .disk-chart {
+    height: 36px;
+    overflow: hidden;
+  }
+  .disk-chart svg {
+    width: 100%;
+    height: 100%;
+  }
+  .disk-chart polyline {
+    fill: none;
+    stroke: var(--color-accent);
+  }
+  .smart-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+  }
+  .smart-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .smart-device {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .smart-error {
+    padding: 10px 12px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-warning);
+    border-radius: 8px;
+    font-size: 11px;
+    color: var(--color-warning);
+  }
+  :global(.active-conn-table table thead th) {
     position: sticky;
     top: 0;
     z-index: 10;
     background: var(--color-bg-card);
+  }
+  /* Leave the floating density pills room over the empty Actions header. */
+  :global(.active-conn-table th:last-child),
+  :global(.active-conn-table td:last-child) {
+    width: 84px;
   }:global(.monitor-panel) {
     display: flex;
     flex-direction: column;
@@ -2089,44 +2745,65 @@
     overflow: hidden;
     min-height: 0;
   }.table-toolbar {
-    padding: 12px 16px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--color-border);
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
     background: var(--color-surface-elevated, rgba(0,0,0,0.1));
+  }.process-search {
+    flex: 1 1 220px;
+    min-width: 180px;
+    max-width: 340px;
+    position: relative;
   }.search-box input {
     background: var(--color-surface, rgba(255, 255, 255, 0.05));
     border: 1px solid var(--color-border);
     color: var(--color-text-primary);
-    padding: 6px 12px;
+    padding: 5px 10px;
     border-radius: 6px;
     font-size: 12px;
-    width: 300px;
+    width: 100%;
     outline: none;
     transition: all 0.2s;
-  }.search-box input:focus { border-color: var(--color-accent); }.toolbar-stats { font-size: 12px; color: var(--color-text-muted); }.toolbar-tree-btn {
+  }.search-box input:focus { border-color: var(--color-accent); }.process-tree-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }.toolbar-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-weight: 600;
-    padding: 4px 10px;
     border-radius: 6px;
+    color: var(--color-text-secondary);
     cursor: pointer;
     transition: all 0.15s ease;
-  }.toolbar-tree-btn:hover {
+  }.toolbar-icon-btn:hover {
     background: rgba(59, 130, 246, 0.12);
     color: var(--color-accent);
     border-color: rgba(59, 130, 246, 0.4);
-  }:global(html.light-mode) .toolbar-tree-btn {
+  }:global(html.light-mode) .toolbar-icon-btn {
     background: #FFFFFF;
     border-color: #CBD5E1;
     color: #475569;
-  }:global(html.light-mode) .toolbar-tree-btn:hover {
+  }:global(html.light-mode) .toolbar-icon-btn:hover {
     background: #EFF6FF;
     border-color: #93C5FD;
     color: #2563EB;
+  }.toolbar-stats {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
   }/* ── Process Tree Hierarchy Styles ─────────────────────────────────── */ .tree-row {
     transition: background 0.15s ease, border-color 0.15s ease;
     position: relative;

@@ -11,9 +11,7 @@
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
-  import KpiCard from '../components/ui/KpiCard.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
-  import FilterChips from '../components/ui/FilterChips.svelte';
   import Select from '../components/ui/Select.svelte';
   import Button from '../components/ui/Button.svelte';
   import Stepper from '../components/ui/Stepper.svelte';
@@ -107,6 +105,7 @@
   // Loading and State
   let loading = $state(true);
   let refreshing = $state(false);
+  let fleetError = $state<string | null>(null);
   let showEcosystemDiffModal = $state(false);
   let systemStatus = $state<Pm2SystemStatus | null>(null);
   let processes = $state<Pm2Process[]>([]);
@@ -123,12 +122,6 @@
   // Filters & Search
   let searchQuery = $state('');
   let statusFilter = $state<'all' | 'online' | 'stopped' | 'errored'>('all');
-  const statusFilters = [
-    { id: 'all', label: 'All' },
-    { id: 'online', label: 'Online' },
-    { id: 'stopped', label: 'Stopped' },
-    { id: 'errored', label: 'Errored' },
-  ] as const;
   let envSearchQuery = $state('');
 
   // Copy Feedback
@@ -204,18 +197,13 @@
   // Timers
   let refreshTimer: any = null;
   let logStreamTimer: any = null;
+  let processesInFlight = false;
 
   // Aggregate Metrics Computed
   let totalApps = $derived(processes.length);
   let onlineApps = $derived(processes.filter(p => p.status === 'online').length);
   let stoppedApps = $derived(processes.filter(p => p.status === 'stopped').length);
   let erroredApps = $derived(processes.filter(p => p.status === 'errored').length);
-  const statusCounts = $derived({
-    all: processes.length,
-    online: onlineApps,
-    stopped: stoppedApps,
-    errored: erroredApps,
-  });
   let totalMemoryBytes = $derived(processes.reduce((acc, p) => acc + (p.memory || 0), 0));
   let totalCpuPercent = $derived(processes.reduce((acc, p) => acc + (p.cpu || 0), 0));
 
@@ -237,14 +225,11 @@
     })
   );
 
-  // Active Selected Process in Detail View
+  // Selected process must belong to the current filter, otherwise the detail
+  // pane would show an app the list says is filtered out.
   let selectedProcess = $derived.by<Pm2Process | null>(() => {
-    if (selectedProcessId === null) {
-      return filteredProcesses.length > 0 ? filteredProcesses[0] : (processes.length > 0 ? processes[0] : null);
-    }
-    const found = processes.find(p => p.pm_id === selectedProcessId);
-    if (found) return found;
-    return filteredProcesses.length > 0 ? filteredProcesses[0] : (processes.length > 0 ? processes[0] : null);
+    if (filteredProcesses.length === 0) return null;
+    return filteredProcesses.find(p => p.pm_id === selectedProcessId) ?? filteredProcesses[0];
   });
 
   // Filtered Environment Variables
@@ -347,40 +332,80 @@
     });
   }
 
-  // Load all PM2 Data
+  /** Merge the live process list into the saved dump metadata. */
+  function mergeSavedDumpState(list: Pm2SavedDumpApp[]): Pm2SavedDumpApp[] {
+    return list.map((app) => {
+      const match = processes.find(
+        (proc) =>
+          proc.name === app.name ||
+          (!!app.script_path && proc.script_path === app.script_path)
+      );
+      return {
+        ...app,
+        is_currently_running: match?.status === 'online',
+        current_pm_id: match?.pm_id,
+      };
+    });
+  }
+
+  /** Cheap telemetry refresh: only the live process list. */
+  async function loadProcesses(silent = true) {
+    if (processesInFlight) return;
+    processesInFlight = true;
+    try {
+      const procList = await invoke<Pm2Process[]>('pm2_list_processes');
+      processes = procList;
+      fleetError = null;
+      if (procList.length > 0) {
+        if (selectedProcessId === null || !procList.some((p) => p.pm_id === selectedProcessId)) {
+          selectedProcessId = procList[0].pm_id;
+        }
+      } else {
+        selectedProcessId = null;
+      }
+      if (savedDumpApps.length > 0) {
+        savedDumpApps = mergeSavedDumpState(savedDumpApps);
+      }
+    } catch (err: any) {
+      fleetError = err?.message || String(err);
+      if (!silent) throw err;
+    } finally {
+      processesInFlight = false;
+    }
+  }
+
+  /** Slower data: ecosystem files, startup service and saved dump. */
+  async function loadAuxiliary() {
+    const [ecoList, startStatus, savedList] = await Promise.all([
+      invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => []),
+      invoke<Pm2StartupStatus>('pm2_get_startup_status').catch(() => null),
+      invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => [])
+    ]);
+    ecosystemFiles = ecoList;
+    startupStatus = startStatus;
+    savedDumpApps = mergeSavedDumpState(savedList);
+
+    if (ecoList.length > 0 && !selectedEcosystemFile) {
+      selectEcosystemFile(ecoList[0]);
+    }
+  }
+
+  // Full load: status once, processes, then the slower ecosystem/dump data.
   async function loadData(silent = false) {
     if (!silent) refreshing = true;
     try {
       const status = await invoke<Pm2SystemStatus>('pm2_get_system_status');
       systemStatus = status;
-
       if (status.installed) {
-        const [procList, ecoList, startStatus, savedList] = await Promise.all([
-          invoke<Pm2Process[]>('pm2_list_processes').catch(() => []),
-          invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => []),
-          invoke<Pm2StartupStatus>('pm2_get_startup_status').catch(() => null),
-          invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => [])
-        ]);
-        processes = procList;
-        ecosystemFiles = ecoList;
-        startupStatus = startStatus;
-        savedDumpApps = savedList;
-
-        // Auto-select first process if none selected or selected was removed
-        if (procList.length > 0) {
-          if (selectedProcessId === null || !procList.some(p => p.pm_id === selectedProcessId)) {
-            selectedProcessId = procList[0].pm_id;
-          }
-        } else {
-          selectedProcessId = null;
-        }
-
-        if (ecoList.length > 0 && !selectedEcosystemFile) {
-          selectEcosystemFile(ecoList[0]);
-        }
+        await loadProcesses(false);
+        await loadAuxiliary();
       }
     } catch (err: any) {
-      uiStore.showToast(err.message || 'Failed to communicate with PM2', 'error');
+      if (!silent) {
+        uiStore.showToast(err.message || 'Failed to communicate with PM2', 'error');
+      } else {
+        fleetError = err?.message || String(err);
+      }
     } finally {
       loading = false;
       refreshing = false;
@@ -395,7 +420,7 @@
         target: target.toString()
       });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadProcesses(false);
       if (activeTab === 'fleet' && selectedInspectorTab === 'logs') {
         loadLogs();
       }
@@ -408,7 +433,7 @@
     try {
       const msg = await invoke<string>('pm2_save_dump');
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to save PM2 dump', 'error');
     }
@@ -418,7 +443,8 @@
     try {
       const msg = await invoke<string>('pm2_resurrect_dump');
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to resurrect PM2 dump', 'error');
     }
@@ -433,10 +459,13 @@
         execMode: app.exec_mode || null,
         instances: app.instances || null,
         watch: app.watch || null,
-        args: app.args && app.args.length > 0 ? app.args : null
+        maxMemoryRestart: app.max_memory_restart || null,
+        args: app.args && app.args.length > 0 ? app.args : null,
+        envVars: app.env_vars && Object.keys(app.env_vars).length > 0 ? app.env_vars : null
       });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || `Failed to start saved app ${app.name}`, 'error');
     }
@@ -446,7 +475,7 @@
     try {
       const msg = await invoke<string>('pm2_delete_saved_app', { name });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || `Failed to delete ${name} from dump`, 'error');
     }
@@ -550,8 +579,8 @@
     }
   }
 
-  // Select a process in the Master list (1-click opens details drawer)
-  function handleSelectProcess(id: number, openDrawer = true) {
+  // Select a process for the live log pane. The details drawer is explicit.
+  function handleSelectProcess(id: number, openDrawer = false) {
     selectedProcessId = id;
     if (openDrawer) {
       showProcessDrawer = true;
@@ -593,7 +622,8 @@
       uiStore.showToast(msg, 'success');
       showLaunchModal = false;
       resetLaunchForm();
-      await loadData(true);
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to start process', 'error');
     }
@@ -778,7 +808,8 @@
         envName: null
       });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to start ecosystem file', 'error');
     }
@@ -867,7 +898,7 @@
       });
       uiStore.showToast('Ecosystem configuration created successfully', 'success');
       showNewEcosystemModal = false;
-      await loadData(true);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to create ecosystem file', 'error');
     }
@@ -879,7 +910,9 @@
     // 3s Live Telemetry Refresh
     refreshTimer = setInterval(() => {
       if (systemStatus?.installed && activeTab === 'fleet') {
-        loadData(true);
+        // Only live telemetry; ecosystem scans and systemctl do not belong on
+        // a three-second loop.
+        loadProcesses(true);
       }
     }, 3000);
 
@@ -943,8 +976,15 @@
         { id: 'daemon', label: 'Daemon & Saved Apps', count: savedDumpApps.length }
       ]}
       bind:activeTab
-      onchange={(t: any) => {
-        if (t === 'fleet' && selectedInspectorTab === 'logs') loadLogs();
+      onchange={async (t: string) => {
+        if (t === 'fleet') {
+          if (selectedInspectorTab === 'logs') loadLogs();
+        } else if (t === 'daemon') {
+          await loadProcesses(true);
+          await loadAuxiliary();
+        } else if (t === 'ecosystem') {
+          await loadAuxiliary();
+        }
       }}
     />
 
@@ -963,42 +1003,113 @@
   </div>
 
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
-  <!-- 3. TOP TELEMETRY KPI CARDS BANNER -->
+  <!-- 3. COMPACT FLEET HEALTH STRIP -->
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
   {#if systemStatus?.installed}
-    <div class="kpi-grid">
-      <KpiCard
-        icon={Layers}
-        value={totalApps}
-        label="Managed Apps"
-        subtext="{onlineApps} running"
-        statusType="info"
-      />
+    <div class="fleet-strip">
+      <div class="fleet-status-group" role="group" aria-label="Filter processes by status">
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'all'}
+          aria-pressed={statusFilter === 'all'}
+          onclick={() => statusFilter = 'all'}
+          title="Show every process"
+        >
+          <Layers size={13} />
+          <strong>{totalApps}</strong>
+          <span>Apps</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'online'}
+          aria-pressed={statusFilter === 'online'}
+          onclick={() => statusFilter = 'online'}
+          title="Show online processes"
+        >
+          <span class="status-dot online"></span>
+          <strong>{onlineApps}</strong>
+          <span>Online</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'stopped'}
+          aria-pressed={statusFilter === 'stopped'}
+          onclick={() => statusFilter = 'stopped'}
+          title="Show stopped processes"
+        >
+          <span class="status-dot stopped"></span>
+          <strong>{stoppedApps}</strong>
+          <span>Stopped</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'errored'}
+          aria-pressed={statusFilter === 'errored'}
+          onclick={() => statusFilter = 'errored'}
+          title="Show errored processes"
+        >
+          <span class="status-dot errored"></span>
+          <strong>{erroredApps}</strong>
+          <span>Errored</span>
+        </button>
+      </div>
 
-      <KpiCard
-        icon={CheckCircle2}
-        value={onlineApps}
-        label="Online"
-        subtext={stoppedApps + erroredApps === 0 ? 'All healthy' : `${stoppedApps + erroredApps} stopped/errored`}
-        statusType={erroredApps > 0 ? 'error' : 'success'}
-      />
+      <span class="strip-sep"></span>
 
-      <KpiCard
-        icon={Cpu}
-        value="{totalCpuPercent.toFixed(1)}%"
-        label="Cluster CPU"
-        subtext="Aggregate load"
-        statusType="info"
-      />
+      <span class="fleet-metric" title="Aggregate CPU across managed processes">
+        <Cpu size={13} /><strong>{totalCpuPercent.toFixed(1)}%</strong><span>CPU</span>
+      </span>
+      <span class="fleet-metric" title="Combined resident memory">
+        <HardDrive size={13} /><strong>{formatBytes(totalMemoryBytes)}</strong><span>RAM</span>
+      </span>
 
-      <KpiCard
-        icon={HardDrive}
-        value={formatBytes(totalMemoryBytes)}
-        label="Memory Heap"
-        subtext="Combined RAM"
-        statusType="info"
-      />
+      <div class="strip-actions">
+        <Button
+          variant="ghost"
+          size="xs"
+          onclick={promptReloadAll}
+          disabled={onlineApps === 0}
+          title="Zero-downtime reload for all online apps"
+        >
+          <Zap size={12} /> Reload all
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          onclick={promptStopAll}
+          disabled={onlineApps === 0}
+          title="Stop every online app"
+        >
+          <Square size={12} /> Stop all
+        </Button>
+        <KebabMenu align="right" title="Fleet actions">
+          <button class="menu-item" onclick={() => handleProcessAction('start', 'all')}>
+            <Play size={14} class="text-emerald" />
+            <span>Start all</span>
+          </button>
+          <button class="menu-item" onclick={handleSaveDump}>
+            <Save size={14} class="text-accent" />
+            <span>Save process list</span>
+          </button>
+          <button class="menu-item" onclick={promptResurrect}>
+            <RefreshCcw size={14} class="text-purple" />
+            <span>Resurrect saved dump</span>
+          </button>
+        </KebabMenu>
+      </div>
     </div>
+
+    {#if fleetError}
+      <div class="fleet-error" role="alert">
+        <AlertTriangle size={14} />
+        <span>PM2 is not responding: {fleetError}</span>
+        <Button variant="outline" size="xs" onclick={() => loadData()}>Retry</Button>
+      </div>
+    {/if}
   {/if}
 
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
@@ -1105,56 +1216,64 @@
       <!-- VIEW 1: MASTER-DETAIL SPLIT CONSOLE (FLEET & LIVE INSPECTOR) -->
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       {#if activeTab === 'fleet'}
-        <div class="fleet-split-container">
+        {#if processes.length === 0}
+          <div class="fleet-empty">
+            <div class="fleet-empty-hero">
+              <div class="fleet-empty-icon"><Layers size={34} /></div>
+              <h2>No PM2 applications yet</h2>
+              <p>
+                Launch your first Node.js app, restore a saved process list, or start an ecosystem
+                config. PM2 keeps it running and restarts it automatically if it crashes.
+              </p>
+              <div class="fleet-empty-actions">
+                <Button variant="primary" onclick={() => showLaunchModal = true}>
+                  <Plus size={15} /> Launch application
+                </Button>
+                {#if savedDumpApps.length > 0}
+                  <Button variant="outline" onclick={promptResurrect}>
+                    <RefreshCcw size={14} /> Restore saved dump ({savedDumpApps.length})
+                  </Button>
+                {/if}
+                <Button variant="outline" onclick={() => activeTab = 'ecosystem'}>
+                  <FileCode size={14} /> Browse ecosystem configs
+                </Button>
+              </div>
+            </div>
+
+            {#if savedDumpApps.length > 0}
+              <div class="fleet-empty-saved">
+                <div class="fleet-empty-saved-head">
+                  <span><Database size={13} /> Saved processes ({savedDumpApps.length})</span>
+                  <Button variant="ghost" size="xs" onclick={promptResurrect}>
+                    <RefreshCcw size={12} /> Resurrect all
+                  </Button>
+                </div>
+                {#each savedDumpApps as app (app.name)}
+                  <div class="fleet-empty-saved-row">
+                    <div class="fleet-empty-saved-info">
+                      <strong>{app.name}</strong>
+                      <span title={app.script_path}>{app.script_path.split('/').pop() || app.script_path}</span>
+                    </div>
+                    <Button variant="primary" size="xs" onclick={() => handleStartSavedApp(app)}>
+                      <Play size={11} /> Run
+                    </Button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="fleet-split-container">
           <!-- ── MASTER PANE: PROCESSES LIST (360px) ────────────────────────── -->
           <div class="fleet-master-pane">
             <!-- Search & Filter Header -->
             <div class="master-header">
-              <div class="master-search-row">
-                <SearchBar
-                  bind:value={searchQuery}
-                  placeholder="Filter apps by name, PID, ID..."
-                  style="margin: 0; width: 100%;"
-                />
-              </div>
-
-              <div class="master-pills-row">
-                <FilterChips
-                  options={statusFilters.map(option => ({ ...option, count: statusCounts[option.id] }))}
-                  bind:value={statusFilter}
-                  label="Filter apps by status"
-                  style="flex:1; min-width:0"
-                />
-
-                <KebabMenu align="left" title="Cluster Bulk Actions">
-                  <button class="menu-item" onclick={() => handleProcessAction('start', 'all')}>
-                    <Play size={14} class="text-emerald" />
-                    <span>Start All Processes</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptReloadAll}>
-                    <Zap size={14} class="text-accent" />
-                    <span>Reload All (0-Downtime)</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptStopAll}>
-                    <Square size={14} class="text-amber" />
-                    <span>Stop All Processes</span>
-                  </button>
-
-                  <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
-
-                  <button class="menu-item" onclick={handleSaveDump}>
-                    <Save size={14} class="text-accent" />
-                    <span>Save Process List (pm2 save)</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptResurrect}>
-                    <RefreshCcw size={14} class="text-purple" />
-                    <span>Resurrect Saved Apps (pm2 resurrect)</span>
-                  </button>
-                </KebabMenu>
-              </div>
+              <SearchBar
+                bind:value={searchQuery}
+                placeholder="Filter by name, PID, ID…"
+                style="margin: 0; width: 100%;"
+              />
+              <span class="master-count">{filteredProcesses.length} / {processes.length}</span>
             </div>
 
             <!-- Scrollable Process Cards List -->
@@ -1163,59 +1282,12 @@
                 <div class="empty-list-container">
                   <EmptyState
                     icon={Layers}
-                    title="No active processes"
-                    description={processes.length === 0 
-                      ? "No Node.js applications are currently running in PM2 memory." 
-                      : "No processes match the current search filter."}
-                    actionLabel={processes.length === 0 ? "Launch App" : "Clear Filter"}
-                    actionIcon={Plus}
-                    onAction={() => {
-                      if (processes.length === 0) showLaunchModal = true;
-                      else { searchQuery = ''; statusFilter = 'all'; }
-                    }}
+                    title="No apps match"
+                    description="No processes match the current search or status filter."
+                    actionLabel="Clear filters"
+                    actionIcon={RefreshCcw}
+                    onAction={() => { searchQuery = ''; statusFilter = 'all'; }}
                   />
-
-                  {#if processes.length === 0 && savedDumpApps.length > 0}
-                    <!-- Quick Saved Apps Restore Box -->
-                    <div class="saved-dump-quick-section">
-                      <div class="quick-section-header">
-                        <div class="quick-section-title">
-                          <Database size={13} class="text-accent" />
-                          <span>Saved in dump ({savedDumpApps.length}):</span>
-                        </div>
-                        <Button variant="ghost" size="xs" onclick={promptResurrect} title="Restore all saved applications">
-                          <RefreshCcw size={11} />
-                          <span>Resurrect All</span>
-                        </Button>
-                      </div>
-                      <div class="quick-dump-list">
-                        {#each savedDumpApps as app}
-                          <div class="quick-dump-item">
-                            <div class="quick-item-info">
-                              <span class="quick-item-name font-mono">{app.name}</span>
-                              <span class="quick-item-path" title={app.script_path}>{app.script_path.split('/').pop() || app.script_path}</span>
-                            </div>
-                            <Button
-                              variant="primary"
-                              size="xs"
-                              onclick={() => handleStartSavedApp(app)}
-                              title="Start {app.name} now"
-                            >
-                              <Play size={11} />
-                              <span>Run</span>
-                            </Button>
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {:else if processes.length === 0}
-                    <div class="resurrect-hint-row">
-                      <Button variant="outline" size="sm" onclick={promptResurrect}>
-                        <RefreshCcw size={13} />
-                        <span>Restore Saved Dump</span>
-                      </Button>
-                    </div>
-                  {/if}
                 </div>
               {:else}
                 {#each filteredProcesses as p (p.pm_id)}
@@ -1301,6 +1373,13 @@
                       </div>
 
                       <div class="proc-hover-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                        <button
+                          class="card-action-btn"
+                          onclick={() => handleSelectProcess(p.pm_id, true)}
+                          title="Inspect application details"
+                        >
+                          <Info size={12} />
+                        </button>
                         {#if isOnline}
                           <button
                             class="card-action-btn action-restart"
@@ -1350,6 +1429,75 @@
           <!-- ── DETAIL PANE: LIVE REAL-TIME LOGS TERMINAL DECK ──────────────── -->
           <div class="fleet-detail-pane">
             {#if selectedProcess}
+              <div class="detail-app-head">
+                <div class="detail-app-identity">
+                  <span class="status-dot {selectedProcess.status}"></span>
+                  <strong class="detail-app-name" title={selectedProcess.name}>{selectedProcess.name}</strong>
+                  <span class="proc-id-tag">#{selectedProcess.pm_id}</span>
+                  <span class="mode-tag {selectedProcess.exec_mode === 'cluster_mode' ? 'cluster' : 'fork'}">
+                    {selectedProcess.exec_mode === 'cluster_mode' ? `cluster (${selectedProcess.instances})` : 'fork'}
+                  </span>
+                </div>
+                <div class="detail-app-meta">
+                  <span>CPU <strong>{selectedProcess.cpu.toFixed(1)}%</strong></span>
+                  <span>RAM <strong>{formatBytes(selectedProcess.memory)}</strong></span>
+                  <span>{selectedProcess.status === 'online' ? formatUptime(selectedProcess.uptime) : 'stopped'}</span>
+                </div>
+                <div class="detail-app-actions">
+                  {#if selectedProcess.status === 'online'}
+                    <button
+                      class="card-action-btn action-reload"
+                      onclick={() => handleProcessAction('reload', selectedProcess!.pm_id)}
+                      title="Reload (zero downtime)"
+                    >
+                      <Zap size={13} />
+                    </button>
+                    <button
+                      class="card-action-btn action-restart"
+                      onclick={() => handleProcessAction('restart', selectedProcess!.pm_id)}
+                      title="Restart"
+                    >
+                      <RotateCw size={13} />
+                    </button>
+                    <button
+                      class="card-action-btn action-stop"
+                      onclick={() => handleProcessAction('stop', selectedProcess!.pm_id)}
+                      title="Stop"
+                    >
+                      <Square size={13} />
+                    </button>
+                  {:else}
+                    <button
+                      class="card-action-btn action-start"
+                      onclick={() => handleProcessAction('start', selectedProcess!.pm_id)}
+                      title="Start"
+                    >
+                      <Play size={13} />
+                    </button>
+                  {/if}
+                  <button
+                    class="card-action-btn"
+                    onclick={() => showProcessDrawer = true}
+                    title="Inspect details and environment"
+                  >
+                    <Info size={13} />
+                  </button>
+                  <KebabMenu align="right" title="Application options">
+                    <button class="menu-item" onclick={() => showProcessDrawer = true}>
+                      <Info size={14} class="text-accent" />
+                      <span>Details &amp; environment</span>
+                    </button>
+                    <button class="menu-item" onclick={() => promptFlushLogs(selectedProcess)}>
+                      <Trash2 size={14} class="text-error" />
+                      <span>Flush logs</span>
+                    </button>
+                    <button class="menu-item text-danger" onclick={() => promptDeleteProcess(selectedProcess!)}>
+                      <Trash2 size={14} class="text-error" />
+                      <span>Delete process</span>
+                    </button>
+                  </KebabMenu>
+                </div>
+              </div>
               <div class="logs-deck-wrap">
                 <!-- Logs Top Controls Ribbon -->
                 <div class="logs-deck-controls">
@@ -1482,19 +1630,18 @@
                 </div>
               </div>
             {:else}
-              <!-- Empty Selection State -->
               <div class="no-selection-wrap">
-                <Layers size={44} class="text-muted" />
-                <h3>No Application Selected</h3>
-                <p>Click on any Node.js process on the left to inspect its real-time logs and open application details in the side drawer.</p>
-                <Button variant="primary" onclick={() => showLaunchModal = true}>
-                  <Plus size={14} />
-                  <span>Launch Application</span>
+                <Layers size={40} class="text-muted" />
+                <h3>No application matches</h3>
+                <p>Clear the search or status filter to bring your applications back.</p>
+                <Button variant="outline" onclick={() => { searchQuery = ''; statusFilter = 'all'; }}>
+                  <RefreshCcw size={14} /> Clear filters
                 </Button>
               </div>
             {/if}
           </div>
         </div>
+        {/if}
 
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       <!-- VIEW 2: ECOSYSTEM CONFIGURATIONS STUDIO -->
@@ -1804,6 +1951,11 @@
           </div>
         </div>
       {/if}
+    {:else if loading}
+      <div class="pm2-loading">
+        <RotateCw size={22} class="spin" />
+        <span>Connecting to PM2…</span>
+      </div>
     {/if}
   </div>
 </div>
@@ -2589,21 +2741,93 @@
     justify-content: space-between;
     gap: 12px;
     flex-shrink: 0;
-  }/* 4 Top KPI Cards */ .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
+  }/* Compact fleet health strip */ .fleet-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
     flex-shrink: 0;
-  }
-@media (max-width: 1100px) {.kpi-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}/* Main Workspace Body */ .pm2-workspace-body {
+  }.fleet-status-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-wrap: wrap;
+  }.fleet-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }.fleet-stat strong {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }.fleet-stat:hover {
+    background: var(--color-bg-hover);
+  }.fleet-stat.active {
+    background: var(--color-bg-hover);
+    border-color: var(--color-border);
+    color: var(--color-text-secondary);
+  }.fleet-stat .status-dot {
+    width: 6px;
+    height: 6px;
+  }.strip-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--color-border);
+  }.fleet-metric {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }.fleet-metric strong {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-primary);
+  }.strip-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }.fleet-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    border-radius: 8px;
+    background: rgba(244, 63, 94, 0.08);
+    color: var(--color-warning);
+    font-size: 11px;
+    flex-shrink: 0;
+  }.fleet-error span {
+    flex: 1;
+    min-width: 0;
+  }/* Main Workspace Body */ .pm2-workspace-body {
     flex: 1;
     min-height: 0;
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }.pm2-loading {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--color-text-muted);
+    font-size: 12px;
   }/* ═════════════════════════════════════════════════════════════════════════ */ /* MASTER-DETAIL SPLIT CONTAINER */ /* ═════════════════════════════════════════════════════════════════════════ */ .fleet-split-container {
     display: flex;
     gap: 14px;
@@ -2611,7 +2835,7 @@
     min-height: 0;
     overflow: hidden;
   }/* ── MASTER PANE (LEFT) ── */ .fleet-master-pane {
-    width: 360px;
+    width: 380px;
     flex-shrink: 0;
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
@@ -2621,41 +2845,38 @@
     overflow: hidden;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
   }.master-header {
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    border-bottom: 1px solid var(--color-border-subtle);
-    background: var(--color-bg-surface);
-  }.master-pills-row {
+    padding: 10px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 6px;
+    gap: 8px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-bg-surface);
+  }.master-count {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
   }.empty-list-container {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-  }.resurrect-hint-row {
-    display: flex;
-    justify-content: center;
   }/* Process Cards List */ .master-cards-list {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 10px;
+    padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }/* Single Process Card */ .proc-card {
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border-subtle);
-    border-radius: 10px;
-    padding: 12px;
+    border-radius: 8px;
+    padding: 9px 10px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 5px;
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease;
     text-align: left;
@@ -2719,7 +2940,7 @@
     color: var(--color-text-secondary);
     border: 1px solid var(--color-border-subtle);
   }.proc-path-line {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--color-text-muted);
     font-family: var(--font-mono, monospace);
     white-space: nowrap;
@@ -2728,9 +2949,9 @@
   }/* Mini Meters */ .proc-meters-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    gap: 6px;
     background: var(--color-bg-surface);
-    padding: 6px 8px;
+    padding: 4px 6px;
     border-radius: 6px;
     border: 1px solid var(--color-border-subtle);
   }.meter-col {
@@ -2762,7 +2983,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-top: 4px;
+    padding-top: 3px;
     border-top: 1px solid var(--color-border-subtle);
   }.proc-meta-tags {
     display: flex;
@@ -2842,7 +3063,157 @@
       transform: scale(2);
       opacity: 0;
     }
-}/* ── DETAIL PANE (RIGHT) ── */ .fleet-detail-pane {
+}@media (max-width: 980px) {
+  .fleet-split-container {
+    flex-direction: column;
+  }
+  .fleet-master-pane {
+    width: 100%;
+    max-height: 45%;
+  }
+  .fleet-detail-pane {
+    min-height: 0;
+  }
+}
+.detail-app-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+    flex-shrink: 0;
+  }.detail-app-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }.detail-app-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+  }.detail-app-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    flex-wrap: wrap;
+  }.detail-app-meta strong {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }.detail-app-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }/* Full-width empty fleet onboarding */ .fleet-empty {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 24px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+  }.fleet-empty-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    max-width: 560px;
+  }.fleet-empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 68px;
+    height: 68px;
+    border-radius: 18px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-accent);
+    margin-bottom: 2px;
+  }.fleet-empty-hero h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }.fleet-empty-hero p {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+  }.fleet-empty-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }.fleet-empty-saved {
+    width: min(560px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 10px;
+  }.fleet-empty-saved-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin-bottom: 2px;
+  }.fleet-empty-saved-head span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }.fleet-empty-saved-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 2px;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.fleet-empty-saved-row:last-child {
+    border-bottom: none;
+  }.fleet-empty-saved-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 1px;
+  }.fleet-empty-saved-info strong {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.fleet-empty-saved-info span {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }/* ── DETAIL PANE (RIGHT) ── */ .fleet-detail-pane {
     flex: 1;
     min-width: 0;
     background: var(--color-bg-card);
@@ -3651,58 +4022,6 @@
     display: flex;
     align-items: center;
     gap: 6px;
-  }/* Quick Saved Dump Runner in Fleet Master List */ .saved-dump-quick-section {
-    width: 100%;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 10px;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 8px;
-  }.quick-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }.quick-section-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }.quick-dump-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }.quick-dump-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    background: var(--color-bg-surface);
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 6px;
-    padding: 6px 8px;
-  }.quick-item-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    overflow: hidden;
-  }.quick-item-name {
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }.quick-item-path {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }/* ═════════════════════════════════════════════════════════════════════════ */ /* NOT INSTALLED HERO CARD */ /* ═════════════════════════════════════════════════════════════════════════ */ .not-installed-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);

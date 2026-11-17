@@ -87,6 +87,166 @@ pub struct Pm2SavedDumpApp {
     pub created_at: Option<u64>,
 }
 
+const ECOSYSTEM_FILENAMES: &[&str] = &[
+    "ecosystem.config.js",
+    "ecosystem.config.cjs",
+    "ecosystem.config.mjs",
+    "ecosystem.json",
+    "pm2.config.js",
+    "pm2.config.cjs",
+    "pm2.json",
+];
+
+/// PM2 accepts a numeric app id or the literal `all`; anything else could be
+/// interpreted as an option by the CLI.
+fn valid_target(target: &str) -> bool {
+    target == "all"
+        || (!target.is_empty() && target.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn valid_process_name(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.chars().any(|c| c.is_control())
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn validate_env_vars(env_vars: &HashMap<String, String>) -> Result<(), String> {
+    for (key, value) in env_vars {
+        if !valid_env_key(key) {
+            return Err(format!("Invalid environment variable name: '{key}'"));
+        }
+        if value.contains('\0') {
+            return Err(format!("Environment variable '{key}' contains a NUL byte"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_memory_size(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    let mut digits = false;
+    let mut dot = false;
+    let mut unit = false;
+    for c in value.chars() {
+        match c {
+            '0'..='9' => digits = true,
+            '.' if !dot && !unit => dot = true,
+            'K' | 'M' | 'G' if !unit => unit = true,
+            _ => return false,
+        }
+    }
+    digits
+}
+
+fn validate_script_path(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute() {
+        return Err("The application script must be an absolute path.".to_string());
+    }
+    if value.contains('\0') {
+        return Err("The application path contains a NUL byte.".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("The application script does not exist: {value}"))?;
+    if !canonical.is_file() {
+        return Err("The application script is not a regular file.".to_string());
+    }
+    Ok(canonical)
+}
+
+fn validate_work_dir(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute() {
+        return Err("The working directory must be an absolute path.".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("The working directory does not exist: {value}"))?;
+    if !canonical.is_dir() {
+        return Err("The working directory is not a directory.".to_string());
+    }
+    Ok(canonical)
+}
+
+fn ecosystem_filename_allowed(name: &str) -> bool {
+    ECOSYSTEM_FILENAMES.contains(&name)
+}
+
+/// Only recognised PM2 ecosystem config files may be read or written here.
+/// This prevents the page from using the editor as a generic file read/write
+/// primitive for secrets such as ~/.ssh/id_rsa.
+fn validate_ecosystem_path(value: &str, for_write: bool) -> Result<PathBuf, String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute() {
+        return Err("The ecosystem file path must be absolute.".to_string());
+    }
+    if value.contains('\0') {
+        return Err("The ecosystem file path contains a NUL byte.".to_string());
+    }
+    let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+        return Err("The ecosystem file path has no file name.".to_string());
+    };
+    if !ecosystem_filename_allowed(name) {
+        return Err(format!(
+            "Refused: '{name}' is not a recognised PM2 ecosystem config name."
+        ));
+    }
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "..")
+    {
+        return Err("The ecosystem file path must not contain '..'.".to_string());
+    }
+    if for_write {
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err("Refused: the ecosystem file is a symlink.".to_string());
+            }
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn pm2_logs_dir() -> PathBuf {
+    PathBuf::from(get_pm2_home()).join("logs")
+}
+
+/// Log files are user-controlled data. Restrict reads and truncation to the
+/// PM2 log directory so a compromised renderer cannot read or erase arbitrary
+/// files through the log viewer.
+fn validate_log_path(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute() {
+        return Err("The log path must be absolute.".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("The log file does not exist: {value}"))?;
+    let root = pm2_logs_dir();
+    let root = root.canonicalize().unwrap_or(root);
+    if !canonical.starts_with(&root) {
+        return Err("Refused: only files inside the PM2 logs directory can be accessed.".to_string());
+    }
+    if !canonical.is_file() {
+        return Err("The log path is not a regular file.".to_string());
+    }
+    Ok(canonical)
+}
+
 /// Helper to get user's PM2 home directory (~/.pm2)
 fn get_pm2_home() -> String {
     if let Ok(val) = std::env::var("PM2_HOME") {
@@ -374,6 +534,9 @@ pub async fn pm2_process_action(action: String, target: String) -> Result<String
     if !valid_actions.contains(&act.as_str()) {
         return Err(format!("Unsupported PM2 action '{}'", action));
     }
+    if !valid_target(&target) {
+        return Err("The PM2 target must be a numeric process id or 'all'.".to_string());
+    }
 
     let out = create_pm2_cmd()
         .args([act.as_str(), target.as_str()])
@@ -396,9 +559,44 @@ pub async fn pm2_process_action(action: String, target: String) -> Result<String
 
 #[tauri::command]
 pub async fn pm2_start_custom_process(options: Pm2StartOptions) -> Result<String, String> {
+    let script = validate_script_path(&options.script_path)?;
+    if let Some(ref name) = options.name {
+        if !name.trim().is_empty() && !valid_process_name(name) {
+            return Err("The process name is invalid.".to_string());
+        }
+    }
+    if let Some(ref cwd) = options.cwd {
+        if !cwd.trim().is_empty() {
+            validate_work_dir(cwd)?;
+        }
+    }
+    if let Some(ref mode) = options.exec_mode {
+        if mode != "fork" && mode != "cluster" {
+            return Err("Execution mode must be 'fork' or 'cluster'.".to_string());
+        }
+    }
+    if let Some(instances) = options.instances {
+        if !(0..=64).contains(&instances) {
+            return Err("Instances must be between 0 and 64.".to_string());
+        }
+    }
+    if let Some(ref mem) = options.max_memory_restart {
+        if !mem.trim().is_empty() && !valid_memory_size(mem) {
+            return Err("The memory limit must look like 500M or 1G.".to_string());
+        }
+    }
+    if let Some(ref env_vars) = options.env_vars {
+        validate_env_vars(env_vars)?;
+    }
+    if let Some(ref args) = options.args {
+        if args.iter().any(|arg| arg.contains('\0')) {
+            return Err("Application arguments must not contain NUL bytes.".to_string());
+        }
+    }
+
     let mut cmd = create_pm2_cmd();
     cmd.arg("start");
-    cmd.arg(&options.script_path);
+    cmd.arg(script.to_string_lossy().as_ref());
 
     if let Some(ref name) = options.name {
         if !name.trim().is_empty() {
@@ -534,9 +732,6 @@ pub async fn pm2_get_saved_dump_apps() -> Result<Vec<Pm2SavedDumpApp>, String> {
         }
     };
 
-    // Query active processes to determine live running state
-    let active_procs = pm2_list_processes().await.unwrap_or_default();
-
     let mut saved_apps = Vec::new();
 
     for item in dump_array {
@@ -574,10 +769,6 @@ pub async fn pm2_get_saved_dump_apps() -> Result<Vec<Pm2SavedDumpApp>, String> {
         let saved_status = item["status"].as_str().unwrap_or("stopped").to_string();
         let created_at = item["created_at"].as_u64();
 
-        let running_match = active_procs.iter().find(|p| p.name == name || (p.script_path == script_path && !script_path.is_empty()));
-        let is_currently_running = running_match.map(|p| p.status == "online").unwrap_or(false);
-        let current_pm_id = running_match.map(|p| p.pm_id);
-
         saved_apps.push(Pm2SavedDumpApp {
             name,
             script_path,
@@ -589,8 +780,10 @@ pub async fn pm2_get_saved_dump_apps() -> Result<Vec<Pm2SavedDumpApp>, String> {
             args,
             env_vars,
             saved_status,
-            is_currently_running,
-            current_pm_id,
+            // The live state is merged from the process list by the frontend
+            // so this command does not run `pm2 jlist` a second time.
+            is_currently_running: false,
+            current_pm_id: None,
             created_at,
         });
     }
@@ -606,19 +799,55 @@ pub async fn pm2_start_saved_app(
     exec_mode: Option<String>,
     instances: Option<i32>,
     watch: Option<bool>,
+    max_memory_restart: Option<String>,
     args: Option<Vec<String>>,
+    env_vars: Option<HashMap<String, String>>,
 ) -> Result<String, String> {
+    if !valid_process_name(&name) {
+        return Err("The saved application name is invalid.".to_string());
+    }
+
     // If the process is registered in PM2 memory, start it by name
     let active_procs = pm2_list_processes().await.unwrap_or_default();
     if let Some(proc) = active_procs.iter().find(|p| p.name == name) {
         return pm2_process_action("start".to_string(), proc.pm_id.to_string()).await;
     }
 
+    let script = validate_script_path(&script_path)?;
+    if let Some(ref cwd) = cwd {
+        if !cwd.trim().is_empty() {
+            validate_work_dir(cwd)?;
+        }
+    }
+    if let Some(ref mode) = exec_mode {
+        if mode != "fork" && mode != "cluster" {
+            return Err("Execution mode must be 'fork' or 'cluster'.".to_string());
+        }
+    }
+    if let Some(instances) = instances {
+        if !(0..=64).contains(&instances) {
+            return Err("Instances must be between 0 and 64.".to_string());
+        }
+    }
+    if let Some(ref mem) = max_memory_restart {
+        if !mem.trim().is_empty() && !valid_memory_size(mem) {
+            return Err("The memory limit must look like 500M or 1G.".to_string());
+        }
+    }
+    if let Some(ref env_vars) = env_vars {
+        validate_env_vars(env_vars)?;
+    }
+    if let Some(ref arg_list) = args {
+        if arg_list.iter().any(|arg| arg.contains('\0')) {
+            return Err("Application arguments must not contain NUL bytes.".to_string());
+        }
+    }
+
     // Otherwise launch it fresh
     let mut cmd = create_pm2_cmd();
     cmd.arg("start");
-    cmd.arg(&script_path);
-    cmd.arg("--name").arg(&name);
+    cmd.arg(script.to_string_lossy().as_ref());
+    cmd.arg("--name").arg(name.trim());
 
     if let Some(ref d) = cwd {
         if !d.trim().is_empty() {
@@ -641,9 +870,21 @@ pub async fn pm2_start_saved_app(
         cmd.arg("--watch");
     }
 
+    if let Some(ref mem) = max_memory_restart {
+        if !mem.trim().is_empty() {
+            cmd.arg("--max-memory-restart").arg(mem.trim());
+        }
+    }
+
     if let Some(ref arg_list) = args {
         if !arg_list.is_empty() {
             cmd.arg("--").args(arg_list);
+        }
+    }
+
+    if let Some(ref env_vars) = env_vars {
+        for (key, value) in env_vars {
+            cmd.env(key, value);
         }
     }
 
@@ -665,6 +906,9 @@ pub async fn pm2_start_saved_app(
 
 #[tauri::command]
 pub async fn pm2_delete_saved_app(name: String) -> Result<String, String> {
+    if !valid_process_name(&name) {
+        return Err("The saved application name is invalid.".to_string());
+    }
     let pm2_home = get_pm2_home();
     let dump_file = PathBuf::from(&pm2_home).join("dump.pm2");
 
@@ -685,8 +929,15 @@ pub async fn pm2_delete_saved_app(name: String) -> Result<String, String> {
     let updated = serde_json::to_string_pretty(&dump_array)
         .map_err(|e| format!("Failed to serialize dump.pm2: {}", e))?;
 
-    fs::write(&dump_file, updated)
+    // Keep a backup and replace the dump atomically; a partially written dump
+    // would make every saved app disappear on the next PM2 start.
+    let backup_path = dump_file.with_extension("pm2.bak");
+    let _ = fs::copy(&dump_file, &backup_path);
+    let tmp_path = dump_file.with_extension("pm2.tmp");
+    fs::write(&tmp_path, updated)
         .map_err(|e| format!("Failed to write dump.pm2: {}", e))?;
+    fs::rename(&tmp_path, &dump_file)
+        .map_err(|e| format!("Failed to replace dump.pm2: {}", e))?;
 
     Ok(format!("Removed '{}' from saved dump", name))
 }
@@ -696,8 +947,12 @@ pub async fn pm2_flush_logs(target: Option<String>) -> Result<String, String> {
     let mut cmd = create_pm2_cmd();
     cmd.arg("flush");
     if let Some(t) = target {
-        if !t.trim().is_empty() {
-            cmd.arg(t.trim());
+        let t = t.trim();
+        if !t.is_empty() {
+            if !valid_target(t) {
+                return Err("The flush target must be a numeric process id or 'all'.".to_string());
+            }
+            cmd.arg(t);
         }
     }
 
@@ -718,16 +973,18 @@ pub async fn pm2_flush_logs(target: Option<String>) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn pm2_read_logs(log_path: String, lines: Option<usize>) -> Result<String, String> {
-    let path = Path::new(&log_path);
-    if !path.exists() {
-        return Ok(format!("[No log file found at {}]", log_path));
+    // A stopped app may not have produced a log file yet; that is not an error.
+    if !Path::new(&log_path).exists() {
+        return Ok(format!("[No log file found at {log_path}]"));
     }
+    let path = validate_log_path(&log_path)?;
 
     let line_count = lines.unwrap_or(250).min(2000);
+    let path_text = path.to_string_lossy().to_string();
 
     // Use tail command for fast, memory-safe reading of large log files
     let out = Command::new("tail")
-        .args(["-n", &line_count.to_string(), &log_path])
+        .args(["-n", &line_count.to_string(), &path_text])
         .output()
         .await;
 
@@ -737,7 +994,7 @@ pub async fn pm2_read_logs(log_path: String, lines: Option<usize>) -> Result<Str
                 Ok(String::from_utf8_lossy(&o.stdout).to_string())
             } else {
                 // Fallback to std::fs read if tail fails
-                match fs::read_to_string(path) {
+                match fs::read_to_string(&path) {
                     Ok(content) => {
                         let all_lines: Vec<&str> = content.lines().collect();
                         let start = all_lines.len().saturating_sub(line_count);
@@ -748,7 +1005,7 @@ pub async fn pm2_read_logs(log_path: String, lines: Option<usize>) -> Result<Str
             }
         }
         Err(_) => {
-            match fs::read_to_string(path) {
+            match fs::read_to_string(&path) {
                 Ok(content) => {
                     let all_lines: Vec<&str> = content.lines().collect();
                     let start = all_lines.len().saturating_sub(line_count);
@@ -762,12 +1019,8 @@ pub async fn pm2_read_logs(log_path: String, lines: Option<usize>) -> Result<Str
 
 #[tauri::command]
 pub async fn pm2_clear_logs(log_path: String) -> Result<String, String> {
-    let path = Path::new(&log_path);
-    if path.exists() {
-        if let Err(e) = fs::write(path, "") {
-            return Err(format!("Failed to truncate log file: {}", e));
-        }
-    }
+    let path = validate_log_path(&log_path)?;
+    fs::write(&path, "").map_err(|e| format!("Failed to truncate log file: {}", e))?;
     Ok("Log file cleared".to_string())
 }
 
@@ -786,7 +1039,13 @@ pub async fn pm2_list_ecosystem_files(custom_dirs: Option<Vec<String>>) -> Resul
 
     if let Some(extras) = custom_dirs {
         for d in extras {
-            search_dirs.push(PathBuf::from(d));
+            let p = PathBuf::from(&d);
+            if !p.is_absolute() {
+                return Err("Custom ecosystem directories must be absolute paths.".to_string());
+            }
+            if p.is_dir() {
+                search_dirs.push(p);
+            }
         }
     }
 
@@ -909,12 +1168,27 @@ fn extract_app_names_from_file(path: &Path) -> Vec<String> {
 
 #[tauri::command]
 pub async fn pm2_read_ecosystem_file(path: String) -> Result<String, String> {
-    fs::read_to_string(&path).map_err(|e| format!("Failed to read ecosystem file '{}': {}", path, e))
+    let p = validate_ecosystem_path(&path, false)?;
+    if let Ok(meta) = fs::symlink_metadata(&p) {
+        if meta.file_type().is_symlink() {
+            return Err("Refused: the ecosystem file is a symlink.".to_string());
+        }
+        if !meta.is_file() {
+            return Err("The ecosystem path is not a regular file.".to_string());
+        }
+        if meta.len() > 2 * 1024 * 1024 {
+            return Err("The ecosystem file is too large to edit (2 MB limit).".to_string());
+        }
+    }
+    fs::read_to_string(&p).map_err(|e| format!("Failed to read ecosystem file '{}': {}", path, e))
 }
 
 #[tauri::command]
 pub async fn pm2_write_ecosystem_file(path: String, content: String) -> Result<String, String> {
-    let p = Path::new(&path);
+    let p = validate_ecosystem_path(&path, true)?;
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("The ecosystem file is too large to save (2 MB limit).".to_string());
+    }
     if let Some(parent) = p.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {}", e))?;
@@ -923,11 +1197,11 @@ pub async fn pm2_write_ecosystem_file(path: String, content: String) -> Result<S
 
     // Make backup if exists
     if p.exists() {
-        let backup_path = format!("{}.bak", path);
-        let _ = fs::copy(p, backup_path);
+        let backup_path = format!("{}.bak", p.to_string_lossy());
+        let _ = fs::copy(&p, backup_path);
     }
 
-    fs::write(p, &content).map_err(|e| format!("Failed to write ecosystem file: {}", e))?;
+    fs::write(&p, &content).map_err(|e| format!("Failed to write ecosystem file: {}", e))?;
     Ok(format!("Saved ecosystem file to {}", path))
 }
 
@@ -937,19 +1211,31 @@ pub async fn pm2_start_ecosystem(
     only: Option<String>,
     env_name: Option<String>,
 ) -> Result<String, String> {
+    let ecosystem = validate_ecosystem_path(&path, false)?;
+    if !ecosystem.is_file() {
+        return Err("The ecosystem file does not exist.".to_string());
+    }
     let mut cmd = create_pm2_cmd();
     cmd.arg("start");
-    cmd.arg(&path);
+    cmd.arg(ecosystem.to_string_lossy().as_ref());
 
     if let Some(ref o) = only {
-        if !o.trim().is_empty() {
-            cmd.arg("--only").arg(o.trim());
+        let only = o.trim();
+        if !only.is_empty() {
+            if only.chars().any(|c| c.is_control()) || only.starts_with('-') {
+                return Err("The --only value contains invalid characters.".to_string());
+            }
+            cmd.arg("--only").arg(only);
         }
     }
 
     if let Some(ref env) = env_name {
-        if !env.trim().is_empty() {
-            cmd.arg("--env").arg(env.trim());
+        let env = env.trim();
+        if !env.is_empty() {
+            if env.chars().any(|c| c.is_control()) || env.starts_with('-') {
+                return Err("The --env value contains invalid characters.".to_string());
+            }
+            cmd.arg("--env").arg(env);
         }
     }
 
@@ -996,4 +1282,89 @@ pub async fn pm2_get_startup_status() -> Result<Pm2StartupStatus, String> {
         user,
         startup_command_hint,
     })
+}
+
+#[cfg(test)]
+mod pm2_validation_tests {
+    use super::{
+        ecosystem_filename_allowed, valid_env_key, valid_memory_size, valid_process_name,
+        valid_target, validate_ecosystem_path, validate_script_path,
+    };
+
+    fn test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lcp-pm2-validation-{}-{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pm2_targets_are_ids_or_all_only() {
+        assert!(valid_target("all"));
+        assert!(valid_target("0"));
+        assert!(valid_target("1234"));
+        assert!(!valid_target("--help"));
+        assert!(!valid_target("-1"));
+        assert!(!valid_target("my-app"));
+        assert!(!valid_target(""));
+    }
+
+    #[test]
+    fn process_names_and_env_keys_are_bounded() {
+        assert!(valid_process_name("api"));
+        assert!(valid_process_name("api-worker 1"));
+        assert!(!valid_process_name(""));
+        assert!(!valid_process_name("line\nbreak"));
+        assert!(valid_env_key("NODE_ENV"));
+        assert!(valid_env_key("_PRIVATE"));
+        assert!(!valid_env_key("1INVALID"));
+        assert!(!valid_env_key("HAS-DASH"));
+        assert!(!valid_env_key("HAS SPACE"));
+    }
+
+    #[test]
+    fn memory_sizes_are_strict() {
+        assert!(valid_memory_size("500M"));
+        assert!(valid_memory_size("1G"));
+        assert!(valid_memory_size("256"));
+        assert!(valid_memory_size("1.5G"));
+        assert!(!valid_memory_size("--help"));
+        assert!(!valid_memory_size("M"));
+        assert!(!valid_memory_size("500 MB"));
+    }
+
+    #[test]
+    fn only_ecosystem_config_filenames_are_editable() {
+        assert!(ecosystem_filename_allowed("ecosystem.config.js"));
+        assert!(ecosystem_filename_allowed("pm2.json"));
+        assert!(!ecosystem_filename_allowed("id_rsa"));
+        assert!(!ecosystem_filename_allowed("notes.txt"));
+
+        let dir = test_dir("eco");
+        let allowed = dir.join("ecosystem.config.js");
+        std::fs::write(&allowed, "module.exports = { apps: [] }").unwrap();
+        assert!(validate_ecosystem_path(&allowed.to_string_lossy(), false).is_ok());
+        assert!(
+            validate_ecosystem_path(&dir.join("id_rsa").to_string_lossy(), false).is_err()
+        );
+        assert!(validate_ecosystem_path("relative.pm2.json", false).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_must_be_absolute_existing_files() {
+        let dir = test_dir("script");
+        let script = dir.join("app.js");
+        std::fs::write(&script, "console.log('ok')").unwrap();
+        assert!(validate_script_path(&script.to_string_lossy()).is_ok());
+        assert!(validate_script_path("app.js").is_err());
+        assert!(validate_script_path(&dir.join("missing.js").to_string_lossy()).is_err());
+        assert!(validate_script_path(&dir.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

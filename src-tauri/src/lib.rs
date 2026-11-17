@@ -77,7 +77,7 @@ use commands::{
         scan_local_appimages, register_appimage, read_appimage_icon, delete_appimage,
         launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, get_process_details, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, count_journal_entries, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
     security_auditor::{
         security_run_audit,
@@ -385,6 +385,7 @@ pub fn run() {
             get_system_stats_history,
             get_disk_usage,
             get_process_list,
+            get_process_details,
             kill_process,
             renice_process,
             get_network_traffic,

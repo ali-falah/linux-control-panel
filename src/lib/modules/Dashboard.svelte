@@ -31,6 +31,7 @@
     user: string;
     cmdline?: string;
     status?: string;
+    owned?: boolean;
   }
 
   interface ServiceDaemon {
@@ -495,6 +496,13 @@
     closeAllContextMenus();
     if (proc.pid <= 100) {
       uiStore.addToast(`Cannot terminate system PID ${proc.pid} (protected process).`, 'error');
+      return;
+    }
+    if (proc.owned === false) {
+      uiStore.addToast(
+        `PID ${proc.pid} belongs to ${proc.user}; administrator rights are required to signal it.`,
+        'error'
+      );
       return;
     }
     const isForce = signal === 9;

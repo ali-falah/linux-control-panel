@@ -310,16 +310,16 @@
       action: () => { uiStore.navigateTo('system-monitor', 'processes'); uiStore.closeSearchModal(); }
     },
     {
-      id: 'tab-monitor-overview',
-      title: 'Resource Sparklines & Gauges',
+      id: 'tab-monitor-resources',
+      title: 'Resources & Sparklines',
       description: 'Live CPU temperature, RAM usage, swap space, and disk I/O metrics',
       category: 'Tabs',
-      breadcrumb: 'Monitoring › Overview',
+      breadcrumb: 'Monitoring › Resources',
       icon: Activity,
-      keywords: 'overview sparklines gauges live temp temperature ram swap disk io network traffic',
+      keywords: 'overview resources sparklines gauges live temp temperature ram swap disk io network traffic',
       tabId: 'system-monitor',
-      subTab: 'overview',
-      action: () => { uiStore.navigateTo('system-monitor', 'overview'); uiStore.closeSearchModal(); }
+      subTab: 'resources',
+      action: () => { uiStore.navigateTo('system-monitor', 'resources'); uiStore.closeSearchModal(); }
     },
 
     // ── Services Manager Tabs ──
