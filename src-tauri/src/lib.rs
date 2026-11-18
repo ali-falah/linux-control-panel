@@ -112,9 +112,10 @@ use commands::{
         pm2_get_system_status, pm2_list_processes, pm2_process_action,
         pm2_start_custom_process, pm2_save_dump, pm2_resurrect_dump,
         pm2_get_saved_dump_apps, pm2_get_dump_info, pm2_start_saved_app, pm2_delete_saved_app,
-        pm2_scale, pm2_flush_logs, pm2_read_logs, pm2_clear_logs,
+        pm2_scale, pm2_flush_logs, pm2_read_logs,
+        pm2_get_log_overview, pm2_export_log,
         pm2_list_ecosystem_files, pm2_read_ecosystem_file,
-        pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
+        pm2_write_ecosystem_file, pm2_validate_ecosystem, pm2_start_ecosystem, pm2_get_startup_status,
     },
 };
 
@@ -485,10 +486,12 @@ pub fn run() {
             pm2_scale,
             pm2_flush_logs,
             pm2_read_logs,
-            pm2_clear_logs,
+            pm2_get_log_overview,
+            pm2_export_log,
             pm2_list_ecosystem_files,
             pm2_read_ecosystem_file,
             pm2_write_ecosystem_file,
+            pm2_validate_ecosystem,
             pm2_start_ecosystem,
             pm2_get_startup_status,
         ])

@@ -7,7 +7,7 @@
     CheckCircle2, Copy, Check, Eye, RefreshCcw, Save, Zap,
     FileText, ArrowDown, Search, Folder, TerminalSquare, Info,
     Activity, Clock, ChevronRight, Hash, Box, KeyRound, Database, Sparkles,
-    LayoutGrid, Table2, Pause
+    LayoutGrid, Table2, Pause, Download
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
@@ -106,8 +106,23 @@
     startup_command_hint: string;
   }
 
+  interface Pm2LogFileInfo {
+    name: string;
+    size: number;
+  }
+
+  interface Pm2LogOverview {
+    directory: string;
+    total_size: number;
+    files: Pm2LogFileInfo[];
+    hidden_files?: number;
+    logrotate_installed: boolean;
+    logrotate_version?: string | null;
+  }
+
   interface Pm2SavedDumpApp {
     name: string;
+    namespace: string;
     script_path: string;
     cwd: string;
     exec_mode: string;
@@ -170,6 +185,7 @@
   let ecosystemFiles = $state<Pm2EcosystemFile[]>([]);
   let startupStatus = $state<Pm2StartupStatus | null>(null);
   let savedDumpApps = $state<Pm2SavedDumpApp[]>([]);
+  let savedDumpLoaded = $state(false);
 
   // Master-Detail & SideDrawer Selection State
   let selectedProcessId = $state<number | null>(null);
@@ -344,6 +360,11 @@
   let ecosystemContent = $state('');
   let originalEcosystemContent = $state('');
   let isEcosystemDirty = $derived(ecosystemContent !== originalEcosystemContent);
+  let ecosystemOnly = $state('');
+  let ecosystemEnv = $state('');
+  let ecosystemValidationError = $state('');
+  let ecosystemValidating = $state(false);
+  let ecosystemLoadToken = 0;
   let showNewEcosystemModal = $state(false);
   let newEcosystemPath = $state('');
   let newEcosystemTemplate = $state<'express' | 'nest' | 'next' | 'microservice'>('express');
@@ -353,10 +374,16 @@
   let rawLogText = $state<string>('');
   let logSearchQuery = $state('');
   let logAutoRefresh = $state(true);
+  let logErrorsOnly = $state(false);
+  let logAtBottom = $state(true);
+  let logOverview = $state<Pm2LogOverview | null>(null);
+  let logOverviewLoading = $state(false);
+  let exportingLog = $state(false);
   let logRefreshInterval = $state(2); // seconds
   let logTailLines = $state('200');
   let logLoading = $state(false);
   let logContainerRef = $state<HTMLDivElement | null>(null);
+  let logLoadToken = 0;
 
   // Timers
   let refreshTimer: any = null;
@@ -440,8 +467,12 @@
   // Selected process must belong to the current filter, otherwise the detail
   // pane would show an app the list says is filtered out.
   let selectedProcess = $derived.by<Pm2Process | null>(() => {
-    if (filteredProcesses.length === 0) return null;
-    return filteredProcesses.find(p => p.pm_id === selectedProcessId) ?? filteredProcesses[0];
+    // Follow the explicit selection only. Falling back to the first filtered
+    // process would silently retarget the drawer's actions (stop, restart,
+    // scale, delete) at an app the user never selected when a filter hides
+    // the current one.
+    if (selectedProcessId === null) return null;
+    return processes.find(p => p.pm_id === selectedProcessId) ?? null;
   });
 
   // Restart storms (3+ restarts in five minutes) and dump drift.
@@ -460,24 +491,33 @@
   });
 
   let dumpDrift = $derived.by(() => {
+    if (!savedDumpLoaded) {
+      // Without a successful dump read, every live app would look unsaved and
+      // the banner would invite a save that drops saved-but-stopped apps.
+      return { hasDrift: false, notSaved: [] as Pm2Process[], notRunning: [], noDump: false };
+    }
     const live = processes.filter((proc) => !proc.is_module);
     const saved = savedDumpApps.filter((app) => !app.name.startsWith('pm2-'));
-    const savedNames = new Set(saved.map((app) => app.name));
+    const savedKeys = new Set(
+      saved.map((app) => `${app.namespace || 'default'}:${app.name}`)
+    );
     const savedScripts = new Set(
       saved.map((app) => app.script_path).filter((path) => Boolean(path))
     );
-    const liveNames = new Set(live.map((proc) => proc.name));
+    const liveKeys = new Set(
+      live.map((proc) => `${proc.namespace || 'default'}:${proc.name}`)
+    );
     const liveScripts = new Set(
       live.map((proc) => proc.script_path).filter((path) => Boolean(path))
     );
     const notSaved = live.filter(
       (proc) =>
-        !savedNames.has(proc.name) &&
+        !savedKeys.has(`${proc.namespace || 'default'}:${proc.name}`) &&
         !(proc.script_path && savedScripts.has(proc.script_path))
     );
     const notRunning = saved.filter(
       (app) =>
-        !liveNames.has(app.name) &&
+        !liveKeys.has(`${app.namespace || 'default'}:${app.name}`) &&
         !(app.script_path && liveScripts.has(app.script_path))
     );
     return {
@@ -520,10 +560,6 @@
       const line = stripAnsi(lines[i]);
       if (!line && i === lines.length - 1) continue;
 
-      if (search && !line.toLowerCase().includes(search)) {
-        continue;
-      }
-
       let level: 'error' | 'warn' | 'info' = 'info';
       let timestamp: string | undefined;
       let context: string | undefined;
@@ -539,16 +575,15 @@
         context = nest[3]?.trim();
         message = nest[4] || '';
       } else {
-        const lower = line.toLowerCase();
+        // Word-boundary matching, so "preferred", "stderr" or a user name
+        // containing "err" are not mistaken for error lines.
         if (
-          lower.includes('err') ||
-          lower.includes('error') ||
-          lower.includes('failed') ||
-          lower.includes('exception') ||
-          lower.includes('fatal')
+          /\b(error|err|fatal|exception|failure|failed|critical|panic)\b|\[(error|fatal)\]|\bERR!/i.test(
+            line
+          )
         ) {
           level = 'error';
-        } else if (lower.includes('warn') || lower.includes('warning')) {
+        } else if (/\b(warn|warning)\b|\[warn\]/i.test(line)) {
           level = 'warn';
         }
 
@@ -559,6 +594,13 @@
           timestamp = tsMatch[1];
           message = tsMatch[2] || '';
         }
+      }
+
+      if (search && !line.toLowerCase().includes(search)) {
+        continue;
+      }
+      if (logErrorsOnly && level !== 'error') {
+        continue;
       }
 
       result.push({
@@ -731,6 +773,25 @@
     uiStore.targetSubTab = null;
   });
 
+  // Keep unsaved ecosystem edits from disappearing on app close or reload.
+  // Switching tabs keeps the editor state, so only file switches need a modal.
+  $effect(() => {
+    if (!isEcosystemDirty || typeof window === 'undefined') return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  });
+
+  // Also guard in-app module switches: leaving unmounts this page and would
+  // silently discard the draft.
+  $effect(() => {
+    if (!isEcosystemDirty) return;
+    return uiStore.registerLeaveGuard(() => isEcosystemDirty);
+  });
+
   $effect(() => {
     // Wait for the first process scan before deciding a saved namespace no
     // longer exists.
@@ -738,6 +799,15 @@
     if (namespaceFilter !== 'all' && !namespaceOptions.includes(namespaceFilter)) {
       namespaceFilter = 'all';
     }
+  });
+
+  let envRevealOwner: number | null = null;
+  $effect(() => {
+    // A revealed secret belongs to one process only; never carry it over to
+    // another app that happens to use the same variable name.
+    if (selectedProcessId === envRevealOwner) return;
+    envRevealOwner = selectedProcessId;
+    if (revealedEnvKeys.size > 0) revealedEnvKeys = new Set();
   });
 
   function formatActivityTime(time: number): string {
@@ -980,12 +1050,82 @@
     });
   }
 
+  function handleLogScroll() {
+    const container = logContainerRef;
+    if (!container) return;
+    const atBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
+    logAtBottom = atBottom;
+    // Pause following while the user reads older lines, and resume once they
+    // scroll back to the newest output.
+    logFollow = atBottom;
+  }
+
+  function jumpToLatest() {
+    logFollow = true;
+    logAtBottom = true;
+    if (logContainerRef) {
+      logContainerRef.scrollTop = logContainerRef.scrollHeight;
+    }
+  }
+
+  function currentLogPath(): string {
+    if (!selectedProcess) return '';
+    return selectedLogType === 'err'
+      ? selectedProcess.err_log_path
+      : selectedProcess.out_log_path;
+  }
+
+  async function openLogFolder() {
+    const home = systemStatus?.pm2_home;
+    const directory = logOverview?.directory || (home ? `${home}/logs` : '');
+    if (!directory) {
+      uiStore.showToast('The PM2 log folder is not known yet.', 'warning');
+      return;
+    }
+    try {
+      await invoke('open_folder', { path: directory });
+    } catch (err: any) {
+      uiStore.showToast(String(err) || 'Could not open the log folder', 'error');
+    }
+  }
+
+  async function downloadLogFile() {
+    const logPath = currentLogPath();
+    if (!logPath) {
+      uiStore.showToast('Select a process with a log file first.', 'warning');
+      return;
+    }
+    exportingLog = true;
+    try {
+      const saved = await invoke<string>('pm2_export_log', { logPath });
+      uiStore.showToast(`Saved log to ${saved}`, 'success');
+    } catch (err: any) {
+      uiStore.showToast(String(err) || 'Could not export the log file', 'error');
+    } finally {
+      exportingLog = false;
+    }
+  }
+
+  async function loadLogOverview() {
+    logOverviewLoading = true;
+    try {
+      logOverview = await invoke<Pm2LogOverview>('pm2_get_log_overview');
+    } catch {
+      logOverview = null;
+    } finally {
+      logOverviewLoading = false;
+    }
+  }
+
   /** Merge the live process list into the saved dump metadata. */
   function mergeSavedDumpState(list: Pm2SavedDumpApp[]): Pm2SavedDumpApp[] {
     return list.map((app) => {
+      const appNamespace = app.namespace || 'default';
       const match = processes.find(
         (proc) =>
-          proc.name === app.name ||
+          (proc.name === app.name &&
+            (proc.namespace || 'default') === appNamespace) ||
           (!!app.script_path && proc.script_path === app.script_path)
       );
       return {
@@ -1041,18 +1181,28 @@
 
   /** Slower data: ecosystem files, startup service and saved dump. */
   async function loadAuxiliary() {
-    const [ecoList, startStatus, savedList, dump] = await Promise.all([
-      invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => []),
+    logOverviewLoading = true;
+    const [ecoList, startStatus, savedList, dump, measuredLogs] = await Promise.all([
+      invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => null),
       invoke<Pm2StartupStatus>('pm2_get_startup_status').catch(() => null),
-      invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => []),
-      invoke<Pm2DumpInfo>('pm2_get_dump_info').catch(() => null)
+      invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => null),
+      invoke<Pm2DumpInfo>('pm2_get_dump_info').catch(() => null),
+      invoke<Pm2LogOverview>('pm2_get_log_overview').catch(() => null)
     ]);
-    ecosystemFiles = ecoList;
-    startupStatus = startStatus;
-    savedDumpApps = mergeSavedDumpState(savedList);
-    dumpInfo = dump;
+    // Keep the previous model when a call fails. Replacing a failed saved-dump
+    // read with an empty list would make every live app look unsaved and invite
+    // a "Save dump" that drops the saved-but-stopped apps.
+    if (ecoList) ecosystemFiles = ecoList;
+    if (startStatus) startupStatus = startStatus;
+    if (savedList) {
+      savedDumpApps = mergeSavedDumpState(savedList);
+      savedDumpLoaded = true;
+    }
+    if (dump) dumpInfo = dump;
+    if (measuredLogs) logOverview = measuredLogs;
+    logOverviewLoading = false;
 
-    if (ecoList.length > 0 && !selectedEcosystemFile) {
+    if (ecoList && ecoList.length > 0 && !selectedEcosystemFile) {
       selectEcosystemFile(ecoList[0]);
     }
   }
@@ -1080,7 +1230,23 @@
   }
 
   // Lifecycle Actions
-  async function handleProcessAction(action: string, target: string | number) {
+  async function handleProcessAction(action: string, target: string | number, confirmed = false) {
+    if (!confirmed && (action === 'stop' || action === 'restart') && target !== 'all') {
+      const proc = processes.find((process) => process.pm_id === Number(target));
+      if (proc) {
+        const stopping = action === 'stop';
+        uiStore.confirm(
+          `${stopping ? 'Stop' : 'Restart'} "${proc.name}"?`,
+          stopping
+            ? `This stops ${proc.name} (ID #${proc.pm_id}) until it is started again. All of its instances will stop.`
+            : `This briefly interrupts ${proc.name} (ID #${proc.pm_id}) while PM2 restarts it. Use Reload for zero downtime instead.`,
+          () => handleProcessAction(action, target, true),
+          stopping
+        );
+        return;
+      }
+    }
+
     // Silence poll-derived events for this app while the action settles; the
     // action itself is recorded explicitly below.
     const suppressUntil = Date.now() + 8000;
@@ -1116,7 +1282,7 @@
         'action'
       );
       await loadProcesses(false);
-      if (activeTab === 'fleet' && selectedInspectorTab === 'logs') {
+      if (activeTab === 'fleet' && showLogsDrawer && selectedInspectorTab === 'logs') {
         loadLogs();
       }
     } catch (err: any) {
@@ -1153,6 +1319,7 @@
       const msg = await invoke<string>('pm2_start_saved_app', {
         name: app.name,
         scriptPath: app.script_path,
+        namespace: app.namespace || 'default',
         cwd: app.cwd || null,
         execMode: app.exec_mode || null,
         instances: app.instances || null,
@@ -1170,31 +1337,36 @@
     }
   }
 
-  async function handleDeleteSavedApp(name: string) {
+  async function handleDeleteSavedApp(app: Pm2SavedDumpApp) {
     try {
-      const msg = await invoke<string>('pm2_delete_saved_app', { name });
+      const msg = await invoke<string>('pm2_delete_saved_app', {
+        name: app.name,
+        namespace: app.namespace || 'default'
+      });
       uiStore.showToast(msg, 'success');
-      recordActivity(`Removed ${name} from dump`, undefined, 'warning', undefined, 'dump');
+      recordActivity(`Removed ${app.name} from dump`, undefined, 'warning', undefined, 'dump');
       await loadAuxiliary();
     } catch (err: any) {
-      uiStore.showToast(err || `Failed to delete ${name} from dump`, 'error');
+      uiStore.showToast(err || `Failed to delete ${app.name} from dump`, 'error');
     }
   }
 
   async function handleFlushLogs(target?: string | number) {
+    const hasTarget = target !== undefined && target !== null && target !== '';
     try {
       const msg = await invoke<string>('pm2_flush_logs', {
-        target: target ? target.toString() : null
+        target: hasTarget ? target.toString() : null
       });
       uiStore.showToast(msg, 'success');
       recordActivity(
         'Flushed logs',
-        target ? `Process #${target}` : 'All PM2 logs',
+        hasTarget ? `Process #${target}` : 'All PM2 logs',
         'info',
         typeof target === 'number' ? target : undefined,
         'logs'
       );
       loadLogs();
+      void loadLogOverview();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to flush logs', 'error');
     }
@@ -1216,7 +1388,7 @@
     const targetName = proc ? `"${proc.name}" (ID #${proc.pm_id})` : 'all PM2 processes';
     const targetId = proc ? proc.pm_id : undefined;
     uiStore.confirm(
-      'Flush Application Logs',
+      proc ? 'Flush Application Logs' : 'Flush All PM2 Logs',
       `Are you sure you want to flush/clear the stdout & stderr log files for ${targetName}? Existing log history on disk will be emptied.`,
       () => handleFlushLogs(targetId),
       true
@@ -1251,11 +1423,14 @@
     );
   }
 
-  function promptDeleteSavedApp(name: string) {
+  function promptDeleteSavedApp(app: Pm2SavedDumpApp) {
+    const label = app.namespace && app.namespace !== 'default'
+      ? `${app.name} (${app.namespace})`
+      : app.name;
     uiStore.confirm(
-      `Remove "${name}" from Saved Dump`,
-      `Are you sure you want to remove "${name}" from ~/.pm2/dump.pm2? It will no longer be restored automatically on system reboot.`,
-      () => handleDeleteSavedApp(name),
+      `Remove "${label}" from Saved Dump`,
+      `Are you sure you want to remove "${label}" from ~/.pm2/dump.pm2? It will no longer be restored automatically on system reboot.`,
+      () => handleDeleteSavedApp(app),
       true
     );
   }
@@ -1263,6 +1438,7 @@
   // Logs stream handling for currently selected process
   async function loadLogs() {
     if (!systemStatus?.installed) return;
+    const token = ++logLoadToken;
     logLoading = true;
     try {
       let logPath = '';
@@ -1277,18 +1453,32 @@
           logPath,
           lines: parseInt(logTailLines, 10) || 200
         });
+        if (token !== logLoadToken) return;
         rawLogText = content;
-        if (logFollow) {
-          await tick();
-          if (logContainerRef) {
+        await tick();
+        if (logContainerRef) {
+          if (logFollow) {
             logContainerRef.scrollTop = logContainerRef.scrollHeight;
+            logAtBottom = true;
+          } else {
+            logAtBottom =
+              logContainerRef.scrollHeight -
+                logContainerRef.scrollTop -
+                logContainerRef.clientHeight <=
+              24;
           }
         }
+      } else {
+        // Never leave another process's text under this app's header.
+        rawLogText = selectedProcess
+          ? `[No log file is configured for "${selectedProcess.name}".]`
+          : '';
       }
     } catch (err: any) {
+      if (token !== logLoadToken) return;
       rawLogText = `[Error reading logs: ${err}]`;
     } finally {
-      logLoading = false;
+      if (token === logLoadToken) logLoading = false;
     }
   }
 
@@ -1301,6 +1491,8 @@
     } else {
       selectedInspectorTab = 'logs';
       showLogsDrawer = true;
+      logFollow = true;
+      logAtBottom = true;
       loadLogs();
     }
   }
@@ -1309,11 +1501,15 @@
     statusFilter = 'all';
     searchQuery = '';
     namespaceFilter = 'all';
+    logSearchQuery = '';
+    logErrorsOnly = false;
     selectedProcessId = proc.pm_id;
     selectedInspectorTab = 'logs';
     activeTab = 'fleet';
     showProcessDrawer = false;
     showLogsDrawer = true;
+    logFollow = true;
+    logAtBottom = true;
     loadLogs();
   }
 
@@ -1514,54 +1710,148 @@
   }
 
   // Ecosystem file handling
-  async function selectEcosystemFile(file: Pm2EcosystemFile) {
-    selectedEcosystemFile = file;
+  async function applyEcosystemFile(file: Pm2EcosystemFile) {
+    const token = ++ecosystemLoadToken;
     try {
       const content = await invoke<string>('pm2_read_ecosystem_file', { path: file.path });
+      // A slower read from a previously-clicked file must not overwrite the
+      // file the user selected last.
+      if (token !== ecosystemLoadToken) return;
+      // Only switch the editor after the content is in hand. Switching first
+      // would leave the old file's text paired with the new file's path, and a
+      // later save could write it to the wrong config.
+      selectedEcosystemFile = file;
       ecosystemContent = content;
       originalEcosystemContent = content;
+      ecosystemOnly = '';
+      ecosystemEnv = '';
+      ecosystemValidationError = '';
     } catch (err: any) {
+      if (token !== ecosystemLoadToken) return;
       uiStore.showToast(`Failed to read ${file.name}: ${err}`, 'error');
+    }
+  }
+
+  function selectEcosystemFile(file: Pm2EcosystemFile) {
+    if (selectedEcosystemFile?.path === file.path) return;
+    if (isEcosystemDirty) {
+      uiStore.confirm(
+        'Unsaved Ecosystem Changes',
+        `${selectedEcosystemFile?.name ?? 'The current config'} has unsaved changes. Opening ${file.name} will discard them. Continue?`,
+        () => applyEcosystemFile(file),
+        true
+      );
+      return;
+    }
+    void applyEcosystemFile(file);
+  }
+
+  async function validateEcosystemContent(): Promise<boolean> {
+    if (!selectedEcosystemFile) return false;
+    ecosystemValidating = true;
+    ecosystemValidationError = '';
+    try {
+      await invoke('pm2_validate_ecosystem', {
+        path: selectedEcosystemFile.path,
+        content: ecosystemContent,
+      });
+      return true;
+    } catch (err: any) {
+      ecosystemValidationError = String(err);
+      return false;
+    } finally {
+      ecosystemValidating = false;
     }
   }
 
   async function saveEcosystemFile(): Promise<boolean> {
     const file = selectedEcosystemFile;
     if (!file) return false;
+    const content = ecosystemContent;
     try {
       await invoke<string>('pm2_write_ecosystem_file', {
         path: file.path,
-        content: ecosystemContent,
+        content,
+        createOnly: false,
       });
-      originalEcosystemContent = ecosystemContent;
+      // Do not clear the dirty state of a different file if the user managed
+      // to switch while the write was in flight.
+      if (selectedEcosystemFile?.path === file.path) {
+        originalEcosystemContent = content;
+        ecosystemValidationError = '';
+      }
       uiStore.showToast(`Saved ${file.name}`, 'success');
       recordActivity(`Saved ${file.name}`, file.path, 'success', undefined, 'ecosystem');
       return true;
     } catch (err: any) {
-      uiStore.showToast(err || 'Failed to save ecosystem file', 'error');
+      if (selectedEcosystemFile?.path === file.path) {
+        ecosystemValidationError = String(err);
+        showEcosystemDiffModal = false;
+      }
+      uiStore.showToast('The ecosystem file could not be saved. See the editor error.', 'error');
       return false;
     }
   }
 
-  function openSaveEcosystemModal() {
+  async function openSaveEcosystemModal() {
     if (!selectedEcosystemFile) return;
+    if (!(await validateEcosystemContent())) {
+      uiStore.showToast('Fix the syntax errors before saving.', 'error');
+      return;
+    }
     showEcosystemDiffModal = true;
   }
 
   async function startEcosystemFile() {
     if (!selectedEcosystemFile) return;
+    if (isEcosystemDirty) {
+      uiStore.confirm(
+        'Save Before Starting',
+        `${selectedEcosystemFile.name} has unsaved changes. Save them before PM2 starts this config?`,
+        async () => {
+          if (await saveEcosystemFile()) {
+            await startEcosystemFile();
+          }
+        },
+        false
+      );
+      return;
+    }
+
+    const only = ecosystemOnly
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .join(',');
+    const environment = ecosystemEnv.trim();
     try {
       const msg = await invoke<string>('pm2_start_ecosystem', {
         path: selectedEcosystemFile.path,
-        only: null,
-        envName: null
+        only: only || null,
+        envName: environment || null
       });
+      ecosystemValidationError = '';
       uiStore.showToast(msg, 'success');
-      recordActivity(`Started ecosystem ${selectedEcosystemFile.name}`, selectedEcosystemFile.path, 'success', undefined, 'ecosystem');
+      const detail = [
+        selectedEcosystemFile.path,
+        only ? `--only ${only}` : '',
+        environment ? `--env ${environment}` : ''
+      ].filter(Boolean).join(' · ');
+      recordActivity(
+        `Started ecosystem ${selectedEcosystemFile.name}`,
+        detail,
+        'success',
+        undefined,
+        'ecosystem'
+      );
       await loadProcesses(false);
       await loadAuxiliary();
     } catch (err: any) {
-      uiStore.showToast(err || 'Failed to start ecosystem file', 'error');
+      const message = String(err);
+      if (/syntax|invalid json|unsupported ecosystem/i.test(message)) {
+        ecosystemValidationError = message;
+      }
+      uiStore.showToast(message || 'Failed to start ecosystem file', 'error');
     }
   }
 
@@ -1644,7 +1934,8 @@
       const content = generateTemplateContent(newEcosystemTemplate);
       await invoke<string>('pm2_write_ecosystem_file', {
         path: newEcosystemPath.trim(),
-        content
+        content,
+        createOnly: true
       });
       uiStore.showToast('Ecosystem configuration created successfully', 'success');
       recordActivity('Created ecosystem config', newEcosystemPath.trim(), 'success', undefined, 'ecosystem');
@@ -1738,7 +2029,7 @@
       bind:activeTab
       onchange={async (t: string) => {
         if (t === 'fleet') {
-          if (selectedInspectorTab === 'logs') loadLogs();
+          if (showLogsDrawer && selectedInspectorTab === 'logs') loadLogs();
         } else if (t === 'daemon') {
           await loadProcesses(true);
           await loadAuxiliary();
@@ -1904,6 +2195,11 @@
           <button class="menu-item" onclick={promptResurrect}>
             <RefreshCcw size={14} class="text-purple" />
             <span>Resurrect saved dump</span>
+          </button>
+          <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
+          <button class="menu-item" onclick={() => promptFlushLogs(null)}>
+            <Trash2 size={14} class="text-amber" />
+            <span>Flush all logs</span>
           </button>
         </KebabMenu>
       </div>
@@ -2101,7 +2397,7 @@
                     <RefreshCcw size={12} /> Resurrect all
                   </Button>
                 </div>
-                {#each savedDumpApps as app (app.name)}
+                {#each savedDumpApps as app (app.namespace + ':' + app.name)}
                   <div class="fleet-empty-saved-row">
                     <div class="fleet-empty-saved-info">
                       <strong>{app.name}</strong>
@@ -2581,7 +2877,7 @@
               <p class="saved-pane-empty">No saved apps yet. Save the current fleet to persist it across reboots.</p>
             {:else}
               <div class="saved-pane-list">
-                {#each savedDumpApps as app (app.name)}
+                {#each savedDumpApps as app (app.namespace + ':' + app.name)}
                   <div class="saved-pane-row">
                     <span class="status-dot {app.is_currently_running ? 'online' : 'stopped'}"></span>
                     <div class="saved-pane-info">
@@ -2767,6 +3063,16 @@
                     />
 
                     <Button
+                      variant={logErrorsOnly ? 'primary' : 'outline'}
+                      size="sm"
+                      onclick={() => logErrorsOnly = !logErrorsOnly}
+                      title="Show only ERROR lines"
+                    >
+                      <AlertTriangle size={12} />
+                      <span>Errors</span>
+                    </Button>
+
+                    <Button
                       variant={logAutoRefresh ? 'primary' : 'outline'}
                       size="sm"
                       onclick={() => logAutoRefresh = !logAutoRefresh}
@@ -2780,9 +3086,10 @@
                       variant={logFollow ? 'outline' : 'ghost'}
                       size="sm"
                       onclick={() => {
-                        logFollow = !logFollow;
-                        if (logFollow && logContainerRef) {
-                          logContainerRef.scrollTop = logContainerRef.scrollHeight;
+                        if (logFollow) {
+                          logFollow = false;
+                        } else {
+                          jumpToLatest();
                         }
                       }}
                       title="Auto-scroll to the newest log line"
@@ -2795,6 +3102,16 @@
                       <button class="menu-item" onclick={() => showProcessDrawer = true}>
                         <Info size={14} class="text-accent" />
                         <span>App Details & Telemetry</span>
+                      </button>
+
+                      <button class="menu-item" onclick={openLogFolder}>
+                        <Folder size={14} class="text-accent" />
+                        <span>Open log folder</span>
+                      </button>
+
+                      <button class="menu-item" onclick={downloadLogFile} disabled={exportingLog}>
+                        <Download size={14} class="text-accent" />
+                        <span>{exportingLog ? 'Saving log…' : 'Download log'}</span>
                       </button>
 
                       <button class="menu-item" onclick={copyCurrentLogs}>
@@ -2813,6 +3130,10 @@
                         <Trash2 size={14} class="text-error" />
                         <span>Flush Logs</span>
                       </button>
+                      <button class="menu-item text-danger" onclick={() => promptFlushLogs(null)}>
+                        <Trash2 size={14} class="text-error" />
+                        <span>Flush all logs</span>
+                      </button>
                     </KebabMenu>
                   </div>
                 </div>
@@ -2826,12 +3147,31 @@
                         {selectedLogType === 'err' ? selectedProcess.err_log_path : selectedProcess.out_log_path}
                       </span>
                     </div>
-                    <span class="log-count-tag font-mono">
-                      {parsedLogs.length} lines rendered
-                    </span>
+                    <div class="log-header-actions">
+                      <button
+                        type="button"
+                        class="log-header-btn"
+                        onclick={openLogFolder}
+                        title="Open log folder"
+                      >
+                        <Folder size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="log-header-btn"
+                        onclick={downloadLogFile}
+                        disabled={exportingLog}
+                        title="Download the full log file"
+                      >
+                        <Download size={12} />
+                      </button>
+                      <span class="log-count-tag font-mono">
+                        {parsedLogs.length} lines
+                      </span>
+                    </div>
                   </div>
 
-                  <div class="log-lines-container" bind:this={logContainerRef}>
+                  <div class="log-lines-container" bind:this={logContainerRef} onscroll={handleLogScroll}>
                     {#if logLoading && parsedLogs.length === 0}
                       <div class="log-state-msg">
                         <RotateCw size={22} class="spin text-accent" />
@@ -2840,7 +3180,11 @@
                     {:else if parsedLogs.length === 0}
                       <div class="log-state-msg">
                         <Terminal size={28} class="text-muted" />
-                        <p>No log output recorded in this file yet.</p>
+                        <p>
+                          {logSearchQuery.trim() || logErrorsOnly
+                            ? 'No log lines match the current filters.'
+                            : 'No log output recorded in this file yet.'}
+                        </p>
                       </div>
                     {:else}
                       <div class="log-table">
@@ -2865,6 +3209,17 @@
                       </div>
                     {/if}
                   </div>
+                  {#if !logAtBottom}
+                    <button
+                      type="button"
+                      class="jump-latest-btn"
+                      onclick={jumpToLatest}
+                      title="Jump to the newest log line"
+                    >
+                      <ArrowDown size={14} />
+                      <span>Jump to latest</span>
+                    </button>
+                  {/if}
                 </div>
               </div>
             {:else}
@@ -2943,10 +3298,10 @@
                     variant="outline"
                     size="sm"
                     onclick={openSaveEcosystemModal}
-                    disabled={!isEcosystemDirty}
+                    disabled={!isEcosystemDirty || ecosystemValidating}
                   >
                     <Save size={13} />
-                    <span>Save</span>
+                    <span>{ecosystemValidating ? 'Checking…' : 'Save'}</span>
                   </Button>
 
                   <Button
@@ -2961,12 +3316,56 @@
                 </div>
               </div>
 
+              <div class="ecosystem-start-options">
+                <label class="eco-option-field">
+                  <span>Only apps</span>
+                  <input
+                    class="form-input form-input-sm"
+                    bind:value={ecosystemOnly}
+                    list="ecosystem-app-names"
+                    placeholder="api,worker"
+                    title="Comma-separated app names; leave empty to start every app in the config"
+                  />
+                </label>
+                <label class="eco-option-field">
+                  <span>Environment</span>
+                  <input
+                    class="form-input form-input-sm"
+                    bind:value={ecosystemEnv}
+                    placeholder="e.g. production"
+                  />
+                </label>
+                <span class="eco-option-hint">
+                  Optional <code>--only</code> and <code>--env</code> flags for <code>pm2 start</code>
+                </span>
+                <datalist id="ecosystem-app-names">
+                  {#each selectedEcosystemFile.app_names as appName}
+                    <option value={appName}></option>
+                  {/each}
+                </datalist>
+              </div>
+
+              {#if ecosystemValidationError}
+                <div class="ecosystem-validation-error" role="alert">
+                  <AlertTriangle size={13} class="flex-shrink-0" />
+                  <pre>{ecosystemValidationError}</pre>
+                  <button
+                    type="button"
+                    class="eco-error-close"
+                    onclick={() => ecosystemValidationError = ''}
+                    aria-label="Dismiss validation error"
+                  >
+                    ×
+                  </button>
+                </div>
+              {/if}
+
               <div class="code-editor-wrap">
                 <CodeEditor
                   value={ecosystemContent}
                   language="javascript"
                   height="100%"
-                  onchange={(newVal) => ecosystemContent = newVal}
+                  onchange={(newVal) => { ecosystemContent = newVal; ecosystemValidationError = ''; }}
                 />
               </div>
             {:else}
@@ -2983,6 +3382,19 @@
       <!-- VIEW 3: DAEMON RUNTIME & SYSTEMD STARTUP -->
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'daemon'}
+        <div class="pm2-scope-note">
+          <Info size={14} class="flex-shrink-0" />
+          <div>
+            <strong>Scope: current user only</strong>
+            <p>
+              This view reads the PM2 instance for
+              <code>{startupStatus?.user || 'the current user'}</code> in
+              <code>{systemStatus.pm2_home}</code>. Apps started by root or another Linux user
+              are not visible from this page.
+            </p>
+          </div>
+        </div>
+
         <div class="daemon-grid">
           <!-- Daemon Status Card -->
           <div class="daemon-card">
@@ -3079,6 +3491,105 @@
             </div>
           </div>
 
+          <!-- Log Health & Rotation Card -->
+          <div class="daemon-card log-health-card">
+            <div class="daemon-card-header">
+              <div class="icon-bubble" style="background: rgba(56, 189, 248, 0.12); color: #38bdf8;">
+                <FileText size={18} />
+              </div>
+              <div>
+                <h3>Log Health &amp; Rotation</h3>
+                <p>
+                  {logOverview?.directory || `${systemStatus.pm2_home}/logs`}
+                </p>
+              </div>
+            </div>
+
+            {#if logOverviewLoading && !logOverview}
+              <p class="daemon-note">
+                <RotateCw size={13} class="spin" /> Measuring log files…
+              </p>
+            {:else if logOverview}
+              <div class="log-health-summary">
+                <div>
+                  <span class="log-health-label">Total log size</span>
+                  <strong class="log-health-value font-mono">{formatBytes(logOverview.total_size)}</strong>
+                </div>
+                <div>
+                  <span class="log-health-label">pm2-logrotate</span>
+                  {#if logOverview.logrotate_installed}
+                    <span class="badge badge-success">
+                      Installed{logOverview.logrotate_version ? ` v${logOverview.logrotate_version}` : ''}
+                    </span>
+                  {:else}
+                    <span class="badge badge-neutral">Not installed</span>
+                  {/if}
+                </div>
+              </div>
+
+              {#if logOverview.files.length > 0}
+                <div class="log-file-list">
+                  {#each logOverview.files as file}
+                    <div class="log-file-row">
+                      <span class="log-file-name font-mono" title={file.name}>{file.name}</span>
+                      <span class="log-file-size font-mono">{formatBytes(file.size)}</span>
+                    </div>
+                  {/each}
+                  {#if logOverview.hidden_files}
+                    <div class="log-file-row log-file-more">
+                      <span>+{logOverview.hidden_files} more files</span>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <p class="daemon-note">No log files have been written yet.</p>
+              {/if}
+
+              {#if !logOverview.logrotate_installed}
+                <div class="logrotate-install">
+                  <p>Install rotation to stop logs from growing without limit:</p>
+                  <div class="code-terminal">
+                    <code>pm2 install pm2-logrotate</code>
+                    <button
+                      class="copy-btn"
+                      onclick={() => copyToClipboard('pm2 install pm2-logrotate', 'logrotate')}
+                      title="Copy install command"
+                    >
+                      {#if copiedCommand === 'logrotate'}
+                        <Check size={14} class="text-emerald" />
+                      {:else}
+                        <Copy size={14} />
+                      {/if}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            {:else}
+              <p class="daemon-note">Log metrics are unavailable.</p>
+            {/if}
+
+            <div class="card-footer-actions">
+              <Button variant="outline" size="sm" onclick={openLogFolder} title="Open the PM2 log directory">
+                <Folder size={12} />
+                <span>Open folder</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={loadLogOverview}
+                disabled={logOverviewLoading}
+                title="Measure log files again"
+              >
+                <RefreshCcw size={12} class={logOverviewLoading ? 'spin' : ''} />
+                <span>Refresh</span>
+              </Button>
+              <Button variant="outline" size="sm" onclick={() => promptFlushLogs(null)} title="Empty every PM2 log file">
+                <Trash2 size={12} class="text-amber" />
+                <span>Flush all</span>
+              </Button>
+            </div>
+          </div>
+
           <!-- Saved Applications Snapshot Catalog Card (Full Width) -->
           <div class="daemon-card dump-catalog-card">
             <div class="daemon-card-header">
@@ -3126,6 +3637,9 @@
                       <div class="saved-app-identity">
                         <span class="status-dot {app.is_currently_running ? 'online' : 'stopped'}"></span>
                         <span class="saved-app-name font-mono">{app.name}</span>
+                        {#if app.namespace && app.namespace !== 'default'}
+                          <span class="mode-badge" title="PM2 namespace">{app.namespace}</span>
+                        {/if}
                         <span class="mode-badge {app.exec_mode.includes('cluster') ? 'cluster' : 'fork'}">
                           {app.exec_mode.includes('cluster') ? `cluster (${app.instances})` : 'fork'}
                         </span>
@@ -3184,7 +3698,7 @@
                         <Button
                           variant="ghost"
                           size="xs"
-                          onclick={() => promptDeleteSavedApp(app.name)}
+                          onclick={() => promptDeleteSavedApp(app)}
                           title="Remove this app entry from dump.pm2"
                         >
                           <Trash2 size={12} class="text-error" />
@@ -5256,6 +5770,7 @@
     color: var(--color-accent);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   }/* Terminal Log Card */ .log-stream-card {
+    position: relative;
     flex: 1;
     min-height: 0;
     --log-bg: #090d13;
@@ -5333,6 +5848,28 @@
   }.log-count-tag {
     font-size: 10px;
     color: var(--log-ts);
+  }.log-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }.log-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--log-muted);
+    cursor: pointer;
+  }.log-header-btn:hover:not(:disabled) {
+    border-color: var(--log-border);
+    color: var(--color-accent);
+  }.log-header-btn:disabled {
+    opacity: 0.4;
+    cursor: wait;
   }.log-lines-container {
     flex: 1;
     min-height: 0;
@@ -5429,6 +5966,26 @@
     gap: 10px;
     color: var(--log-ts);
     font-size: 12px;
+  }.jump-latest-btn {
+    position: absolute;
+    right: 16px;
+    bottom: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-family: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+  }.jump-latest-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }/* ── TAB 2: VITALS & METRICS ── */ .vitals-tab-wrap {
     flex: 1;
     min-height: 0;
@@ -5758,6 +6315,63 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }.ecosystem-start-options {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-bg-card);
+  }.eco-option-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }.eco-option-field .form-input {
+    width: 170px;
+    margin: 0;
+  }.eco-option-hint {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    padding-bottom: 5px;
+  }.eco-option-hint code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-accent);
+  }.ecosystem-validation-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin: 8px 16px 0;
+    padding: 7px 9px;
+    border: 1px solid rgba(244, 63, 94, 0.35);
+    border-radius: 7px;
+    background: rgba(244, 63, 94, 0.08);
+    color: var(--color-error);
+    font-size: 11px;
+  }.ecosystem-validation-error pre {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    max-height: 130px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.45;
+  }.eco-error-close {
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
   }.code-editor-wrap {
     flex: 1;
     min-height: 0;
@@ -5781,7 +6395,32 @@
     font-size: 12px;
     max-width: 320px;
     margin: 0;
-  }/* ═════════════════════════════════════════════════════════════════════════ */ /* VIEW 3: DAEMON RUNTIME & STARTUP */ /* ═════════════════════════════════════════════════════════════════════════ */ .daemon-grid {
+  }/* ═════════════════════════════════════════════════════════════════════════ */ /* VIEW 3: DAEMON RUNTIME & STARTUP */ /* ═════════════════════════════════════════════════════════════════════════ */ .pm2-scope-note {
+    flex-shrink: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+  }.pm2-scope-note strong {
+    display: block;
+    margin-bottom: 1px;
+    color: var(--color-text-primary);
+  }.pm2-scope-note p {
+    margin: 0;
+    line-height: 1.45;
+  }.pm2-scope-note code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-accent);
+  }.daemon-grid {
+    flex: 1;
+    min-height: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 14px;
@@ -5823,6 +6462,69 @@
     align-items: center;
     gap: 8px;
     margin-top: 4px;
+    flex-wrap: wrap;
+  }.log-health-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }.log-health-card {
+    grid-column: 1 / -1;
+  }.log-health-label {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }.log-health-value {
+    font-size: 16px;
+    color: var(--color-text-primary);
+  }.log-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+    background: var(--color-bg-surface);
+  }.log-file-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 10.5px;
+  }.log-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+  }.log-file-size {
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+  }.log-file-more {
+    padding-top: 3px;
+    border-top: 1px dashed var(--color-border-subtle);
+    color: var(--color-text-muted);
+    font-size: 10px;
+  }.logrotate-install {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }.logrotate-install p {
+    margin: 0;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }.daemon-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 11px;
+    color: var(--color-text-muted);
   }.startup-hint-box {
     display: flex;
     flex-direction: column;
