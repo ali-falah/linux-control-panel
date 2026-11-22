@@ -2192,7 +2192,7 @@ pub fn is_protected_admin_group(groupname: &str) -> bool {
 }
 
 /// Kernel module (`modprobe 8021q`, `rmmod floppy`).
-fn is_module_name(value: &str) -> bool {
+pub(crate) fn is_module_name(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()
@@ -3497,6 +3497,42 @@ pub fn smart_test_type_valid(test_type: &str) -> Result<(), String> {
     }
 }
 
+/// Optional smartctl `-d` device type, as reported by `smartctl --scan -j`.
+/// USB bridges and RAID controllers need values such as `sat` or
+/// `megaraid,0`; this accepts only one safe argument and never an option.
+pub fn smart_device_type_valid(device_type: &str) -> Result<(), String> {
+    if device_type.is_empty()
+        || device_type.len() > 40
+        || device_type.starts_with('-')
+        || !device_type
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '_' | '-' | '/'))
+    {
+        return Err(format!(
+            "the SMART device type must be one argument such as sat or megaraid,0, got: {device_type}"
+        ));
+    }
+    Ok(())
+}
+
+/// A PCI address such as "0000:00:1f.6". Only characters a sysfs path can
+/// contain are allowed, so the value can never traverse out of the PCI tree.
+pub fn pci_slot_valid(slot: &str) -> Result<(), String> {
+    if slot.is_empty()
+        || slot.len() > 16
+        || slot.matches(':').count() != 2
+        || !slot.contains('.')
+        || !slot
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'))
+    {
+        return Err(format!(
+            "the PCI slot must look like 0000:00:1f.6, got: {slot}"
+        ));
+    }
+    Ok(())
+}
+
 fn check_module_tools(program: &str, args: &[String]) -> Result<(), String> {
     for arg in args {
         if arg.starts_with('-') {
@@ -4076,6 +4112,8 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "smart_health",
     "smart_data",
     "smart_self_test",
+    "inventory_scan",
+    "pci_reset",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -4293,6 +4331,10 @@ const HELPER_PROCESS_RENICE_ACTIONS: &[&str] = &["process_renice"];
 const HELPER_SMART_HEALTH_ACTIONS: &[&str] = &["smart_health"];
 const HELPER_SMART_DATA_ACTIONS: &[&str] = &["smart_data"];
 const HELPER_SMART_SELF_TEST_ACTIONS: &[&str] = &["smart_self_test"];
+/// `inventory_scan` takes no parameters and returns `lshw -json` from root.
+const HELPER_INVENTORY_ACTIONS: &[&str] = &["inventory_scan"];
+/// `pci_reset <slot>` unbinds and rebinds one PCI function's driver.
+const HELPER_PCI_RESET_ACTIONS: &[&str] = &["pci_reset"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -5102,14 +5144,38 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     if HELPER_SMART_DATA_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 && args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a device path and an optional smartctl device type",
+            ));
+        }
+        smart_device_valid(&args[1])?;
+        if let Some(device_type) = args.get(2) {
+            smart_device_type_valid(device_type)?;
+        }
+        return Ok(());
+    }
+    if HELPER_INVENTORY_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_PCI_RESET_ACTIONS.contains(&action.as_str()) {
         if args.len() != 2 {
             return Err(operand_not_allowed(
                 "lcp-admin",
                 action,
-                "this action takes exactly one device path",
+                "this action takes exactly one PCI slot address",
             ));
         }
-        smart_device_valid(&args[1])?;
+        pci_slot_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_SMART_SELF_TEST_ACTIONS.contains(&action.as_str()) {
@@ -9477,6 +9543,36 @@ mod system_info_validator_tests {
     }
 
     #[test]
+    fn smart_device_type_is_one_safe_argument() {
+        use super::smart_device_type_valid;
+        for device_type in ["sat", "nvme", "scsi", "megaraid,0", "aacraid,0,0,0", "usbasm1352r,0"] {
+            smart_device_type_valid(device_type).expect("valid smartctl device type");
+        }
+        for device_type in ["", "-d", "sat --all", "sat;reboot", "sat/../x", "x".repeat(41).as_str()] {
+            assert!(
+                smart_device_type_valid(device_type).is_err(),
+                "{device_type:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn pci_slots_are_validated_before_any_sysfs_access() {
+        use super::pci_slot_valid;
+        for slot in ["0000:00:1f.6", "0000:3b:00.0", "0000:00:02.0"] {
+            pci_slot_valid(slot).expect("valid PCI slot");
+        }
+        for slot in ["", "../../etc/shadow", "0000:00:1f.6/../../x", "::::", "0000:00:1f"] {
+            assert!(pci_slot_valid(slot).is_err(), "{slot:?} must be refused");
+        }
+        check_lcp(&["pci_reset", "0000:00:1f.6"]).expect("valid PCI reset gate shape");
+        assert!(check_lcp(&["pci_reset", "../../etc/shadow"]).is_err());
+        assert!(check_lcp(&["pci_reset"]).is_err());
+        check_lcp(&["inventory_scan"]).expect("inventory scan takes no arguments");
+        assert!(check_lcp(&["inventory_scan", "x"]).is_err());
+    }
+
+    #[test]
     fn smart_device_only_accepts_a_direct_non_symlink_device_path() {
         assert!(smart_device_valid("/etc/passwd").is_err());
         assert!(smart_device_valid("/dev/../etc/passwd").is_err());
@@ -9504,6 +9600,8 @@ mod system_info_validator_tests {
             smart_device_valid(&device_str).expect("fixture regular file is allowed");
             check_lcp(&["smart_health", &device_str]).expect("valid health gate shape");
             check_lcp(&["smart_data", &device_str]).expect("valid data gate shape");
+            check_lcp(&["smart_data", &device_str, "sat"]).expect("valid typed data gate shape");
+            assert!(check_lcp(&["smart_data", &device_str, "sat --all"]).is_err());
             check_lcp(&["smart_self_test", &device_str, "long"])
                 .expect("valid self-test gate shape");
 

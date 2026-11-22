@@ -11,6 +11,7 @@ const FIXTURE_ROOT: &str = "/tmp/lcp-admin-test-fixture";
 const LOG: &str = "/tmp/lcp-admin-test-fixture/log/calls.log";
 const RENICE_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/renice";
 const SMARTCTL_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/smartctl";
+const LSHW_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/lshw";
 const DEVICE_DIR: &str = "/tmp/lcp-admin-test-fixture/dev";
 const DEVICE: &str = "/tmp/lcp-admin-test-fixture/dev/sda";
 const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
@@ -49,8 +50,13 @@ echo 'Device Model: Test Disk'
 echo 'SMART overall-health self-assessment test result: PASSED'
 exit 0
 "#;
+    const LSHW_STUB: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "/tmp/lcp-admin-test-fixture/log/calls.log"
+printf '{"id":"fixture","class":"system","children":[]}'
+exit 0
+"#;
     use std::os::unix::fs::PermissionsExt;
-    for (path, body) in [(RENICE_BIN, RENICE_STUB), (SMARTCTL_BIN, SMARTCTL_STUB)] {
+    for (path, body) in [(RENICE_BIN, RENICE_STUB), (SMARTCTL_BIN, SMARTCTL_STUB), (LSHW_BIN, LSHW_STUB)] {
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -168,6 +174,27 @@ fn smart_data_uses_the_exact_argv_and_returns_stdout() {
     assert_eq!(run.code, 0, "valid smart data must succeed: {run:?}");
     assert!(run.stdout.contains("Device Model: Test Disk"), "{run:?}");
     assert_eq!(calls(), vec![format!("-a -j {DEVICE}")]);
+}
+
+#[test]
+fn smart_data_accepts_the_scanned_device_type() {
+    let _guard = fixture();
+    let run = run_helper(&["smart_data", DEVICE, "sat"]);
+    assert_eq!(run.code, 0, "typed smart data must succeed: {run:?}");
+    assert_eq!(calls(), vec![format!("-a -j -d sat {DEVICE}")]);
+
+    let run = run_helper(&["smart_data", DEVICE, "sat --all"]);
+    assert_eq!(run.code, 2, "an option-shaped type must be refused: {run:?}");
+    assert!(run.stderr.starts_with("lcp-admin:"), "{run:?}");
+}
+
+#[test]
+fn inventory_scan_returns_root_lshw_json() {
+    let _guard = fixture();
+    let run = run_helper(&["inventory_scan"]);
+    assert_eq!(run.code, 0, "inventory scan must succeed: {run:?}");
+    assert!(run.stdout.contains("\"id\":\"fixture\""), "{run:?}");
+    assert_eq!(calls(), vec!["-json".to_string()]);
 }
 
 #[test]

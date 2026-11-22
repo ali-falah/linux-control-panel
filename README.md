@@ -60,7 +60,7 @@
 | Module | Description & Capabilities |
 | :--- | :--- |
 | ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), new-unit wizard, editable drop-in override plus read-only effective unit view, boot analyzer, and inline `journalctl -u` log stream. |
-| 🔌 **Device Manager** | PCI & USB Device Explorer (`lspci`, `lsusb`), Block Storage Devices (`lsblk`) with filesystem types & mount points, CPU/GPU hardware specs, Thermal Sensors inspector (core temps, fan speeds), and **SMART Disk Health & Self-Test Inspector** (`smartctl`). |
+| 🔌 **Device Manager** | Searchable hardware inventory (`lshw`) with class filters and an administrator detailed scan for serials/capabilities, a per-device details drawer with **PCI driver reset** and guarded module unload, **SMART health, key indicators, type-aware self-test progress & logs** (`smartctl`), and PCI/USB bus topology (`lspci`, `lsusb`). |
 | 👥 **User Manager** | System Users & Groups manager (`/etc/passwd`, `/etc/group`), user creation & deletion, password management, UID/GID config, default shell selector (`bash`, `zsh`, `fish`), **Sudoers Privilege Rule Builder** (`/etc/sudoers.d/`), and SSH Authorized Keys manager (`~/.ssh/authorized_keys`). |
 | 💻 **Shell Environment** | Graphical editor for shell environment files (`.bashrc`, `.zshrc`, `.bash_profile`), **Shell Aliases Manager** (create, edit, toggle, delete command aliases), **PATH Variable Visual Manager** (add, reorder, or remove directory paths), and shell config backup helper. |
 | 🌐 **Hosts Manager** | Graphical `/etc/hosts` domain mapping editor, IP-to-Domain entry management with status toggles (enable/disable without deletion), pre-configured adware/malware blocklist integration, and domain ping verification tool. |
@@ -100,6 +100,9 @@ sudo dnf install -y \
   file \
   libappindicator-gtk3-devel \
   librsvg2-devel
+
+# Hardware inspection tools used by Device Manager
+sudo dnf install -y lshw smartmontools pciutils usbutils
 
 # Node.js (v20+)
 sudo dnf install -y nodejs npm

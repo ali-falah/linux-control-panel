@@ -2634,13 +2634,21 @@ fn smart_health_action(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `smart_data <device>`: `smartctl -a -j`, preserving JSON even when
-/// smartctl exits non-zero for a warning.
-fn smart_data_action(device: &str) -> Result<(), String> {
+/// `smart_data <device> [type]`: `smartctl -a -j`, preserving JSON even when
+/// smartctl exits non-zero for a warning. The optional type is the one
+/// `smartctl --scan -j` reported and enables USB bridges and RAID controllers
+/// that need `-d sat`/`-d megaraid,0`.
+fn smart_data_action(device: &str, device_type: Option<&str>) -> Result<(), String> {
     smart_device_valid(device)?;
     let smartctl = resolve_trusted_program("smartctl")?;
-    let output = std::process::Command::new(smartctl)
-        .args(["-a", "-j", device])
+    let mut command = std::process::Command::new(smartctl);
+    command.args(["-a", "-j"]);
+    if let Some(device_type) = device_type {
+        root_policy::smart_device_type_valid(device_type)?;
+        command.args(["-d", device_type]);
+    }
+    command.arg(device);
+    let output = command
         .output()
         .map_err(|_| "lcp-admin: smartctl could not be started".to_string())?;
     if !output.stdout.is_empty() {
@@ -2669,6 +2677,94 @@ fn smart_self_test_action(device: &str, test_type: &str) -> Result<(), String> {
     std::io::stdout()
         .write_all(&output.stdout)
         .map_err(|_| "lcp-admin: could not write smartctl output".to_string())?;
+    Ok(())
+}
+
+/// `inventory_scan`: read the full hardware tree as root, so serial numbers
+/// and capabilities that unprivileged lshw hides are available.
+fn inventory_scan_action() -> Result<(), String> {
+    let lshw = resolve_trusted_program("lshw")?;
+    let output = std::process::Command::new(lshw)
+        .arg("-json")
+        .output()
+        .map_err(|_| "lcp-admin: lshw could not be started".to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "lcp-admin: lshw failed".to_string()
+        } else {
+            format!("lcp-admin: lshw failed: {stderr}")
+        });
+    }
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|_| "lcp-admin: could not write lshw output".to_string())?;
+    Ok(())
+}
+
+/// `pci_reset <slot>`: unbind and rebind one PCI function's driver. This is
+/// the device-level reset that works while the module is still bound; it never
+/// unloads a kernel module and never accepts a driver path from the caller.
+fn pci_reset_action(slot: &str) -> Result<(), String> {
+    root_policy::pci_slot_valid(slot)?;
+    // Resetting the controller that owns the boot disk, the display, a bridge,
+    // or the USB controller can take the session (or the machine) down. Those
+    // are exactly the devices a user must not casually detach here.
+    let class_text = std::fs::read_to_string(format!("/sys/bus/pci/devices/{slot}/class"))
+        .map_err(|e| format!("lcp-admin: could not read the PCI class of {slot}: {e}"))?;
+    let class_hex = class_text.trim().trim_start_matches("0x");
+    let class = u32::from_str_radix(class_hex, 16)
+        .map_err(|_| format!("lcp-admin: invalid PCI class for {slot}"))?;
+    let base = (class >> 16) & 0xff;
+    let sub = (class >> 8) & 0xff;
+    let blocked = base == 0x01 // mass storage
+        || base == 0x03 // display
+        || base == 0x06 // bridge
+        || (base == 0x0c && sub == 0x03); // USB controller
+    if blocked {
+        return Err(format!(
+            "lcp-admin: refusing to reset PCI device {slot}: storage, display, bridge and USB controllers can take the system down"
+        ));
+    }
+    let device_link = format!("/sys/bus/pci/devices/{slot}/driver");
+    let driver_path = std::fs::canonicalize(&device_link).map_err(|_| {
+        format!("lcp-admin: no driver is bound to PCI device {slot}")
+    })?;
+    let drivers_root = std::fs::canonicalize("/sys/bus/pci/drivers")
+        .map_err(|_| "lcp-admin: /sys/bus/pci/drivers is not readable".to_string())?;
+    if driver_path == drivers_root || !driver_path.starts_with(&drivers_root) {
+        return Err(format!(
+            "lcp-admin: the driver path for {slot} is not inside /sys/bus/pci/drivers"
+        ));
+    }
+    let unbind = driver_path.join("unbind");
+    let bind = driver_path.join("bind");
+    if !unbind.is_file() || !bind.is_file() {
+        return Err(format!(
+            "lcp-admin: the driver for PCI device {slot} does not expose bind/unbind"
+        ));
+    }
+    std::fs::write(&unbind, slot).map_err(|e| {
+        format!("lcp-admin: could not unbind PCI device {slot}: {e}")
+    })?;
+    // udev may rebind the function on its own. Give it a moment, then bind
+    // explicitly; EEXIST/BUSY after an automatic rebind is a success.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let bind_result = std::fs::write(&bind, slot);
+    if std::fs::canonicalize(&device_link).is_err() {
+        if let Err(e) = bind_result {
+            return Err(format!(
+                "lcp-admin: PCI device {slot} was unbound but could not be rebound: {e}"
+            ));
+        }
+        if std::fs::canonicalize(&device_link).is_err() {
+            return Err(format!(
+                "lcp-admin: PCI device {slot} was unbound but is still detached"
+            ));
+        }
+    }
+    println!("lcp-admin: PCI device {slot} driver reset successfully.");
     Ok(())
 }
 
@@ -2736,6 +2832,8 @@ const ROOT_ACTIONS: &[&str] = &[
     "smart_health",
     "smart_data",
     "smart_self_test",
+    "inventory_scan",
+    "pci_reset",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -3034,11 +3132,27 @@ fn main() {
                 ))
             }
         } else if requested == "smart_data" {
-            if args.len() == 2 {
-                smart_data_action(&args[1])
+            match args.len() {
+                2 => smart_data_action(&args[1], None),
+                3 => smart_data_action(&args[1], Some(&args[2])),
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes a device path and an optional smartctl device type."
+                )),
+            }
+        } else if requested == "inventory_scan" {
+            if args.len() == 1 {
+                inventory_scan_action()
             } else {
                 Err(format!(
-                    "lcp-admin: the action '{requested}' takes exactly one device path."
+                    "lcp-admin: the action '{requested}' takes no arguments."
+                ))
+            }
+        } else if requested == "pci_reset" {
+            if args.len() == 2 {
+                pci_reset_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one PCI slot address."
                 ))
             }
         } else if requested == "smart_self_test" {
