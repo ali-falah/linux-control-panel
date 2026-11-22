@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { 
-    Key, ShieldCheck, Lock, FileKey, AlertTriangle, CheckCircle2, XCircle, 
-    Plus, Trash2, Copy, RefreshCw, HelpCircle, Server, Eye, ExternalLink, ShieldAlert,
-    Terminal, Globe, Activity, Play, RotateCw, Ban, Search, X, Check, Info, Shield,
-    Cpu, Laptop, ArrowUpRight, Clock, Sparkles
+  import {
+    Key, ShieldCheck, Lock, FileKey, AlertTriangle, CheckCircle2, XCircle,
+    Plus, Trash2, Copy, RefreshCw, Server, ShieldAlert, Terminal, Globe,
+    Play, RotateCw, Ban, X, Check, Info, Shield, Clock,
+    MoreVertical, Pencil, Fingerprint, HardDrive, Unlock
   } from '@lucide/svelte';
   import { invokeSafe } from '../utils/ipc';
   import { uiStore } from '../stores/ui.svelte.ts';
@@ -15,7 +15,10 @@
   import EmptyState from '../components/ui/EmptyState.svelte';
   import Button from '../components/ui/Button.svelte';
   import Badge from '../components/ui/Badge.svelte';
-  import Card from '../components/ui/Card.svelte';
+  import KpiCard from '../components/ui/KpiCard.svelte';
+  import Input from '../components/ui/Input.svelte';
+  import Select from '../components/ui/Select.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
   import { portal } from '../actions/portal.ts';
 
   // ─── Types ───────────────────────────────────────────────────────────────────
@@ -27,6 +30,7 @@
     pub_key_path?: string;
     fingerprint: string;
     public_key: string;
+    comment: string;
     has_private: boolean;
   }
 
@@ -45,6 +49,7 @@
     host: string;
     key_type: string;
     fingerprint: string;
+    marker: string;
     raw: string;
   }
 
@@ -65,6 +70,7 @@
     port: string;
     config_path: string;
     is_evaluated: boolean;
+    source: 'daemon' | 'config' | 'none' | string;
     error?: string;
   }
 
@@ -79,6 +85,8 @@
     san_domains: string[];
     is_expired: boolean;
     is_expiring_soon: boolean;
+    is_self_signed: boolean;
+    date_parse_error: boolean;
   }
 
   interface Fail2banJailInfo {
@@ -91,24 +99,46 @@
   interface Fail2banStatus {
     is_installed: boolean;
     is_active: boolean;
+    needs_elevation: boolean;
     total_banned_ips: number;
     jails: Fail2banJailInfo[];
+    error?: string;
   }
+
+  interface MenuItem {
+    label: string;
+    icon?: any;
+    action?: () => void | Promise<void>;
+    danger?: boolean;
+    disabled?: boolean;
+    divider?: boolean;
+  }
+
+  type TabId = 'keys' | 'client_config' | 'known_hosts' | 'authorized' | 'certs' | 'threats';
+  type KeyFilter = 'all' | 'pair' | 'public';
+  type CertFilter = 'all' | 'valid' | 'expiring';
 
   // ─── State ───────────────────────────────────────────────────────────────────
 
-  let activeTab = $state<'keys' | 'client_config' | 'known_hosts' | 'authorized' | 'certs' | 'threats'>(
-    uiStore.targetSubTab && ['keys', 'client_config', 'known_hosts', 'authorized', 'certs', 'threats'].includes(uiStore.targetSubTab)
-      ? (uiStore.targetSubTab as any)
+  const tabIds: TabId[] = ['keys', 'client_config', 'known_hosts', 'authorized', 'certs', 'threats'];
+  let activeTab = $state<TabId>(
+    uiStore.targetSubTab && tabIds.includes(uiStore.targetSubTab as TabId)
+      ? (uiStore.targetSubTab as TabId)
       : 'keys'
   );
-  if (uiStore.targetSubTab && ['keys', 'client_config', 'known_hosts', 'authorized', 'certs', 'threats'].includes(uiStore.targetSubTab)) {
+  if (uiStore.targetSubTab && tabIds.includes(uiStore.targetSubTab as TabId)) {
     uiStore.targetSubTab = null;
   }
+
   let loading = $state(false);
   let evaluatingSshd = $state(false);
+  let evaluatingFail2ban = $state(false);
+  let generatingKey = $state(false);
+  let savingHost = $state(false);
+  let savingKey = $state(false);
+  let banning = $state(false);
+  let loadErrors = $state<string[]>([]);
 
-  // Data Stores
   let sshKeys = $state<SshKeyItem[]>([]);
   let clientHosts = $state<SshClientHost[]>([]);
   let knownHosts = $state<KnownHostItem[]>([]);
@@ -117,111 +147,202 @@
   let sslCerts = $state<SslCertItem[]>([]);
   let fail2banStatus = $state<Fail2banStatus | null>(null);
 
-  // Search & Filter States
   let keySearch = $state('');
+  let keyFilter = $state<KeyFilter>('all');
   let clientSearch = $state('');
   let knownSearch = $state('');
+  let authSearch = $state('');
   let certSearch = $state('');
-  let certFilter = $state<'all' | 'expiring' | 'valid'>('all');
+  let certFilter = $state<CertFilter>('all');
 
-  // Modals State
+  // Generate-key form
   let showGenModal = $state(false);
-  let genKeyType = $state<'ed25519' | 'rsa'>('ed25519');
+  let genKeyType = $state<'ed25519' | 'rsa' | 'ecdsa'>('ed25519');
   let genBits = $state(4096);
   let genFilename = $state('id_ed25519_custom');
   let genComment = $state('user@linux-control-panel');
   let genPassphrase = $state('');
   let generatedKeyResult = $state<{ filename: string; publicKey: string } | null>(null);
 
-  let showAddClientModal = $state(false);
-  let newHostAlias = $state('');
-  let newHostName = $state('');
-  let newHostUser = $state('');
-  let newHostPort = $state('22');
-  let newHostKey = $state('');
-  let newHostProxy = $state('');
-  let newHostExtra = $state('');
+  // Client-host form
+  let showHostModal = $state(false);
+  let editingHost = $state(false);
+  let hostAlias = $state('');
+  let hostName = $state('');
+  let hostUser = $state('');
+  let hostPort = $state('22');
+  let hostKey = $state('');
+  let hostProxy = $state('');
+  let hostExtra = $state('');
 
-  let showAddAuthModal = $state(false);
+  // Authorized-key form
+  let showAuthModal = $state(false);
   let newAuthPubKey = $state('');
 
-  let showTestSslModal = $state(false);
-  let testSslHost = $state('google.com');
-  let testSslPort = $state(443);
-  let testSslLoading = $state(false);
-  let testSslResult = $state<SslCertItem | null>(null);
-  let testSslError = $state<string | null>(null);
+  // Live TLS form
+  let showTlsModal = $state(false);
+  let tlsHost = $state('example.com');
+  let tlsPort = $state(443);
+  let tlsLoading = $state(false);
+  let tlsResult = $state<SslCertItem | null>(null);
+  let tlsError = $state<string | null>(null);
 
+  // Fail2ban ban form
   let showBanModal = $state(false);
-  let banJailName = $state('sshd');
-  let banIpAddress = $state('');
+  let banJail = $state('sshd');
+  let banIp = $state('');
 
-  // ─── Filtered Lists ──────────────────────────────────────────────────────────
+  // Context menu
+  let menuOpen = $state(false);
+  let menuX = $state(0);
+  let menuY = $state(0);
+  let menuTitle = $state('');
+  let menuSubtitle = $state('');
+  let menuItems = $state<MenuItem[]>([]);
+
+  // ─── Derived ─────────────────────────────────────────────────────────────────
 
   let filteredSshKeys = $derived(
-    sshKeys.filter(k => 
-      !keySearch || 
-      k.name.toLowerCase().includes(keySearch.toLowerCase()) || 
-      k.fingerprint.toLowerCase().includes(keySearch.toLowerCase()) ||
-      k.key_type.toLowerCase().includes(keySearch.toLowerCase())
-    )
+    sshKeys.filter((key) => {
+      if (keyFilter === 'pair' && !key.has_private) return false;
+      if (keyFilter === 'public' && key.has_private) return false;
+      const query = keySearch.trim().toLowerCase();
+      return (
+        !query ||
+        key.name.toLowerCase().includes(query) ||
+        key.key_type.toLowerCase().includes(query) ||
+        key.fingerprint.toLowerCase().includes(query) ||
+        key.comment.toLowerCase().includes(query)
+      );
+    })
   );
 
   let filteredClientHosts = $derived(
-    clientHosts.filter(h => 
-      !clientSearch || 
-      h.host.toLowerCase().includes(clientSearch.toLowerCase()) || 
-      h.hostname.toLowerCase().includes(clientSearch.toLowerCase()) ||
-      h.user.toLowerCase().includes(clientSearch.toLowerCase())
-    )
+    clientHosts.filter((host) => {
+      const query = clientSearch.trim().toLowerCase();
+      return (
+        !query ||
+        host.host.toLowerCase().includes(query) ||
+        host.hostname.toLowerCase().includes(query) ||
+        host.user.toLowerCase().includes(query) ||
+        host.proxy_jump.toLowerCase().includes(query)
+      );
+    })
   );
 
   let filteredKnownHosts = $derived(
-    knownHosts.filter(k => 
-      !knownSearch || 
-      k.host.toLowerCase().includes(knownSearch.toLowerCase()) || 
-      k.fingerprint.toLowerCase().includes(knownSearch.toLowerCase())
-    )
+    knownHosts.filter((host) => {
+      const query = knownSearch.trim().toLowerCase();
+      return (
+        !query ||
+        host.host.toLowerCase().includes(query) ||
+        host.key_type.toLowerCase().includes(query) ||
+        host.fingerprint.toLowerCase().includes(query)
+      );
+    })
   );
 
-  let filteredSslCerts = $derived(
-    sslCerts.filter(c => {
-      const matchText = !certSearch || 
-        c.name.toLowerCase().includes(certSearch.toLowerCase()) ||
-        c.issuer.toLowerCase().includes(certSearch.toLowerCase()) ||
-        c.san_domains.some(s => s.toLowerCase().includes(certSearch.toLowerCase()));
+  let filteredAuthorizedKeys = $derived(
+    authorizedKeys.filter((key) => {
+      const query = authSearch.trim().toLowerCase();
+      return (
+        !query ||
+        key.comment.toLowerCase().includes(query) ||
+        key.key_type.toLowerCase().includes(query) ||
+        key.options.toLowerCase().includes(query)
+      );
+    })
+  );
 
-      if (!matchText) return false;
-      if (certFilter === 'expiring') return c.is_expiring_soon || c.is_expired;
-      if (certFilter === 'valid') return !c.is_expired;
+  let expiringCertsCount = $derived(
+    sslCerts.filter((cert) => cert.is_expiring_soon || cert.is_expired).length
+  );
+  let expiredCertsCount = $derived(sslCerts.filter((cert) => cert.is_expired).length);
+
+  let filteredSslCerts = $derived(
+    sslCerts.filter((cert) => {
+      const query = certSearch.trim().toLowerCase();
+      const matches =
+        !query ||
+        cert.name.toLowerCase().includes(query) ||
+        cert.subject.toLowerCase().includes(query) ||
+        cert.issuer.toLowerCase().includes(query) ||
+        cert.san_domains.some((san) => san.toLowerCase().includes(query));
+      if (!matches) return false;
+      if (certFilter === 'expiring') return cert.is_expiring_soon || cert.is_expired;
+      if (certFilter === 'valid') return !cert.is_expired;
       return true;
     })
   );
 
-  // Expiring certs count
-  let expiringCertsCount = $derived(
-    sslCerts.filter(c => c.is_expiring_soon || c.is_expired).length
-  );
-
-  const certFilters = [
-    { id: 'all', label: 'All' },
-    { id: 'valid', label: 'Valid' },
-    { id: 'expiring', label: 'Expiring' },
-  ] as const;
-  const certFilterCounts = $derived({
+  let keyPairCount = $derived(sshKeys.filter((key) => key.has_private).length);
+  let certFilterCounts = $derived({
     all: sslCerts.length,
-    valid: sslCerts.filter(c => !c.is_expired).length,
+    valid: sslCerts.filter((cert) => !cert.is_expired).length,
     expiring: expiringCertsCount,
   });
+  let keyFilterCounts = $derived({
+    all: sshKeys.length,
+    pair: keyPairCount,
+    public: sshKeys.length - keyPairCount,
+  });
 
-  // ─── Data Loading ────────────────────────────────────────────────────────────
+  let keyFilterOptions = $derived([
+    { id: 'all', label: 'All', count: keyFilterCounts.all },
+    { id: 'pair', label: 'Key pairs', count: keyFilterCounts.pair },
+    { id: 'public', label: 'Public only', count: keyFilterCounts.public },
+  ]);
+
+  let certFilterOptions = $derived([
+    { id: 'all', label: 'All', count: certFilterCounts.all },
+    { id: 'valid', label: 'Valid', count: certFilterCounts.valid },
+    { id: 'expiring', label: 'Expiring', count: certFilterCounts.expiring },
+  ]);
+
+  let parsedAuthPreview = $derived.by(() => {
+    const raw = newAuthPubKey.trim();
+    if (!raw || /[\r\n\0]/.test(raw)) return null;
+    const parts = raw.split(/\s+/);
+    const index = parts.findIndex(
+      (part, position) =>
+        (part.startsWith('ssh-') ||
+          part.startsWith('ecdsa-') ||
+          part.startsWith('sk-ssh-') ||
+          part.startsWith('sk-ecdsa-')) &&
+        position + 1 < parts.length &&
+        /^[A-Za-z0-9+/=]+$/.test(parts[position + 1])
+    );
+    if (index < 0 || !parts[index + 1]) return null;
+    return {
+      type: parts[index],
+      comment: parts.slice(index + 2).join(' ') || 'No comment',
+    };
+  });
+
+  // ─── Loading ─────────────────────────────────────────────────────────────────
 
   onMount(() => {
     loadAllData();
+    return () => {
+      // A closed page must not keep a generated private-key passphrase around.
+      genPassphrase = '';
+    };
   });
+
+  // Closing the generation modal discards the passphrase immediately.
+  $effect(() => {
+    if (!showGenModal) {
+      genPassphrase = '';
+    }
+  });
+
+  function noteError(message: string) {
+    if (!loadErrors.includes(message)) loadErrors = [...loadErrors, message];
+  }
 
   async function loadAllData() {
     loading = true;
+    loadErrors = [];
     await Promise.all([
       loadSshKeys(),
       loadClientConfig(),
@@ -229,1734 +350,1805 @@
       loadAuthorizedKeys(),
       loadSshdHardening(false),
       loadSslCerts(),
-      loadFail2banStatus(),
+      loadFail2banStatus(false),
     ]);
     loading = false;
   }
 
   async function loadSshKeys() {
-    const res = await invokeSafe<SshKeyItem[]>('vault_list_ssh_keys', {}, { quiet: true });
-    if (res) sshKeys = [...res];
+    const result = await invokeSafe<SshKeyItem[]>('vault_list_ssh_keys', {}, { quiet: true });
+    if (result) sshKeys = [...result];
+    else noteError('Could not read ~/.ssh keys.');
   }
 
   async function loadClientConfig() {
-    const res = await invokeSafe<SshClientHost[]>('vault_list_ssh_client_config', {}, { quiet: true });
-    if (res) clientHosts = [...res];
+    const result = await invokeSafe<SshClientHost[]>('vault_list_ssh_client_config', {}, { quiet: true });
+    if (result) clientHosts = [...result];
+    else noteError('Could not read ~/.ssh/config.');
   }
 
   async function loadKnownHosts() {
-    const res = await invokeSafe<KnownHostItem[]>('vault_list_known_hosts', {}, { quiet: true });
-    if (res) knownHosts = [...res];
+    const result = await invokeSafe<KnownHostItem[]>('vault_list_known_hosts', {}, { quiet: true });
+    if (result) knownHosts = [...result];
+    else noteError('Could not read ~/.ssh/known_hosts.');
   }
 
   async function loadAuthorizedKeys() {
-    const res = await invokeSafe<AuthorizedKeyItem[]>('vault_list_authorized_keys', {}, { quiet: true });
-    if (res) authorizedKeys = [...res];
+    const result = await invokeSafe<AuthorizedKeyItem[]>('vault_list_authorized_keys', {}, { quiet: true });
+    if (result) authorizedKeys = [...result];
+    else noteError('Could not read ~/.ssh/authorized_keys.');
   }
 
-  async function loadSshdHardening(isManual = false) {
-    if (isManual) evaluatingSshd = true;
-    const res = await invokeSafe<SshdHardeningStatus>('vault_get_sshd_hardening', { elevated: isManual }, { quiet: true });
-    if (res) {
-      sshdStatus = res;
-      if (isManual) {
-        if (res.is_evaluated) {
-          uiStore.showToast('SSH daemon configuration evaluated successfully', 'success');
+  async function loadSshdHardening(manual = false) {
+    if (manual) evaluatingSshd = true;
+    const result = await invokeSafe<SshdHardeningStatus>(
+      'vault_get_sshd_hardening',
+      { elevated: manual },
+      { quiet: true }
+    );
+    if (result) {
+      sshdStatus = result;
+      if (manual) {
+        if (result.is_evaluated) {
+          uiStore.addToast(
+            result.source === 'daemon'
+              ? 'Effective sshd configuration loaded.'
+              : 'sshd settings parsed from the configuration file.',
+            'success'
+          );
         } else {
-          uiStore.showToast('Could not evaluate the SSH daemon configuration. Check authorization or file permissions.', 'warning');
+          uiStore.addToast(
+            'Could not evaluate sshd. Check administrator authorization and file permissions.',
+            'warning'
+          );
         }
       }
+    } else if (manual) {
+      uiStore.addToast('Could not evaluate the SSH daemon configuration.', 'error');
+    } else {
+      noteError('Could not load the SSH daemon posture.');
     }
-    if (isManual) evaluatingSshd = false;
+    if (manual) evaluatingSshd = false;
   }
 
   async function loadSslCerts() {
-    const res = await invokeSafe<SslCertItem[]>('vault_list_ssl_certs', {}, { quiet: true });
-    if (res) sslCerts = [...res];
+    const result = await invokeSafe<SslCertItem[]>('vault_list_ssl_certs', {}, { quiet: true });
+    if (result) sslCerts = [...result];
+    else noteError('Could not inspect local TLS certificates. Is OpenSSL installed?');
   }
 
-  async function loadFail2banStatus() {
-    const res = await invokeSafe<Fail2banStatus>('vault_get_fail2ban_status', {}, { quiet: true });
-    if (res) fail2banStatus = res;
+  async function loadFail2banStatus(manual = false) {
+    if (manual) evaluatingFail2ban = true;
+    const result = await invokeSafe<Fail2banStatus>(
+      'vault_get_fail2ban_status',
+      { elevated: manual },
+      { quiet: true }
+    );
+    if (result) {
+      fail2banStatus = result;
+      if (manual && result.error && !result.needs_elevation) {
+        uiStore.addToast(`Fail2ban: ${result.error}`, 'warning');
+      }
+    } else if (manual) {
+      uiStore.addToast('Could not read fail2ban status.', 'error');
+    } else {
+      noteError('Could not read fail2ban status.');
+    }
+    if (manual) evaluatingFail2ban = false;
   }
 
-  // ─── Actions ─────────────────────────────────────────────────────────────────
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-  async function copyToClipboard(text: string, label: string) {
+  async function copyText(text: string, label: string) {
+    if (!text) {
+      uiStore.addToast(`No ${label.toLowerCase()} to copy.`, 'warning');
+      return;
+    }
     try {
       await navigator.clipboard.writeText(text);
-      uiStore.showToast(`${label} copied to clipboard`, 'success');
+      uiStore.addToast(`${label} copied.`, 'success');
     } catch {
-      uiStore.showToast('Failed to copy to clipboard', 'error');
+      uiStore.addToast('Clipboard access was denied.', 'error');
     }
   }
+
+  function openMenu(
+    position: MouseEvent | HTMLElement,
+    title: string,
+    subtitle: string,
+    items: MenuItem[]
+  ) {
+    if (position instanceof MouseEvent) {
+      menuX = position.clientX;
+      menuY = position.clientY;
+    } else {
+      const rect = position.getBoundingClientRect();
+      menuX = rect.right - 4;
+      menuY = rect.bottom + 4;
+    }
+    menuTitle = title;
+    menuSubtitle = subtitle;
+    menuItems = items;
+    menuOpen = true;
+  }
+
+  function sshHostCommand(host: SshClientHost): string {
+    // A Host line may contain several patterns; the first one is the usable
+    // shortcut for a terminal command.
+    return `ssh ${host.host.split(/\s+/)[0]}`;
+  }
+
+  function sshdTone(value: string, good: string[]): 'success' | 'warning' | 'error' | 'muted' {
+    if (value === 'unset') return 'muted';
+    return good.includes(value) ? 'success' : 'error';
+  }
+
+  function certTone(cert: SslCertItem): 'success' | 'warning' | 'error' {
+    if (cert.is_expired) return 'error';
+    if (cert.is_expiring_soon || cert.date_parse_error) return 'warning';
+    return 'success';
+  }
+
+  function certLabel(cert: SslCertItem): string {
+    if (cert.date_parse_error) return 'Expiry unknown';
+    if (cert.is_expired) return 'Expired';
+    if (cert.is_expiring_soon) return `${cert.days_valid} days left`;
+    return `${cert.days_valid} days left`;
+  }
+
+  function certProgress(cert: SslCertItem): number {
+    if (cert.date_parse_error || cert.is_expired) return 0;
+    return Math.max(2, Math.min(100, Math.round((cert.days_valid / 365) * 100)));
+  }
+
+  function resetGeneratedResult() {
+    generatedKeyResult = null;
+  }
+
+  function closeModals() {
+    showGenModal = false;
+    showHostModal = false;
+    showAuthModal = false;
+    showTlsModal = false;
+    showBanModal = false;
+    generatedKeyResult = null;
+  }
+
+  function handleGlobalKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    if (menuOpen) {
+      menuOpen = false;
+      return;
+    }
+    closeModals();
+  }
+
+  // ─── SSH key actions ─────────────────────────────────────────────────────────
 
   async function handleGenerateKey() {
     if (!genFilename.trim()) {
-      uiStore.showToast('Please provide a filename for the key', 'warning');
+      uiStore.addToast('Enter a filename for the new key.', 'warning');
       return;
     }
-    const res = await invokeSafe<string>('vault_generate_ssh_key', {
-      keyType: genKeyType,
-      bits: genBits,
-      filename: genFilename.trim(),
-      comment: genComment.trim(),
-      passphrase: genPassphrase,
-    });
-
-    if (res) {
-      generatedKeyResult = { filename: genFilename.trim(), publicKey: res };
+    if (genKeyType === 'rsa' && ![2048, 3072, 4096].includes(Number(genBits))) {
+      uiStore.addToast('Choose a valid RSA size.', 'warning');
+      return;
+    }
+    generatingKey = true;
+    const result = await invokeSafe<string>(
+      'vault_generate_ssh_key',
+      {
+        keyType: genKeyType,
+        bits: genKeyType === 'ed25519' ? undefined : Number(genBits),
+        filename: genFilename.trim(),
+        comment: genComment.trim(),
+        passphrase: genPassphrase,
+      },
+      { showToastOnError: true }
+    );
+    generatingKey = false;
+    if (result) {
+      const filename = genFilename.trim().replace(/\.pub$/i, '');
+      generatedKeyResult = { filename, publicKey: result };
       showGenModal = false;
-      uiStore.showToast('SSH key pair generated successfully', 'success');
-      loadSshKeys();
+      genPassphrase = '';
+      uiStore.addToast('SSH key pair generated.', 'success');
+      await loadSshKeys();
     }
   }
 
-  async function handleDeleteKey(keyName: string) {
-    if (!confirm(`Are you sure you want to delete SSH key pair "${keyName}"? This action cannot be undone.`)) return;
-    const res = await invokeSafe<string>('vault_delete_ssh_key', { name: keyName });
-    if (res) {
-      uiStore.showToast(res, 'success');
-      loadSshKeys();
-    }
+  function askDeleteKey(key: SshKeyItem) {
+    uiStore.confirm(
+      'Delete SSH key pair',
+      `Delete "${key.name}" and its public key from ~/.ssh? This cannot be undone.`,
+      async () => {
+        const result = await invokeSafe<string>(
+          'vault_delete_ssh_key',
+          { name: key.name },
+          { showToastOnError: true }
+        );
+        if (result) {
+          uiStore.addToast(result, 'success');
+          await loadSshKeys();
+        }
+      },
+      true
+    );
   }
 
-  async function handleAddClientHost() {
-    if (!newHostAlias.trim() || !newHostName.trim()) {
-      uiStore.showToast('Host alias and HostName/IP are required', 'warning');
+  function keyMenuItems(key: SshKeyItem): MenuItem[] {
+    return [
+      { label: 'Copy public key', icon: Copy, disabled: !key.public_key, action: () => copyText(key.public_key, 'Public key') },
+      { label: 'Copy fingerprint', icon: Fingerprint, disabled: !key.fingerprint, action: () => copyText(key.fingerprint, 'Fingerprint') },
+      { label: 'Copy private key path', icon: HardDrive, action: () => copyText(key.path, 'Key path') },
+      { divider: true, label: '' },
+      { label: 'Delete key pair', icon: Trash2, danger: true, action: () => askDeleteKey(key) },
+    ];
+  }
+
+  // ─── Client host actions ─────────────────────────────────────────────────────
+
+  function resetHostForm() {
+    editingHost = false;
+    hostAlias = '';
+    hostName = '';
+    hostUser = '';
+    hostPort = '22';
+    hostKey = '';
+    hostProxy = '';
+    hostExtra = '';
+  }
+
+  function openAddHost() {
+    resetHostForm();
+    showHostModal = true;
+  }
+
+  function openEditHost(host: SshClientHost) {
+    editingHost = true;
+    hostAlias = host.host;
+    hostName = host.hostname;
+    hostUser = host.user;
+    hostPort = host.port || '22';
+    hostKey = host.identity_file;
+    hostProxy = host.proxy_jump;
+    hostExtra = host.extra_config;
+    showHostModal = true;
+  }
+
+  async function handleSaveHost() {
+    if (!hostAlias.trim() || !hostName.trim()) {
+      uiStore.addToast('Host alias and target hostname are required.', 'warning');
       return;
     }
-
-    const newHost: SshClientHost = {
-      host: newHostAlias.trim(),
-      hostname: newHostName.trim(),
-      user: newHostUser.trim(),
-      port: newHostPort.trim() || '22',
-      identity_file: newHostKey.trim(),
-      proxy_jump: newHostProxy.trim(),
-      extra_config: newHostExtra.trim(),
+    const port = Number(hostPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      uiStore.addToast('The SSH port must be between 1 and 65535.', 'warning');
+      return;
+    }
+    savingHost = true;
+    const host: SshClientHost = {
+      host: hostAlias.trim(),
+      hostname: hostName.trim(),
+      user: hostUser.trim(),
+      port: String(port),
+      identity_file: hostKey.trim(),
+      proxy_jump: hostProxy.trim(),
+      extra_config: hostExtra.trim(),
     };
-
-    const updatedHosts = [...clientHosts.filter(h => h.host !== newHostAlias.trim()), newHost];
-    const res = await invokeSafe('vault_save_ssh_client_config', { hosts: updatedHosts });
-
-    if (res !== null) {
-      uiStore.showToast('Host alias saved to ~/.ssh/config', 'success');
-      showAddClientModal = false;
-      newHostAlias = '';
-      newHostName = '';
-      newHostUser = '';
-      newHostPort = '22';
-      newHostKey = '';
-      newHostProxy = '';
-      newHostExtra = '';
-      loadClientConfig();
+    const result = await invokeSafe(
+      'vault_upsert_ssh_client_host',
+      { host },
+      { showToastOnError: true }
+    );
+    savingHost = false;
+    if (result !== null) {
+      uiStore.addToast(editingHost ? 'Host profile updated.' : 'Host profile added.', 'success');
+      showHostModal = false;
+      resetHostForm();
+      await loadClientConfig();
     }
   }
 
-  async function handleDeleteClientHost(host: string) {
-    if (!confirm(`Remove host profile "${host}" from ~/.ssh/config?`)) return;
-    const res = await invokeSafe('vault_delete_ssh_client_host', { hostName: host });
-    if (res !== null) {
-      uiStore.showToast(`Removed host profile "${host}"`, 'success');
-      loadClientConfig();
-    }
+  function askDeleteHost(host: SshClientHost) {
+    uiStore.confirm(
+      'Remove host profile',
+      `Remove "${host.host}" from ~/.ssh/config? Other host blocks and comments will be preserved.`,
+      async () => {
+        const result = await invokeSafe(
+          'vault_delete_ssh_client_host',
+          { hostName: host.host },
+          { showToastOnError: true }
+        );
+        if (result !== null) {
+          uiStore.addToast(`Removed "${host.host}".`, 'success');
+          await loadClientConfig();
+        }
+      },
+      true
+    );
   }
 
-  async function handleRemoveKnownHost(lineNumber: number, host: string) {
-    const res = await invokeSafe('vault_remove_known_host', { lineNumber });
-    if (res !== null) {
-      uiStore.showToast(`Removed entry for ${host}`, 'success');
-      loadKnownHosts();
-    }
+  function hostMenuItems(host: SshClientHost): MenuItem[] {
+    return [
+      { label: 'Copy ssh command', icon: Terminal, action: () => copyText(sshHostCommand(host), 'SSH command') },
+      { label: 'Edit host profile', icon: Pencil, action: () => openEditHost(host) },
+      { label: 'Copy hostname', icon: Globe, disabled: !host.hostname, action: () => copyText(host.hostname, 'Hostname') },
+      { label: 'Copy identity file path', icon: Key, disabled: !host.identity_file, action: () => copyText(host.identity_file, 'Identity path') },
+      { divider: true, label: '' },
+      { label: 'Remove host profile', icon: Trash2, danger: true, action: () => askDeleteHost(host) },
+    ];
   }
 
-  async function handleClearKnownHosts() {
-    if (!confirm('Are you sure you want to clear ALL known host entries from ~/.ssh/known_hosts?')) return;
-    const res = await invokeSafe<string>('vault_clear_known_hosts');
-    if (res) {
-      uiStore.showToast(res, 'success');
-      loadKnownHosts();
-    }
+  // ─── Known hosts actions ─────────────────────────────────────────────────────
+
+  function askRemoveKnownHost(host: KnownHostItem) {
+    uiStore.confirm(
+      'Remove known host',
+      `Remove the host key for "${host.host}"? The next connection will ask you to verify the server again.`,
+      async () => {
+        const result = await invokeSafe(
+          'vault_remove_known_host',
+          { lineNumber: host.line_number, raw: host.raw },
+          { showToastOnError: true }
+        );
+        if (result !== null) {
+          uiStore.addToast(`Removed ${host.host}.`, 'success');
+          await loadKnownHosts();
+        }
+      },
+      true
+    );
   }
+
+  function askClearKnownHosts() {
+    uiStore.confirm(
+      'Clear all known hosts',
+      'Remove every entry from ~/.ssh/known_hosts? Every server will need to be verified again.',
+      async () => {
+        const result = await invokeSafe<string>(
+          'vault_clear_known_hosts',
+          {},
+          { showToastOnError: true }
+        );
+        if (result) {
+          uiStore.addToast(result, 'success');
+          await loadKnownHosts();
+        }
+      },
+      true
+    );
+  }
+
+  function knownHostMenuItems(host: KnownHostItem): MenuItem[] {
+    return [
+      { label: host.marker ? 'Copy marker' : 'Copy host', icon: Copy, action: () => copyText(host.marker || host.host, 'Host') },
+      { label: 'Copy fingerprint', icon: Fingerprint, disabled: !host.fingerprint, action: () => copyText(host.fingerprint, 'Fingerprint') },
+      { divider: true, label: '' },
+      { label: 'Remove host key', icon: Trash2, danger: true, action: () => askRemoveKnownHost(host) },
+    ];
+  }
+
+  // ─── Authorized keys actions ─────────────────────────────────────────────────
 
   async function handleAddAuthorizedKey() {
     if (!newAuthPubKey.trim()) {
-      uiStore.showToast('Please paste a valid SSH public key', 'warning');
+      uiStore.addToast('Paste a public key first.', 'warning');
       return;
     }
-    const res = await invokeSafe<string>('vault_add_authorized_key', { pubKey: newAuthPubKey.trim() });
-    if (res) {
-      uiStore.showToast(res, 'success');
-      showAddAuthModal = false;
+    savingKey = true;
+    const result = await invokeSafe<string>(
+      'vault_add_authorized_key',
+      { pubKey: newAuthPubKey.trim() },
+      { showToastOnError: true }
+    );
+    savingKey = false;
+    if (result) {
+      uiStore.addToast(result, 'success');
+      showAuthModal = false;
       newAuthPubKey = '';
-      loadAuthorizedKeys();
+      await loadAuthorizedKeys();
     }
   }
 
-  async function handleRemoveAuthorizedKey(lineNumber: number) {
-    if (!confirm(`Revoke authorized key at line #${lineNumber}? Incoming logins with this key will be blocked.`)) return;
-    const res = await invokeSafe<string>('vault_remove_authorized_key', { lineNumber });
-    if (res) {
-      uiStore.showToast(res, 'success');
-      loadAuthorizedKeys();
-    }
+  function askRemoveAuthorizedKey(key: AuthorizedKeyItem) {
+    uiStore.confirm(
+      'Revoke authorized key',
+      `Revoke ${key.comment || key.key_type}? Incoming logins using this key will be blocked.`,
+      async () => {
+        const result = await invokeSafe<string>(
+          'vault_remove_authorized_key',
+          { lineNumber: key.line_number, raw: key.raw },
+          { showToastOnError: true }
+        );
+        if (result) {
+          uiStore.addToast(result, 'success');
+          await loadAuthorizedKeys();
+        }
+      },
+      true
+    );
   }
 
-  async function handleTestRemoteSsl() {
-    if (!testSslHost.trim()) {
-      uiStore.showToast('Please specify a domain or IP to test', 'warning');
+  function authorizedMenuItems(key: AuthorizedKeyItem): MenuItem[] {
+    return [
+      { label: 'Copy public key', icon: Copy, action: () => copyText(key.raw, 'Authorized key') },
+      { label: 'Copy key comment', icon: Terminal, disabled: !key.comment, action: () => copyText(key.comment, 'Comment') },
+      { divider: true, label: '' },
+      { label: 'Revoke this key', icon: Trash2, danger: true, action: () => askRemoveAuthorizedKey(key) },
+    ];
+  }
+
+  // ─── TLS inspector ───────────────────────────────────────────────────────────
+
+  async function handleTestTls() {
+    if (!tlsHost.trim()) {
+      uiStore.addToast('Enter a hostname or IP address.', 'warning');
       return;
     }
-    testSslLoading = true;
-    testSslResult = null;
-    testSslError = null;
-
+    const port = Number(tlsPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      uiStore.addToast('The port must be between 1 and 65535.', 'warning');
+      return;
+    }
+    tlsLoading = true;
+    tlsResult = null;
+    tlsError = null;
     try {
-      const res = await invokeSafe<SslCertItem>('vault_test_remote_ssl', {
-        host: testSslHost.trim(),
-        port: Number(testSslPort) || 443,
-      });
-      if (res) {
-        testSslResult = res;
-      }
-    } catch (e: any) {
-      testSslError = e?.toString() || 'Failed to inspect remote TLS certificate';
+      const result = await invokeSafe<SslCertItem>(
+        'vault_test_remote_ssl',
+        { host: tlsHost.trim(), port },
+        { showToastOnError: true }
+      );
+      if (result) tlsResult = result;
+    } catch (error) {
+      tlsError = String(error);
     } finally {
-      testSslLoading = false;
+      tlsLoading = false;
     }
   }
 
-  async function handleUnbanIp(jail: string, ip: string) {
-    const res = await invokeSafe<string>('vault_unban_ip', { jail, ip });
-    if (res) {
-      uiStore.showToast(`Unbanned ${ip} from jail ${jail}`, 'success');
-      loadFail2banStatus();
+  // ─── Fail2ban actions ────────────────────────────────────────────────────────
+
+  async function authorizeFail2ban() {
+    await loadFail2banStatus(true);
+  }
+
+  async function handleServiceAction(action: 'start' | 'restart') {
+    const run = async () => {
+      const result = await invokeSafe(
+        'vault_manage_fail2ban_service',
+        { action },
+        { showToastOnError: true }
+      );
+      if (result !== null) {
+        uiStore.addToast(`Fail2ban ${action === 'start' ? 'started' : 'restarted'}.`, 'success');
+        await loadFail2banStatus(true);
+      }
+    };
+    if (action === 'restart') {
+      uiStore.confirm(
+        'Restart fail2ban',
+        'Restart the fail2ban service? Active bans can be reloaded from the jail database.',
+        run,
+        false
+      );
+    } else {
+      await run();
     }
+  }
+
+  async function handleUnban(jail: string, ip: string) {
+    uiStore.confirm(
+      'Unban IP address',
+      `Remove ${ip} from jail ${jail}? The address may be able to attempt logins again.`,
+      async () => {
+        const result = await invokeSafe<string>(
+          'vault_unban_ip',
+          { jail, ip },
+          { showToastOnError: true }
+        );
+        if (result) {
+          uiStore.addToast(result, 'success');
+          await loadFail2banStatus(true);
+        }
+      },
+      false
+    );
   }
 
   async function handleManualBan() {
-    if (!banJailName || !banIpAddress.trim()) {
-      uiStore.showToast('Please select a jail and specify an IP address', 'warning');
+    if (!banJail || !banIp.trim()) {
+      uiStore.addToast('Choose a jail and enter an IP address.', 'warning');
       return;
     }
-    const res = await invokeSafe<string>('vault_ban_ip', { jail: banJailName, ip: banIpAddress.trim() });
-    if (res) {
-      uiStore.showToast(`Successfully banned ${banIpAddress} into jail ${banJailName}`, 'success');
+    if (!fail2banStatus?.is_active) {
+      uiStore.addToast('Start the fail2ban service before adding a ban.', 'warning');
+      return;
+    }
+    banning = true;
+    const result = await invokeSafe<string>(
+      'vault_ban_ip',
+      { jail: banJail, ip: banIp.trim() },
+      { showToastOnError: true }
+    );
+    banning = false;
+    if (result) {
+      uiStore.addToast(result, 'success');
       showBanModal = false;
-      banIpAddress = '';
-      loadFail2banStatus();
+      banIp = '';
+      await loadFail2banStatus(true);
     }
   }
 
-  async function handleControlFail2ban(action: 'start' | 'restart') {
-    const res = await invokeSafe('vault_manage_fail2ban_service', { action });
-    if (res !== null) {
-      uiStore.showToast(`Fail2ban service ${action} executed`, 'success');
-      loadFail2banStatus();
-    }
+  function openBanModal() {
+    banJail = fail2banStatus?.jails[0]?.jail_name || 'sshd';
+    banIp = '';
+    showBanModal = true;
   }
 </script>
 
+<svelte:window onkeydown={handleGlobalKeydown} />
+
 <div class="module-page ssh-vault-page">
-  <!-- ── Page Header (Clean & Uncrowded) ───────────────────────────────────── -->
-  <PageHeader 
-    title="SSH &amp; SSL Vault" 
-    icon={Lock}
-  >
+  <PageHeader title="SSH &amp; SSL Vault" icon={Lock}>
     <div class="header-actions">
       {#if expiringCertsCount > 0}
-        <span class="vault-status-pill warning" title="{expiringCertsCount} SSL certificate(s) expiring soon or expired">
+        <span class="vault-status-pill warning" title="Certificates expiring within 30 days or already expired">
           <AlertTriangle size={12} />
-          <span>{expiringCertsCount} Expiring</span>
-        </span>
-      {:else if fail2banStatus?.is_active}
-        <span class="vault-status-pill active" title="Fail2ban threat defense is active with {fail2banStatus.total_banned_ips} banned IPs">
-          <ShieldCheck size={12} />
-          <span>Shield Active</span>
+          {expiringCertsCount} cert{expiringCertsCount === 1 ? '' : 's'} at risk
         </span>
       {/if}
-
-      <button class="header-refresh-btn"
-        onclick={loadAllData} 
-        disabled={loading}
-        title="Reload all SSH keys, configs, SSL certs, and fail2ban data"
-      >
+      {#if fail2banStatus?.is_active}
+        <span class="vault-status-pill active" title="Fail2ban is active">
+          <ShieldCheck size={12} />
+          {fail2banStatus.total_banned_ips} banned
+        </span>
+      {:else if fail2banStatus?.is_installed}
+        <span class="vault-status-pill muted">
+          <ShieldAlert size={12} />
+          Fail2ban inactive
+        </span>
+      {/if}
+      <button class="header-refresh-btn" onclick={loadAllData} disabled={loading} title="Reload all vault data">
         <RefreshCw size={13} class={loading ? 'animate-spin-slow' : ''} />
         <span>Refresh</span>
       </button>
     </div>
   </PageHeader>
 
-  <!-- ── Dedicated Sub-Navigation & Action Bar ─────────────────────────────── -->
-  <div class="vault-subnav-bar">
-    <TabGroup
-      size="sm"
-      tabs={[
-        { id: 'keys', label: 'SSH Keys', count: sshKeys.length, icon: Key },
-        { id: 'client_config', label: 'Client Config', count: clientHosts.length, icon: Laptop },
-        { id: 'known_hosts', label: 'Known Hosts', count: knownHosts.length, icon: Globe },
-        { id: 'authorized', label: 'Authorized & SSHD', count: authorizedKeys.length, icon: ShieldCheck },
-        { id: 'certs', label: 'SSL Certificates', count: sslCerts.length, icon: FileKey },
-        { id: 'threats', label: 'Threat Defense', count: fail2banStatus?.total_banned_ips ?? 0, icon: ShieldAlert }
-      ]}
-      bind:activeTab
+  <div class="vault-overview" aria-label="Vault overview">
+    <KpiCard icon={Key} value={sshKeys.length} label="SSH keys" subtext={`${keyPairCount} key pair${keyPairCount === 1 ? '' : 's'}`} onclick={() => (activeTab = 'keys')} />
+    <KpiCard icon={Server} value={clientHosts.length} label="Host profiles" subtext="~/.ssh/config" onclick={() => (activeTab = 'client_config')} />
+    <KpiCard
+      icon={FileKey}
+      value={sslCerts.length}
+      label="Certificates"
+      statusText={expiredCertsCount > 0 ? `${expiredCertsCount} expired` : expiringCertsCount > 0 ? `${expiringCertsCount} soon` : 'Healthy'}
+      statusType={expiredCertsCount > 0 ? 'error' : expiringCertsCount > 0 ? 'warning' : 'success'}
+      onclick={() => (activeTab = 'certs')}
     />
+    <KpiCard
+      icon={ShieldAlert}
+      value={fail2banStatus?.is_active ? fail2banStatus.total_banned_ips : '—'}
+      label="Banned IPs"
+      subtext={fail2banStatus?.is_active ? `${fail2banStatus.jails.length} jails` : 'Fail2ban'}
+      statusText={fail2banStatus?.is_active ? 'Active' : 'Off'}
+      statusType={fail2banStatus?.is_active ? 'success' : 'muted'}
+      onclick={() => (activeTab = 'threats')}
+    />
+  </div>
+
+  <div class="vault-subnav-bar">
+    <div class="tab-scroll">
+      <TabGroup
+        size="sm"
+        tabs={[
+          { id: 'keys', label: 'SSH Keys', count: sshKeys.length, icon: Key },
+          { id: 'client_config', label: 'Client Config', count: clientHosts.length, icon: Server },
+          { id: 'known_hosts', label: 'Known Hosts', count: knownHosts.length, icon: Globe },
+          { id: 'authorized', label: 'Authorized & SSHD', count: authorizedKeys.length, icon: ShieldCheck },
+          { id: 'certs', label: 'SSL Certificates', count: sslCerts.length, icon: FileKey },
+          { id: 'threats', label: 'Threat Defense', count: fail2banStatus?.total_banned_ips ?? 0, icon: ShieldAlert },
+        ]}
+        bind:activeTab
+      />
+    </div>
 
     <div class="subnav-actions">
       {#if activeTab === 'keys'}
-        <Button variant="primary" size="sm" onclick={() => showGenModal = true}>
+        <Button variant="primary" size="sm" onclick={() => { generatedKeyResult = null; showGenModal = true; }}>
           <Plus size={13} /> Generate SSH Key
         </Button>
       {:else if activeTab === 'client_config'}
-        <Button variant="primary" size="sm" onclick={() => showAddClientModal = true}>
+        <Button variant="primary" size="sm" onclick={openAddHost}>
           <Plus size={13} /> Add Host Profile
         </Button>
       {:else if activeTab === 'known_hosts'}
         {#if knownHosts.length > 0}
-          <Button variant="danger" size="sm" onclick={handleClearKnownHosts} title="Remove all stored host keys in ~/.ssh/known_hosts">
+          <Button variant="danger" size="sm" onclick={askClearKnownHosts} title="Remove every entry from known_hosts">
             <Trash2 size={13} /> Flush Known Hosts
           </Button>
         {/if}
       {:else if activeTab === 'authorized'}
-        <Button variant="primary" size="sm" onclick={() => showAddAuthModal = true}>
+        <Button variant="primary" size="sm" onclick={() => (showAuthModal = true)}>
           <Plus size={13} /> Add Authorized Key
         </Button>
       {:else if activeTab === 'certs'}
-        <Button variant="primary" size="sm" onclick={() => showTestSslModal = true}>
-          <Globe size={13} /> Test Live TLS Port
+        <Button variant="primary" size="sm" onclick={() => (showTlsModal = true)}>
+          <Globe size={13} /> Test Live TLS
         </Button>
       {:else if activeTab === 'threats'}
         {#if fail2banStatus?.is_installed}
-          <Button variant="outline" size="sm" onclick={() => handleControlFail2ban('restart')} title="Restart fail2ban service daemon">
-            <RotateCw size={13} /> Restart Service
-          </Button>
-          <Button 
-            variant="primary" 
-            size="sm" 
-            onclick={() => { 
-              if (fail2banStatus?.jails && fail2banStatus.jails.length > 0) { 
-                banJailName = fail2banStatus.jails[0].jail_name; 
-              } else { 
-                banJailName = 'sshd'; 
-              } 
-              showBanModal = true; 
-            }}
-          >
-            <Ban size={13} /> Manually Ban IP
+          <Button variant="primary" size="sm" onclick={openBanModal}>
+            <Ban size={13} /> Ban IP
           </Button>
         {/if}
       {/if}
     </div>
   </div>
 
-  <!-- ── Tab Body Content ──────────────────────────────────────────────────── -->
+  {#if loadErrors.length > 0}
+    <div class="vault-alert" role="alert">
+      <AlertTriangle size={15} />
+      <span>{loadErrors[0]}</span>
+      {#if loadErrors.length > 1}<span class="muted">+{loadErrors.length - 1} more</span>{/if}
+      <button class="link-btn" onclick={loadAllData}>Retry</button>
+    </div>
+  {/if}
+
   <div class="tab-main-body">
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 1: SSH KEY VAULT
-         ══════════════════════════════════════════════════════════════════════════ -->
+    <!-- ═══ SSH KEYS ═══ -->
     {#if activeTab === 'keys'}
-      <div class="tab-panel">
-        <!-- Filter & Table Card -->
-        <div class="card table-card">
-          <div class="table-toolbar">
-            <SearchBar
-              bind:value={keySearch}
-              placeholder="Search key name, algorithm, or fingerprint..."
-              count={filteredSshKeys.length}
-              total={sshKeys.length}
-            />
-          </div>
-
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>KEY IDENTIFIER</th>
-                  <th>ALGORITHM</th>
-                  <th>FINGERPRINT (SHA256)</th>
-                  <th>STATUS</th>
-                  <th>PUBLIC KEY</th>
-                  <th style="text-align: right;">ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if filteredSshKeys.length === 0}
-                  <tr>
-                    <td colspan="6" class="empty-cell" style="padding: 24px 0 !important;">
-                      <EmptyState
-                        icon={Key}
-                        title="No SSH Keys Found"
-                        description={keySearch ? 'No keys matched your search filter.' : 'Generate a new Ed25519 key pair to start passwordless SSH authentication.'}
-                        actionLabel={!keySearch ? 'Generate Key' : ''}
-                        actionIcon={Plus}
-                        onAction={() => showGenModal = true}
-                      />
-                    </td>
-                  </tr>
-                {:else}
-                  {#each filteredSshKeys as key}
-                    <tr>
-                      <td>
-                        <div class="key-name-col">
-                          <span class="font-mono strong">{key.name}</span>
-                          <span class="text-xs text-muted font-mono">{key.path}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <span class="badge {key.key_type.includes('ed25519') ? 'badge-accent' : 'badge-neutral'}">
-                          {key.key_type}
-                        </span>
-                      </td>
-                      <td>
-                        <div class="fingerprint-cell">
-                          <span class="font-mono text-xs">{key.fingerprint}</span>
-                          <button 
-                            class="copy-mini-btn" 
-                            onclick={() => copyToClipboard(key.fingerprint, 'Fingerprint')} 
-                            title="Copy Fingerprint"
-                          >
-                            <Copy size={11} />
-                          </button>
-                        </div>
-                      </td>
-                      <td>
-                        {#if key.has_private}
-                          <span class="status-chip success" title="Both private and public keys are present on disk">
-                            <CheckCircle2 size={12} /> Key Pair
-                          </span>
-                        {:else}
-                          <span class="status-chip muted" title="Only public key file exists">
-                            <Info size={12} /> Pub Only
-                          </span>
-                        {/if}
-                      </td>
-                      <td>
-                        <Button 
-                          variant="ghost" 
-                          size="sm"
-                          onclick={() => copyToClipboard(key.public_key, `${key.name}.pub`)}
-                          title="Copy public key contents to paste into remote servers or GitHub"
-                        >
-                          <Copy size={13} /> Copy Public Key
-                        </Button>
-                      </td>
-                      <td style="text-align: right;">
-                        <Button 
-                          variant="danger" 
-                          size="sm"
-                          onclick={() => handleDeleteKey(key.name)}
-                          title="Permanently delete this key pair from ~/.ssh/"
-                        >
-                          <Trash2 size={13} /> Delete
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <div class="panel-toolbar">
+        <SearchBar bind:value={keySearch} placeholder="Search key name, algorithm, fingerprint, or comment…" count={filteredSshKeys.length} total={sshKeys.length} />
+        <FilterChips options={keyFilterOptions} bind:value={keyFilter} label="Filter SSH keys by completeness" />
       </div>
+
+      {#if filteredSshKeys.length === 0}
+        <div class="vault-empty-card">
+          <EmptyState
+            icon={Key}
+            title={keySearch ? 'No keys match this search' : 'No SSH keys yet'}
+            description={keySearch ? 'Try a different name, algorithm, or fingerprint.' : 'Generate an Ed25519 key pair for passwordless SSH, Git, and server access.'}
+            actionLabel={keySearch ? '' : 'Generate Key'}
+            actionIcon={Plus}
+            onAction={() => (showGenModal = true)}
+          />
+        </div>
+      {:else}
+        <div class="vault-grid">
+          {#each filteredSshKeys as key (key.path)}
+            <article
+              class="vault-card"
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openMenu(event, key.name, key.path, keyMenuItems(key));
+              }}
+            >
+              <div class="vault-card-head">
+                <div class="vault-icon"><Key size={15} /></div>
+                <div class="vault-title">
+                  <h3>{key.name}</h3>
+                  <span class="mono truncate" title={key.path}>{key.path}</span>
+                </div>
+                <Badge variant={key.key_type.includes('ed25519') ? 'info' : 'muted'}>{key.key_type}</Badge>
+                <button
+                  class="icon-btn"
+                  aria-label="SSH key actions"
+                  title="Actions"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    openMenu(event.currentTarget as HTMLElement, key.name, key.path, keyMenuItems(key));
+                  }}
+                >
+                  <MoreVertical size={14} />
+                </button>
+              </div>
+
+              <div class="vault-meta">
+                <div class="meta-row">
+                  <span class="meta-label">Fingerprint</span>
+                  <span class="meta-value mono truncate" title={key.fingerprint}>{key.fingerprint}</span>
+                  <button class="copy-mini" onclick={() => copyText(key.fingerprint, 'Fingerprint')} title="Copy fingerprint" aria-label="Copy fingerprint">
+                    <Copy size={11} />
+                  </button>
+                </div>
+                <div class="meta-row">
+                  <span class="meta-label">Comment</span>
+                  <span class="meta-value truncate" title={key.comment}>{key.comment || 'No comment'}</span>
+                </div>
+              </div>
+
+              <div class="vault-card-footer">
+                <span class="status-chip {key.has_private ? 'success' : 'muted'}">
+                  {#if key.has_private}<CheckCircle2 size={12} /> Key pair{:else}<Info size={12} /> Public only{/if}
+                </span>
+                <div class="card-actions">
+                  <Button variant="ghost" size="sm" onclick={() => copyText(key.public_key, 'Public key')} disabled={!key.public_key}>
+                    <Copy size={12} /> Public key
+                  </Button>
+                  <Button variant="ghost" size="sm" onclick={() => copyText(key.fingerprint, 'Fingerprint')}>
+                    <Fingerprint size={12} /> Fingerprint
+                  </Button>
+                </div>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
     {/if}
 
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 2: SSH CLIENT CONFIG (~/.ssh/config)
-         ══════════════════════════════════════════════════════════════════════════ -->
+    <!-- ═══ CLIENT CONFIG ═══ -->
     {#if activeTab === 'client_config'}
-      <div class="tab-panel">
-        <div class="card table-card">
-          <div class="table-toolbar">
-            <SearchBar
-              bind:value={clientSearch}
-              placeholder="Search host alias, target hostname, or user..."
-              count={filteredClientHosts.length}
-              total={clientHosts.length}
-            />
-          </div>
-
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>HOST ALIAS</th>
-                  <th>TARGET HOSTNAME / IP</th>
-                  <th>USER</th>
-                  <th>PORT</th>
-                  <th>IDENTITY KEY</th>
-                  <th>QUICK CONNECT</th>
-                  <th style="text-align: right;">ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if filteredClientHosts.length === 0}
-                  <tr>
-                    <td colspan="7" class="empty-cell" style="padding: 24px 0 !important;">
-                      <EmptyState
-                        icon={Laptop}
-                        title="No Host Profiles Configured"
-                        description={clientSearch ? 'No client hosts matched your search filter.' : 'Add your servers to ~/.ssh/config for 1-click terminal connections.'}
-                        actionLabel={!clientSearch ? 'Add Host Profile' : ''}
-                        actionIcon={Plus}
-                        onAction={() => showAddClientModal = true}
-                      />
-                    </td>
-                  </tr>
-                {:else}
-                  {#each filteredClientHosts as host}
-                    <tr>
-                      <td class="font-mono strong text-accent">{host.host}</td>
-                      <td class="font-mono">{host.hostname}</td>
-                      <td class="font-mono text-muted">{host.user || '—'}</td>
-                      <td class="font-mono text-muted">{host.port || '22'}</td>
-                      <td class="font-mono text-xs text-muted">
-                        {#if host.identity_file}
-                          <span class="badge badge-neutral">{host.identity_file}</span>
-                        {:else}
-                          <span>Default (~/.ssh/id_*)</span>
-                        {/if}
-                      </td>
-                      <td>
-                        <Button 
-                          variant="ghost" 
-                          size="sm"
-                          class="font-mono"
-                          onclick={() => copyToClipboard(`ssh ${host.host}`, 'SSH command')}
-                          title="Copy terminal connection command"
-                        >
-                          <Terminal size={12} /> ssh {host.host}
-                        </Button>
-                      </td>
-                      <td style="text-align: right;">
-                        <Button 
-                          variant="danger" 
-                          size="sm"
-                          onclick={() => handleDeleteClientHost(host.host)}
-                          title="Remove host profile from config"
-                        >
-                          <Trash2 size={13} /> Delete
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <div class="panel-toolbar">
+        <SearchBar bind:value={clientSearch} placeholder="Search alias, hostname, user, or bastion…" count={filteredClientHosts.length} total={clientHosts.length} />
       </div>
+
+      {#if filteredClientHosts.length === 0}
+        <div class="vault-empty-card">
+          <EmptyState
+            icon={Server}
+            title={clientSearch ? 'No host profiles match' : 'No SSH host profiles'}
+            description={clientSearch ? 'Try a different alias or hostname.' : 'Add servers to ~/.ssh/config and connect with a short alias.'}
+            actionLabel={clientSearch ? '' : 'Add Host Profile'}
+            actionIcon={Plus}
+            onAction={openAddHost}
+          />
+        </div>
+      {:else}
+        <div class="vault-grid">
+          {#each filteredClientHosts as host (host.host)}
+            <article
+              class="vault-card"
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openMenu(event, host.host, sshHostCommand(host), hostMenuItems(host));
+              }}
+            >
+              <div class="vault-card-head">
+                <div class="vault-icon"><Server size={15} /></div>
+                <div class="vault-title">
+                  <h3>{host.host}</h3>
+                  <span class="mono truncate" title={host.hostname}>
+                    {host.user ? `${host.user}@` : ''}{host.hostname || 'No HostName'} : {host.port || '22'}
+                  </span>
+                </div>
+                {#if host.proxy_jump}<Badge variant="info">ProxyJump</Badge>{/if}
+                <button
+                  class="icon-btn"
+                  aria-label="Host profile actions"
+                  title="Actions"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    openMenu(event.currentTarget as HTMLElement, host.host, sshHostCommand(host), hostMenuItems(host));
+                  }}
+                >
+                  <MoreVertical size={14} />
+                </button>
+              </div>
+
+              <div class="vault-meta">
+                <div class="meta-row">
+                  <span class="meta-label">Identity</span>
+                  <span class="meta-value mono truncate" title={host.identity_file || 'Default keys'}>
+                    {host.identity_file || 'Default (~/.ssh/id_*)'}
+                  </span>
+                </div>
+                {#if host.proxy_jump}
+                  <div class="meta-row">
+                    <span class="meta-label">Bastion</span>
+                    <span class="meta-value mono truncate" title={host.proxy_jump}>{host.proxy_jump}</span>
+                  </div>
+                {/if}
+                {#if host.extra_config}
+                  <div class="meta-row">
+                    <span class="meta-label">Extra</span>
+                    <span class="meta-value truncate" title={host.extra_config}>{host.extra_config.split('\n').length} option line(s)</span>
+                  </div>
+                {/if}
+              </div>
+
+              <div class="vault-card-footer">
+                <span class="status-chip success"><CheckCircle2 size={12} /> Configured</span>
+                <div class="card-actions">
+                  <Button variant="ghost" size="sm" onclick={() => copyText(sshHostCommand(host), 'SSH command')}>
+                    <Terminal size={12} /> Copy ssh
+                  </Button>
+                  <Button variant="ghost" size="sm" onclick={() => openEditHost(host)}>
+                    <Pencil size={12} /> Edit
+                  </Button>
+                </div>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
     {/if}
 
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 3: KNOWN HOSTS (~/.ssh/known_hosts)
-         ══════════════════════════════════════════════════════════════════════════ -->
+    <!-- ═══ KNOWN HOSTS ═══ -->
     {#if activeTab === 'known_hosts'}
-      <div class="tab-panel">
-        <div class="card table-card">
-          <div class="table-toolbar">
-            <SearchBar
-              bind:value={knownSearch}
-              placeholder="Search server domain, IP, or fingerprint..."
-              count={filteredKnownHosts.length}
-              total={knownHosts.length}
-            />
-          </div>
-
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>LINE</th>
-                  <th>REMOTE SERVER / IP</th>
-                  <th>ALGORITHM</th>
-                  <th>FINGERPRINT / KEY DATA</th>
-                  <th style="text-align: right;">ACTION</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if filteredKnownHosts.length === 0}
-                  <tr>
-                    <td colspan="5" class="empty-cell" style="padding: 24px 0 !important;">
-                      <EmptyState
-                        icon={Globe}
-                        title="No Known Hosts Recorded"
-                        description="Your ~/.ssh/known_hosts file is currently clean and empty."
-                      />
-                    </td>
-                  </tr>
-                {:else}
-                  {#each filteredKnownHosts as kh}
-                    <tr>
-                      <td class="font-mono text-muted">#{kh.line_number}</td>
-                      <td class="font-mono strong">{kh.host}</td>
-                      <td>
-                        <span class="badge badge-neutral">{kh.key_type}</span>
-                      </td>
-                      <td class="font-mono text-xs text-muted truncate-cell" title={kh.raw}>
-                        {kh.fingerprint !== 'Available' ? kh.fingerprint : kh.raw.slice(0, 45) + '...'}
-                      </td>
-                      <td style="text-align: right;">
-                        <Button 
-                          variant="danger" 
-                          size="sm"
-                          onclick={() => handleRemoveKnownHost(kh.line_number, kh.host)}
-                          title="Remove this host key to fix verification errors"
-                        >
-                          <Trash2 size={13} /> Remove
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <div class="panel-toolbar">
+        <SearchBar bind:value={knownSearch} placeholder="Search host, key type, or fingerprint…" count={filteredKnownHosts.length} total={knownHosts.length} />
       </div>
+
+      {#if filteredKnownHosts.length === 0}
+        <div class="vault-empty-card">
+          <EmptyState icon={Globe} title="No known hosts" description={knownSearch ? 'No entries match this search.' : 'OpenSSH will add host keys here the first time you connect to a server.'} />
+        </div>
+      {:else}
+        <div class="vault-list">
+          {#each filteredKnownHosts as host (host.line_number)}
+            <article
+              class="vault-row-card"
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openMenu(event, host.host, `Line ${host.line_number}`, knownHostMenuItems(host));
+              }}
+            >
+              <div class="vault-row-main">
+                <div class="vault-icon"><Globe size={14} /></div>
+                <div class="vault-title">
+                  <h3>
+                    {host.host}
+                    {#if host.marker}<Badge variant="warning">{host.marker.replace('@', '')}</Badge>{/if}
+                  </h3>
+                  <span class="mono truncate" title={host.fingerprint}>{host.fingerprint}</span>
+                </div>
+                <Badge variant="muted">{host.key_type}</Badge>
+              </div>
+              <div class="vault-row-actions">
+                <span class="line-number mono">#{host.line_number}</span>
+                <button class="icon-btn" onclick={() => copyText(host.fingerprint, 'Fingerprint')} title="Copy fingerprint" aria-label="Copy fingerprint">
+                  <Copy size={13} />
+                </button>
+                <Button variant="danger" size="sm" onclick={() => askRemoveKnownHost(host)} title="Remove this host key">
+                  <Trash2 size={12} /> Remove
+                </Button>
+              </div>
+            </article>
+          {/each}
+        </div>
+        <div class="vault-note">
+          <ShieldAlert size={14} />
+          Only remove a host key when you trust the new fingerprint. Removing entries exposes you to a first-connection trust prompt.
+        </div>
+      {/if}
     {/if}
 
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 4: AUTHORIZED KEYS & SSHD HARDENING
-         ══════════════════════════════════════════════════════════════════════════ -->
+    <!-- ═══ AUTHORIZED & SSHD ═══ -->
     {#if activeTab === 'authorized'}
-      <div class="tab-panel">
-        <!-- Authorized Keys Table Card -->
-        <div class="card table-card">
-          <div class="table-toolbar" style="display: flex; align-items: center; justify-content: space-between;">
-            <div style="font-size: 12px; font-weight: 600; color: var(--color-text-secondary);">
-              Authorized Public Keys ({authorizedKeys.length})
-            </div>
-          </div>
+      <div class="panel-toolbar">
+        <SearchBar bind:value={authSearch} placeholder="Search comment, key type, or restrictions…" count={filteredAuthorizedKeys.length} total={authorizedKeys.length} />
+      </div>
 
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>LINE</th>
-                  <th>ALGORITHM</th>
-                  <th>IDENTITY / COMMENT</th>
-                  <th>ACCESS RESTRICTIONS</th>
-                  <th style="text-align: right;">ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if authorizedKeys.length === 0}
-                  <tr>
-                    <td colspan="5" class="empty-cell" style="padding: 24px 0 !important;">
-                      <EmptyState
-                        icon={ShieldCheck}
-                        title="No Authorized Keys Configured"
-                        description="Add public keys to ~/.ssh/authorized_keys to allow incoming logins."
-                        actionLabel="Add Key"
-                        actionIcon={Plus}
-                        onAction={() => showAddAuthModal = true}
-                      />
-                    </td>
-                  </tr>
-                {:else}
-                  {#each authorizedKeys as ak}
-                    <tr>
-                      <td class="font-mono text-muted">#{ak.line_number}</td>
-                      <td><span class="badge badge-accent">{ak.key_type}</span></td>
-                      <td class="font-mono strong">{ak.comment || 'No comment provided'}</td>
-                      <td>
-                        {#if ak.options}
-                          <span class="badge badge-warning">{ak.options}</span>
-                        {:else}
-                          <span class="text-muted text-xs">Full Shell Access</span>
-                        {/if}
-                      </td>
-                      <td style="text-align: right;">
-                        <Button 
-                          variant="danger" 
-                          size="sm"
-                          onclick={() => handleRemoveAuthorizedKey(ak.line_number)}
-                          title="Revoke login access for this key"
-                        >
-                          <Trash2 size={13} /> Revoke
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
+      {#if filteredAuthorizedKeys.length === 0}
+        <div class="vault-empty-card">
+          <EmptyState
+            icon={ShieldCheck}
+            title={authSearch ? 'No keys match' : 'No authorized keys'}
+            description={authSearch ? 'Try another comment or key type.' : 'Add public keys here to allow inbound SSH logins with cryptographic authentication.'}
+            actionLabel={authSearch ? '' : 'Add Authorized Key'}
+            actionIcon={Plus}
+            onAction={() => (showAuthModal = true)}
+          />
+        </div>
+      {:else}
+        <div class="vault-grid">
+          {#each filteredAuthorizedKeys as key (key.line_number)}
+            <article
+              class="vault-card"
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                openMenu(event, key.comment || key.key_type, `Line ${key.line_number}`, authorizedMenuItems(key));
+              }}
+            >
+              <div class="vault-card-head">
+                <div class="vault-icon"><ShieldCheck size={15} /></div>
+                <div class="vault-title">
+                  <h3>{key.comment || 'No comment'}</h3>
+                  <span class="mono truncate" title={key.key_data}>{key.key_data.slice(0, 32)}…</span>
+                </div>
+                <Badge variant="info">{key.key_type}</Badge>
+                <button
+                  class="icon-btn"
+                  aria-label="Authorized key actions"
+                  title="Actions"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    openMenu(event.currentTarget as HTMLElement, key.comment || key.key_type, `Line ${key.line_number}`, authorizedMenuItems(key));
+                  }}
+                >
+                  <MoreVertical size={14} />
+                </button>
+              </div>
+              <div class="vault-meta">
+                <div class="meta-row">
+                  <span class="meta-label">Access</span>
+                  <span class="meta-value">
+                    {#if key.options}
+                      <Badge variant="warning">{key.options}</Badge>
+                    {:else}
+                      Full shell access
+                    {/if}
+                  </span>
+                </div>
+                <div class="meta-row">
+                  <span class="meta-label">Line</span>
+                  <span class="meta-value mono">#{key.line_number}</span>
+                </div>
+              </div>
+              <div class="vault-card-footer">
+                <span class="status-chip success"><CheckCircle2 size={12} /> Authorized</span>
+                <div class="card-actions">
+                  <Button variant="ghost" size="sm" onclick={() => copyText(key.raw, 'Authorized key')}>
+                    <Copy size={12} /> Copy
+                  </Button>
+                  <Button variant="danger" size="sm" onclick={() => askRemoveAuthorizedKey(key)}>
+                    <Trash2 size={12} /> Revoke
+                  </Button>
+                </div>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+
+      <section class="vault-card sshd-card">
+        <div class="vault-card-head">
+          <div class="vault-icon"><Lock size={15} /></div>
+          <div class="vault-title">
+            <h3>SSH daemon posture</h3>
+            <span>
+              {sshdStatus?.source === 'daemon'
+                ? 'Effective live configuration (sshd -T)'
+                : sshdStatus?.source === 'config'
+                  ? 'Parsed from /etc/ssh/sshd_config'
+                  : 'Not evaluated yet'}
+            </span>
           </div>
+          <Button variant="outline" size="sm" onclick={() => loadSshdHardening(true)} disabled={evaluatingSshd}>
+            <RefreshCw size={12} class={evaluatingSshd ? 'animate-spin-slow' : ''} />
+            {sshdStatus?.source === 'daemon' ? 'Refresh' : 'Authorize & evaluate'}
+          </Button>
         </div>
 
-        <!-- SSHD Hardening Cards Section -->
-        {#if sshdStatus}
-          <div class="card grid-card">
-            <div class="card-header-bar">
-              <div>
-                <h3 class="card-section-title">SSH Daemon Security Posture</h3>
-                <span class="card-section-sub">Active daemon settings resolved via <code>/etc/ssh/sshd_config</code></span>
-              </div>
-              <Button 
-                variant="outline" 
-                size="sm"
-                onclick={() => loadSshdHardening(true)} 
-                disabled={evaluatingSshd}
-              >
-                <RefreshCw size={12} class={evaluatingSshd ? 'animate-spin-slow' : ''} /> 
-                <span>{evaluatingSshd ? 'Evaluating...' : 'Re-evaluate'}</span>
-              </Button>
+        {#if sshdStatus && !sshdStatus.is_evaluated}
+          <div class="vault-callout warning">
+            <ShieldAlert size={16} />
+            <div>
+              <strong>Administrator authorization required</strong>
+              <p>
+                {sshdStatus.error || 'The active sshd configuration could not be read. Authorize once to run sshd -T and read the effective settings.'}
+              </p>
             </div>
-
-            {#if sshdStatus.error}
-              <div class="alert-banner-warn">
-                <div class="alert-banner-left">
-                  <AlertTriangle size={16} class="text-warning flex-shrink-0" />
-                  <span>{sshdStatus.error}. Select Re-evaluate to request system authorization for the full configuration.</span>
-                </div>
+            <Button variant="primary" size="sm" onclick={() => loadSshdHardening(true)} disabled={evaluatingSshd}>
+              <Unlock size={13} /> Authorize
+            </Button>
+          </div>
+        {:else if sshdStatus}
+          {#if sshdStatus.source === 'config'}
+            <div class="vault-callout info">
+              <Info size={15} />
+              <span>These values were parsed from the main file and included fragments. Authorize for the authoritative <code>sshd -T</code> view.</span>
+            </div>
+          {/if}
+          <div class="sshd-grid">
+            <div class="sshd-item">
+              <div class="sshd-item-top">
+                <span class="sshd-label">PermitRootLogin</span>
+                <Badge variant={sshdTone(sshdStatus.permit_root_login, ['no', 'prohibit-password', 'without-password', 'forced-commands-only'])}>{sshdStatus.permit_root_login}</Badge>
               </div>
-            {/if}
-
-            <div class="sshd-grid">
-              <!-- PermitRootLogin Card -->
-              <div class="sshd-item">
-                <div class="sshd-item-top">
-                  <span class="sshd-label">PermitRootLogin</span>
-                  <span class="badge {sshdStatus.permit_root_login === 'no' || sshdStatus.permit_root_login === 'prohibit-password' ? 'badge-success' : 'badge-error'}">
-                    {sshdStatus.permit_root_login}
-                  </span>
-                </div>
-                <span class="sshd-desc">
-                  {sshdStatus.permit_root_login === 'prohibit-password' ? 'Root password logins blocked (keys only)' : sshdStatus.permit_root_login === 'no' ? 'Direct root remote access completely disabled' : 'Direct root superuser logins permitted'}
-                </span>
+              <span class="sshd-desc">
+                {sshdStatus.permit_root_login === 'no'
+                  ? 'Direct root remote access is disabled.'
+                  : ['prohibit-password', 'without-password'].includes(sshdStatus.permit_root_login)
+                    ? 'Root may log in with keys only.'
+                    : sshdStatus.permit_root_login === 'forced-commands-only'
+                      ? 'Root may run forced commands with keys only.'
+                      : 'Root password logins may be accepted.'}
+              </span>
+            </div>
+            <div class="sshd-item">
+              <div class="sshd-item-top">
+                <span class="sshd-label">PasswordAuthentication</span>
+                <Badge variant={sshdTone(sshdStatus.password_authentication, ['no'])}>{sshdStatus.password_authentication}</Badge>
               </div>
-
-              <!-- PasswordAuthentication Card -->
-              <div class="sshd-item">
-                <div class="sshd-item-top">
-                  <span class="sshd-label">PasswordAuthentication</span>
-                  <span class="badge {sshdStatus.password_authentication === 'no' ? 'badge-success' : 'badge-warning'}">
-                    {sshdStatus.password_authentication}
-                  </span>
-                </div>
-                <span class="sshd-desc">
-                  {sshdStatus.password_authentication === 'no' ? 'Strict key-only authentication enforced' : 'Interactive password login enabled'}
-                </span>
+              <span class="sshd-desc">
+                {sshdStatus.password_authentication === 'no' ? 'Key-only authentication is enforced.' : 'Interactive password login is enabled.'}
+              </span>
+            </div>
+            <div class="sshd-item">
+              <div class="sshd-item-top">
+                <span class="sshd-label">PubkeyAuthentication</span>
+                <Badge variant={sshdTone(sshdStatus.pubkey_authentication, ['yes'])}>{sshdStatus.pubkey_authentication}</Badge>
               </div>
-
-              <!-- PubkeyAuthentication Card -->
-              <div class="sshd-item">
-                <div class="sshd-item-top">
-                  <span class="sshd-label">PubkeyAuthentication</span>
-                  <span class="badge {sshdStatus.pubkey_authentication === 'yes' ? 'badge-success' : 'badge-error'}">
-                    {sshdStatus.pubkey_authentication}
-                  </span>
-                </div>
-                <span class="sshd-desc">
-                  {sshdStatus.pubkey_authentication === 'yes' ? 'Cryptographic public key login active' : 'Public key authentication disabled'}
-                </span>
+              <span class="sshd-desc">
+                {sshdStatus.pubkey_authentication === 'yes' ? 'Cryptographic key login is active.' : 'Public-key authentication is disabled.'}
+              </span>
+            </div>
+            <div class="sshd-item">
+              <div class="sshd-item-top">
+                <span class="sshd-label">X11Forwarding</span>
+                <Badge variant={sshdTone(sshdStatus.x11_forwarding, ['no'])}>{sshdStatus.x11_forwarding}</Badge>
               </div>
-
-              <!-- X11Forwarding Card -->
-              <div class="sshd-item">
-                <div class="sshd-item-top">
-                  <span class="sshd-label">X11Forwarding</span>
-                  <span class="badge {sshdStatus.x11_forwarding === 'no' ? 'badge-success' : 'badge-warning'}">
-                    {sshdStatus.x11_forwarding}
-                  </span>
-                </div>
-                <span class="sshd-desc">
-                  {sshdStatus.x11_forwarding === 'no' ? 'GUI window tunneling over SSH blocked' : 'X11 GUI tunneling over SSH permitted'}
-                </span>
+              <span class="sshd-desc">
+                {sshdStatus.x11_forwarding === 'no' ? 'X11 tunneling is disabled.' : 'GUI tunneling over SSH is allowed.'}
+              </span>
+            </div>
+            <div class="sshd-item">
+              <div class="sshd-item-top">
+                <span class="sshd-label">SSH Port</span>
+                <Badge variant="muted">{sshdStatus.port}</Badge>
               </div>
-
-              <!-- SSH Port Card -->
-              <div class="sshd-item">
-                <div class="sshd-item-top">
-                  <span class="sshd-label">SSH Port</span>
-                  <span class="badge badge-neutral font-mono">{sshdStatus.port}</span>
-                </div>
-                <span class="sshd-desc">
-                  {sshdStatus.port === '22' ? 'Standard listening port (22/TCP)' : `Custom listening port (${sshdStatus.port}/TCP)`}
-                </span>
-              </div>
+              <span class="sshd-desc">
+                {sshdStatus.port === '22' ? 'Standard listening port (22/TCP).' : 'Custom listening port.'}
+              </span>
             </div>
           </div>
         {/if}
-      </div>
+      </section>
     {/if}
 
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 5: SSL/TLS CERTIFICATES
-         ══════════════════════════════════════════════════════════════════════════ -->
+    <!-- ═══ CERTIFICATES ═══ -->
     {#if activeTab === 'certs'}
-      <div class="tab-panel">
-        <div class="card table-card">
-          <div class="table-toolbar">
-            <div style="display: flex; align-items: center; gap: 10px; flex: 1;">
-              <SearchBar
-                bind:value={certSearch}
-                placeholder="Search domain, issuer, or SANs..."
-                count={filteredSslCerts.length}
-                total={sslCerts.length}
-              />
-              <FilterChips
-                options={certFilters.map(option => ({ ...option, count: certFilterCounts[option.id] }))}
-                bind:value={certFilter}
-                label="Filter certificates by state"
-              />
-            </div>
-          </div>
-
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>DOMAIN / SUBJECT</th>
-                  <th>ISSUER</th>
-                  <th>EXPIRY COUNTDOWN</th>
-                  <th>ALTERNATIVE NAMES (SANS)</th>
-                  <th>CERTIFICATE PATH</th>
-                  <th style="text-align: right;">ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if filteredSslCerts.length === 0}
-                  <tr>
-                    <td colspan="6" class="empty-cell" style="padding: 24px 0 !important;">
-                      <EmptyState
-                        icon={FileKey}
-                        title="No SSL Certificates Found"
-                        description={certSearch ? 'No certificates matched your search filter.' : 'No active server certificates found in /etc/letsencrypt, /etc/nginx/ssl, or ~/.local/share/mkcert.'}
-                        actionLabel={!certSearch ? 'Test Remote TLS Endpoint' : ''}
-                        actionIcon={Globe}
-                        onAction={() => showTestSslModal = true}
-                      />
-                    </td>
-                  </tr>
-                {:else}
-                  {#each filteredSslCerts as cert}
-                    <tr>
-                      <td>
-                        <div class="domain-cell">
-                          <span class="font-mono strong">{cert.name}</span>
-                          <span class="text-xs text-muted">{cert.subject}</span>
-                        </div>
-                      </td>
-                      <td class="text-sm text-secondary">{cert.issuer}</td>
-                      <td>
-                        {#if cert.is_expired}
-                          <span class="status-chip danger">
-                            <XCircle size={12} /> Expired
-                          </span>
-                        {:else if cert.is_expiring_soon}
-                          <span class="status-chip warning" title="Expires in less than 30 days">
-                            <Clock size={12} /> {cert.days_valid} days left
-                          </span>
-                        {:else}
-                          <span class="status-chip success">
-                            <CheckCircle2 size={12} /> {cert.days_valid} days left
-                          </span>
-                        {/if}
-                      </td>
-                      <td>
-                        {#if cert.san_domains.length > 0}
-                          <div class="san-pill-wrap">
-                            {#each cert.san_domains.slice(0, 3) as san}
-                              <span class="san-pill">{san}</span>
-                            {/each}
-                            {#if cert.san_domains.length > 3}
-                              <span class="san-pill muted">+{cert.san_domains.length - 3} more</span>
-                            {/if}
-                          </div>
-                        {:else}
-                          <span class="text-xs text-muted">Primary domain only</span>
-                        {/if}
-                      </td>
-                      <td class="font-mono text-xs text-muted truncate-cell" title={cert.path}>
-                        {cert.path}
-                      </td>
-                      <td style="text-align: right;">
-                        <Button 
-                          variant="outline" 
-                          size="sm"
-                          onclick={() => copyToClipboard(cert.path, 'Certificate Path')}
-                          title="Copy file path to clipboard"
-                        >
-                          <Copy size={12} /> Path
-                        </Button>
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      <div class="panel-toolbar">
+        <SearchBar bind:value={certSearch} placeholder="Search subject, issuer, or SAN…" count={filteredSslCerts.length} total={sslCerts.length} />
+        <FilterChips options={certFilterOptions} bind:value={certFilter} label="Filter certificates by validity" />
       </div>
-    {/if}
 
-    <!-- ══════════════════════════════════════════════════════════════════════════
-         TAB 6: THREAT DEFENSE & FAIL2BAN
-         ══════════════════════════════════════════════════════════════════════════ -->
-    {#if activeTab === 'threats'}
-      <div class="tab-panel">
-        {#if !fail2banStatus?.is_installed}
-          <div class="card p-5 text-center">
-            <ShieldAlert size={36} class="text-muted mx-auto mb-2" />
-            <h3 class="font-semibold text-lg text-primary mb-1">Fail2ban Is Not Installed</h3>
-            <p class="text-sm text-muted max-w-md mx-auto mb-4">
-              Install Fail2ban on your host system to automatically block abusive SSH brute-force bots and protect your server.
-            </p>
-            <div class="font-mono text-xs bg-black/20 p-3 rounded-lg border border-border inline-block">
-              sudo dnf install -y fail2ban &amp;&amp; sudo systemctl enable --now fail2ban
-            </div>
-          </div>
-        {:else}
-          <!-- Service Status Card -->
-          <div class="card status-overview-card">
-            <div class="status-overview-left">
-              <div class="status-indicator-dot {fail2banStatus.is_active ? 'online' : 'offline'}"></div>
-              <div>
-                <div class="font-semibold text-primary text-sm">
-                  Fail2ban Daemon: {fail2banStatus.is_active ? 'Running & Active' : 'Stopped / Inactive'}
+      {#if filteredSslCerts.length === 0}
+        <div class="vault-empty-card">
+          <EmptyState
+            icon={FileKey}
+            title={certSearch ? 'No certificates match' : 'No local server certificates found'}
+            description={certSearch ? 'Try another domain, issuer, or SAN.' : 'Scanned /etc/letsencrypt, nginx, Apache, httpd, and mkcert stores. Use Test Live TLS to inspect a remote endpoint.'}
+            actionLabel={certSearch ? '' : 'Test Live TLS'}
+            actionIcon={Globe}
+            onAction={() => (showTlsModal = true)}
+          />
+        </div>
+      {:else}
+        <div class="vault-grid">
+          {#each filteredSslCerts as cert (cert.path + cert.subject)}
+            <article class="vault-card">
+              <div class="vault-card-head">
+                <div class="vault-icon" class:warn={cert.is_expiring_soon || cert.is_expired}>
+                  <FileKey size={15} />
                 </div>
-                <div class="text-xs text-muted">
-                  Monitoring {fail2banStatus.jails.length} security jail{fail2banStatus.jails.length !== 1 ? 's' : ''} with {fail2banStatus.total_banned_ips} active IP ban{fail2banStatus.total_banned_ips !== 1 ? 's' : ''}
+                <div class="vault-title">
+                  <h3>{cert.name}</h3>
+                  <span class="truncate" title={cert.subject}>{cert.subject || 'Unknown subject'}</span>
+                </div>
+                <Badge variant={certTone(cert)}>{certLabel(cert)}</Badge>
+              </div>
+
+              <div class="cert-progress" title={cert.date_parse_error ? 'Expiry could not be parsed' : `${cert.days_valid} days remaining`}>
+                <span class="cert-progress-fill {certTone(cert)}" style="width: {certProgress(cert)}%"></span>
+              </div>
+
+              <div class="vault-meta">
+                <div class="meta-row">
+                  <span class="meta-label">Issuer</span>
+                  <span class="meta-value truncate" title={cert.issuer}>{cert.issuer || 'Unknown'}</span>
+                </div>
+                <div class="meta-row">
+                  <span class="meta-label">Valid until</span>
+                  <span class="meta-value">{cert.not_after || 'Unknown'}</span>
+                </div>
+                <div class="meta-row">
+                  <span class="meta-label">Path</span>
+                  <span class="meta-value mono truncate" title={cert.path}>{cert.path}</span>
+                  <button class="copy-mini" onclick={() => copyText(cert.path, 'Certificate path')} title="Copy path" aria-label="Copy certificate path">
+                    <Copy size={11} />
+                  </button>
                 </div>
               </div>
+
+              {#if cert.san_domains.length > 0}
+                <div class="san-pill-wrap">
+                  {#each cert.san_domains.slice(0, 4) as san}
+                    <span class="san-pill">{san}</span>
+                  {/each}
+                  {#if cert.san_domains.length > 4}
+                    <span class="san-pill muted">+{cert.san_domains.length - 4} more</span>
+                  {/if}
+                </div>
+              {/if}
+
+              <div class="vault-card-footer">
+                <span class="status-chip {certTone(cert)}">
+                  {#if cert.is_expired}<XCircle size={12} /> Expired{:else if cert.date_parse_error}<Info size={12} /> Date unknown{:else if cert.is_expiring_soon}<Clock size={12} /> Renew soon{:else}<CheckCircle2 size={12} /> Valid{/if}
+                </span>
+                <div class="card-actions">
+                  {#if cert.is_self_signed}<Badge variant="warning">Self-signed</Badge>{/if}
+                  <Button variant="ghost" size="sm" onclick={() => copyText(cert.path, 'Certificate path')}>
+                    <Copy size={12} /> Path
+                  </Button>
+                </div>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+
+    <!-- ═══ THREAT DEFENSE ═══ -->
+    {#if activeTab === 'threats'}
+      {#if !fail2banStatus}
+        <div class="vault-empty-card">
+          <EmptyState icon={ShieldAlert} title="Fail2ban status not loaded" description="Refresh to check whether fail2ban is installed and running." actionLabel="Refresh" actionIcon={RefreshCw} onAction={() => loadFail2banStatus(false)} />
+        </div>
+      {:else if !fail2banStatus.is_installed}
+        <div class="vault-card install-card">
+          <div class="vault-icon"><ShieldAlert size={18} /></div>
+          <h3>Fail2ban is not installed</h3>
+          <p>Fail2ban blocks abusive SSH and web clients after repeated failures. Install it to enable jail monitoring and IP bans here.</p>
+          <div class="install-command">
+            <code>sudo dnf install -y fail2ban &amp;&amp; sudo systemctl enable --now fail2ban</code>
+            <Button variant="outline" size="sm" onclick={() => copyText('sudo dnf install -y fail2ban && sudo systemctl enable --now fail2ban', 'Install command')}>
+              <Copy size={12} /> Copy
+            </Button>
+          </div>
+        </div>
+      {:else if fail2banStatus.needs_elevation}
+        <div class="vault-callout warning">
+          <ShieldAlert size={18} />
+          <div>
+            <strong>Administrator authorization required</strong>
+            <p>Fail2ban’s control socket is root-only. Authorize once to read jail status or manage bans; the approval is cached by PolicyKit.</p>
+          </div>
+          <Button variant="primary" size="sm" onclick={authorizeFail2ban} disabled={evaluatingFail2ban}>
+            <Unlock size={13} /> Authorize status
+          </Button>
+        </div>
+      {:else}
+        <div class="vault-card status-overview-card">
+          <div class="status-overview-left">
+            <span class="status-dot {fail2banStatus.is_active ? 'online' : 'offline'}"></span>
+            <div>
+              <strong>{fail2banStatus.is_active ? 'Fail2ban is active' : 'Fail2ban is inactive'}</strong>
+              <span>
+                {fail2banStatus.is_active
+                  ? `Monitoring ${fail2banStatus.jails.length} jail${fail2banStatus.jails.length === 1 ? '' : 's'} · ${fail2banStatus.total_banned_ips} active ban${fail2banStatus.total_banned_ips === 1 ? '' : 's'}`
+                  : 'No jail data is available while the service is stopped.'}
+              </span>
             </div>
-            {#if !fail2banStatus.is_active}
-              <Button variant="primary" size="sm" onclick={() => handleControlFail2ban('start')}>
-                <Play size={13} /> Start Fail2ban
+          </div>
+          <div class="card-actions">
+            <Button variant="outline" size="sm" onclick={() => loadFail2banStatus(true)} disabled={evaluatingFail2ban}>
+              <RefreshCw size={12} class={evaluatingFail2ban ? 'animate-spin-slow' : ''} /> Refresh
+            </Button>
+            {#if fail2banStatus.is_active}
+              <Button variant="outline" size="sm" onclick={() => handleServiceAction('restart')}>
+                <RotateCw size={12} /> Restart
+              </Button>
+            {:else}
+              <Button variant="primary" size="sm" onclick={() => handleServiceAction('start')}>
+                <Play size={12} /> Start Service
               </Button>
             {/if}
           </div>
+        </div>
 
-          <!-- Jails List Grid -->
+        {#if fail2banStatus.error}
+          <div class="vault-alert" role="alert">
+            <AlertTriangle size={15} />
+            <span>{fail2banStatus.error}</span>
+          </div>
+        {/if}
+
+        {#if fail2banStatus.jails.length === 0}
+          <div class="vault-empty-card">
+            <EmptyState icon={Shield} title="No jails reported" description="Fail2ban is running but did not report any jails. Check /etc/fail2ban/jail.local." />
+          </div>
+        {:else}
           <div class="jails-grid">
-            {#each fail2banStatus.jails as jail}
-              <div class="card jail-card">
-                <div class="jail-header">
-                  <div class="jail-title-group">
-                    <Shield size={16} class="text-accent" />
-                    <span class="jail-name font-mono">{jail.jail_name}</span>
+            {#each fail2banStatus.jails as jail (jail.jail_name)}
+              <article class="vault-card jail-card">
+                <div class="vault-card-head">
+                  <div class="vault-icon"><Shield size={15} /></div>
+                  <div class="vault-title">
+                    <h3>{jail.jail_name}</h3>
+                    <span>{jail.currently_banned} currently banned · {jail.total_banned} total</span>
                   </div>
-                  <span class="badge {jail.currently_banned > 0 ? 'badge-error' : 'badge-neutral'}">
-                    {jail.currently_banned} banned
-                  </span>
+                  <Badge variant={jail.currently_banned > 0 ? 'error' : 'muted'}>{jail.currently_banned} banned</Badge>
                 </div>
-
-                <div class="jail-body">
-                  <div class="jail-stat-row">
-                    <span class="text-xs text-muted">Total Filtered Bans:</span>
-                    <span class="text-xs font-semibold text-primary">{jail.total_banned}</span>
+                {#if jail.banned_ips.length === 0}
+                  <p class="jail-empty">No active IP blocks.</p>
+                {:else}
+                  <div class="ip-pills-wrap">
+                    {#each jail.banned_ips as ip (ip)}
+                      <span class="banned-ip-pill">
+                        <span class="mono">{ip}</span>
+                        <button class="copy-mini" onclick={() => copyText(ip, 'IP address')} title="Copy IP" aria-label="Copy IP">
+                          <Copy size={10} />
+                        </button>
+                        <button class="unban-btn" onclick={() => handleUnban(jail.jail_name, ip)} title="Unban {ip}" aria-label="Unban {ip}">
+                          <X size={11} />
+                        </button>
+                      </span>
+                    {/each}
                   </div>
-
-                  <div class="banned-ips-section">
-                    <span class="text-xs text-secondary font-medium mb-1 block">Active IP Blocks:</span>
-                    {#if jail.banned_ips.length === 0}
-                      <span class="text-xs text-muted italic">No active bans in this jail</span>
-                    {:else}
-                      <div class="ip-pills-wrap">
-                        {#each jail.banned_ips as ip}
-                          <span class="banned-ip-pill">
-                            <span>{ip}</span>
-                            <button 
-                              class="unban-btn" 
-                              onclick={() => handleUnbanIp(jail.jail_name, ip)} 
-                              title="Unban IP {ip}"
-                            >
-                              <X size={11} />
-                            </button>
-                          </span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                </div>
-              </div>
+                {/if}
+              </article>
             {/each}
           </div>
         {/if}
-      </div>
+      {/if}
     {/if}
   </div>
 </div>
 
-<!-- ════════════════════════════════════════════════════════════════════════════
-     MODALS
-     ════════════════════════════════════════════════════════════════════════════ -->
+<!-- ═══ Context menu ═══ -->
+<ContextMenu
+  bind:isOpen={menuOpen}
+  x={menuX}
+  y={menuY}
+  title={menuTitle}
+  subtitle={menuSubtitle}
+  items={menuItems}
+/>
 
-<!-- 1. Generate SSH Key Modal -->
+<!-- ═══ Generate key modal ═══ -->
 {#if showGenModal}
-  <div use:portal class="modal-backdrop" onclick={() => showGenModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+  <div use:portal class="modal-backdrop" onclick={() => (showGenModal = false)} onkeydown={(event) => { if (event.key === 'Escape') showGenModal = false; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="gen-title" tabindex="-1">
       <div class="modal-header">
-        <div class="modal-title-group">
-          <Key size={18} class="text-accent" />
-          <h3>Generate New SSH Key Pair</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => showGenModal = false}><X size={16} /></button>
+        <div class="modal-title-group"><Key size={18} class="accent" /><h3 id="gen-title">Generate SSH key pair</h3></div>
+        <button class="icon-btn" onclick={() => (showGenModal = false)} aria-label="Close"><X size={16} /></button>
       </div>
-
       <div class="modal-body">
         <div class="form-group">
-          <label for="gen-key-type">Cryptographic Algorithm</label>
+          <span class="form-label">Algorithm</span>
           <div class="radio-pill-group">
-            <button 
-              type="button"
-              class="radio-pill-btn" 
-              class:active={genKeyType === 'ed25519'} 
-              onclick={() => { genKeyType = 'ed25519'; genFilename = 'id_ed25519_custom'; }}
-            >
-              <strong>Ed25519</strong> (Recommended • Fast &amp; Secure)
+            <button type="button" class="radio-pill-btn" class:active={genKeyType === 'ed25519'} onclick={() => { genKeyType = 'ed25519'; genBits = 4096; genFilename = 'id_ed25519_custom'; }}>
+              <strong>Ed25519</strong><span>Recommended · fast and compact</span>
             </button>
-            <button 
-              type="button"
-              class="radio-pill-btn" 
-              class:active={genKeyType === 'rsa'} 
-              onclick={() => { genKeyType = 'rsa'; genFilename = 'id_rsa_custom'; }}
-            >
-              <strong>RSA (4096-bit)</strong> (Legacy Compatibility)
+            <button type="button" class="radio-pill-btn" class:active={genKeyType === 'rsa'} onclick={() => { genKeyType = 'rsa'; genBits = 4096; genFilename = 'id_rsa_custom'; }}>
+              <strong>RSA</strong><span>Legacy compatibility · larger keys</span>
+            </button>
+            <button type="button" class="radio-pill-btn" class:active={genKeyType === 'ecdsa'} onclick={() => { genKeyType = 'ecdsa'; genBits = 256; genFilename = 'id_ecdsa_custom'; }}>
+              <strong>ECDSA</strong><span>NIST curves · optional compatibility</span>
             </button>
           </div>
         </div>
 
-        <div class="form-group">
-          <label for="gen-key-name">Key Filename (in ~/.ssh/)</label>
-          <input id="gen-key-name" type="text" class="form-input font-mono" bind:value={genFilename} placeholder="id_ed25519_project" />
-          <span class="field-hint">Files <code>~/.ssh/{genFilename}</code> and <code>~/.ssh/{genFilename}.pub</code> will be created.</span>
-        </div>
-
-        <div class="form-group">
-          <label for="gen-key-comment">Comment / Identity Tag</label>
-          <input id="gen-key-comment" type="text" class="form-input" bind:value={genComment} placeholder="user@linux-control-panel" />
-        </div>
-
-        <div class="form-group">
-          <label for="gen-key-pass">Passphrase (Optional)</label>
-          <input id="gen-key-pass" type="password" class="form-input" bind:value={genPassphrase} placeholder="Leave empty for passwordless key" />
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <Button variant="secondary" onclick={() => showGenModal = false}>Cancel</Button>
-        <Button variant="primary" onclick={handleGenerateKey}>
-          <Key size={14} /> Generate Key Pair
-        </Button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- 2. Generated Key Result Modal -->
-{#if generatedKeyResult}
-  <div use:portal class="modal-backdrop" onclick={() => generatedKeyResult = null} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <CheckCircle2 size={18} class="text-success" />
-          <h3 class="text-success">SSH Key Pair Created!</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => generatedKeyResult = null}><X size={16} /></button>
-      </div>
-
-      <div class="modal-body">
-        <p class="text-sm text-secondary">
-          Your key pair has been written to <code>~/.ssh/{generatedKeyResult.filename}</code>. Copy the public key below to add it to your server's <code>authorized_keys</code> or GitHub:
-        </p>
-
-        <div class="pubkey-preview-box font-mono text-xs">
-          {generatedKeyResult.publicKey}
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <Button variant="secondary" onclick={() => generatedKeyResult = null}>Close</Button>
-        <Button variant="primary" onclick={() => {
-          if (generatedKeyResult) copyToClipboard(generatedKeyResult.publicKey, 'Public Key');
-          generatedKeyResult = null;
-        }}>
-          <Copy size={14} /> Copy Public Key &amp; Close
-        </Button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- 3. Add Client Host Modal -->
-{#if showAddClientModal}
-  <div use:portal class="modal-backdrop" onclick={() => showAddClientModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <Laptop size={18} class="text-accent" />
-          <h3>Add SSH Client Host Profile</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => showAddClientModal = false}><X size={16} /></button>
-      </div>
-
-      <div class="modal-body">
-        <div class="form-row-2">
+        {#if genKeyType !== 'ed25519'}
           <div class="form-group">
-            <label for="cli-host-alias">Host Shortcut / Alias *</label>
-            <input id="cli-host-alias" type="text" class="form-input font-mono" bind:value={newHostAlias} placeholder="dev-server" />
-            <span class="field-hint">Usage: <code>ssh dev-server</code></span>
-          </div>
-          <div class="form-group">
-            <label for="cli-hostname">Target IP / Domain *</label>
-            <input id="cli-hostname" type="text" class="form-input font-mono" bind:value={newHostName} placeholder="192.168.1.100" />
-          </div>
-        </div>
-
-        <div class="form-row-2">
-          <div class="form-group">
-            <label for="cli-user">Remote User</label>
-            <input id="cli-user" type="text" class="form-input" bind:value={newHostUser} placeholder="root or ubuntu" />
-          </div>
-          <div class="form-group">
-            <label for="cli-port">SSH Port</label>
-            <input id="cli-port" type="text" class="form-input font-mono" bind:value={newHostPort} placeholder="22" />
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="cli-key">Specific Identity Key Path (Optional)</label>
-          <input id="cli-key" type="text" class="form-input font-mono" bind:value={newHostKey} placeholder="~/.ssh/id_ed25519" />
-        </div>
-
-        <div class="form-group">
-          <label for="cli-proxy">ProxyJump / Bastion (Optional)</label>
-          <input id="cli-proxy" type="text" class="form-input font-mono" bind:value={newHostProxy} placeholder="bastion.example.com" />
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <Button variant="secondary" onclick={() => showAddClientModal = false}>Cancel</Button>
-        <Button variant="primary" onclick={handleAddClientHost}>
-          <Check size={14} /> Save to ~/.ssh/config
-        </Button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- 4. Add Authorized Key Modal -->
-{#if showAddAuthModal}
-  <div use:portal class="modal-backdrop" onclick={() => showAddAuthModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <ShieldCheck size={18} class="text-accent" />
-          <h3>Add Remote Authorized Public Key</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => showAddAuthModal = false}><X size={16} /></button>
-      </div>
-
-      <div class="modal-body">
-        <div class="form-group">
-          <label for="auth-key-input">Paste Public Key (OpenSSH Format)</label>
-          <textarea 
-            id="auth-key-input" 
-            class="form-textarea font-mono text-xs" 
-            rows="4" 
-            bind:value={newAuthPubKey} 
-            placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... admin@laptop"
-          ></textarea>
-          <span class="field-hint">This key will be appended to <code>~/.ssh/authorized_keys</code> to grant inbound SSH login access.</span>
-        </div>
-      </div>
-
-      <div class="modal-footer">
-        <Button variant="secondary" onclick={() => showAddAuthModal = false}>Cancel</Button>
-        <Button variant="primary" onclick={handleAddAuthorizedKey}>
-          <Plus size={14} /> Add Authorized Key
-        </Button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- 5. Test Remote TLS Modal -->
-{#if showTestSslModal}
-  <div use:portal class="modal-backdrop" onclick={() => showTestSslModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <Globe size={18} class="text-accent" />
-          <h3>Live TLS Certificate Inspector</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => showTestSslModal = false}><X size={16} /></button>
-      </div>
-
-      <div class="modal-body">
-        <div class="form-row-2">
-          <div class="form-group" style="flex: 3;">
-            <label for="tls-host">Domain or Hostname</label>
-            <input id="tls-host" type="text" class="form-input font-mono" bind:value={testSslHost} placeholder="example.com or localhost" />
-          </div>
-          <div class="form-group" style="flex: 1;">
-            <label for="tls-port">Port</label>
-            <input id="tls-port" type="number" class="form-input font-mono" bind:value={testSslPort} placeholder="443" />
-          </div>
-        </div>
-
-        <Button 
-          variant="primary" 
-          class="w-full justify-center" 
-          onclick={handleTestRemoteSsl} 
-          disabled={testSslLoading}
-        >
-          <RefreshCw size={13} class={testSslLoading ? 'animate-spin-slow' : ''} />
-          <span>{testSslLoading ? 'Querying TLS Handshake...' : 'Inspect Live Certificate'}</span>
-        </Button>
-
-        {#if testSslError}
-          <div class="alert-banner-danger mt-3">
-            <AlertTriangle size={15} class="text-error flex-shrink-0" />
-            <span class="text-xs">{testSslError}</span>
-          </div>
-        {/if}
-
-        {#if testSslResult}
-          <div class="tls-result-card mt-3">
-            <div class="tls-result-header">
-              <span class="font-semibold text-primary">{testSslResult.name}</span>
-              {#if testSslResult.is_expired}
-                <span class="badge badge-error">Expired</span>
+            <Select id="gen-bits" label="Key size (bits)" bind:value={genBits}>
+              {#if genKeyType === 'rsa'}
+                <option value={2048}>2048</option>
+                <option value={3072}>3072</option>
+                <option value={4096}>4096 (recommended)</option>
               {:else}
-                <span class="badge badge-success">{testSslResult.days_valid} days remaining</span>
+                <option value={256}>256</option>
+                <option value={384}>384</option>
+                <option value={521}>521</option>
               {/if}
-            </div>
-            <div class="tls-result-detail">
-              <div><strong>Issuer:</strong> {testSslResult.issuer}</div>
-              <div><strong>Valid Range:</strong> {testSslResult.not_before} &rarr; {testSslResult.not_after}</div>
-              {#if testSslResult.san_domains.length > 0}
-                <div class="mt-1">
-                  <strong>SANs:</strong>
-                  <div class="san-pill-wrap mt-1">
-                    {#each testSslResult.san_domains as s}
-                      <span class="san-pill">{s}</span>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
+            </Select>
           </div>
         {/if}
-      </div>
 
+        <Input id="gen-key-name" label="File name in ~/.ssh/" bind:value={genFilename} placeholder="id_ed25519_project" class="mono" />
+        <span class="field-hint">Creates <code>~/.ssh/{genFilename || '…'}</code> and <code>~/.ssh/{genFilename || '…'}.pub</code>. Existing files are never overwritten.</span>
+
+        <Input id="gen-key-comment" label="Comment / identity tag" bind:value={genComment} placeholder="user@linux-control-panel" />
+        <Input id="gen-key-pass" label="Passphrase (optional)" type="password" bind:value={genPassphrase} placeholder="Leave empty for a passwordless key" />
+        <span class="field-hint">The passphrase is sent to ssh-keygen through a pseudo-terminal, never through a process argument list.</span>
+      </div>
       <div class="modal-footer">
-        <Button variant="secondary" onclick={() => showTestSslModal = false}>Close</Button>
+        <Button variant="secondary" onclick={() => (showGenModal = false)}>Cancel</Button>
+        <Button variant="primary" onclick={handleGenerateKey} disabled={generatingKey}>
+          <Key size={14} /> {generatingKey ? 'Generating…' : 'Generate key pair'}
+        </Button>
       </div>
     </div>
   </div>
 {/if}
 
-<!-- 6. Manually Ban IP Modal -->
-{#if showBanModal}
-  <div use:portal class="modal-backdrop" onclick={() => showBanModal = false} role="presentation">
-    <div class="modal-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+<!-- ═══ Generated key result ═══ -->
+{#if generatedKeyResult}
+  <div use:portal class="modal-backdrop" onclick={() => (generatedKeyResult = null)} onkeydown={(event) => { if (event.key === 'Escape') generatedKeyResult = null; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="generated-title" tabindex="-1">
       <div class="modal-header">
-        <div class="modal-title-group">
-          <Ban size={18} class="text-danger" />
-          <h3>Manually Ban Threat IP Address</h3>
-        </div>
-        <button class="modal-close-btn" onclick={() => showBanModal = false}><X size={16} /></button>
+        <div class="modal-title-group"><CheckCircle2 size={18} class="success" /><h3 id="generated-title">SSH key pair created</h3></div>
+        <button class="icon-btn" onclick={() => (generatedKeyResult = null)} aria-label="Close"><X size={16} /></button>
       </div>
+      <div class="modal-body">
+        <p class="text-sm muted">The private key is at <code>~/.ssh/{generatedKeyResult.filename}</code>. Copy the public key to a server’s <code>authorized_keys</code> or to your Git host.</p>
+        <pre class="pubkey-preview">{generatedKeyResult.publicKey}</pre>
+      </div>
+      <div class="modal-footer">
+        <Button variant="secondary" onclick={() => (generatedKeyResult = null)}>Close</Button>
+        <Button variant="primary" onclick={() => { copyText(generatedKeyResult!.publicKey, 'Public key'); generatedKeyResult = null; }}>
+          <Copy size={14} /> Copy public key
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
 
+<!-- ═══ Host profile modal ═══ -->
+{#if showHostModal}
+  <div use:portal class="modal-backdrop" onclick={() => (showHostModal = false)} onkeydown={(event) => { if (event.key === 'Escape') showHostModal = false; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="host-title" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title-group"><Server size={18} class="accent" /><h3 id="host-title">{editingHost ? 'Edit host profile' : 'Add host profile'}</h3></div>
+        <button class="icon-btn" onclick={() => (showHostModal = false)} aria-label="Close"><X size={16} /></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row-2">
+          <Input id="host-alias" label="Shortcut / alias *" bind:value={hostAlias} placeholder="dev-server" disabled={editingHost} class="mono" />
+          <Input id="host-name" label="Target hostname or IP *" bind:value={hostName} placeholder="192.168.1.100" class="mono" />
+        </div>
+        {#if editingHost}<span class="field-hint">The alias identifies the block. To rename it, remove this profile and add a new one.</span>{/if}
+
+        <div class="form-row-2">
+          <Input id="host-user" label="Remote user" bind:value={hostUser} placeholder="ubuntu" />
+          <Input id="host-port" label="SSH port" type="number" min="1" max="65535" bind:value={hostPort} placeholder="22" class="mono" />
+        </div>
+
+        <Input id="host-key" label="Identity file (optional)" bind:value={hostKey} placeholder="~/.ssh/id_ed25519" class="mono" list="ssh-key-list" />
+        <datalist id="ssh-key-list">
+          {#each sshKeys as key}
+            <option value={key.path}></option>
+          {/each}
+        </datalist>
+
+        <Input id="host-proxy" label="ProxyJump / bastion (optional)" bind:value={hostProxy} placeholder="bastion.example.com" class="mono" />
+
+        <details class="advanced-details">
+          <summary>Advanced SSH options</summary>
+          <textarea class="form-textarea mono" rows="4" bind:value={hostExtra} placeholder="ServerAliveInterval 60&#10;ForwardAgent yes"></textarea>
+          <span class="field-hint">One directive per line. Host and Match blocks are not allowed here.</span>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <Button variant="secondary" onclick={() => (showHostModal = false)}>Cancel</Button>
+        <Button variant="primary" onclick={handleSaveHost} disabled={savingHost}>
+          <Check size={14} /> {savingHost ? 'Saving…' : 'Save host profile'}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ═══ Authorized key modal ═══ -->
+{#if showAuthModal}
+  <div use:portal class="modal-backdrop" onclick={() => (showAuthModal = false)} onkeydown={(event) => { if (event.key === 'Escape') showAuthModal = false; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="auth-title" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title-group"><ShieldCheck size={18} class="accent" /><h3 id="auth-title">Add authorized public key</h3></div>
+        <button class="icon-btn" onclick={() => (showAuthModal = false)} aria-label="Close"><X size={16} /></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label" for="auth-key-input">OpenSSH public key</label>
+          <textarea id="auth-key-input" class="form-textarea mono" rows="4" bind:value={newAuthPubKey} placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… admin@laptop"></textarea>
+          <span class="field-hint">Exactly one key. It will be appended to <code>~/.ssh/authorized_keys</code> and grants inbound login access.</span>
+        </div>
+
+        {#if parsedAuthPreview}
+          <div class="parsed-key-preview">
+            <Badge variant="info">{parsedAuthPreview.type}</Badge>
+            <span class="muted">{parsedAuthPreview.comment}</span>
+          </div>
+        {:else if newAuthPubKey.trim()}
+          <div class="vault-callout warning"><AlertTriangle size={14} /><span>This does not look like an OpenSSH public key.</span></div>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <Button variant="secondary" onclick={() => (showAuthModal = false)}>Cancel</Button>
+        <Button variant="primary" onclick={handleAddAuthorizedKey} disabled={savingKey}>
+          <Plus size={14} /> {savingKey ? 'Adding…' : 'Add authorized key'}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ═══ Live TLS modal ═══ -->
+{#if showTlsModal}
+  <div use:portal class="modal-backdrop" onclick={() => (showTlsModal = false)} onkeydown={(event) => { if (event.key === 'Escape') showTlsModal = false; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="tls-title" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title-group"><Globe size={18} class="accent" /><h3 id="tls-title">Inspect a live TLS certificate</h3></div>
+        <button class="icon-btn" onclick={() => (showTlsModal = false)} aria-label="Close"><X size={16} /></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row-2">
+          <Input id="tls-host" label="Hostname or IP" bind:value={tlsHost} placeholder="example.com or 2001:db8::1" class="mono" />
+          <Input id="tls-port" label="Port" type="number" min="1" max="65535" bind:value={tlsPort} placeholder="443" class="mono" />
+        </div>
+        <Button variant="primary" class="full-width" onclick={handleTestTls} disabled={tlsLoading}>
+          <RefreshCw size={13} class={tlsLoading ? 'animate-spin-slow' : ''} /> {tlsLoading ? 'Connecting…' : 'Inspect certificate'}
+        </Button>
+
+        {#if tlsError}
+          <div class="vault-callout danger"><AlertTriangle size={15} /><span>{tlsError}</span></div>
+        {/if}
+
+        {#if tlsResult}
+          <div class="tls-result">
+            <div class="tls-result-head">
+              <strong>{tlsResult.name}</strong>
+              <Badge variant={certTone(tlsResult)}>{certLabel(tlsResult)}</Badge>
+            </div>
+            <div class="meta-row"><span class="meta-label">Issuer</span><span class="meta-value">{tlsResult.issuer || 'Unknown'}</span></div>
+            <div class="meta-row"><span class="meta-label">Valid</span><span class="meta-value">{tlsResult.not_before} → {tlsResult.not_after}</span></div>
+            {#if tlsResult.san_domains.length > 0}
+              <div class="san-pill-wrap">
+                {#each tlsResult.san_domains as san}<span class="san-pill">{san}</span>{/each}
+              </div>
+            {/if}
+            {#if tlsResult.is_self_signed}<Badge variant="warning">Self-signed certificate</Badge>{/if}
+          </div>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <Button variant="secondary" onclick={() => (showTlsModal = false)}>Close</Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ═══ Ban IP modal ═══ -->
+{#if showBanModal}
+  <div use:portal class="modal-backdrop" onclick={() => (showBanModal = false)} onkeydown={(event) => { if (event.key === 'Escape') showBanModal = false; }} role="presentation">
+    <div class="modal-card" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ban-title" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title-group"><Ban size={18} class="danger" /><h3 id="ban-title">Ban an IP address</h3></div>
+        <button class="icon-btn" onclick={() => (showBanModal = false)} aria-label="Close"><X size={16} /></button>
+      </div>
       <div class="modal-body">
         {#if !fail2banStatus?.is_active}
-          <div class="alert-banner-warn" style="margin: 0 0 8px 0;">
-            <div class="alert-banner-left">
-              <AlertTriangle size={15} class="text-warning flex-shrink-0" />
-              <span>Fail2ban service is currently inactive. Start the service to enforce active IP bans.</span>
-            </div>
-            <Button variant="primary" size="sm" onclick={() => handleControlFail2ban('start')}>
-              <Play size={12} /> Start Service
-            </Button>
-          </div>
+          <div class="vault-callout warning"><AlertTriangle size={14} /><span>Fail2ban is inactive. Start the service before adding bans.</span></div>
         {/if}
-
         <div class="form-group">
-          <label for="ban-jail-sel">Target Fail2ban Jail</label>
-          <select id="ban-jail-sel" class="form-select font-mono" bind:value={banJailName}>
-            {#if fail2banStatus?.jails && fail2banStatus.jails.length > 0}
-              {#each fail2banStatus.jails as j}
-                <option value={j.jail_name}>{j.jail_name} (Active Jail • {j.currently_banned} banned)</option>
+          <label class="form-label" for="ban-jail">Jail</label>
+          <select id="ban-jail" class="form-select mono" bind:value={banJail}>
+            {#if fail2banStatus?.jails.length}
+              {#each fail2banStatus.jails as jail}
+                <option value={jail.jail_name}>{jail.jail_name} · {jail.currently_banned} banned</option>
               {/each}
             {:else}
-              <option value="sshd">sshd (Default SSH Jail)</option>
-              <option value="recidive">recidive (Persistent Offender Jail)</option>
-              <option value="nginx-http-auth">nginx-http-auth (HTTP Auth Jail)</option>
-              <option value="nginx-botsearch">nginx-botsearch (Bot Filter Jail)</option>
+              <option value="sshd">sshd</option>
+              <option value="recidive">recidive</option>
+              <option value="nginx-http-auth">nginx-http-auth</option>
             {/if}
           </select>
-          <span class="field-hint">Select the firewall filter jail that will drop traffic from this IP address.</span>
         </div>
-
-        <div class="form-group">
-          <label for="ban-ip-input">Offending IP Address</label>
-          <input id="ban-ip-input" type="text" class="form-input font-mono" bind:value={banIpAddress} placeholder="192.0.2.1" />
-          <span class="field-hint">The IP will be added to the chosen jail and dropped by your host firewall (iptables / nftables).</span>
-        </div>
+        <Input id="ban-ip" label="IP address" bind:value={banIp} placeholder="192.0.2.1 or 2001:db8::1" class="mono" />
+        <span class="field-hint">The address is added to the selected jail and dropped by the host firewall.</span>
       </div>
-
       <div class="modal-footer">
-        <Button variant="secondary" onclick={() => showBanModal = false}>Cancel</Button>
-        <Button variant="danger" onclick={handleManualBan} disabled={!banIpAddress.trim()}>
-          <Ban size={14} /> Ban IP Address
+        <Button variant="secondary" onclick={() => (showBanModal = false)}>Cancel</Button>
+        <Button variant="danger" onclick={handleManualBan} disabled={!banIp.trim() || banning || !fail2banStatus?.is_active}>
+          <Ban size={14} /> {banning ? 'Banning…' : 'Ban IP'}
         </Button>
       </div>
     </div>
   </div>
 {/if}
 
-<style>/* ── Layout Root ─────────────────────────────────────────────────────────── */ .module-page.ssh-vault-page {
+<style>
+  .module-page.ssh-vault-page {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    overflow-y: auto;
-    overflow-x: hidden;
     gap: var(--page-content-gap);
     padding: 24px;
+    min-height: 100%;
     box-sizing: border-box;
-    background: transparent;
-  }.tab-main-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding-bottom: 12px;
-  }.tab-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }.header-actions {
+  }
+
+  .header-actions,
+  .subnav-actions,
+  .card-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-  }/* ── Subnav Bar ─────────────────────────────────────────────────────────── */ .vault-subnav-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 0 0 2px 0;
     flex-wrap: wrap;
-  }.subnav-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }.vault-status-pill {
+  }
+
+  .vault-status-pill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
     padding: 3px 9px;
-    border-radius: 9999px;
+    border-radius: 999px;
     font-size: 11px;
     font-weight: 600;
     border: 1px solid transparent;
-  }.vault-status-pill.warning {
-    background: rgba(245, 158, 11, 0.12);
-    border-color: rgba(245, 158, 11, 0.3);
+  }
+  .vault-status-pill.warning {
+    background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 32%, transparent);
     color: var(--color-warning);
-  }.vault-status-pill.active {
-    background: rgba(16, 185, 129, 0.12);
-    border-color: rgba(16, 185, 129, 0.3);
+  }
+  .vault-status-pill.active {
+    background: color-mix(in srgb, var(--color-success) 14%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 32%, transparent);
     color: var(--color-success);
-  }/* ── Table Card & Toolbar ───────────────────────────────────────────────── */ .card {
+  }
+  .vault-status-pill.muted {
+    background: var(--color-bg-surface);
+    border-color: var(--color-border);
+    color: var(--color-text-muted);
+  }
+
+  .header-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .header-refresh-btn:hover:not(:disabled) {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+  .header-refresh-btn:disabled { opacity: 0.55; cursor: default; }
+
+  .vault-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 8px;
+  }
+
+  .vault-subnav-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .tab-scroll {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    padding-bottom: 2px;
+  }
+  .tab-scroll :global(.tab-bar) { flex-wrap: nowrap; }
+
+  .panel-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .panel-toolbar :global(.search-bar),
+  .panel-toolbar :global(.search-container) {
+    flex: 1 1 280px;
+    max-width: 520px;
+  }
+
+  .tab-main-body { display: flex; flex-direction: column; gap: 10px; }
+
+  .vault-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 10px;
+  }
+
+  .vault-card,
+  .vault-empty-card,
+  .vault-row-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 12px;
-    overflow: hidden;
-  }:global(html.light-mode) .card {
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  }.table-toolbar {
-    padding: 12px 16px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    border-bottom: 1px solid var(--color-border);
-    background: rgba(0, 0, 0, 0.08);
-  }:global(html.light-mode) .table-toolbar {
-    background: #F8FAFC;
-    border-bottom-color: #E2E8F0;
-  }.table-wrap {
-    overflow-x: auto;
-  }.data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12.5px;
-  }.data-table th {
-    text-align: left;
-    padding: 10px 16px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    color: var(--color-text-muted);
-    background: rgba(0, 0, 0, 0.12);
-    border-bottom: 1px solid var(--color-border);
-  }:global(html.light-mode) .data-table th {
-    background: #F8FAFC;
-    border-bottom-color: #E2E8F0;
-  }.data-table td {
-    padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    vertical-align: middle;
-  }:global(html.light-mode) .data-table td {
-    border-bottom-color: #F1F5F9;
-  }.data-table tr:hover td {
-    background: rgba(255, 255, 255, 0.02);
-  }:global(html.light-mode) .data-table tr:hover td {
-    background: #F8FAFC;
-  }/* ── Table Cells & Chips ────────────────────────────────────────────────── */ .key-name-col {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }.fingerprint-cell {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }.copy-mini-btn {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    padding: 2px 5px;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-  }.copy-mini-btn:hover {
-    color: var(--color-text-primary);
-    border-color: var(--color-accent);
-  }.status-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-  }.status-chip.success { background: rgba(16, 185, 129, 0.12); color: var(--color-success); }.status-chip.warning { background: rgba(245, 158, 11, 0.12); color: var(--color-warning); }.status-chip.danger { background: rgba(239, 68, 68, 0.12); color: var(--color-error); }.status-chip.muted { background: rgba(255, 255, 255, 0.06); color: var(--color-text-muted); }.badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 7px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-  }.badge-accent { background: var(--color-accent-muted, rgba(0, 218, 243, 0.12)); color: var(--color-accent); }:global(html.light-mode) .badge-accent { background: var(--color-accent-muted, rgba(37, 99, 235, 0.1)); color: var(--color-accent); }.badge-neutral { background: rgba(255, 255, 255, 0.08); color: var(--color-text-secondary); }:global(html.light-mode) .badge-neutral { background: #F1F5F9; color: #475569; }.badge-success { background: rgba(16, 185, 129, 0.15); color: var(--color-success); }.badge-warning { background: rgba(245, 158, 11, 0.15); color: var(--color-warning); }.san-pill-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }.san-pill {
-    font-size: 10px;
-    font-family: var(--font-mono, monospace);
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    padding: 1px 5px;
-    color: var(--color-text-secondary);
-  }.san-pill.muted {
-    color: var(--color-text-muted);
-  }.domain-cell {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }.truncate-cell {
-    max-width: 240px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }/* ── Empty Cell ─────────────────────────────────────────────────────────── */ .empty-cell {
-    text-align: center;
-  }/* ── SSHD Hardening Cards ───────────────────────────────────────────────── */ .card-header-bar {
-    padding: 14px 18px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--color-border);
-    background: rgba(0, 0, 0, 0.06);
-  }:global(html.light-mode) .card-header-bar {
-    background: #F8FAFC;
-    border-bottom-color: #E2E8F0;
-  }.card-section-title {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }.card-section-sub {
-    font-size: 11.5px;
-    color: var(--color-text-muted);
-    margin-top: 1px;
-    display: block;
-  }.alert-banner-warn {
-    margin: 14px 18px 0 18px;
-    padding: 10px 14px;
-    background: rgba(245, 158, 11, 0.1);
-    border: 1px solid rgba(245, 158, 11, 0.25);
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
-    font-size: 12px;
-  }.alert-banner-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }.alert-banner-danger {
-    padding: 10px 14px;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }.sshd-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-    padding: 16px 18px;
-  }.sshd-item {
-    background: rgba(0, 0, 0, 0.15);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    transition: all 0.15s ease;
-  }:global(html.light-mode) .sshd-item {
-    background: #F8FAFC;
-    border-color: #E2E8F0;
-  }.sshd-item:hover {
-    border-color: var(--color-accent);
-  }.sshd-item-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-  }.sshd-label {
-    font-size: 13px;
-    color: var(--color-text-primary);
-    font-weight: 600;
-  }.sshd-desc {
-    font-size: 11px;
-    color: var(--color-text-muted);
-    line-height: 1.4;
-  }/* ── Threat Defense / Jails ─────────────────────────────────────────────── */ .status-overview-card {
-    padding: 14px 18px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }.status-overview-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }.status-indicator-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-  }.status-indicator-dot.online { background: var(--color-success); box-shadow: 0 0 8px var(--color-success); }.status-indicator-dot.offline { background: var(--color-error); }.jails-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 8px;
-  }.jail-card {
-    padding: 16px;
-  }.jail-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 12px;
-  }.jail-title-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }.jail-name {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-  }.jail-stat-row {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 10px;
-  }.ip-pills-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 6px;
-  }.banned-ip-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--font-mono, monospace);
-    font-size: 11px;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    color: var(--color-error);
-    padding: 2px 8px;
-    border-radius: 6px;
-  }.unban-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-error);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    padding: 0;
-  }/* ── Modals & Controls ──────────────────────────────────────────────────── */ .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 99990;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-  }.modal-card {
-    width: 540px;
-    max-width: calc(100vw - 32px);
-    max-height: calc(100vh - 40px);
-    background: var(--color-bg-card, #0b1726);
-    border: 1px solid var(--color-border);
-    border-radius: 16px;
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.6);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }:global(html.light-mode) .modal-card {
-    background: #FFFFFF;
-    border-color: #E2E8F0;
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.15);
-  }.modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--color-border);
-    background: rgba(0, 0, 0, 0.12);
-  }:global(html.light-mode) .modal-header {
-    background: #F8FAFC;
-    border-bottom-color: #E2E8F0;
-  }.modal-title-group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }.modal-title-group h3 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--color-text-primary);
-  }.modal-close-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 6px;
-  }.modal-close-btn:hover {
-    color: var(--color-text-primary);
-  }.modal-body {
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    overflow-y: auto;
-  }.modal-footer {
-    padding: 14px 20px;
-    border-top: 1px solid var(--color-border);
-    background: rgba(0, 0, 0, 0.08);
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }:global(html.light-mode) .modal-footer {
-    background: #F8FAFC;
-    border-top-color: #E2E8F0;
-  }.form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }.form-group label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-  }.form-input, .form-select, .form-textarea {
-    width: 100%;
-    padding: 8px 12px;
-    background: var(--color-bg-base);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    color: var(--color-text-primary);
-    font-size: 12.5px;
-    outline: none;
     box-sizing: border-box;
-  }:global(html.light-mode) .form-input, :global(html.light-mode) .form-select, :global(html.light-mode) .form-textarea {
-    background: #FFFFFF;
-    border-color: #CBD5E1;
-  }.form-input:focus, .form-select:focus, .form-textarea:focus {
-    border-color: var(--color-accent);
-  }.form-row-2 {
-    display: flex;
-    gap: 12px;
-  }.radio-pill-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }.radio-pill-btn {
-    padding: 10px 14px;
-    border: 1px solid var(--color-border);
+  }
+  .vault-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .vault-empty-card { padding: 30px 16px; }
+  .vault-row-card { padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .vault-row-card:hover, .vault-card:hover { border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border)); }
+
+  .vault-card-head { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+  .vault-icon {
+    width: 30px; height: 30px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
     border-radius: 8px;
-    background: rgba(0, 0, 0, 0.1);
-    color: var(--color-text-muted);
-    font-size: 12.5px;
-    text-align: left;
-    cursor: pointer;
-    transition: all 0.15s;
-  }:global(html.light-mode) .radio-pill-btn {
-    background: #F8FAFC;
-    border-color: #E2E8F0;
-  }.radio-pill-btn.active {
-    border-color: var(--color-accent);
-    background: var(--color-accent-muted, rgba(0, 218, 243, 0.08));
-    color: var(--color-text-primary);
-  }:global(html.light-mode) .radio-pill-btn.active {
-    background: var(--color-accent-muted, rgba(37, 99, 235, 0.1));
-    border-color: var(--color-accent);
-    color: var(--color-text-primary);
-  }.field-hint {
-    font-size: 11px;
-    color: var(--color-text-muted);
-  }.pubkey-preview-box {
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 12px;
-    word-break: break-all;
-    user-select: all;
-    color: var(--color-text-primary);
-  }:global(html.light-mode) .pubkey-preview-box {
-    background: #F8FAFC;
-    border-color: #CBD5E1;
-  }.tls-result-card {
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 12px;
-  }:global(html.light-mode) .tls-result-card {
-    background: #F8FAFC;
-    border-color: #E2E8F0;
-  }.tls-result-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-    font-size: 13px;
-  }.tls-result-detail {
-    font-size: 11.5px;
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    color: var(--color-accent);
+  }
+  .vault-icon.warn { background: color-mix(in srgb, var(--color-warning) 14%, transparent); color: var(--color-warning); }
+  .vault-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .vault-title h3 { margin: 0; font-size: 13px; font-weight: 650; color: var(--color-text-primary); display: flex; align-items: center; gap: 6px; }
+  .vault-title span { font-size: 11px; color: var(--color-text-muted); }
+
+  .vault-meta { display: flex; flex-direction: column; gap: 5px; }
+  .meta-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11.5px; }
+  .meta-label { width: 74px; flex-shrink: 0; color: var(--color-text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .meta-value { min-width: 0; color: var(--color-text-secondary); }
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .vault-card-footer {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+  }
+
+  .copy-mini, .icon-btn, .unban-btn, .link-btn {
+    border: 0; background: transparent; color: var(--color-text-muted); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; padding: 3px; border-radius: 5px;
+  }
+  .copy-mini:hover, .icon-btn:hover, .unban-btn:hover, .link-btn:hover { color: var(--color-text-primary); background: var(--color-bg-hover); }
+  .unban-btn:hover { color: var(--color-error); }
+  .link-btn { color: var(--color-accent); font-size: 11.5px; font-weight: 600; }
+
+  .status-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 6px; font-size: 10.5px; font-weight: 600;
+  }
+  .status-chip.success { background: color-mix(in srgb, var(--color-success) 13%, transparent); color: var(--color-success); }
+  .status-chip.warning { background: color-mix(in srgb, var(--color-warning) 13%, transparent); color: var(--color-warning); }
+  .status-chip.error, .status-chip.danger { background: color-mix(in srgb, var(--color-error) 13%, transparent); color: var(--color-error); }
+  .status-chip.muted { background: var(--color-bg-surface); color: var(--color-text-muted); }
+
+  .vault-list { display: flex; flex-direction: column; gap: 6px; }
+  .vault-row-main { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+  .vault-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .line-number { color: var(--color-text-muted); font-size: 10.5px; }
+
+  .vault-note {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; font-size: 11.5px; color: var(--color-text-muted);
+    border: 1px dashed var(--color-border); border-radius: 8px;
+  }
+
+  .vault-alert {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-radius: 8px; font-size: 12px;
+    border: 1px solid color-mix(in srgb, var(--color-error) 28%, transparent);
+    background: color-mix(in srgb, var(--color-error) 8%, transparent);
     color: var(--color-text-secondary);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }/* ── General UI Helpers ─────────────────────────────────────────────────── */ .font-mono { font-family: var(--font-mono, monospace); }.strong { font-weight: 600; color: var(--color-text-primary); }.text-accent { color: var(--color-accent); }.text-success { color: var(--color-success); }.text-primary { color: var(--color-text-primary); }.text-secondary { color: var(--color-text-secondary); }.text-muted { color: var(--color-text-muted); }.text-xs { font-size: 11px; }.text-sm { font-size: 12px; }.mt-3 { margin-top: 12px; }.mb-1 { margin-bottom: 4px; }.mb-4 { margin-bottom: 16px; }
-@keyframes spin {from { transform: rotate(0deg); }to { transform: rotate(360deg); }
-}</style>
+  }
+
+  .vault-callout {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 11px 13px; border-radius: 9px; font-size: 12px;
+    border: 1px solid var(--color-border); background: var(--color-bg-surface);
+    color: var(--color-text-secondary);
+  }
+  .vault-callout > div { flex: 1; }
+  .vault-callout strong { display: block; color: var(--color-text-primary); font-size: 12.5px; margin-bottom: 2px; }
+  .vault-callout p { margin: 0; line-height: 1.45; }
+  .vault-callout.warning { border-color: color-mix(in srgb, var(--color-warning) 32%, transparent); background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+  .vault-callout.info { border-color: color-mix(in srgb, var(--color-info) 28%, transparent); background: color-mix(in srgb, var(--color-info) 7%, transparent); }
+  .vault-callout.danger { border-color: color-mix(in srgb, var(--color-error) 32%, transparent); background: color-mix(in srgb, var(--color-error) 8%, transparent); }
+
+  .sshd-card { gap: 0; }
+  .sshd-card > .vault-card-head { padding-bottom: 10px; }
+  .sshd-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px;
+  }
+  .sshd-item {
+    border: 1px solid var(--color-border); border-radius: 9px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px; background: var(--color-bg-surface);
+  }
+  .sshd-item-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+  .sshd-item-top :global(.badge) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .sshd-label { overflow-wrap: anywhere; }
+  .sshd-label { font-size: 12px; font-weight: 600; color: var(--color-text-primary); }
+  .sshd-desc { font-size: 10.5px; line-height: 1.4; color: var(--color-text-muted); }
+
+  .cert-progress { height: 5px; border-radius: 999px; background: var(--color-bg-surface); overflow: hidden; }
+  .cert-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--color-success); }
+  .cert-progress-fill.warning { background: var(--color-warning); }
+  .cert-progress-fill.error { background: var(--color-error); }
+
+  .san-pill-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
+  .san-pill {
+    font-family: var(--font-mono); font-size: 10px; padding: 1px 5px;
+    border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-secondary);
+  }
+  .san-pill.muted { color: var(--color-text-muted); }
+
+  .status-overview-card { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .status-overview-left { display: flex; align-items: center; gap: 10px; }
+  .status-overview-left strong { display: block; font-size: 13px; color: var(--color-text-primary); }
+  .status-overview-left span:not(.status-dot) { display: block; font-size: 11.5px; color: var(--color-text-muted); margin-top: 1px; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.online { background: var(--color-success); box-shadow: 0 0 8px color-mix(in srgb, var(--color-success) 70%, transparent); }
+  .status-dot.offline { background: var(--color-error); }
+
+  .jails-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+  .jail-card { gap: 8px; }
+  .jail-empty { margin: 0; font-size: 11.5px; color: var(--color-text-muted); font-style: italic; }
+  .ip-pills-wrap { display: flex; flex-wrap: wrap; gap: 5px; }
+  .banned-ip-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10.5px; padding: 2px 6px; border-radius: 5px;
+    color: var(--color-error); border: 1px solid color-mix(in srgb, var(--color-error) 28%, transparent);
+    background: color-mix(in srgb, var(--color-error) 8%, transparent);
+  }
+
+  .install-card { align-items: flex-start; }
+  .install-card h3 { margin: 0; font-size: 15px; color: var(--color-text-primary); }
+  .install-card p { margin: 0; font-size: 12px; color: var(--color-text-muted); line-height: 1.5; }
+  .install-command {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    width: 100%; padding: 8px 10px; border-radius: 7px;
+    background: var(--color-bg-surface); border: 1px solid var(--color-border);
+  }
+  .install-command code { flex: 1; font-size: 11px; word-break: break-all; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 99990; padding: 20px;
+    background: rgba(0, 0, 0, 0.68);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-card {
+    width: 560px; max-width: calc(100vw - 32px); max-height: calc(100vh - 40px);
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--color-bg-card); border: 1px solid var(--color-border);
+    border-radius: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  }
+  .modal-header, .modal-footer {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 13px 18px; border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+  }
+  .modal-footer { justify-content: flex-end; border-bottom: 0; border-top: 1px solid var(--color-border); }
+  .modal-title-group { display: flex; align-items: center; gap: 9px; }
+  .modal-title-group h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--color-text-primary); }
+  .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 13px; overflow-y: auto; }
+
+  .form-group { display: flex; flex-direction: column; gap: 5px; }
+  .form-label { font-size: 11.5px; font-weight: 600; color: var(--color-text-secondary); }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-textarea, .form-select {
+    width: 100%; padding: 8px 11px; box-sizing: border-box;
+    background: var(--color-bg-base); border: 1px solid var(--color-border);
+    border-radius: 7px; color: var(--color-text-primary); font-size: 12px; outline: none;
+  }
+  .form-textarea:focus, .form-select:focus { border-color: var(--color-accent); }
+  .field-hint { font-size: 10.5px; color: var(--color-text-muted); line-height: 1.4; }
+
+  .radio-pill-group { display: flex; flex-direction: column; gap: 6px; }
+  .radio-pill-btn {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 9px 12px; border: 1px solid var(--color-border); border-radius: 8px;
+    background: var(--color-bg-surface); color: var(--color-text-muted);
+    font-size: 12px; text-align: left; cursor: pointer;
+  }
+  .radio-pill-btn strong { color: var(--color-text-primary); font-size: 12.5px; }
+  .radio-pill-btn.active { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
+
+  .advanced-details { border-top: 1px dashed var(--color-border); padding-top: 10px; }
+  .advanced-details summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 7px; }
+
+  .pubkey-preview {
+    margin: 0; padding: 11px; border-radius: 8px; border: 1px solid var(--color-border);
+    background: var(--color-bg-surface); color: var(--color-text-primary);
+    font-family: var(--font-mono); font-size: 11px; word-break: break-all; white-space: pre-wrap;
+  }
+
+  .parsed-key-preview { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; background: var(--color-bg-surface); }
+
+  .tls-result { display: flex; flex-direction: column; gap: 7px; padding: 11px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-surface); }
+  .tls-result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+
+  .full-width { width: 100%; justify-content: center; }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--color-text-muted); }
+  .text-sm { font-size: 12px; }
+  .accent { color: var(--color-accent); }
+  .success { color: var(--color-success); }
+  .danger { color: var(--color-error); }
+
+  @media (max-width: 720px) {
+    .module-page.ssh-vault-page { padding: 16px; }
+    .vault-grid, .jails-grid { grid-template-columns: 1fr; }
+    .form-row-2 { grid-template-columns: 1fr; }
+    .vault-row-card { align-items: flex-start; flex-direction: column; }
+    .vault-row-actions { width: 100%; justify-content: flex-end; }
+  }
+</style>

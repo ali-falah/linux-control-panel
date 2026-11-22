@@ -9591,7 +9591,6 @@ mod polkit_policy_tests {
 mod system_info_validator_tests {
     use super::{
         ensure_arguments_for_program as check, process_renice_valid, smart_device_valid,
-        HELPER_CLEAR_VALUE,
     };
 
     fn check_lcp(args: &[&str]) -> Result<(), String> {
