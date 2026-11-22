@@ -27,7 +27,7 @@ use commands::{
         firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, preview_rpm_removal, remove_flatpak, remove_rpm},
-    hosts_manager::{read_hosts, write_hosts},
+    hosts_manager::{read_hosts, read_hosts_raw, preview_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
     service_manager::{
         get_service_logs, list_all_units, read_unit_file, read_unit_override, create_unit_file, unit_file_exists, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
@@ -258,6 +258,8 @@ pub fn run() {
             get_services_status,
             // Hosts Manager
             read_hosts,
+            read_hosts_raw,
+            preview_hosts,
             write_hosts,
             // User Manager
             list_users,
