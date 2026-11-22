@@ -64,7 +64,8 @@ use commands::{
     network_manager::{
         network_get_interfaces, network_get_dns,
         network_list_connections, network_get_connection,
-        network_save_connection, network_delete_connection,
+        network_save_connection, network_store_connection_secret, network_create_bridge,
+        network_delete_connection,
         network_up_connection, network_down_connection,
         network_set_interface_state,
         network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
@@ -349,6 +350,8 @@ pub fn run() {
             network_list_connections,
             network_get_connection,
             network_save_connection,
+            network_store_connection_secret,
+            network_create_bridge,
             network_delete_connection,
             network_up_connection,
             network_down_connection,

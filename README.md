@@ -45,7 +45,7 @@
 | Module | Description & Capabilities |
 | :--- | :--- |
 | 🌐 **Nginx Manager** | Nginx virtual host scanner & server block inspector (domains, ports, SSL, document roots), integrated CodeMirror configuration editor, syntax testing (`nginx -t`), live reload (`nginx -s reload`), `access.log` & `error.log` live tail viewers, and Certbot SSL helper. |
-| 🌐 **Advanced Network** | NetworkManager connection inspector (Wi-Fi, Ethernet, VPN, Bridge, Loopback), IP v4/v6, MAC Address, MTU, Gateway, DNS configuration, **Wi-Fi Access Point Scanner** (SSID, Signal Strength dBm/%, WPA2/WPA3 security, connection wizard), and Gateway Ping Latency Tester. |
+| 🌐 **Advanced Network** | NetworkManager adapter and profile inspector with IPv4/IPv6 addressing, MAC/MTU details, subnet calculator and gateway checks, DNS validation and presets, Ethernet/Wi-Fi/bridge profile creation with autoconnect and root-only keyfile secrets, VPN import/create for OpenVPN and WireGuard, and a Cloudflare-backed latency/speed test. |
 | 🔥 **Firewall Manager** | Firewalld zone manager (`public`, `work`, `home`, `internal`, `trusted`), TCP/UDP port rule management, service toggles (`http`, `https`, `ssh`, `dns`, `ftp`, `wireguard`), Rich Rules editor, Interface-to-Zone mapping, and **Panic Mode Emergency Toggle** (instantly block all network traffic). |
 
 ### 📦 Package & Application Management

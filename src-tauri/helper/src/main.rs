@@ -2834,6 +2834,7 @@ const ROOT_ACTIONS: &[&str] = &[
     "smart_self_test",
     "inventory_scan",
     "pci_reset",
+    "nm_store_keyfile_secret",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -3059,6 +3060,14 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly an import type and a file path."
+                ))
+            }
+        } else if requested == "nm_store_keyfile_secret" {
+            if args.len() == 3 {
+                nm_store_keyfile_secret_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a connection name and vpn-password|wifi-psk."
                 ))
             }
         } else if requested == "repo_toggle_enable" {
@@ -4730,9 +4739,293 @@ fn nginx_www_install_action(dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
-/// action: creates or modifies an nmcli connection profile. All operands are
-/// validated by `check_nmcli_connection_save` before this point runs.
+/// NetworkManager's system connection keyfiles.
+#[cfg(feature = "test-fixture")]
+const NM_KEYFILE_DIR: &str = "/tmp/lcp-admin-test-fixture/etc/NetworkManager/system-connections";
+#[cfg(not(feature = "test-fixture"))]
+const NM_KEYFILE_DIR: &str = "/etc/NetworkManager/system-connections";
+
+fn keyfile_connection_id(content: &str) -> Option<String> {
+    let mut in_connection = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_connection = trimmed.eq_ignore_ascii_case("[connection]");
+            continue;
+        }
+        if !in_connection {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            if key.trim() == "id" {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn section_bounds(lines: &[String], section: &str) -> Option<(usize, usize)> {
+    let header = format!("[{section}]");
+    let start = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case(&header))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim().starts_with('['))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    Some((start, end))
+}
+
+fn set_keyfile_value(
+    lines: &mut Vec<String>,
+    section: &str,
+    key: &str,
+    value: &str,
+    create_section: bool,
+) -> Result<(), String> {
+    let Some((start, mut end)) = section_bounds(lines, section) else {
+        if !create_section {
+            return Err(format!(
+                "lcp-admin: the NetworkManager keyfile has no [{section}] section"
+            ));
+        }
+        lines.push(format!("[{section}]"));
+        lines.push(format!("{key}={value}"));
+        return Ok(());
+    };
+
+    let prefix = format!("{key}=");
+    for line in lines.iter_mut().take(end).skip(start + 1) {
+        if line.trim_start().starts_with(&prefix) {
+            *line = format!("{key}={value}");
+            return Ok(());
+        }
+    }
+
+    // Insert before the next section; avoid leaving a trailing blank before it.
+    if end > start + 1 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    lines.insert(end, format!("{key}={value}"));
+    Ok(())
+}
+
+fn escaped_keyfile_secret(secret: &str) -> Result<String, String> {
+    if secret.is_empty() {
+        return Err("lcp-admin: the secret must not be empty".to_string());
+    }
+    if secret.contains('\n') || secret.contains('\r') || secret.contains('\0') {
+        return Err("lcp-admin: the secret must be a single line".to_string());
+    }
+    Ok(secret.replace('\\', "\\\\"))
+}
+
+fn update_keyfile_secret(content: &str, kind: &str, secret: &str) -> Result<String, String> {
+    let escaped = escaped_keyfile_secret(secret)?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+
+    match kind {
+        "vpn-password" => {
+            set_keyfile_value(&mut lines, "vpn", "password-flags", "0", false)?;
+            set_keyfile_value(&mut lines, "vpn-secrets", "password", &escaped, true)?;
+        }
+        "wifi-psk" => {
+            set_keyfile_value(&mut lines, "wifi-security", "psk-flags", "0", false)?;
+            set_keyfile_value(&mut lines, "wifi-security", "psk", &escaped, false)?;
+        }
+        _ => return Err("lcp-admin: unsupported keyfile secret kind".to_string()),
+    }
+
+    let mut content = lines.join("\n");
+    content.push('\n');
+    Ok(content)
+}
+
+fn find_keyfile(connection: &str) -> Result<std::path::PathBuf, String> {
+    let entries = std::fs::read_dir(NM_KEYFILE_DIR)
+        .map_err(|e| format!("lcp-admin: could not read {NM_KEYFILE_DIR}: {e}"))?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("nmconnection") {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+            _ => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        if keyfile_connection_id(&content).as_deref() == Some(connection) {
+            matches.push(path);
+        }
+    }
+    match matches.len() {
+        0 => Err(format!(
+            "lcp-admin: no NetworkManager keyfile belongs to connection '{connection}'"
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => Err(format!(
+            "lcp-admin: more than one NetworkManager keyfile belongs to connection '{connection}'"
+        )),
+    }
+}
+
+/// Copy the `security.selinux` xattr from the existing keyfile onto the
+/// temporary replacement. The rename below keeps the temporary inode, so the
+/// original label has to travel with it; otherwise NetworkManager may be
+/// denied access on an enforcing system.
+///
+/// Returns Ok when the platform has no SELinux label to copy.
+fn copy_security_label(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    // The fixture build runs unprivileged in /tmp, where test files have no
+    // production label; there is nothing to preserve.
+    if cfg!(feature = "test-fixture") {
+        return Ok(());
+    }
+
+    let from_c = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| "lcp-admin: the keyfile path contains a NUL byte".to_string())?;
+    let to_c = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| "lcp-admin: the temporary keyfile path contains a NUL byte".to_string())?;
+    // The literal includes the terminating NUL required by getxattr(2).
+    let name = b"security.selinux\0";
+
+    let size = unsafe {
+        libc::getxattr(
+            from_c.as_ptr(),
+            name.as_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size <= 0 {
+        // ENODATA (no label) and ENOTSUP (no SELinux) are the normal cases.
+        return Ok(());
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let copied = unsafe {
+        libc::getxattr(
+            from_c.as_ptr(),
+            name.as_ptr().cast(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if copied <= 0 {
+        return Ok(());
+    }
+
+    let applied = unsafe {
+        libc::setxattr(
+            to_c.as_ptr(),
+            name.as_ptr().cast(),
+            buffer.as_ptr().cast(),
+            copied as usize,
+            0,
+        )
+    };
+    if applied != 0 {
+        return Err(format!(
+            "lcp-admin: could not copy the SELinux label to the keyfile: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn write_private_keyfile(path: &std::path::Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "lcp-admin: the NetworkManager keyfile has no parent directory".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("connection.nmconnection");
+    let tmp = parent.join(format!(".{file_name}.lcp-{}.tmp", std::process::id()));
+
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("lcp-admin: could not create a keyfile: {e}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("lcp-admin: could not write the keyfile: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("lcp-admin: could not sync the keyfile: {e}"))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("lcp-admin: could not secure the keyfile: {e}"))?;
+        copy_security_label(path, &tmp)?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("lcp-admin: could not replace the keyfile: {e}"))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// `nm_store_keyfile_secret <connection> <vpn-password|wifi-psk>` with the
+/// secret supplied on stdin. NetworkManager reads secrets from its root-only
+/// keyfile, so the secret never appears in a process argument list.
+fn nm_store_keyfile_secret_action(connection: &str, kind: &str) -> Result<(), String> {
+    // A trailing newline is a transport artifact, never part of a PSK or
+    // password. Interior newlines stay refused by `escaped_keyfile_secret`.
+    let secret = read_stdin_content(4096, "secret")?;
+    let secret = secret.trim_end_matches(['\r', '\n']);
+    let path = find_keyfile(connection)?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("lcp-admin: could not inspect the keyfile: {e}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("lcp-admin: the NetworkManager keyfile is not a regular file".to_string());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("lcp-admin: could not read the keyfile: {e}"))?;
+    let updated = update_keyfile_secret(&content, kind, &secret)?;
+    write_private_keyfile(&path, &updated)?;
+
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
+        .args(["connection", "reload"])
+        .output()
+        .map_err(|e| format!("lcp-admin: nmcli could not be started: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: the secret was stored but NetworkManager reload failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    println!("lcp-admin: stored the {kind} secret for '{connection}'.");
+    Ok(())
+}
+
+/// The `nmcli_connection_save` action (add/modify + property pairs):
+/// Creates or modifies a connection profile. All operands are validated by
+/// `check_nmcli_connection_save` before this point runs.
 fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
     // args[0] is the action name; args[1..] = [verb, connection, prop, value, ...]
     let verb = args.get(1).ok_or_else(|| {
@@ -4743,10 +5036,73 @@ fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
     })?;
     let nmcli = resolve_trusted_program("nmcli")?;
     let mut cmd = std::process::Command::new(nmcli);
-    cmd.arg("connection").arg(verb.as_str()).arg(connection.as_str());
-    for pair in args[3..].chunks(2) {
-        cmd.arg(pair[0].as_str()).arg(pair[1].as_str());
+    cmd.arg("connection").arg(verb.as_str());
+
+    // The app speaks one dialect for both verbs: `setting.property value`
+    // pairs. `nmcli connection add` additionally requires `type` and takes
+    // `con-name`/`ifname`/`master`/`slave-type` as options before those pairs;
+    // a bare connection name is not an argument to `add`.
+    let pairs: Vec<(&str, &str)> = args[3..]
+        .chunks(2)
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+
+    if verb == "add" {
+        let type_value = pairs
+            .iter()
+            .find(|(key, _)| *key == "connection.type")
+            .map(|(_, value)| *value)
+            .ok_or_else(|| {
+                "lcp-admin: a new connection requires connection.type (for example connection.type ethernet)."
+                    .to_string()
+            })?;
+        cmd.arg("type").arg(type_value);
+
+        let id = pairs
+            .iter()
+            .find(|(key, _)| *key == "connection.id")
+            .map(|(_, value)| *value)
+            .unwrap_or(connection);
+        cmd.arg("con-name").arg(id);
+
+        for option in ["connection.interface-name", "connection.master", "connection.slave-type"] {
+            if let Some((_, value)) = pairs.iter().find(|(key, _)| *key == option) {
+                let flag = match option {
+                    "connection.interface-name" => "ifname",
+                    "connection.master" => "master",
+                    _ => "slave-type",
+                };
+                cmd.arg(flag).arg(*value);
+            }
+        }
+
+        for (key, value) in &pairs {
+            if matches!(
+                *key,
+                "connection.type"
+                    | "connection.id"
+                    | "connection.interface-name"
+                    | "connection.master"
+                    | "connection.slave-type"
+            ) {
+                continue;
+            }
+            cmd.arg(*key).arg(*value);
+        }
+    } else {
+        cmd.arg(connection.as_str());
+        for (key, value) in &pairs {
+            // The app cannot place an empty string in privileged argv; this
+            // sentinel is the documented clear instruction for nmcli.
+            let value = if *value == root_policy::HELPER_CLEAR_VALUE {
+                ""
+            } else {
+                *value
+            };
+            cmd.arg(*key).arg(value);
+        }
     }
+
     let output = cmd.output().map_err(|e| {
         format!("lcp-admin: failed to spawn nmcli: {e}")
     })?;
@@ -6816,5 +7172,43 @@ mod trusted_program_tests {
     #[test]
     fn a_real_system_binary_is_trusted() {
         trusted_program("/usr/bin/true").expect("/usr/bin/true is root-owned and trusted");
+    }
+}
+
+#[cfg(test)]
+mod keyfile_secret_tests {
+    use super::*;
+
+    const VPN: &str = "[connection]\nid=Work VPN\nuuid=1234\ntype=vpn\n\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=vpn.example.com\n\n[ipv4]\nmethod=auto\n";
+
+    #[test]
+    fn connection_id_is_read_from_the_connection_section() {
+        assert_eq!(keyfile_connection_id(VPN).as_deref(), Some("Work VPN"));
+        assert_eq!(keyfile_connection_id("[vpn]\nid=nope\n"), None);
+    }
+
+    #[test]
+    fn vpn_secret_sets_password_flags_and_password_without_losing_fields() {
+        let updated = update_keyfile_secret(VPN, "vpn-password", "s3cret").unwrap();
+        assert!(updated.contains("password-flags=0"), "{updated}");
+        assert!(updated.contains("[vpn-secrets]\npassword=s3cret"), "{updated}");
+        assert!(updated.contains("remote=vpn.example.com"), "{updated}");
+        assert!(updated.contains("[ipv4]\nmethod=auto"), "{updated}");
+    }
+
+    #[test]
+    fn wifi_secret_sets_psk_flags_and_psk() {
+        let wifi = "[connection]\nid=Home Wi-Fi\n\n[wifi-security]\nkey-mgmt=wpa-psk\n\n[ipv4]\nmethod=auto\n";
+        let updated = update_keyfile_secret(wifi, "wifi-psk", "pa\\ss").unwrap();
+        assert!(updated.contains("psk-flags=0"), "{updated}");
+        assert!(updated.contains("psk=pa\\\\ss"), "{updated}");
+        assert!(updated.contains("key-mgmt=wpa-psk"), "{updated}");
+    }
+
+    #[test]
+    fn secrets_must_be_single_line_and_non_empty() {
+        assert!(update_keyfile_secret(VPN, "vpn-password", "").is_err());
+        assert!(update_keyfile_secret(VPN, "vpn-password", "two\nlines").is_err());
+        assert!(update_keyfile_secret(VPN, "vpn-password", "nul\0byte").is_err());
     }
 }

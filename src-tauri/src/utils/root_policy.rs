@@ -3023,7 +3023,8 @@ fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
                 ));
             }
         }
-        // values are free-form but must not be empty or contain control chars
+        // Values are free-form. An empty value is meaningful: nmcli uses it to
+        // clear a property (e.g. `ipv4.addresses ""` when switching to DHCP).
         let value = args
             .get(index + 1)
             .ok_or_else(|| {
@@ -3033,13 +3034,6 @@ fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
                     "every property must be followed by a value",
                 )
             })?;
-        if value.is_empty() {
-            return Err(operand_not_allowed(
-                PROGRAM,
-                setting,
-                "a property value must not be empty",
-            ));
-        }
         if value.contains('\n') || value.contains('\r') || value.contains('\0') {
             return Err(operand_not_allowed(
                 PROGRAM,
@@ -4049,6 +4043,11 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 /// sshd shape stays with `check_daemon_flags` (flags only: `-T` to print the
 /// effective configuration, `-t` to validate it — no operands, no key paths).
 
+/// Sentinel passed through the privileged argv (which forbids empty strings)
+/// for an nmcli property value that must be cleared. The helper translates it
+/// to an empty nmcli argument.
+pub const HELPER_CLEAR_VALUE: &str = "__LCP_CLEAR__";
+
 /// The helper's named-action calls (the first slice of the phase 3 CLI):
 /// `lcp-admin <action> [params]`.
 ///
@@ -4114,6 +4113,7 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "smart_self_test",
     "inventory_scan",
     "pci_reset",
+    "nm_store_keyfile_secret",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -4335,6 +4335,10 @@ const HELPER_SMART_SELF_TEST_ACTIONS: &[&str] = &["smart_self_test"];
 const HELPER_INVENTORY_ACTIONS: &[&str] = &["inventory_scan"];
 /// `pci_reset <slot>` unbinds and rebinds one PCI function's driver.
 const HELPER_PCI_RESET_ACTIONS: &[&str] = &["pci_reset"];
+/// `nm_store_keyfile_secret <connection-name> <vpn-password|wifi-psk>` with
+/// the secret on stdin. The connection name is confined; the secret never
+/// appears in argv.
+const HELPER_NM_KEYFILE_SECRET_ACTIONS: &[&str] = &["nm_store_keyfile_secret"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -5188,6 +5192,31 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         }
         smart_device_valid(&args[1])?;
         smart_test_type_valid(&args[2])?;
+        return Ok(());
+    }
+    if HELPER_NM_KEYFILE_SECRET_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a connection name and vpn-password|wifi-psk",
+            ));
+        }
+        ensure_safe_operand(&args[1], "connection name")?;
+        if args[1].len() > 128 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[1],
+                "a connection name must be at most 128 characters",
+            ));
+        }
+        if args[2] != "vpn-password" && args[2] != "wifi-psk" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[2],
+                "the secret kind must be vpn-password or wifi-psk",
+            ));
+        }
         return Ok(());
     }
     if HELPER_NMCLI_INTERFACE_STATE_ACTIONS.contains(&action.as_str()) {
@@ -6357,7 +6386,7 @@ mod argument_policy_tests {
     use super::{
         ensure_arguments_for_program as check, ensure_program_allowed, is_system_owned_repo_path,
         is_uuid, nmcli_import_allowed_dirs, nmcli_import_path_valid, repo_id_is_protected,
-        repo_override_id_valid, repo_override_option_valid,
+        repo_override_id_valid, repo_override_option_valid, HELPER_CLEAR_VALUE,
     };
 
     #[test]
@@ -6889,6 +6918,17 @@ mod argument_policy_tests {
                 "yes",
             ],
         );
+        // The helper translates this sentinel to nmcli's empty clear value;
+        // the privileged argv itself must never contain an empty argument.
+        ok(
+            "nmcli_connection_save",
+            &[
+                "modify",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.addresses",
+                HELPER_CLEAR_VALUE,
+            ],
+        );
         refused(
             "nmcli_connection_save",
             &["delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses", "1.2.3.4/24"],
@@ -6902,6 +6942,51 @@ mod argument_policy_tests {
         refused(
             "nmcli_connection_save",
             &["add", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses"],
+        );
+    }
+
+    // ── nm_store_keyfile_secret: connection + kind, secret on stdin ──
+    #[test]
+    fn nm_store_keyfile_secret_validates_connection_and_kind() {
+        ok(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "vpn-password"],
+        );
+        ok(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Home Wi-Fi", "wifi-psk"],
+        );
+
+        refused("lcp-admin", &["nm_store_keyfile_secret"]);
+        refused("lcp-admin", &["nm_store_keyfile_secret", "Work VPN"]);
+        refused(
+            "lcp-admin",
+            &[
+                "nm_store_keyfile_secret",
+                "Work VPN",
+                "vpn-password",
+                "extra",
+            ],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "--connection", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work\nVPN", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "vpn-secrets"],
         );
     }
 
@@ -9506,6 +9591,7 @@ mod polkit_policy_tests {
 mod system_info_validator_tests {
     use super::{
         ensure_arguments_for_program as check, process_renice_valid, smart_device_valid,
+        HELPER_CLEAR_VALUE,
     };
 
     fn check_lcp(args: &[&str]) -> Result<(), String> {

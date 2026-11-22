@@ -17,6 +17,11 @@ publish = false
 # `process` provides getuid/getgid for the compile-time test-fixture builds
 # (their fixture directories are owned by the test user instead of root).
 rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process"] }
+# `getxattr`/`setxattr` copy the original keyfile's SELinux label onto the
+# temporary file before it is renamed into place. Without this, a keyfile
+# written from an unconfined root process can end up with a label that
+# NetworkManager is not allowed to read.
+libc = "0.2"
 
 [features]
 # Compile-time test fixture for the named-action dispatch tests. Redirects
