@@ -1,21 +1,19 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { 
-    LayoutDashboard, HardDrive, Wifi, Server, Activity, RefreshCw, Shield, 
-    Cpu, Clock, Calendar, Laptop, Cable, Network, Lock, Disc, Sparkles, 
-    AlertTriangle, ShieldAlert, Thermometer, ExternalLink, ChevronRight,
-    Terminal, Info, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
-    Zap, Layers, Package, Boxes, Sliders, Play, Pause, Square, RotateCcw, ShieldCheck, Database,
-    FileText, HardDriveDownload, SlidersHorizontal, Plus, Trash2, Check, Search, X,
-    Copy, Globe, Folder, FolderOpen, Flame, MoreHorizontal
+    LayoutDashboard, HardDrive, Server, Activity, RefreshCw,
+    AlertTriangle, ChevronRight,
+    Terminal, CheckCircle2, AlertCircle, ArrowUpRight, ArrowDown, ArrowUp,
+    Zap, Layers, Package, Boxes, Play, Pause, Square, RotateCcw, ShieldCheck, Database,
+    FileText, SlidersHorizontal, Plus, Trash2, Check, Search, X,
+    Copy, Globe, Folder, Flame, MoreHorizontal
   } from '@lucide/svelte';
-  import PageHeader from '../components/PageHeader.svelte';
   import Button from '../components/ui/Button.svelte';
   import Card from '../components/ui/Card.svelte';
   import Badge from '../components/ui/Badge.svelte';
+  import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
-  import { statusStore } from '../stores/status.svelte.ts';
   import { portal } from '../actions/portal.ts';
   import { open as openUrl } from '@tauri-apps/plugin-shell';
 
@@ -67,7 +65,11 @@
       const stored = localStorage.getItem('dashboard_watchdog_services');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed.map(svc => ({ ...svc, status: 'unknown', subState: 'checking' }));
+        // An empty list is a valid choice: the user unpinned every service and
+        // does not want the defaults back on the next launch.
+        if (Array.isArray(parsed)) {
+          return parsed.map(svc => ({ ...svc, status: 'unknown', subState: 'checking' }));
+        }
       }
     } catch {}
     return DEFAULT_WATCHDOG_SERVICES;
@@ -237,6 +239,8 @@
   let lastSlowCheck = $state<Date | null>(null);
   /** True when the storage read failed — distinguishes "no data" from "error" */
   let diskUsageError = $state(false);
+  /** True once the slow tier has answered for disks (success or failure) */
+  let diskUsageLoaded = $state(false);
   let lastLogsCheck = $state<Date | null>(null);
   let lastServicesCheck = $state<Date | null>(null);
   let lastSecurityCheck = $state<Date | null>(null);
@@ -248,7 +252,8 @@
     serviceActionRunning = `${serviceName}-${action}`;
     try {
       await invoke('unit_action', { name: serviceName, action, userMode: false });
-      uiStore.addToast(`Service ${serviceName} ${action}ed successfully`, 'success');
+      const pastTense = action === 'start' ? 'started' : action === 'stop' ? 'stopped' : 'restarted';
+      uiStore.addToast(`Service ${serviceName} ${pastTense} successfully`, 'success');
       await fetchServicesWatchdog();
     } catch (e) {
       uiStore.addToast(`Failed to ${action} ${serviceName}: ${e}`, 'error');
@@ -325,7 +330,6 @@
   }
 
   function confirmStopService(svc: ServiceDaemon) {
-    closeAllContextMenus();
     if (isCriticalService(svc.name)) {
       uiStore.addToast(`Cannot stop core critical system service "${svc.name}"`, 'error');
       return;
@@ -339,7 +343,6 @@
   }
 
   function confirmRestartService(svc: ServiceDaemon) {
-    closeAllContextMenus();
     uiStore.confirm(
       `Restart Service "${svc.label || svc.name}"?`,
       `Are you sure you want to restart "${svc.name}"? Connections or sessions handled by this service may reset.`,
@@ -349,7 +352,6 @@
   }
 
   function confirmRestartFromLog(serviceName: string) {
-    closeAllContextMenus();
     const unit = serviceName.endsWith('.service') ? serviceName : `${serviceName}.service`;
     uiStore.confirm(
       `Restart Service "${unit}"?`,
@@ -360,7 +362,6 @@
   }
 
   function confirmUnpinService(serviceName: string) {
-    closeAllContextMenus();
     uiStore.confirm(
       `Unpin "${serviceName}"?`,
       `Remove "${serviceName}" from your Dashboard watchdog services grid? You can re-pin it anytime using the "+" button.`,
@@ -374,9 +375,13 @@
     return ['dbus', 'dbus-broker', 'polkit', 'systemd-journald', 'systemd-logind', 'systemd-udevd', 'init'].includes(clean);
   }
 
-  function copyToClipboard(text: string, label = 'Copied to clipboard') {
-    navigator.clipboard.writeText(text);
-    uiStore.addToast(label, 'info');
+  async function copyToClipboard(text: string, label = 'Copied to clipboard') {
+    try {
+      await navigator.clipboard.writeText(text);
+      uiStore.addToast(label, 'info');
+    } catch (e) {
+      uiStore.addToast(`Could not copy to the clipboard: ${e}`, 'error');
+    }
   }
 
   async function searchWeb(query: string) {
@@ -394,106 +399,327 @@
     }
   }
 
-  // 1. Service Watchdog Context Menu
+  // ── Context menus ─────────────────────────────────────────────────────────
+  // All five use the shared ContextMenu component: it owns positioning, boundary
+  // clamping, focus, keyboard navigation and dismissal. Only the row-specific
+  // data and actions live here.
+
+  type MenuBadge = {
+    text: string;
+    variant: 'success' | 'info' | 'warning' | 'error' | 'muted';
+  };
+
+  type DashboardLogEntry = {
+    time: string;
+    service: string;
+    level: string;
+    message: string;
+  };
+
+  /**
+   * Where a menu should open. A context-menu event carries the pointer
+   * position; a kebab activated from the keyboard emits a click with no
+   * coordinates, so anchor that one to the button.
+   */
+  function menuPoint(e: MouseEvent): { x: number; y: number } {
+    const fromKeyboard = e.type === 'click' && e.clientX === 0 && e.clientY === 0;
+    const rect = fromKeyboard
+      ? (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+      : null;
+    return rect
+      ? { x: rect.left, y: rect.bottom + 4 }
+      : { x: e.clientX, y: e.clientY };
+  }
+
+  /**
+   * Only one menu may be open at a time. Rows stop the click/contextmenu event
+   * from reaching the window, so the shared menus cannot close each other
+   * through their outside-click listener; do it explicitly.
+   */
+  function closeContextMenus() {
+    serviceContextMenu.open = false;
+    logContextMenu.open = false;
+    processContextMenu.open = false;
+    storageContextMenu.open = false;
+    footprintContextMenu.open = false;
+  }
+
+  // 1. Service Watchdog
   let serviceContextMenu = $state<{
+    open: boolean;
     x: number;
     y: number;
-    show: boolean;
     svc: ServiceDaemon | null;
-  }>({ x: 0, y: 0, show: false, svc: null });
+  }>({ open: false, x: 0, y: 0, svc: null });
 
   function handleServiceContextMenu(e: MouseEvent, svc: ServiceDaemon) {
     e.preventDefault();
     e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 250;
-    const menuHeight = 320;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    serviceContextMenu = {
-      x,
-      y,
-      show: true,
-      svc
-    };
+    closeContextMenus();
+    serviceContextMenu = { ...menuPoint(e), open: true, svc };
   }
 
-  // 2. System Events Metrics Context Menu
-  let metricContextMenu = $state<{
-    x: number;
-    y: number;
-    show: boolean;
-    type: 'errors' | 'warnings' | 'health';
-    count: number;
-  }>({ x: 0, y: 0, show: false, type: 'errors', count: 0 });
+  const serviceMenuBadges = $derived.by<MenuBadge[]>(() => {
+    const svc = serviceContextMenu.svc;
+    if (!svc) return [];
+    const badges: MenuBadge[] = [];
+    if (isCriticalService(svc.name)) badges.push({ text: 'Core', variant: 'error' });
+    badges.push({
+      text: svc.status,
+      variant: svc.status === 'active' ? 'success' : svc.status === 'failed' ? 'error' : 'muted',
+    });
+    return badges;
+  });
 
-  function handleMetricContextMenu(e: MouseEvent, type: 'errors' | 'warnings' | 'health', count = 0) {
-    e.preventDefault();
-    e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 270;
-    const menuHeight = 250;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    metricContextMenu = {
-      x,
-      y,
-      show: true,
-      type,
-      count
-    };
-  }
+  const serviceMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const svc = serviceContextMenu.svc;
+    if (!svc) return [];
+    const busy = !!serviceActionRunning;
+    const critical = isCriticalService(svc.name);
+    return [
+      {
+        label: 'Restart Service',
+        icon: RotateCcw,
+        color: 'var(--color-warning)',
+        disabled: busy,
+        action: () => confirmRestartService(svc),
+      },
+      svc.status === 'active'
+        ? {
+            label: critical ? 'Stop Service (Locked)' : 'Stop Service',
+            icon: Square,
+            color: 'var(--color-error)',
+            danger: true,
+            disabled: critical || busy,
+            action: () => confirmStopService(svc),
+          }
+        : {
+            label: 'Start Service',
+            icon: Play,
+            color: 'var(--color-success)',
+            disabled: busy,
+            action: () => doServiceAction(svc.name, 'start'),
+          },
+      { label: '', divider: true },
+      {
+        label: 'Inspect in Service Manager',
+        icon: ArrowUpRight,
+        color: 'var(--color-accent)',
+        action: () => {
+          uiStore.serviceFilter = 'all';
+          uiStore.serviceSearchQuery = svc.name.replace(/\.service$/, '');
+          uiStore.navigateTo('service-manager');
+        },
+      },
+      {
+        label: 'View Logs in Journal',
+        icon: FileText,
+        color: 'var(--color-accent)',
+        action: () => {
+          uiStore.preAppliedJournalPriority = 'all';
+          uiStore.preAppliedJournalSearch = svc.name;
+          uiStore.navigateTo('journal-logs', 'journal');
+        },
+      },
+      {
+        label: 'Copy Unit Name / CLI Command',
+        icon: Copy,
+        action: () =>
+          copyToClipboard(`systemctl status ${svc.name}`, 'Copied systemctl status command'),
+      },
+      { label: '', divider: true },
+      {
+        label: 'Unpin from Dashboard',
+        icon: Trash2,
+        danger: true,
+        action: () => confirmUnpinService(svc.name),
+      },
+    ];
+  });
 
-  // 3. Log Ticker Line Context Menu
+  // 2. Journal line
   let logContextMenu = $state<{
+    open: boolean;
     x: number;
     y: number;
-    show: boolean;
-    log: { time: string; service: string; level: string; message: string } | null;
-  }>({ x: 0, y: 0, show: false, log: null });
+    log: DashboardLogEntry | null;
+  }>({ open: false, x: 0, y: 0, log: null });
 
-  function handleLogContextMenu(e: MouseEvent, log: { time: string; service: string; level: string; message: string }) {
+  function handleLogContextMenu(e: MouseEvent, log: DashboardLogEntry) {
     e.preventDefault();
     e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 290;
-    const menuHeight = 350;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    logContextMenu = {
-      x,
-      y,
-      show: true,
-      log
-    };
+    closeContextMenus();
+    logContextMenu = { ...menuPoint(e), open: true, log };
   }
 
-  // 4. Top Active Processes Context Menu
+  const logMenuBadge = $derived.by<MenuBadge | undefined>(() => {
+    const level = logContextMenu.log?.level;
+    if (!level) return undefined;
+    return {
+      text: level,
+      variant: level === 'Err' || level === 'Crit' ? 'error' : level === 'Warn' ? 'warning' : 'info',
+    };
+  });
+
+  const logMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const log = logContextMenu.log;
+    if (!log) return [];
+    const items: ContextMenuItem[] = [
+      {
+        label: `Filter Journal by '${log.service}'`,
+        icon: FileText,
+        color: 'var(--color-accent)',
+        action: () => {
+          uiStore.preAppliedJournalPriority = 'all';
+          uiStore.preAppliedJournalSearch = log.service;
+          uiStore.navigateTo('journal-logs', 'journal');
+        },
+      },
+      {
+        label: 'Copy Log Message',
+        icon: Copy,
+        action: () => copyToClipboard(log.message, 'Copied log message'),
+      },
+      {
+        label: 'Copy Full Log Entry',
+        icon: Copy,
+        action: () =>
+          copyToClipboard(
+            `[${log.time}] [${log.service}] [${log.level}] ${log.message}`,
+            'Copied full log line'
+          ),
+      },
+    ];
+
+    if (log.service && log.service !== 'kernel' && log.service !== 'system') {
+      items.push(
+        { label: '', divider: true },
+        {
+          label: `Inspect '${log.service}' in Service Manager`,
+          icon: ArrowUpRight,
+          color: 'var(--color-accent)',
+          action: () => {
+            uiStore.serviceFilter = 'all';
+            uiStore.serviceSearchQuery = log.service.replace(/\.service$/, '');
+            uiStore.navigateTo('service-manager');
+          },
+        },
+        {
+          label: `Restart '${log.service}'`,
+          icon: RotateCcw,
+          color: 'var(--color-warning)',
+          action: () => confirmRestartFromLog(log.service),
+        }
+      );
+    }
+
+    items.push(
+      { label: '', divider: true },
+      {
+        label: 'Search Error on Web',
+        icon: Globe,
+        color: 'var(--color-text-secondary)',
+        action: () => searchWeb(`${log.service} ${log.message}`.trim()),
+      }
+    );
+    return items;
+  });
+
+  // 3. Top process
   let processContextMenu = $state<{
+    open: boolean;
     x: number;
     y: number;
-    show: boolean;
     proc: ProcessItem | null;
-  }>({ x: 0, y: 0, show: false, proc: null });
+  }>({ open: false, x: 0, y: 0, proc: null });
 
   function handleProcessContextMenu(e: MouseEvent, proc: ProcessItem) {
     e.preventDefault();
     e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 270;
-    const menuHeight = 360;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    processContextMenu = {
-      x,
-      y,
-      show: true,
-      proc
-    };
+    closeContextMenus();
+    processContextMenu = { ...menuPoint(e), open: true, proc };
   }
 
+  const processMenuBadges = $derived.by<MenuBadge[]>(() => {
+    const proc = processContextMenu.proc;
+    return proc
+      ? [
+          { text: `PID ${proc.pid}`, variant: 'info' },
+          { text: proc.user, variant: 'muted' },
+        ]
+      : [];
+  });
+
+  const processMenuSubtitle = $derived.by(() => {
+    const proc = processContextMenu.proc;
+    if (!proc) return '';
+    const ram = (proc.mem_percent ?? proc.memory_percent ?? 0).toFixed(1);
+    return `${(proc.cpu_percent || 0).toFixed(1)}% CPU · ${ram}% RAM`;
+  });
+
+  const processMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const proc = processContextMenu.proc;
+    if (!proc) return [];
+    return [
+      {
+        label: 'Inspect in System Monitor',
+        icon: ArrowUpRight,
+        color: 'var(--color-accent)',
+        action: () => {
+          uiStore.processSearchQuery = proc.name;
+          uiStore.navigateTo('system-monitor', 'processes');
+        },
+      },
+      {
+        label: 'View Logs in Journal',
+        icon: FileText,
+        color: 'var(--color-accent)',
+        action: () => {
+          uiStore.preAppliedJournalPriority = 'all';
+          uiStore.preAppliedJournalSearch = proc.name;
+          uiStore.navigateTo('journal-logs', 'journal');
+          uiStore.addToast(`Jumped to Journal logs for ${proc.name}`, 'info');
+        },
+      },
+      {
+        label: 'Search Process on Web',
+        icon: Globe,
+        color: 'var(--color-text-secondary)',
+        action: () => searchWeb(`${proc.name} linux process`),
+      },
+      { label: '', divider: true },
+      {
+        label: `Copy PID (${proc.pid})`,
+        icon: Copy,
+        action: () => copyToClipboard(proc.pid.toString(), `Copied PID ${proc.pid}`),
+      },
+      {
+        label: 'Copy Command Line',
+        icon: Terminal,
+        action: () => copyToClipboard(proc.cmdline || proc.name, 'Copied command line'),
+      },
+      {
+        label: `Copy \`ps -fp ${proc.pid}\``,
+        icon: Copy,
+        action: () => copyToClipboard(`ps -fp ${proc.pid}`, 'Copied CLI inspection command'),
+      },
+      { label: '', divider: true },
+      {
+        label: 'Terminate (SIGTERM)',
+        icon: Square,
+        danger: true,
+        action: () => confirmKillProcess(proc, 15),
+      },
+      {
+        label: 'Force Kill (SIGKILL)',
+        icon: Flame,
+        danger: true,
+        action: () => confirmKillProcess(proc, 9),
+      },
+    ];
+  });
+
   function confirmKillProcess(proc: ProcessItem, signal: number = 15) {
-    closeAllContextMenus();
     if (proc.pid <= 100) {
       uiStore.addToast(`Cannot terminate system PID ${proc.pid} (protected process).`, 'error');
       return;
@@ -523,7 +749,7 @@
     );
   }
 
-  // 5. Storage & Disks Context Menu
+  // 4. Storage & disks
   interface StorageContextItem {
     title: string;
     mount?: string;
@@ -531,96 +757,171 @@
     fs_type?: string;
     used_gb: number;
     total_gb: number;
-    is_pool?: boolean;
-    is_drive?: boolean;
   }
 
   let storageContextMenu = $state<{
+    open: boolean;
     x: number;
     y: number;
-    show: boolean;
     item: StorageContextItem | null;
-  }>({ x: 0, y: 0, show: false, item: null });
+  }>({ open: false, x: 0, y: 0, item: null });
 
   function handleStorageContextMenu(e: MouseEvent, item: StorageContextItem) {
     e.preventDefault();
     e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 270;
-    const menuHeight = 310;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    storageContextMenu = {
-      x,
-      y,
-      show: true,
-      item
-    };
+    closeContextMenus();
+    storageContextMenu = { ...menuPoint(e), open: true, item };
   }
 
-  // 6. App & Disk Footprint Context Menu
+  const storageMenuBadge = $derived.by<MenuBadge | undefined>(() => {
+    const fsType = storageContextMenu.item?.fs_type;
+    return fsType ? { text: fsType.toUpperCase(), variant: 'info' } : undefined;
+  });
+
+  const storageMenuSubtitle = $derived.by(() => {
+    const item = storageContextMenu.item;
+    if (!item) return '';
+    const pct = item.total_gb > 0 ? ((item.used_gb / item.total_gb) * 100).toFixed(1) : '0.0';
+    return `${formatStorageBytes(item.used_gb)} used of ${formatStorageBytes(item.total_gb)} (${pct}%)`;
+  });
+
+  const storageMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const item = storageContextMenu.item;
+    if (!item) return [];
+    const mount = item.mount;
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Inspect Storage Path Breakdown',
+        icon: Search,
+        color: 'var(--color-accent)',
+        action: () =>
+          openStoragePathModal(
+            mount || item.device,
+            item.device,
+            item.used_gb,
+            item.total_gb,
+            item.fs_type
+          ),
+      },
+      {
+        label: 'Open Device & Disk Manager',
+        icon: HardDrive,
+        color: 'var(--color-accent)',
+        action: () => uiStore.navigateTo('device-manager', 'list'),
+      },
+      {
+        label: 'Check SMART Health & Diagnostics',
+        icon: Activity,
+        color: 'var(--color-success)',
+        action: () => {
+          uiStore.navigateTo('device-manager', 'smart');
+          uiStore.addToast('Jumped to Disk Health & Diagnostics', 'info');
+        },
+      },
+      { label: '', divider: true },
+      {
+        label: `Copy Device Node (${item.device})`,
+        icon: Copy,
+        action: () => copyToClipboard(item.device, `Copied device node ${item.device}`),
+      },
+    ];
+
+    if (mount) {
+      items.push({
+        label: `Copy Mount Point (${mount})`,
+        icon: Folder,
+        action: () => copyToClipboard(mount, `Copied mount point ${mount}`),
+      });
+    }
+
+    const cmd = mount ? `df -h ${mount}` : `lsblk -f ${item.device}`;
+    items.push({
+      label: `Copy \`${cmd}\``,
+      icon: Terminal,
+      action: () => copyToClipboard(cmd, `Copied command ${cmd}`),
+    });
+    return items;
+  });
+
+  // 5. App & disk footprint
   interface FootprintContextItem {
     title: string;
-    path?: string;
     size: string;
-    type: 'path' | 'flatpak' | 'rpm' | 'logs' | 'cache';
-    used_gb?: number;
-    total_gb?: number;
-    fs_type?: string;
-    device?: string;
+    type: 'flatpak' | 'rpm';
   }
 
   let footprintContextMenu = $state<{
+    open: boolean;
     x: number;
     y: number;
-    show: boolean;
     item: FootprintContextItem | null;
-  }>({ x: 0, y: 0, show: false, item: null });
+  }>({ open: false, x: 0, y: 0, item: null });
 
   function handleFootprintContextMenu(e: MouseEvent, item: FootprintContextItem) {
     e.preventDefault();
     e.stopPropagation();
-    closeAllContextMenus();
-    const menuWidth = 280;
-    const menuHeight = 330;
-    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
-    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
-    footprintContextMenu = {
-      x,
-      y,
-      show: true,
-      item
-    };
+    closeContextMenus();
+    footprintContextMenu = { ...menuPoint(e), open: true, item };
   }
 
-  function confirmCleanDnfCache() {
-    closeAllContextMenus();
-    uiStore.confirm(
-      'Clean DNF Metadata & Package Caches?',
-      'This will expire and purge DNF package caches in /var/cache to free up disk space. DNF will re-download fresh metadata on the next package check.',
-      async () => {
-        statusStore.setBusy('Cleaning DNF package caches...');
-        try {
-          await invoke('run_makecache');
-          uiStore.addToast('DNF cache refreshed and cleaned successfully', 'success');
-        } catch (e) {
-          uiStore.addToast(`Failed to clean cache: ${e}`, 'error');
-        } finally {
-          statusStore.clearBusy();
-        }
+  const footprintMenuBadge = $derived.by<MenuBadge | undefined>(() =>
+    footprintContextMenu.item
+      ? { text: footprintContextMenu.item.size, variant: 'info' }
+      : undefined
+  );
+
+  const footprintMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const item = footprintContextMenu.item;
+    if (!item) return [];
+    if (item.type === 'flatpak') {
+      return [
+        {
+          label: 'Open Flatpak Apps in App Manager',
+          icon: Package,
+          color: 'var(--color-accent)',
+          action: () => uiStore.navigateTo('app-manager', 'Flatpak'),
+        },
+        {
+          label: 'Scan for Unused / Duplicate Flatpaks',
+          icon: Zap,
+          color: 'var(--color-warning)',
+          action: () => uiStore.navigateTo('app-manager', 'Duplicates'),
+        },
+        {
+          label: 'Copy `flatpak list` Command',
+          icon: Terminal,
+          action: () =>
+            copyToClipboard(
+              'flatpak list --app --columns=name,size,application',
+              'Copied flatpak list command'
+            ),
+        },
+      ];
+    }
+    return [
+      {
+        label: 'Open Native RPM Packages',
+        icon: Package,
+        color: 'var(--color-warning)',
+        action: () => uiStore.navigateTo('app-manager', 'RPM'),
       },
-      false
-    );
-  }
-
-  function closeAllContextMenus() {
-    serviceContextMenu.show = false;
-    metricContextMenu.show = false;
-    logContextMenu.show = false;
-    processContextMenu.show = false;
-    storageContextMenu.show = false;
-    footprintContextMenu.show = false;
-  }
+      {
+        label: 'Manage DNF / RPM Repositories',
+        icon: Database,
+        color: 'var(--color-accent)',
+        action: () => uiStore.navigateTo('repo-manager'),
+      },
+      {
+        label: 'Copy Largest RPMs Query Command',
+        icon: Terminal,
+        action: () =>
+          copyToClipboard(
+            'rpm -qa --qf "%{SIZE} %{NAME}\\n" | sort -rn | head -20',
+            'Copied RPM size query command'
+          ),
+      },
+    ];
+  });
 
   function activateOnKeyboard(e: KeyboardEvent, action: () => void) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -652,20 +953,6 @@
     return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
   }
 
-  let primaryAdapterLabel = $derived.by(() => {
-    if (!networkInterfaces || networkInterfaces.length === 0) return 'eth0 (Ethernet)';
-    const active = networkInterfaces.find((i: any) => i.is_up && i.iface_type !== 'loopback' && i.ip4)
-      || networkInterfaces.find((i: any) => i.is_up && i.iface_type !== 'loopback')
-      || networkInterfaces[0];
-    if (!active) return 'eth0';
-    const typeLabel = active.iface_type === 'wifi' ? 'Wi-Fi' : active.iface_type === 'ethernet' ? 'Ethernet' : active.iface_type;
-    return `${active.name} (${typeLabel})`;
-  });
-
-  let cpuHigh = $derived(systemStats && systemStats.cpu_percent > 85);
-  let ramHigh = $derived(systemStats && systemStats.ram_percent > 90);
-  let hasFailedServices = $derived(failedServicesCount > 0);
-
   let cpuTempNumeric = $derived.by(() => {
     if (cpuTemp) {
       const match = cpuTemp.match(/(\d+(\.\d+)?)/);
@@ -675,12 +962,6 @@
       }
     }
     return null;
-  });
-
-  let cpuTempClass = $derived.by(() => {
-    if (cpuTempNumeric !== null && cpuTempNumeric > 85) return 'temp-crit';
-    if (cpuTempNumeric !== null && cpuTempNumeric > 70) return 'temp-warn';
-    return 'temp-normal';
   });
 
   let securityReport = $state<any>(null);
@@ -715,25 +996,6 @@
     const rawScore = totalMax > 0 ? Math.round((totalCur / totalMax) * 100) : 100;
     return hasUnmutedCritical ? Math.min(rawScore, 60) : rawScore;
   });
-
-  let securityCriticalCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Critical' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
-  let securityWarningCount = $derived(securityReport ? securityReport.findings.filter((f: any) => f.severity === 'Warning' && !f.is_resolved && !mutedIds.includes(f.id)).length : 0);
-
-  function getScoreColor(score: number) {
-    if (score >= 80) return '#22C55E';
-    if (score >= 50) return '#D97706';
-    return '#EF4444';
-  }
-
-  function getScoreLabel(score: number) {
-    if (score >= 90) return 'EXCELLENT';
-    if (score >= 80) return 'GOOD';
-    if (score >= 60) return 'FAIR';
-    if (score >= 40) return 'POOR';
-    return 'CRITICAL RISK';
-  }
-
-
 
   async function fetchSecurityReport(forceRefresh: boolean | MouseEvent = false) {
     loadingSecurity = true;
@@ -825,7 +1087,13 @@
     percent: number;
   } | null>(null);
 
-  function openStoragePathModal(mount: string, device = '/dev/sda3', used_gb = 17.3, total_gb = 235.9, fs_type = 'btrfs') {
+  function openStoragePathModal(
+    mount: string,
+    device: string,
+    used_gb: number,
+    total_gb: number,
+    fs_type?: string
+  ) {
     const free = Math.max(0, total_gb - used_gb);
     selectedStorageDetail = {
       title: `Storage Path — ${mount}`,
@@ -837,15 +1105,6 @@
       free_gb: free,
       percent: (used_gb / (total_gb || 1)) * 100
     };
-  }
-
-  async function handleOpenInFileManager(path?: string) {
-    if (!path) return;
-    try {
-      await invoke('open_folder', { path });
-    } catch (e) {
-      console.error('Failed to launch file manager for path:', path, e);
-    }
   }
 
   function formatStorageBytes(gb: number) {
@@ -974,9 +1233,11 @@
    * Runs every 30 s so we are not re-running journalctl every 4 seconds.
    */
   async function fetchSlowData() {
-    fetchRecentLogs();
-    fetchServicesWatchdog();
-    fetchTopProcesses();
+    await Promise.all([
+      fetchRecentLogs(),
+      fetchServicesWatchdog(),
+      fetchTopProcesses(),
+    ]);
     try {
       // Each read is isolated: one failing command (e.g. df) must not discard
       // the rest of the slow tier.
@@ -1006,6 +1267,7 @@
       } else {
         diskUsageError = true;
       }
+      diskUsageLoaded = true;
 
       // Names of the failed units — lets the attention card link straight to
       // the journal entries of the unit that broke.
@@ -1023,8 +1285,7 @@
 
       lastSlowCheck = new Date();
 
-      fetchNetworkDetails();
-      fetchSystemEvents();
+      await Promise.all([fetchNetworkDetails(), fetchSystemEvents()]);
     } catch (e) {
       console.error("Dashboard slow fetch error:", e);
     }
@@ -1080,7 +1341,7 @@
   }
 
   function formatShortDate(raw: string): string {
-    if (!raw) return '17 May 2026, 15:21';
+    if (!raw) return '—';
     try {
       const d = new Date(raw);
       if (!isNaN(d.getTime())) {
@@ -1090,7 +1351,7 @@
       }
     } catch {}
     const cleaned = raw.replace(/^[A-Za-z]{3}\s+/, '').replace(/(:\d{2})\s*(AM|PM).*/i, '');
-    return cleaned || '17 May 2026, 15:21';
+    return cleaned || '—';
   }
 
   // ── Refresh tiers ─────────────────────────────────────────────────────────
@@ -1167,6 +1428,11 @@
     // closing at the same time, so scroll once that has settled.
     setTimeout(() => {
       detailsSectionRef?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Move focus with the view, otherwise keyboard and screen-reader users
+      // stay on the tile with no idea what just opened below it.
+      detailsSectionRef
+        ?.querySelector<HTMLElement>('.card-title-header')
+        ?.focus({ preventScroll: true });
     }, 160);
     setTimeout(() => (storageSpotlight = false), 1900);
   }
@@ -1236,20 +1502,30 @@
     label: string;
     value: string;
     checkedAt: string;
+    /** Short imperative label for the primary button */
+    actionLabel: string;
+    /** One sentence telling the user what to do about it */
+    guidance: string;
     /** Where the problem is actually fixed (remediation) */
     action: () => void;
     /** The journal entries that prove this problem (diagnosis) */
-    logFilter?: { search?: string; unit?: string; priority?: string };
+    logFilter?: { search?: string; unit?: string; priority?: string; boot?: boolean };
   }
 
   /**
    * Open the Journal Logs pre-filtered for a specific problem.
    * The Journal Viewer consumes these as one-shot deep links.
    */
-  function openLogsFor(filter: { search?: string; unit?: string; priority?: string }) {
+  function openLogsFor(filter: {
+    search?: string;
+    unit?: string;
+    priority?: string;
+    boot?: boolean;
+  }) {
     uiStore.preAppliedJournalSearch = filter.search ?? '';
     uiStore.preAppliedJournalUnit = filter.unit ?? '';
     uiStore.preAppliedJournalPriority = filter.priority ?? 'all';
+    uiStore.preAppliedJournalBoot = !!filter.boot;
     uiStore.navigateTo('journal-logs', 'journal');
   }
 
@@ -1280,8 +1556,14 @@
         label: 'Security Posture Audit',
         value: `${effectiveDashboardScore}/100 score (${isCrit ? 'Critical Risk' : 'Warnings Detected'})`,
         checkedAt: formatCheckedAt(lastSecurityCheck),
-        logFilter: { priority: '3' },
-        action: () => uiStore.navigateTo('security-auditor', 'advisory')
+        actionLabel: 'Review findings',
+        guidance: isCrit
+          ? 'Open the critical findings in Security Auditor and apply their recommended fixes.'
+          : 'Open the flagged findings in Security Auditor and resolve the warnings you can.',
+        action: () => {
+          uiStore.securitySeverityFilter = isCrit ? 'Critical' : 'Warning';
+          uiStore.navigateTo('security-auditor');
+        }
       });
     }
 
@@ -1296,10 +1578,11 @@
         id: 'critical-logs',
         severity: 'critical',
         label: systemEventsLoaded && !systemEventsError ? 'Journal Errors Since Boot' : 'Recent Journal Errors',
-        value: `${logErrCount} critical error${logErrCount > 1 ? 's' : ''} found`,
+        value: `${logErrCount} error${logErrCount > 1 ? 's' : ''} recorded`,
         checkedAt: formatCheckedAt(lastSlowCheck),
-        logFilter: { priority: '3' },
-        action: () => uiStore.navigateTo('journal-logs', 'journal')
+        actionLabel: 'Triage errors',
+        guidance: 'Start with the newest errors; repeated messages usually point to one failing service or driver.',
+        action: () => openLogsFor({ priority: '3', boot: true })
       });
     }
 
@@ -1312,6 +1595,8 @@
         label: 'CPU Thermal Alert',
         value: `${Math.round(cpuTempNumeric)}°C (Thermal threshold exceeded)`,
         checkedAt: formatCheckedAt(lastSlowCheck),
+        actionLabel: 'Inspect thermal load',
+        guidance: 'Check which processes are using the CPU and review the temperature history in System Monitor.',
         // the kernel reports throttling as "Thermal throttled"
         logFilter: { search: 'thermal' },
         action: () => uiStore.navigateTo('system-monitor', 'overview')
@@ -1332,7 +1617,6 @@
           : failedWatchdog.length === 1
             ? failedWatchdog[0].name
             : '';
-      const unitHint = failedUnit ? ` (${failedUnit})` : '';
       items.push({
         id: 'failed-services',
         severity: 'critical',
@@ -1341,8 +1625,16 @@
           ? `${failedUnit} — ${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`
           : `${totalFailed} service${totalFailed > 1 ? 's' : ''} in failed state`,
         checkedAt: formatCheckedAt(lastServicesCheck),
+        actionLabel: failedUnit ? 'Open failed service' : 'Open failed services',
+        guidance: failedUnit
+          ? `Open ${failedUnit} in Service Manager to see why it failed, then restart it.`
+          : 'Open the failed units in Service Manager, check their status, then restart the broken ones.',
         logFilter: { unit: failedUnit, priority: '3' },
-        action: () => uiStore.navigateTo('service-manager')
+        action: () => {
+          uiStore.serviceFilter = 'failed';
+          uiStore.serviceSearchQuery = failedUnit ? failedUnit.replace(/\.service$/, '') : '';
+          uiStore.navigateTo('service-manager', 'services');
+        }
       });
     }
 
@@ -1357,6 +1649,8 @@
           label: `Root Partition Storage (${rootDisk.mount || '/'})`,
           value: `${diskPct.toFixed(0)}% utilized (${(rootDisk.free_gb ?? 0).toFixed(1)} GB free)`,
           checkedAt: formatCheckedAt(lastSlowCheck),
+          actionLabel: 'Review storage',
+          guidance: 'Open the storage breakdown, find the fullest mount, and remove old packages, logs, or caches from it.',
           // the kernel reports this as "No space left on device"
           logFilter: { search: 'no space' },
           action: () => openStorageOverview()
@@ -1387,6 +1681,11 @@
     };
   });
 
+  // Failed units among the services this card actually lists. The system-wide
+  // count belongs to Needs Attention; showing it here produced a "1 failed"
+  // badge with no failed row in sight.
+  let failedPinnedCount = $derived(watchdogServices.filter(s => s.status === 'failed').length);
+
   // Show all pinned services, with failed services first.
   let displayServices = $derived.by<ServiceDaemon[]>(() => {
     const list = [...watchdogServices];
@@ -1413,7 +1712,15 @@
   });
 
   let checksPending = $derived((!securityReport && !securityError) || (!logsLoaded && !systemEventsLoaded) || !servicesLoaded || !systemStatsLoaded);
-  let checksUnavailable = $derived(securityError || (logsError && systemEventsError) || servicesError || systemStatsError || (systemStatsLoaded && (!cpuTempAvailable || !rootDisk)));
+  // A missing CPU sensor is normal on VMs and must not paint the whole
+  // dashboard as unavailable; the storage read only counts once it has answered.
+  let checksUnavailable = $derived(
+    securityError ||
+      (logsError && systemEventsError) ||
+      servicesError ||
+      systemStatsError ||
+      (diskUsageLoaded && !rootDisk)
+  );
 
 </script>
 
@@ -1620,8 +1927,8 @@
                 <button
                   type="button"
                   class="data-row clickable-row"
-                  onclick={() => item.logFilter ? openLogsFor(item.logFilter) : item.action()}
-                  title={item.logFilter ? `View the log evidence for: ${item.label}` : `Click to resolve: ${item.label}`}
+                  onclick={() => item.action()}
+                  title={item.guidance}
                 >
                   <div class="data-row-left">
                     <span class="status-dot {item.severity}"></span>
@@ -1639,8 +1946,8 @@
       <div class="card-wrap service-card-wrap">
         <Card title="Services">
           {#snippet headerActions()}
-            {#if failedServicesCount > 0}
-              <Badge variant="error">{failedServicesCount} failed</Badge>
+            {#if failedPinnedCount > 0}
+              <Badge variant="error">{failedPinnedCount} failed</Badge>
             {/if}
             {#if displayServices.length > 0}
               <Button
@@ -1760,9 +2067,9 @@
             </button>
           {/snippet}
 
-          {#if !logsLoaded && !systemEventsLoaded}
+          {#if !logsLoaded}
             <div class="all-clear-state compact"><span class="all-clear-title">Loading recent events…</span></div>
-          {:else if logsError && systemEventsError}
+          {:else if logsError}
             <div class="all-clear-state compact"><span class="all-clear-title">Recent events unavailable</span></div>
           {:else if displayEvents.length === 0}
             <div class="all-clear-state compact">
@@ -2021,6 +2328,7 @@
                 <span class="attention-item-label">{item.label}</span>
                 <span class="attention-item-val mono">{item.value}</span>
                 <span class="attention-item-val">{item.checkedAt}</span>
+                <span class="attention-item-guidance">{item.guidance}</span>
               </div>
             </div>
             <div class="attention-item-buttons">
@@ -2028,24 +2336,24 @@
                 <Button
                   variant="ghost"
                   size="sm"
-                  title="Open the journal filtered to this problem"
+                  title="Open the journal entries that prove this problem"
                   onclick={() => {
                     showAttentionModal = false;
                     openLogsFor(item.logFilter!);
                   }}
                 >
-                  <FileText size={13} /> View logs
+                  <FileText size={13} /> View evidence
                 </Button>
               {/if}
               <Button
-                variant="outline"
+                variant="primary"
                 size="sm"
                 onclick={() => {
                   showAttentionModal = false;
                   item.action();
                 }}
               >
-                <span>Take Action &rarr;</span>
+                <span>{item.actionLabel} &rarr;</span>
               </Button>
             </div>
           </div>
@@ -2064,7 +2372,13 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div use:portal class="modal-backdrop" onclick={(e) => { if(e.target === e.currentTarget) selectedStorageDetail = null; }}>
-    <div class="modal-glass-card modal-storage-card">
+    <div
+      class="modal-glass-card modal-storage-card"
+      role="dialog"
+      aria-modal="true"
+      aria-label={selectedStorageDetail.title}
+      tabindex="-1"
+    >
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
         <h3 style="margin:0; color:var(--color-text-primary); display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700;">
           <HardDrive size={18} style="color:var(--color-accent)"/>
@@ -2093,11 +2407,13 @@
 <!-- MODAL: CUSTOMIZE WATCHDOG SERVICES (EXPANDED 2-COLUMN WORKSPACE) -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showWatchdogModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div use:portal class="modal-backdrop" onclick={() => showWatchdogModal = false} role="presentation">
-    <div class="modal-glass-card modal-watchdog-card" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') showWatchdogModal = false; }} role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal-glass-card modal-watchdog-card" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header-row">
         <div style="display:flex; align-items:center; gap:10px;">
-          <ShieldCheck size={20} style="color:#22c55e;" />
+          <ShieldCheck size={20} style="color:var(--color-success);" />
           <div>
             <h3 style="margin:0; font-size:16px; font-weight:700; color:var(--color-text-primary);">Customize Watchdog Services</h3>
             <span style="font-size:11.5px; color:var(--color-text-muted);">Select and configure critical system services to monitor on your dashboard</span>
@@ -2115,7 +2431,7 @@
                 System Services Directory
               </label>
               <span style="font-size:11px; color:var(--color-text-muted);">
-                {filteredAvailableUnits.length} available
+                {loadingUnits ? 'Loading…' : `${availableUnits.length} available`}
               </span>
             </div>
 
@@ -2137,7 +2453,7 @@
                 </div>
               {:else if filteredAvailableUnits.length === 0}
                 <div style="padding:32px; text-align:center; color:var(--color-text-muted); font-size:12.5px;">
-                  {watchdogSearchQuery ? `No service found matching "${watchdogSearchQuery}". You can add it manually below.` : 'No services available.'}
+                  {watchdogSearchQuery ? `No service found matching "${watchdogSearchQuery}".` : 'No services available.'}
                 </div>
               {:else}
                 {#each filteredAvailableUnits as u}
@@ -2313,857 +2629,73 @@
   </div>
 {/if}
 
-<!-- ══ Global Window Listeners for Context Menus ══ -->
-<svelte:window 
-  onclick={(e) => {
-    if (!(e.target as HTMLElement)?.closest('.custom-context-menu')) {
-      closeAllContextMenus();
-    }
-  }}
-  oncontextmenu={(e) => {
-    if (!(e.target as HTMLElement)?.closest('.watchdog-item, .metric-btn, .log-item-line, .process-row-item, .clickable-storage-row, .footprint-row-item, .custom-context-menu')) {
-      closeAllContextMenus();
-    }
-  }}
-  onkeydown={(e) => { if (e.key === 'Escape') closeAllContextMenus(); }} 
+<!-- ══ Context menus (shared: positioning, focus, keyboard, dismissal) ══ -->
+<ContextMenu
+  bind:isOpen={serviceContextMenu.open}
+  x={serviceContextMenu.x}
+  y={serviceContextMenu.y}
+  icon={Server}
+  title={serviceContextMenu.svc?.name ?? ''}
+  badges={serviceMenuBadges}
+  items={serviceMenuItems}
+  minWidth="250px"
 />
 
-<!-- ══ Services Watchdog Context Menu ══ -->
-{#if serviceContextMenu.show && serviceContextMenu.svc}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {serviceContextMenu.x}px; top: {serviceContextMenu.y}px; z-index: 99999; min-width: 250px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={serviceContextMenu.svc.name}>
-          {serviceContextMenu.svc.name}
-        </span>
-        {#if isCriticalService(serviceContextMenu.svc.name)}
-          <span class="protection-badge critical" style="font-size: 9px; padding: 1px 4px;">Core</span>
-        {/if}
-      </div>
-      <span class="badge {serviceContextMenu.svc.status === 'active' ? 'badge-success' : serviceContextMenu.svc.status === 'failed' ? 'badge-error' : 'badge-muted'}" style="font-size: 9.5px; padding: 1px 5px;">
-        {serviceContextMenu.svc.status}
-      </span>
-    </div>
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+<ContextMenu
+  bind:isOpen={logContextMenu.open}
+  x={logContextMenu.x}
+  y={logContextMenu.y}
+  icon={FileText}
+  title={logContextMenu.log ? `[${logContextMenu.log.time}] [${logContextMenu.log.service}]` : ''}
+  badge={logMenuBadge}
+  items={logMenuItems}
+  minWidth="280px"
+/>
 
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => confirmRestartService(serviceContextMenu.svc!)}
-      disabled={!!serviceActionRunning}
-    >
-      <RotateCcw size={14} style="color: var(--color-warning);" />
-      <span>Restart Service</span>
-    </button>
+<ContextMenu
+  bind:isOpen={processContextMenu.open}
+  x={processContextMenu.x}
+  y={processContextMenu.y}
+  icon={Activity}
+  title={processContextMenu.proc?.name ?? ''}
+  subtitle={processMenuSubtitle}
+  badges={processMenuBadges}
+  items={processMenuItems}
+  minWidth="270px"
+/>
 
-    {#if serviceContextMenu.svc.status !== 'active'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => { const svc = serviceContextMenu.svc!; closeAllContextMenus(); doServiceAction(svc.name, 'start'); }}
-        disabled={!!serviceActionRunning}
-      >
-        <Play size={14} style="color: var(--color-success);" />
-        <span>Start Service</span>
-      </button>
-    {:else}
-      <button
-        type="button"
-        class="context-menu-item text-danger"
-        onclick={() => confirmStopService(serviceContextMenu.svc!)}
-        disabled={isCriticalService(serviceContextMenu.svc.name) || !!serviceActionRunning}
-        title={isCriticalService(serviceContextMenu.svc.name) ? 'Cannot stop critical OS core unit' : ''}
-      >
-        <Square size={14} style="color: var(--color-error);" />
-        <span>{isCriticalService(serviceContextMenu.svc.name) ? 'Stop Service (Locked)' : 'Stop Service'}</span>
-      </button>
-    {/if}
+<ContextMenu
+  bind:isOpen={storageContextMenu.open}
+  x={storageContextMenu.x}
+  y={storageContextMenu.y}
+  icon={HardDrive}
+  title={storageContextMenu.item?.title ?? ''}
+  subtitle={storageMenuSubtitle}
+  badge={storageMenuBadge}
+  items={storageMenuItems}
+  minWidth="270px"
+/>
 
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
+<ContextMenu
+  bind:isOpen={footprintContextMenu.open}
+  x={footprintContextMenu.x}
+  y={footprintContextMenu.y}
+  icon={Layers}
+  title={footprintContextMenu.item?.title ?? ''}
+  badge={footprintMenuBadge}
+  items={footprintMenuItems}
+  minWidth="280px"
+/>
 
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = serviceContextMenu.svc!.name;
-        closeAllContextMenus();
-        uiStore.serviceFilter = 'all';
-        uiStore.serviceSearchQuery = name.replace(/\.service$/, '');
-        uiStore.navigateTo('service-manager');
-      }}
-    >
-      <ArrowUpRight size={14} style="color: var(--color-accent);" />
-      <span>Inspect in Service Manager</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = serviceContextMenu.svc!.name;
-        closeAllContextMenus();
-        uiStore.preAppliedJournalPriority = 'all';
-        uiStore.preAppliedJournalSearch = name;
-        uiStore.navigateTo('journal-logs', 'journal');
-      }}
-    >
-      <FileText size={14} style="color: var(--color-accent);" />
-      <span>View Logs in Journal</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = serviceContextMenu.svc!.name;
-        closeAllContextMenus();
-        copyToClipboard(`systemctl status ${name}`, 'Copied systemctl status command');
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Unit Name / CLI Command</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item text-danger"
-      onclick={() => confirmUnpinService(serviceContextMenu.svc!.name)}
-    >
-      <Trash2 size={14} />
-      <span>Unpin from Dashboard</span>
-    </button>
-  </div>
-{/if}
-
-<!-- ══ System Events Metrics Context Menu ══ -->
-{#if metricContextMenu.show}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {metricContextMenu.x}px; top: {metricContextMenu.y}px; z-index: 99999; min-width: 260px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="padding: 6px 8px; font-size: 11.5px; font-weight: 700; color: var(--color-text-primary); border-bottom: 1px solid var(--color-border); margin-bottom: 4px;">
-      {#if metricContextMenu.type === 'errors'}
-        <span class="text-danger">Critical &amp; Emergency Logs</span>
-      {:else if metricContextMenu.type === 'warnings'}
-        <span class="text-warn">System Warnings</span>
-      {:else}
-        <span class="text-success">System Health Telemetry</span>
-      {/if}
-    </div>
-
-    {#if metricContextMenu.type === 'errors'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.preAppliedJournalPriority = '3';
-          uiStore.preAppliedJournalSearch = '';
-          uiStore.navigateTo('journal-logs', 'journal');
-        }}
-      >
-        <FileText size={14} style="color: var(--color-error);" />
-        <span>Open Journal Filtered to Critical (0-3)</span>
-      </button>
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard(`Critical System Errors: ${metricContextMenu.count}`, 'Copied error count summary');
-        }}
-      >
-        <Copy size={14} />
-        <span>Copy Error Count Summary</span>
-      </button>
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('security-auditor');
-        }}
-      >
-        <ShieldCheck size={14} style="color: var(--color-accent);" />
-        <span>Run Full Security Audit</span>
-      </button>
-    {:else if metricContextMenu.type === 'warnings'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.preAppliedJournalPriority = '4';
-          uiStore.preAppliedJournalSearch = '';
-          uiStore.navigateTo('journal-logs', 'journal');
-        }}
-      >
-        <FileText size={14} style="color: var(--color-warning);" />
-        <span>Open Journal Filtered to Warnings (4)</span>
-      </button>
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard(`System Warnings: ${metricContextMenu.count}`, 'Copied warning summary');
-        }}
-      >
-        <Copy size={14} />
-        <span>Copy Warning Count</span>
-      </button>
-    {:else}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('system-monitor', 'overview');
-        }}
-      >
-        <Activity size={14} style="color: var(--color-accent);" />
-        <span>Open System Monitor &amp; Resources</span>
-      </button>
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('security-auditor');
-        }}
-      >
-        <ShieldCheck size={14} style="color: var(--color-success);" />
-        <span>Inspect Security Audit Report</span>
-      </button>
-    {/if}
-  </div>
-{/if}
-
-<!-- ══ Log Ticker Line Context Menu ══ -->
-{#if logContextMenu.show && logContextMenu.log}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {logContextMenu.x}px; top: {logContextMenu.y}px; z-index: 99999; min-width: 280px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px; border-bottom: 1px solid var(--color-border); margin-bottom: 4px;">
-      <span style="font-size: 11px; font-weight: 700; font-family: var(--font-mono); color: var(--color-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px;" title={logContextMenu.log.service}>
-        [{logContextMenu.log.time}] [{logContextMenu.log.service}]
-      </span>
-      <span class="badge {logContextMenu.log.level === 'Err' || logContextMenu.log.level === 'Crit' ? 'badge-error' : logContextMenu.log.level === 'Warn' ? 'badge-warning' : 'badge-info'}" style="font-size: 9px; padding: 1px 4px;">
-        {logContextMenu.log.level}
-      </span>
-    </div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const svc = logContextMenu.log!.service;
-        closeAllContextMenus();
-        uiStore.preAppliedJournalPriority = 'all';
-        uiStore.preAppliedJournalSearch = svc;
-        uiStore.navigateTo('journal-logs', 'journal');
-      }}
-    >
-      <FileText size={14} style="color: var(--color-accent);" />
-      <span>Filter Journal by '{logContextMenu.log.service}'</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const msg = logContextMenu.log!.message;
-        closeAllContextMenus();
-        copyToClipboard(msg, 'Copied log message');
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Log Message</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const l = logContextMenu.log!;
-        closeAllContextMenus();
-        copyToClipboard(`[${l.time}] [${l.service}] [${l.level}] ${l.message}`, 'Copied full log line');
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Full Log Entry</span>
-    </button>
-
-    {#if logContextMenu.log.service && logContextMenu.log.service !== 'kernel' && logContextMenu.log.service !== 'system'}
-      <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const svc = logContextMenu.log!.service;
-          closeAllContextMenus();
-          uiStore.serviceFilter = 'all';
-          uiStore.serviceSearchQuery = svc.replace(/\.service$/, '');
-          uiStore.navigateTo('service-manager');
-        }}
-      >
-        <ArrowUpRight size={14} style="color: var(--color-accent);" />
-        <span>Inspect '{logContextMenu.log.service}' in Service Manager</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => confirmRestartFromLog(logContextMenu.log!.service)}
-      >
-        <RotateCcw size={14} style="color: var(--color-warning);" />
-        <span>Restart '{logContextMenu.log.service}'</span>
-      </button>
-    {/if}
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const query = `${logContextMenu.log!.service} ${logContextMenu.log!.message}`.trim();
-        closeAllContextMenus();
-        searchWeb(query);
-      }}
-    >
-      <Globe size={14} style="color: var(--color-text-secondary);" />
-      <span>Search Error on Web</span>
-    </button>
-  </div>
-{/if}
-
-<!-- ══ Top Active Processes Context Menu ══ -->
-{#if processContextMenu.show && processContextMenu.proc}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {processContextMenu.x}px; top: {processContextMenu.y}px; z-index: 99999; min-width: 270px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <Activity size={14} style="color: #38bdf8; flex-shrink: 0;" />
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;" title={processContextMenu.proc.name}>
-          {processContextMenu.proc.name}
-        </span>
-      </div>
-      <div style="display: flex; align-items: center; gap: 4px;">
-        <span class="badge badge-info" style="font-size: 9.5px; padding: 1px 5px; font-family: var(--font-mono);">PID {processContextMenu.proc.pid}</span>
-        <span class="badge badge-muted" style="font-size: 9px; padding: 1px 4px;">{processContextMenu.proc.user}</span>
-      </div>
-    </div>
-
-    <div style="padding: 2px 8px 6px; font-size: 11px; color: var(--color-text-secondary); display: flex; gap: 8px; font-family: var(--font-mono);">
-      <span style="color: {(processContextMenu.proc.cpu_percent || 0) > 10 ? 'var(--color-warning)' : 'var(--color-text-muted)'};">
-        {(processContextMenu.proc.cpu_percent || 0).toFixed(1)}% CPU
-      </span>
-      <span>·</span>
-      <span style="color: var(--color-text-muted);">
-        {(processContextMenu.proc.mem_percent ?? processContextMenu.proc.memory_percent ?? 0).toFixed(1)}% RAM
-      </span>
-    </div>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const proc = processContextMenu.proc!;
-        closeAllContextMenus();
-        uiStore.processSearchQuery = proc.name;
-        uiStore.navigateTo('system-monitor', 'processes');
-      }}
-    >
-      <ArrowUpRight size={14} style="color: var(--color-accent);" />
-      <span>Inspect in System Monitor</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const proc = processContextMenu.proc!;
-        closeAllContextMenus();
-        uiStore.preAppliedJournalPriority = 'all';
-        uiStore.preAppliedJournalSearch = proc.name;
-        uiStore.navigateTo('journal-logs', 'journal');
-        uiStore.addToast(`Jumped to Journal logs for ${proc.name}`, 'info');
-      }}
-    >
-      <FileText size={14} style="color: #38bdf8;" />
-      <span>View Logs in Journal</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const name = processContextMenu.proc!.name;
-        closeAllContextMenus();
-        searchWeb(name + ' linux process');
-      }}
-    >
-      <Globe size={14} style="color: var(--color-text-secondary);" />
-      <span>Search Process on Web</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const pid = processContextMenu.proc!.pid;
-        closeAllContextMenus();
-        copyToClipboard(pid.toString(), `Copied PID ${pid}`);
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy PID ({processContextMenu.proc.pid})</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const proc = processContextMenu.proc!;
-        closeAllContextMenus();
-        copyToClipboard(proc.cmdline || proc.name, `Copied command line`);
-      }}
-    >
-      <Terminal size={14} />
-      <span>Copy Command Line</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const pid = processContextMenu.proc!.pid;
-        closeAllContextMenus();
-        copyToClipboard(`ps -fp ${pid}`, `Copied CLI inspection command`);
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy `ps -fp {processContextMenu.proc.pid}`</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item text-danger"
-      onclick={() => {
-        const proc = processContextMenu.proc!;
-        confirmKillProcess(proc, 15);
-      }}
-    >
-      <Square size={14} />
-      <span>Terminate (SIGTERM)</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item text-danger"
-      onclick={() => {
-        const proc = processContextMenu.proc!;
-        confirmKillProcess(proc, 9);
-      }}
-    >
-      <Flame size={14} />
-      <span>Force Kill (SIGKILL)</span>
-    </button>
-  </div>
-{/if}
-
-<!-- ══ Storage & Disks Context Menu ══ -->
-{#if storageContextMenu.show && storageContextMenu.item}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {storageContextMenu.x}px; top: {storageContextMenu.y}px; z-index: 99999; min-width: 270px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <HardDrive size={14} style="color: #3b82f6; flex-shrink: 0;" />
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title={storageContextMenu.item.title}>
-          {storageContextMenu.item.title}
-        </span>
-      </div>
-      {#if storageContextMenu.item.fs_type}
-        <span class="badge badge-info" style="font-size: 9.5px; padding: 1px 5px; text-transform: uppercase;">
-          {storageContextMenu.item.fs_type}
-        </span>
-      {:else if storageContextMenu.item.is_drive}
-        <span class="badge badge-success" style="font-size: 9px; padding: 1px 4px;">NVMe/SSD</span>
-      {/if}
-    </div>
-
-    <div style="padding: 2px 8px 6px; font-size: 11px; color: var(--color-text-secondary); font-family: var(--font-mono);">
-      {formatStorageBytes(storageContextMenu.item.used_gb)} used of {formatStorageBytes(storageContextMenu.item.total_gb)} ({((storageContextMenu.item.used_gb / storageContextMenu.item.total_gb) * 100).toFixed(1)}%)
-    </div>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const it = storageContextMenu.item!;
-        closeAllContextMenus();
-        openStoragePathModal(it.mount || it.device, it.device, it.used_gb, it.total_gb, it.fs_type || 'btrfs');
-      }}
-    >
-      <Search size={14} style="color: var(--color-accent);" />
-      <span>Inspect Storage Path Breakdown</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        closeAllContextMenus();
-        uiStore.navigateTo('device-manager', 'list');
-      }}
-    >
-      <HardDrive size={14} style="color: #3b82f6;" />
-      <span>Open Device &amp; Disk Manager</span>
-    </button>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        closeAllContextMenus();
-        uiStore.navigateTo('device-manager', 'list');
-        uiStore.addToast('Jumped to Disk Health & Diagnostics', 'info');
-      }}
-    >
-      <Activity size={14} style="color: var(--color-success);" />
-      <span>Check SMART Health &amp; Diagnostics</span>
-    </button>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const it = storageContextMenu.item!;
-        closeAllContextMenus();
-        copyToClipboard(it.device, `Copied device node ${it.device}`);
-      }}
-    >
-      <Copy size={14} />
-      <span>Copy Device Node ({storageContextMenu.item.device})</span>
-    </button>
-
-    {#if storageContextMenu.item.mount}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const it = storageContextMenu.item!;
-          closeAllContextMenus();
-          copyToClipboard(it.mount!, `Copied mount point ${it.mount}`);
-        }}
-      >
-        <Folder size={14} />
-        <span>Copy Mount Point ({storageContextMenu.item.mount})</span>
-      </button>
-    {/if}
-
-    <button
-      type="button"
-      class="context-menu-item"
-      onclick={() => {
-        const it = storageContextMenu.item!;
-        closeAllContextMenus();
-        const cmd = it.mount ? `df -h ${it.mount}` : `lsblk -f ${it.device}`;
-        copyToClipboard(cmd, `Copied command ${cmd}`);
-      }}
-    >
-      <Terminal size={14} />
-      <span>Copy `{storageContextMenu.item.mount ? `df -h ${storageContextMenu.item.mount}` : `lsblk -f ${storageContextMenu.item.device}`}`</span>
-    </button>
-  </div>
-{/if}
-
-<!-- ══ App & Disk Footprint Context Menu ══ -->
-{#if footprintContextMenu.show && footprintContextMenu.item}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    use:portal
-    class="custom-context-menu"
-    style="position: fixed; left: {footprintContextMenu.x}px; top: {footprintContextMenu.y}px; z-index: 99999; min-width: 280px;"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => e.stopPropagation()}
-  >
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; gap: 8px;">
-      <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-        <Layers size={14} style="color: #a855f7; flex-shrink: 0;" />
-        <span style="font-size: 12px; font-weight: 700; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;" title={footprintContextMenu.item.title}>
-          {footprintContextMenu.item.title}
-        </span>
-      </div>
-      <span class="badge badge-info" style="font-size: 10px; padding: 1px 6px; font-family: var(--font-mono); font-weight: 600;">
-        {footprintContextMenu.item.size}
-      </span>
-    </div>
-
-    <div style="height: 1px; background: var(--color-border); margin: 4px 0;"></div>
-
-    {#if footprintContextMenu.item.type === 'flatpak'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('app-manager', 'Flatpak');
-        }}
-      >
-        <Package size={14} style="color: #38bdf8;" />
-        <span>Open Flatpak Apps in App Manager</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('app-manager', 'Duplicates');
-        }}
-      >
-        <Zap size={14} style="color: var(--color-warning);" />
-        <span>Scan for Unused / Duplicate Flatpaks</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard('flatpak list --app --columns=name,size,application', 'Copied flatpak list command');
-        }}
-      >
-        <Terminal size={14} />
-        <span>Copy `flatpak list` Command</span>
-      </button>
-
-    {:else if footprintContextMenu.item.type === 'rpm'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('app-manager', 'RPM');
-        }}
-      >
-        <Package size={14} style="color: #f59e0b;" />
-        <span>Open Native RPM Packages</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('repo-manager');
-        }}
-      >
-        <Database size={14} style="color: var(--color-accent);" />
-        <span>Manage DNF / RPM Repositories</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard('rpm -qa --qf "%{SIZE} %{NAME}\\n" | sort -rn | head -20', 'Copied RPM size query command');
-        }}
-      >
-        <Terminal size={14} />
-        <span>Copy Largest RPMs Query Command</span>
-      </button>
-
-    {:else if footprintContextMenu.item.type === 'logs'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('journal-logs', 'journal');
-        }}
-      >
-        <FileText size={14} style="color: #ec4899;" />
-        <span>Open System Journal Viewer</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const it = footprintContextMenu.item!;
-          closeAllContextMenus();
-          openStoragePathModal(it.path || '/var/log', it.device || '/dev/sda3', it.used_gb || 1.4, it.total_gb || 235.9, it.fs_type || 'btrfs');
-        }}
-      >
-        <Search size={14} style="color: var(--color-accent);" />
-        <span>Inspect `/var/log` Space Breakdown</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard('journalctl --disk-usage', 'Copied journalctl disk usage command');
-        }}
-      >
-        <Terminal size={14} />
-        <span>Copy `journalctl --disk-usage` Command</span>
-      </button>
-
-    {:else if footprintContextMenu.item.type === 'cache'}
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('repo-manager');
-        }}
-      >
-        <Database size={14} style="color: #14b8a6;" />
-        <span>Open Repository Manager</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => confirmCleanDnfCache()}
-      >
-        <RefreshCw size={14} style="color: var(--color-warning);" />
-        <span>Clean DNF Package &amp; Metadata Cache</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const it = footprintContextMenu.item!;
-          closeAllContextMenus();
-          openStoragePathModal(it.path || '/var/cache', it.device || '/dev/sda3', it.used_gb || 2.1, it.total_gb || 235.9, it.fs_type || 'btrfs');
-        }}
-      >
-        <Search size={14} style="color: var(--color-accent);" />
-        <span>Inspect `/var/cache` Space Breakdown</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          copyToClipboard('dnf clean all', 'Copied dnf clean all command');
-        }}
-      >
-        <Terminal size={14} />
-        <span>Copy `dnf clean all` Command</span>
-      </button>
-
-    {:else}
-      <!-- type === 'path' (/home, /usr) -->
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const it = footprintContextMenu.item!;
-          closeAllContextMenus();
-          openStoragePathModal(it.path || '/home', it.device || '/dev/sda3', it.used_gb || 17.3, it.total_gb || 235.9, it.fs_type || 'btrfs');
-        }}
-      >
-        <Search size={14} style="color: var(--color-accent);" />
-        <span>Inspect Storage Path Breakdown</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          closeAllContextMenus();
-          uiStore.navigateTo('device-manager', 'list');
-        }}
-      >
-        <HardDrive size={14} style="color: #3b82f6;" />
-        <span>Open Storage &amp; Device Manager</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const p = footprintContextMenu.item!.path || '/home';
-          closeAllContextMenus();
-          copyToClipboard(p, `Copied directory path ${p}`);
-        }}
-      >
-        <Folder size={14} />
-        <span>Copy Directory Path ({footprintContextMenu.item.path})</span>
-      </button>
-
-      <button
-        type="button"
-        class="context-menu-item"
-        onclick={() => {
-          const p = footprintContextMenu.item!.path || '/home';
-          closeAllContextMenus();
-          copyToClipboard(`du -sh ${p}/* | sort -rh | head -10`, 'Copied du breakdown command');
-        }}
-      >
-        <Terminal size={14} />
-        <span>Copy `du -sh {footprintContextMenu.item.path}/*` Command</span>
-      </button>
-    {/if}
-  </div>
-{/if}
+<!-- Escape closes the topmost modal; the context menus handle their own. -->
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key !== 'Escape') return;
+    if (selectedStorageDetail) selectedStorageDetail = null;
+    else if (showAttentionModal) showAttentionModal = false;
+    else if (showWatchdogModal) showWatchdogModal = false;
+  }}
+/>
 
 <style>
 
@@ -3448,13 +2980,6 @@
     white-space: nowrap;
   }
 
-  .net-tx {
-    font-size: 13.5px;
-    font-weight: normal;
-    color: var(--color-text-secondary);
-    margin-left: 4px;
-  }
-
   .metric-tile-sparkline {
     width: 60px;
     height: 16px;
@@ -3572,8 +3097,7 @@
   }
 
   .services-card-list {
-    flex: 0 0 182px;
-    height: 182px;
+    flex: 0 1 auto;
     min-height: 0;
     max-height: 182px;
     overflow-y: auto;
@@ -3661,7 +3185,7 @@
   }
 
   .status-dot.active {
-    background: #22c55e;
+    background: var(--color-success);
   }
 
   .status-dot.critical {
@@ -3743,7 +3267,7 @@
   }
 
   .all-clear-icon {
-    color: #22c55e;
+    color: var(--color-success);
     flex-shrink: 0;
   }
 
@@ -3840,7 +3364,6 @@
   }
 
   .details-card-container :global(.card-header-row) {
-    cursor: pointer;
     user-select: none;
     border-radius: 6px;
     padding: 4px 6px;
@@ -3848,12 +3371,7 @@
     transition: background 0.15s ease;
   }
 
-  /* Clear "click to expand" affordance — accent tint instead of a flat wash */
-  .details-card-container :global(.card-header-row:hover) {
-    background: var(--color-accent-muted);
-  }
-
-  .details-card-container :global(.card-header-row:hover .card-title-header) {
+  .details-card-container :global(.card-title-header:hover) {
     color: var(--color-accent);
   }
 
@@ -3903,14 +3421,6 @@
     .dashboard-subtitle { overflow-wrap: anywhere; }
     .health-banner { align-items: flex-start; gap: 8px; padding: 8px 10px; }
     .health-banner-link { flex-shrink: 0; }
-  }
-
-  .details-subpanel {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 6px;
-    overflow: hidden;
   }
 
   /* Sub-panel header — a raised band so it reads as a header, not as content */
@@ -4181,10 +3691,6 @@
     border-color: rgba(239, 68, 68, 0.3);
   }
 
-  .row-icon {
-    flex-shrink: 0;
-  }
-
   .mono {
     font-family: var(--font-mono);
   }
@@ -4195,9 +3701,9 @@
 
   /* ── Needs Attention Modal Styles ── */
   .modal-glass-card.modal-attention-card {
-    width: 600px !important;
+    width: 900px !important;
     max-width: calc(100vw - 40px) !important;
-    max-height: 80vh !important;
+    max-height: 88vh !important;
     display: flex !important;
     flex-direction: column !important;
     box-sizing: border-box !important;
@@ -4210,7 +3716,7 @@
     gap: 10px;
     margin-top: 14px;
     overflow-y: auto;
-    max-height: 52vh;
+    max-height: 60vh;
     padding-right: 4px;
   }
 
@@ -4219,17 +3725,19 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+    margin-left: auto;
   }
 
   .attention-modal-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     padding: 10px 14px;
     border-radius: 8px;
     background: var(--color-bg-base);
     border: 1px solid var(--color-border-subtle);
-    gap: 12px;
+    gap: 10px 12px;
   }
 
   .attention-modal-item.critical {
@@ -4264,6 +3772,14 @@
   .attention-item-val {
     font-size: 11.5px;
     color: var(--color-text-secondary);
+  }
+
+  .attention-item-guidance {
+    margin-top: 3px;
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--color-text-secondary);
+    max-width: 52ch;
   }
 
   .modal-header-row {
@@ -4354,12 +3870,12 @@
     text-transform: uppercase;
   }
   .unit-state-tag.active {
-    background: rgba(34, 197, 94, 0.14);
-    color: #22c55e;
+    background: var(--color-success-muted);
+    color: var(--color-success);
   }
   .unit-state-tag.failed {
-    background: rgba(239, 68, 68, 0.14);
-    color: #ef4444;
+    background: var(--color-error-muted);
+    color: var(--color-error);
   }
 
   .pinned-services-scroll-panel {
@@ -4444,8 +3960,8 @@
     background: var(--color-text-muted);
     flex-shrink: 0;
   }
-  .chip-status-dot.active { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.5); }
-  .chip-status-dot.failed { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+  .chip-status-dot.active { background: var(--color-success); box-shadow: 0 0 6px rgba(34, 197, 94, 0.5); }
+  .chip-status-dot.failed { background: var(--color-error); box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
 
   .chip-info {
     display: flex;
@@ -4585,281 +4101,9 @@
     color: var(--color-accent);
   }
   .pin-toggle-btn.pinned {
-    background: rgba(34, 197, 94, 0.12);
-    border-color: #22c55e;
-    color: #22c55e;
-  }
-
-  .watchdog-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 7px 10px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    text-align: left;
-    width: 100%;
-  }
-  .watchdog-left {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-  .status-indicator-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
-  }
-  .status-indicator-dot.active {
-    background: #22c55e;
-    box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
-  }
-  .status-indicator-dot.failed {
-    background: #ef4444;
-    box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
-  }
-
-  .watchdog-text {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .watchdog-name {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-  .watchdog-unit {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-  }
-  .watchdog-state-pill {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--color-text-muted);
-    text-transform: capitalize;
-  }
-  .watchdog-state-pill.active {
-    background: rgba(34, 197, 94, 0.12);
-    color: #22c55e;
-  }
-  .watchdog-state-pill.failed {
-    background: rgba(239, 68, 68, 0.12);
-    color: #ef4444;
-  }
-
-  /* ── 5. System Events & Log Ticker ── */
-  .events-card-container {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .proportion-bar {
-    height: 10px;
-    border-radius: 5px;
-    overflow: hidden;
-    display: flex;
-    width: 100%;
-    gap: 2px;
-  }
-  .prop-segment {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 8px;
-    font-weight: 700;
-    color: white;
-  }
-  .green-seg { background: #22c55e; }
-  .orange-seg { background: #f59e0b; }
-  .red-seg { background: #ef4444; }
-
-  .event-metrics-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .metric-btn {
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--color-border);
-    padding: 6px 8px;
-    border-radius: 8px;
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.15s ease;
-  }
-  .metric-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    transform: translateY(-2px);
-    border-color: rgba(var(--color-accent-rgb, 0, 218, 243), 0.3);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  }
-  :global(html.light-mode) .metric-btn:hover,
-  :global([data-theme="light"]) .metric-btn:hover {
-    background: #f1f5f9;
-    border-color: #cbd5e1;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-  }
-  .metric-num {
-    font-size: 16px;
-    font-weight: 800;
-    font-family: var(--font-mono);
-  }
-  .text-success { color: #22c55e; }
-  .text-warn { color: #f59e0b; }
-  .text-danger { color: #ef4444; }
-  .metric-desc {
-    font-size: 9.5px;
-    color: var(--color-text-muted);
-    font-weight: 500;
-  }
-
-  .log-stream-box {
-    background: rgba(0, 0, 0, 0.15);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 8px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .log-stream-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 10.5px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-  }
-  .view-all-link {
-    background: transparent;
-    border: none;
-    color: var(--color-accent);
-    font-size: 10.5px;
-    font-weight: 600;
-    cursor: pointer;
-    padding: 0;
-  }
-  .view-all-link:hover {
-    text-decoration: underline;
-  }
-
-  .log-stream-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-  }
-  .log-item-line {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    padding: 4px 8px;
-    border-radius: 5px;
-    background: transparent;
-    border: 1px solid transparent;
-    text-align: left;
-    width: 100%;
-  }
-  .log-ts { color: var(--color-text-muted); flex-shrink: 0; }
-  .log-svc { color: #38bdf8; font-weight: 600; flex-shrink: 0; }
-  .log-lvl.err { color: #ef4444; font-weight: 700; flex-shrink: 0; }
-  .log-lvl.warn { color: #f59e0b; font-weight: 700; flex-shrink: 0; }
-  .log-lvl.info { color: #22c55e; flex-shrink: 0; }
-  .log-msg {
-    color: var(--color-text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 1;
-    font-family: var(--font-sans);
-    font-size: 10.5px;
-  }
-
-  /* ── 6. App & Disk Footprint ── */
-  .footprint-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .footprint-row-item {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 10px;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    text-align: left;
-    width: 100%;
-  }
-
-  .footprint-label-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 11.5px;
-  }
-  .row-name-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .row-val-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .footprint-name {
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-  .footprint-val {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    color: var(--color-text-secondary);
-    font-size: 11px;
-  }
-
-  /* ── Card Footer Action ── */
-  .card-footer-action {
-    margin-top: auto;
-    padding-top: 4px;
-    border-top: 1px solid var(--color-border);
-  }
-
-  .footer-jump-link {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    background: transparent;
-    border: none;
-    color: var(--color-accent);
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    padding: 4px 0;
-    transition: opacity 0.12s ease;
-  }
-  .footer-jump-link:hover {
-    opacity: 0.8;
-    text-decoration: underline;
+    background: var(--color-success-muted);
+    border-color: var(--color-success);
+    color: var(--color-success);
   }
 
   /* ── Modal Backdrop ── */
@@ -4911,108 +4155,4 @@
     border-bottom: 1px solid var(--color-border);
   }
 
-  /* ── Light Mode Custom Styling ── */
-  :global(html.light-mode) .dash-card-wrapper,
-  :global(html.light-mode) .kpi-card {
-    background: #FFFFFF !important;
-    border-color: #E2E8F0 !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 6px 16px rgba(0, 0, 0, 0.02) !important;
-  }
-
-  :global(html.light-mode) .action-pill-btn {
-    background: #FFFFFF !important;
-    border-color: #E2E8F0 !important;
-  }
-
-  :global(html.light-mode) .overview-row {
-    background: #F8FAFC !important;
-    border-color: #E2E8F0 !important;
-  }
-  :global(html.light-mode) .overview-row.uptime-row {
-    background: #DCFCE7 !important;
-    border-color: #BBF7D0 !important;
-  }
-
-  :global(html.light-mode) .process-row-item,
-  :global(html.light-mode) .watchdog-item,
-  :global(html.light-mode) .footprint-row-item,
-  :global(html.light-mode) .btrfs-pool-subcard,
-  :global(html.light-mode) .metric-btn,
-  :global(html.light-mode) .quick-chip {
-    background: #F8FAFC !important;
-    border-color: #E2E8F0 !important;
-  }
-
-  :global(html.light-mode) .log-stream-box {
-    background: #F8FAFC !important;
-    border-color: #E2E8F0 !important;
-  }
-
-  :global(html.light-mode) .custom-context-menu {
-    background: #FFFFFF !important;
-    border-color: #E2E8F0 !important;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15) !important;
-  }
-
-  :global(html.light-mode) .context-menu-item:hover:not(:disabled) {
-    background: #F1F5F9 !important;
-  }
-
-  /* Context Menu Styles */
-  .custom-context-menu {
-    background: rgba(15, 23, 42, 0.95);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: 6px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-height: calc(100vh - 24px);
-    overflow-y: auto;
-  }
-
-  .context-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 10px;
-    border-radius: 6px;
-    background: transparent;
-    border: none;
-    color: var(--color-text-primary);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    text-align: left;
-    width: 100%;
-    transition: background 0.15s ease;
-  }
-
-  .context-menu-item:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .context-menu-item:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .context-menu-item.text-danger {
-    color: var(--color-error);
-  }
-
-  .context-menu-item.text-danger:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.12);
-  }
-
-  .protection-badge.critical {
-    background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 4px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
 </style>

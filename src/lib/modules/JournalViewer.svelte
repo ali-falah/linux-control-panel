@@ -497,7 +497,7 @@
    * Manager …) exactly once — they are consumed here so that later state
    * changes never overwrite what the user typed.
    *
-   * Only the three deep-link fields are tracked. Applying them (and the
+   * Only the four deep-link fields are tracked. Applying them (and the
    * fetch that follows) is untracked on purpose: an effect that reads and
    * writes the same state re-triggers itself and Svelte aborts the update
    * with "Maximum update depth exceeded".
@@ -507,6 +507,7 @@
     const prio = uiStore.preAppliedJournalPriority;
     const search = uiStore.preAppliedJournalSearch;
     const unit = uiStore.preAppliedJournalUnit;
+    const boot = uiStore.preAppliedJournalBoot;
 
     untrack(() => {
       let applied = false;
@@ -523,11 +524,16 @@
         currentUnitFilter = unit;
         applied = true;
       }
+      if (boot) {
+        journalCurrentBoot = true;
+        applied = true;
+      }
 
       // consume the deep link so it is not applied again on the next visit
       uiStore.preAppliedJournalPriority = 'all';
       uiStore.preAppliedJournalSearch = '';
       uiStore.preAppliedJournalUnit = '';
+      uiStore.preAppliedJournalBoot = false;
 
       // remember the applied context — the page header shows it as a
       // breadcrumb, but the pre-applied fields are already cleared here

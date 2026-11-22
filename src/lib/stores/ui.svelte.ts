@@ -223,6 +223,8 @@ class UIStore {
   preAppliedJournalPriority = $state<string>('all');
   preAppliedJournalSearch = $state<string>('');
   preAppliedJournalUnit = $state<string>('');
+  /** Restrict the journal to the current boot when a deep link asks for it */
+  preAppliedJournalBoot = $state(false);
   /**
    * Deep-link context that is currently applied to the Journal view.
    *
