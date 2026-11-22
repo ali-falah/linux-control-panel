@@ -352,11 +352,59 @@
     return `${u.package}.${u.arch}`;
   }
 
-  /** Last 40 lines of upgradeOutput — what is shown in the non-scrollable terminal */
+  /** Last 40 lines of upgradeOutput — what the AI conflict explainer reads. */
   let terminalLines = $derived(() => {
     const lines = dnfStore.upgradeOutput.split('\n');
     return lines.slice(Math.max(0, lines.length - 40)).join('\n');
   });
+
+  let upgradeTerminalRef = $state<HTMLDivElement | null>(null);
+  let upgradeTerminalPinned = $state(true);
+  let copiedUpgradeLog = $state(false);
+  let showFailedOnly = $state(false);
+
+  /** What the finished-upgrade log shows: the whole output or only failures. */
+  let upgradeLogText = $derived(
+    showFailedOnly && (dnfStore.upgradeSummary?.errors.length ?? 0) > 0
+      ? (dnfStore.upgradeSummary?.errors ?? []).join('\n')
+      : dnfStore.upgradeOutput
+  );
+  let upgradeLogLineCount = $derived(
+    upgradeLogText.length === 0 ? 0 : upgradeLogText.split('\n').length
+  );
+
+  // Keep the live tail at the newest line unless the user scrolled up to read
+  // earlier output.
+  $effect(() => {
+    void dnfStore.upgradeOutput;
+    if (!dnfStore.isUpgrading || !upgradeTerminalPinned) return;
+    tick().then(() => {
+      const element = upgradeTerminalRef;
+      if (element) element.scrollTop = element.scrollHeight;
+    });
+  });
+
+  function handleUpgradeTerminalScroll() {
+    const element = upgradeTerminalRef;
+    if (!element) return;
+    upgradeTerminalPinned =
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
+  }
+
+  function jumpUpgradeTerminalToLatest() {
+    upgradeTerminalPinned = true;
+    if (upgradeTerminalRef) {
+      upgradeTerminalRef.scrollTop = upgradeTerminalRef.scrollHeight;
+    }
+  }
+
+  function copyUpgradeLog() {
+    navigator.clipboard.writeText(upgradeLogText).then(() => {
+      copiedUpgradeLog = true;
+      uiStore.addToast('Upgrade log copied', 'info', 2000);
+      setTimeout(() => (copiedUpgradeLog = false), 2000);
+    });
+  }
 
   let selectAllUpdates = $derived(
     updates.length > 0 && selectedUpdates.size === updates.length
@@ -374,7 +422,6 @@
   let repoFilter = $state('all');
   let archFilter = $state('all');
   let securityOnly = $state(false);
-  let showFailedOnly = $state(false);
 
   /** The repositories that offer updates, with the number of packages each. */
   let repoCounts = $derived.by(() => {
@@ -897,6 +944,15 @@
     if (dnfStore.upgradeFinished) refreshUpdates();
   });
 
+  // A new transaction starts a fresh view: do not carry the previous run's
+  // failures-only filter or scroll state into it.
+  $effect(() => {
+    if (dnfStore.isUpgrading) {
+      showFailedOnly = false;
+      upgradeTerminalPinned = true;
+    }
+  });
+
   $effect(() => {
     if (activeTab === 'maintenance') checkLockStatus();
   });
@@ -1173,24 +1229,62 @@
             </div>
           {/if}
 
-          <!-- Non-scrollable terminal: always shows last 40 lines -->
-          <div class="upgrade-terminal">
-            {#if showFailedOnly && (dnfStore.upgradeSummary?.errors.length ?? 0) > 0}
-              {#each dnfStore.upgradeSummary?.errors ?? [] as line}
-                <div class="error-line">{line}</div>
-              {/each}
-            {:else}
-              {terminalLines()}
-            {/if}
-          </div>
-
-          <!-- Post-upgrade: full scrollable log -->
-          {#if dnfStore.upgradeFinished}
-            <div style="display:flex; flex-direction:column; flex:1; min-height:0; border:1px solid var(--color-border); border-radius:8px; overflow:hidden;">
-              <div style="padding:8px 14px; background:rgba(0,0,0,0.2); border-bottom:1px solid var(--color-border); font-size:11px; font-weight:600; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:0.05em;">
-                Full Upgrade Log
+          <!-- Live output while dnf runs. Once finished, the full log below
+               replaces it so the same output is never shown twice. -->
+          {#if dnfStore.isUpgrading}
+            <div class="upgrade-terminal-wrap">
+              <div class="upgrade-terminal-head">
+                <span>Live output</span>
+                <span class="upgrade-terminal-hint">Full output · follows the newest line</span>
               </div>
-              <CodeEditor value={dnfStore.upgradeOutput} readonly={true} height="100%" />
+              <div
+                class="upgrade-terminal"
+                bind:this={upgradeTerminalRef}
+                onscroll={handleUpgradeTerminalScroll}
+              >
+                {dnfStore.upgradeOutput}
+              </div>
+              {#if !upgradeTerminalPinned}
+                <button
+                  type="button"
+                  class="upgrade-terminal-jump"
+                  onclick={jumpUpgradeTerminalToLatest}
+                  title="Scroll to the newest output"
+                >
+                  <ChevronDown size={13} />
+                  <span>Jump to latest</span>
+                </button>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- Post-upgrade: the full, scrollable log is the only output view. -->
+          {#if dnfStore.upgradeFinished}
+            <div class="upgrade-log-surface">
+              <div class="upgrade-log-toolbar">
+                <div class="upgrade-log-heading">
+                  <span class="upgrade-log-title">Full Upgrade Log</span>
+                  <span class="upgrade-log-count">
+                    {upgradeLogLineCount.toLocaleString()} line{upgradeLogLineCount === 1 ? '' : 's'}
+                    {#if showFailedOnly && (dnfStore.upgradeSummary?.errors.length ?? 0) > 0}
+                      · failed only
+                    {/if}
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onclick={copyUpgradeLog}
+                  disabled={upgradeLogLineCount === 0}
+                  title="Copy the full log to the clipboard"
+                >
+                  <Copy size={12} />
+                  <span>{copiedUpgradeLog ? 'Copied' : 'Copy log'}</span>
+                </Button>
+              </div>
+              <div class="dnf-log-raw">
+                <CodeEditor value={upgradeLogText} readonly={true} height="100%" />
+              </div>
             </div>
           {/if}
         </div>
@@ -1935,13 +2029,6 @@
     border-color: var(--color-accent);
   }
 
-  .error-line {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--color-error);
-    white-space: pre-wrap;
-  }
-
   /* ── Pagination Bar ─────────────────────────────────────────────────── */
   .pagination-bar {
     display: flex;
@@ -1982,23 +2069,128 @@
     flex-shrink: 0;
   }
 
-  /* ── Non-scrollable upgrade terminal ─────────────────────────────────── */
-  .upgrade-terminal {
+  /* ── Upgrade output: live terminal, then the full log ────────────────── */
+  .upgrade-terminal-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 200px;
+    border: 1px solid rgba(0, 255, 136, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
     background: #0d0f14;
+    box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .upgrade-terminal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: rgba(0, 255, 136, 0.75);
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(0, 255, 136, 0.12);
+  }
+
+  .upgrade-terminal-hint {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    color: rgba(255, 255, 255, 0.45);
+  }
+
+  .upgrade-terminal {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    background: transparent;
     color: #00ff88;
     font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.55;
-    padding: 14px 16px;
-    border-radius: 8px;
-    overflow: hidden;         /* NON-SCROLLABLE: intentional */
+    padding: 12px 16px;
     white-space: pre-wrap;
     word-break: break-all;
-    min-height: 220px;
-    max-height: 340px;
-    border: 1px solid rgba(0, 255, 136, 0.1);
-    box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .upgrade-terminal-jump {
+    position: absolute;
+    right: 14px;
+    bottom: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid rgba(0, 255, 136, 0.25);
+    border-radius: 999px;
+    background: #141a22;
+    color: #00ff88;
+    font-family: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+  }
+
+  .upgrade-terminal-jump:hover {
+    border-color: #00ff88;
+  }
+
+  .upgrade-log-surface {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 200px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    overflow: hidden;
+  }
+
+  .upgrade-log-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     flex-shrink: 0;
+    padding: 8px 12px 8px 14px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+  }
+
+  .upgrade-log-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .upgrade-log-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .upgrade-log-count {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  :global(html.light-mode) .upgrade-log-surface {
+    background: #FFFFFF;
+    border-color: #E2E8F0;
   }
 
   /* ── Hang warning banner ─────────────────────────────────────────────── */

@@ -10,12 +10,13 @@
   import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { RefreshCw, Plus, Database, Settings, Activity, ShieldAlert, AlertTriangle, CheckCircle2, Trash2, Zap, FileX } from '@lucide/svelte';
+  import { RefreshCw, Plus, Database, Settings, Activity, ShieldAlert, AlertTriangle, CheckCircle2, Trash2, Zap, FileX, Power } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import KebabMenu from '../components/KebabMenu.svelte';
+  import ContextMenu, { type ContextMenuItem } from '../components/ui/ContextMenu.svelte';
   import Skeleton from '../components/Skeleton.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import CoprBrowser from './CoprBrowser.svelte';
@@ -79,6 +80,51 @@
   let addUrl = $state('');
   let addLoading = $state(false);
   let togglingId = $state<string | null>(null);
+
+  // Right-click menu for a repository row: the same actions as the Actions column.
+  let repoMenu = $state<{ open: boolean; x: number; y: number; repo: RepoEntry | null }>({
+    open: false,
+    x: 0,
+    y: 0,
+    repo: null,
+  });
+
+  function openRepoContextMenu(event: MouseEvent, repo: RepoEntry) {
+    event.preventDefault();
+    repoMenu = { open: true, x: event.clientX, y: event.clientY, repo };
+  }
+
+  const repoContextItems = $derived.by((): ContextMenuItem[] => {
+    const repo = repoMenu.repo;
+    if (!repo) return [];
+    return [
+      { label: 'Edit Configuration', icon: Settings, action: () => openEditDrawer(repo) },
+      { label: 'Clean Expired Cache', icon: RefreshCw, action: () => cleanCacheForRepo(repo.id) },
+      {
+        label: 'Test Mirror Speeds',
+        icon: Activity,
+        action: () => {
+          openEditDrawer(repo);
+          testSpeeds();
+        },
+      },
+      { label: '', divider: true },
+      {
+        label: repo.enabled ? 'Disable Repository' : 'Enable Repository',
+        icon: Power,
+        disabled: togglingId === repo.id,
+        action: () => toggleRepo(repo),
+      },
+      { label: '', divider: true },
+      {
+        label: 'Delete Repository',
+        icon: Trash2,
+        danger: true,
+        disabled: repo.system_owned,
+        action: () => confirmDeleteRepo(repo),
+      },
+    ];
+  });
 
   // Diagnostics State
   let validating = $state(false);
@@ -769,7 +815,7 @@
           {#each visibleRepos as repo (repo.id)}
             {@const diag = getDiagnosticForRepo(repo.id, repo.file_path)}
             {@const source = repoSource(repo)}
-            <tr>
+            <tr oncontextmenu={(event) => openRepoContextMenu(event, repo)}>
               <td>
                 <div class="repo-name" class:off={!repo.enabled} title={repo.name}>
                   <span class="repo-name-text">{repo.name}</span>
@@ -865,6 +911,18 @@
   </div>
 {/if}
 </div>
+
+<!-- Right-click menu for a repository row: same actions as the Actions column. -->
+<ContextMenu
+  bind:isOpen={repoMenu.open}
+  x={repoMenu.x}
+  y={repoMenu.y}
+  icon={Database}
+  title={repoMenu.repo?.name ?? 'Repository'}
+  subtitle={repoMenu.repo?.id ?? ''}
+  badge={repoMenu.repo?.system_owned ? { text: 'System', variant: 'info' } : undefined}
+  items={repoContextItems}
+/>
 
 <svelte:window onkeydown={(e) => { 
   if (e.key === 'Escape') {

@@ -39,6 +39,11 @@ function svelteStyleFallback() {
 
   return {
     name: "svelte-style-fallback",
+    // Development only. The fallback compiles styles with the dev scope hash
+    // (`s-<filename hash>`); a production build must keep the styles the
+    // Svelte plugin compiles with its production scope hash (`svelte-<hash>`),
+    // otherwise every component style ships under a class the DOM never gets.
+    apply: "serve" as const,
     enforce: "pre" as const,
     configResolved(config: { root: string }) {
       root = config.root;

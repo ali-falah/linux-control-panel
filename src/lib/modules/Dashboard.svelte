@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { 
     LayoutDashboard, HardDrive, Wifi, Server, Activity, RefreshCw, Shield, 
@@ -1152,6 +1152,24 @@
 
     // ── REDESIGNED DASHBOARD DERIVED STATES ──
   let detailsCollapsed = $state(true);
+  let detailsSectionRef = $state<HTMLDivElement | null>(null);
+  let storageSpotlight = $state(false);
+
+  /**
+   * The Disk tile measures space usage, so it drills into the storage
+   * breakdown on this page — all mounts with their capacity bars — instead of
+   * leaving the user on a hardware inventory where nothing is expanded.
+   */
+  function openStorageOverview() {
+    detailsCollapsed = false;
+    storageSpotlight = true;
+    // The details card may still be hidden by the attention modal that is
+    // closing at the same time, so scroll once that has settled.
+    setTimeout(() => {
+      detailsSectionRef?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 160);
+    setTimeout(() => (storageSpotlight = false), 1900);
+  }
 
   // Header subtitle uses values from the live system response.
   let headerSubtitle = $derived.by(() => {
@@ -1341,7 +1359,7 @@
           checkedAt: formatCheckedAt(lastSlowCheck),
           // the kernel reports this as "No space left on device"
           logFilter: { search: 'no space' },
-          action: () => uiStore.navigateTo('device-manager')
+          action: () => openStorageOverview()
         });
       }
     }
@@ -1530,8 +1548,8 @@
       <button
         type="button"
         class="metric-tile"
-        onclick={() => uiStore.navigateTo('device-manager')}
-        title="Open Device Manager (Disks)"
+        onclick={openStorageOverview}
+        title="Show the storage breakdown for all mounted filesystems"
       >
         <div class="metric-tile-header">
           <span class="metric-tile-label">Disk<ArrowUpRight size={12} class="metric-tile-arrow" /></span>
@@ -1861,7 +1879,11 @@
     </div>
 
     <!-- 6. Collapsed "Details" section (collapsed by default) -->
-    <div class="details-card-container">
+    <div
+      class="details-card-container"
+      class:spotlight={storageSpotlight}
+      bind:this={detailsSectionRef}
+    >
       <Card collapsible={true} bind:collapsed={detailsCollapsed} title="Storage Breakdown & Footprint" class="details-card">
       <div class="details-grid">
         <!-- Sub-panel 1: Storage Breakdown -->
@@ -3799,6 +3821,22 @@
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
+    scroll-margin-top: 12px;
+    border-radius: var(--radius, 10px);
+  }
+
+  /* Brief outline after the Disk tile jumps here, so the eye lands on it. */
+  .details-card-container.spotlight {
+    animation: storage-spotlight 1.8s ease-out;
+  }
+
+  @keyframes storage-spotlight {
+    0% {
+      box-shadow: 0 0 0 2px var(--color-accent);
+    }
+    100% {
+      box-shadow: 0 0 0 2px transparent;
+    }
   }
 
   .details-card-container :global(.card-header-row) {

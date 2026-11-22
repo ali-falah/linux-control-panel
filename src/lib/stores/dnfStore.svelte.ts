@@ -225,6 +225,8 @@ class DnfStore {
     this.upgradeFinished = false;
     this.upgradeSuccess = false;
     this.upgradeNoChanges = false;
+    // Never show the previous transaction's counters while the next one runs.
+    this.upgradeSummary = null;
     this.upgradeOutput = `Starting DNF upgrade for ${packages.length} package(s)…\n`;
     this.pendingCr = false;
     this.hangWarning = false;
