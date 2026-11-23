@@ -188,23 +188,25 @@
   <div class="status-left">
     {#if statusStore.busy}
       <div class="status-indicator">
-        <Loader size={12} class="spin-icon" />
+        <span class="status-chip busy" aria-hidden="true"><Loader size={11} class="spin-icon" /></span>
         <span class="cmd-text busy" title={statusStore.busyLabel}>{statusStore.busyLabel}</span>
       </div>
     {:else if statusStore.lastEntry}
       <div class="status-indicator">
-        {#if statusStore.lastEntry.success}
-          <CheckCircle2 size={12} class="icon-ok" />
-        {:else}
-          <XCircle size={12} class="icon-fail" />
-        {/if}
+        <span class="status-chip" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success} aria-hidden="true">
+          {#if statusStore.lastEntry.success}
+            <CheckCircle2 size={11} class="icon-ok" />
+          {:else}
+            <XCircle size={11} class="icon-fail" />
+          {/if}
+        </span>
         <span class="cmd-text" class:ok={statusStore.lastEntry.success} class:fail={!statusStore.lastEntry.success} title={statusStore.lastEntry.command}>
           {statusStore.lastEntry.command}
         </span>
       </div>
     {:else}
       <div class="status-indicator">
-        <Terminal size={12} class="icon-idle" />
+        <span class="status-chip idle" aria-hidden="true"><Terminal size={11} class="icon-idle" /></span>
         <span class="cmd-text idle">Ready</span>
       </div>
     {/if}
@@ -288,15 +290,15 @@
     font-weight: 600;
     font-family: var(--font-mono);
     color: var(--color-text-secondary);
-    background: var(--color-bg-base);
-    border: 1px solid var(--color-border);
+    background: var(--color-bg-raised);
+    border: 1px solid transparent;
     cursor: pointer;
     white-space: nowrap;
-    transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+    transition: color 0.18s ease, background 0.18s ease;
   }
   .admin-toggle:hover {
     color: var(--color-text-primary);
-    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
   }
   .admin-toggle:disabled {
     cursor: progress;
@@ -304,13 +306,11 @@
   }
   .admin-toggle.on {
     color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 12%, transparent);
-    border-color: color-mix(in srgb, var(--color-success) 38%, transparent);
+    background: color-mix(in srgb, var(--color-success) 14%, transparent);
   }
   .admin-toggle.expired {
     color: var(--color-warning);
-    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
-    border-color: color-mix(in srgb, var(--color-warning) 38%, transparent);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
   }
   .admin-track {
     position: relative;
@@ -379,7 +379,7 @@
     height: 32px;
     padding: 0 16px;
     background: var(--color-sidebar-bg);
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--color-sidebar-border);
     font-size: 11.5px;
     font-family: var(--font-mono);
     flex-shrink: 0;
@@ -401,11 +401,11 @@
     flex-shrink: 0;
   }.global-search-trigger {
     width: 100%;
-    height: 20px;
-    padding: 0 7px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--color-border);
-    border-radius: 5px;
+    height: 22px;
+    padding: 0 5px 0 9px;
+    background: var(--color-bg-raised);
+    border: 1px solid transparent;
+    border-radius: 999px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -416,8 +416,7 @@
     font-family: var(--font-sans);
     transition: all 0.15s ease;
   }.global-search-trigger:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: var(--color-accent);
+    background: var(--color-accent-muted);
     color: var(--color-text-primary);
   }:global(.search-trigger-icon) {
     color: var(--color-accent);
@@ -430,26 +429,14 @@
     text-overflow: ellipsis;
     font-weight: 450;
   }.search-trigger-kbd {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    padding: 0 4px;
+    background: var(--color-bg-card);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 0 6px;
     font-size: 9.5px;
     font-family: var(--font-mono);
-    color: var(--color-text-secondary);
-    line-height: 14px;
-  }:global(html.light-mode) .global-search-trigger {
-    background: #F1F5F9 !important;
-    border-color: #CBD5E1 !important;
-    color: #64748B !important;
-  }:global(html.light-mode) .global-search-trigger:hover {
-    background: #E2E8F0 !important;
-    border-color: var(--color-accent) !important;
-    color: #0F172A !important;
-  }:global(html.light-mode) .search-trigger-kbd {
-    background: #E2E8F0 !important;
-    border-color: #CBD5E1 !important;
-    color: #475569 !important;
+    color: var(--color-text-muted);
+    line-height: 15px;
   }.status-right {
     display: flex;
     align-items: center;
@@ -460,9 +447,27 @@
   }.status-indicator {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     min-width: 0;
-  }.cmd-text {
+  }
+  .status-chip {
+    --chip: var(--color-accent);
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--chip);
+    background: linear-gradient(145deg,
+      color-mix(in srgb, var(--chip) 20%, transparent),
+      color-mix(in srgb, var(--chip) 5%, transparent));
+    box-shadow: 0 2px 8px -5px color-mix(in srgb, var(--chip) 55%, transparent);
+  }
+  .status-chip.ok { --chip: var(--color-success); }
+  .status-chip.fail { --chip: var(--color-error); }
+  .status-chip.idle { --chip: var(--color-text-muted); }.cmd-text {
     color: var(--color-text-primary);
     font-weight: 500;
     max-width: 500px;
@@ -483,31 +488,17 @@
     border: 1px solid transparent;
     font-family: var(--font-mono);
     transition: all 0.18s ease;
-  }.pill-ok { background: rgba(34, 197, 94, 0.12); color: #166534; border-color: rgba(34, 197, 94, 0.25); cursor: default; }.pill-fail { background: rgba(239, 68, 68, 0.12); color: #991B1B; border-color: rgba(239, 68, 68, 0.25); cursor: default; }.ts-pill {
-    padding: 3px 9px;
-    border-radius: 6px;
-    background: var(--color-bg-base);
+  }.pill-ok { background: color-mix(in srgb, var(--color-success) 14%, transparent); color: var(--color-success); cursor: default; }.pill-fail { background: color-mix(in srgb, var(--color-error) 14%, transparent); color: var(--color-error); cursor: default; }.ts-pill {
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
     color: var(--color-text-secondary);
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 500;
     white-space: nowrap;
-    border: 1px solid var(--color-border);
-  }.ts-pill.muted { color: var(--color-text-muted); }/* ── Light Mode High Contrast Status Bar Overrides ── */ :global(html.light-mode .status-bar) {
-    background: #FFFFFF !important;
-    border-top: 1px solid #E5E7EB !important;
-    color: #111827 !important;
-  }:global(html.light-mode .cmd-text) {
-    color: #0F172A !important;
-    font-weight: 500 !important;
-  }:global(html.light-mode .pill-ok) {
-    background: rgba(34, 197, 94, 0.1) !important;
-    color: #166534 !important;
-    border: 1px solid rgba(34, 197, 94, 0.25) !important;
-  }:global(html.light-mode .pill-fail) {
-    background: rgba(239, 68, 68, 0.1) !important;
-    color: #991B1B !important;
-    border: 1px solid rgba(239, 68, 68, 0.25) !important;
-  }/* ── IP pill ──────────────────────────────────────────────────────────── *//* ── Popover ──────────────────────────────────────────────────────────── *//* ── Spin/icon helpers ─────────────────────────────────────────────── */ :global(.spin-icon) {
+    border: 1px solid transparent;
+  }.ts-pill.muted { color: var(--color-text-muted); }/* Light-mode search trigger used hardcoded slate values; the token
+     surfaces above already flip with the theme. *//* ── IP pill ──────────────────────────────────────────────────────────── *//* ── Popover ──────────────────────────────────────────────────────────── *//* ── Spin/icon helpers ─────────────────────────────────────────────── */ :global(.spin-icon) {
     animation: spin 1s linear infinite;
     color: var(--color-info);
     flex-shrink: 0;
