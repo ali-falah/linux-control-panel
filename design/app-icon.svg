@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#fbfdff"/><stop offset=".55" stop-color="#eef7ff"/><stop offset="1" stop-color="#d8e9f8"/>
+  </linearGradient>
+  <linearGradient id="navy" x1="0" y1="0" x2=".7" y2="1">
+    <stop offset="0" stop-color="#123a5a"/><stop offset=".55" stop-color="#0a2238"/><stop offset="1" stop-color="#061422"/>
+  </linearGradient>
+  <linearGradient id="ice" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d8f2fc"/>
+  </linearGradient>
+  <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#007f99"/>
+  </linearGradient>
+  <linearGradient id="aqua" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#7ff4ff"/><stop offset="1" stop-color="#00b8d9"/>
+  </linearGradient>
+  <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#4f8dff"/><stop offset="1" stop-color="#1d4ed8"/>
+  </linearGradient>
+  <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#6d28d9"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="50%" cy="36%" r="62%">
+    <stop offset="0" stop-color="#ffffff" stop-opacity=".95"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="blueHaze" cx="50%" cy="38%" r="58%">
+    <stop offset="0" stop-color="#8edcff" stop-opacity=".32"/><stop offset="1" stop-color="#8edcff" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#ffffff"/><stop offset=".55" stop-color="#c7e4f6"/><stop offset="1" stop-color="#a9cfe6"/>
+  </linearGradient>
+  <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#34648a" flood-opacity=".22"/>
+  </filter>
+  <filter id="deep" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#204a6c" flood-opacity=".30"/>
+  </filter>
+  <clipPath id="clip"><rect x="26" y="26" width="972" height="972" rx="214"/></clipPath>
+</defs>
+<g clip-path="url(#clip)">
+<rect x="26" y="26" width="972" height="972" rx="214" fill="url(#bg)"/>
+<rect x="30" y="30" width="964" height="964" rx="210" fill="none" stroke="url(#rim)" stroke-width="3"/>
+
+<ellipse cx="512" cy="420" rx="410" ry="390" fill="url(#blueHaze)"/>
+<ellipse cx="512" cy="840" rx="210" ry="28" fill="#6fa5c8" opacity=".20"/>
+<g filter="url(#shadow)">
+  <ellipse cx="318" cy="606" rx="50" ry="154" transform="rotate(16 318 606)" fill="url(#navy)" stroke="#2f6d89" stroke-width="4"/>
+  <ellipse cx="706" cy="606" rx="50" ry="154" transform="rotate(-16 706 606)" fill="url(#navy)" stroke="#2f6d89" stroke-width="4"/>
+  <ellipse cx="512" cy="562" rx="190" ry="244" fill="url(#navy)" stroke="#2f6d89" stroke-width="4"/>
+  <circle cx="512" cy="315" r="132" fill="url(#navy)" stroke="#2f6d89" stroke-width="4"/>
+  <ellipse cx="512" cy="574" rx="132" ry="171" fill="url(#ice)" stroke="#a9d9ea" stroke-width="5"/>
+  <ellipse cx="438" cy="830" rx="60" ry="27" fill="#f6a21a"/>
+  <ellipse cx="586" cy="830" rx="60" ry="27" fill="#f6a21a"/>
+</g>
+<!-- compact white eye patches keep the face legible on a pale tile -->
+<ellipse cx="474" cy="306" rx="29" ry="34" fill="#ffffff" opacity=".97"/>
+<ellipse cx="550" cy="306" rx="29" ry="34" fill="#ffffff" opacity=".97"/>
+<circle cx="474" cy="310" r="11" fill="#061422"/>
+<circle cx="550" cy="310" r="11" fill="#061422"/>
+<circle cx="478" cy="306" r="3.6" fill="#ffffff" opacity=".85"/>
+<circle cx="554" cy="306" r="3.6" fill="#ffffff" opacity=".85"/>
+<path d="M 486 352 L 538 352 L 512 388 Z" fill="#f6a21a"/>
+<!-- power control -->
+<path d="M 450 516 A 68 68 0 1 1 574 516" fill="none" stroke="#00677d" stroke-width="44" stroke-linecap="round"/>
+<path d="M 450 516 A 68 68 0 1 1 574 516" fill="none" stroke="#22d3ee" stroke-width="20" stroke-linecap="round"/>
+<rect x="501" y="464" width="22" height="98" rx="11" fill="#007f99"/>
+<rect x="505" y="468" width="8" height="82" rx="4" fill="#8bf9ff" opacity=".55"/>
+<circle cx="512" cy="676" r="11" fill="#00b8d9"/>
+
+</g>
+</svg>
