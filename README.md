@@ -47,7 +47,7 @@
 | 🔐 **SSH & SSL Vault** | SSH key generation (Ed25519/RSA/ECDSA, optional passphrase via pty), `~/.ssh/config` host profiles with safe block editing, known_hosts inspection, authorized key management, live `sshd -T` hardening audit, local TLS certificate inventory with expiry tracking, remote TLS inspector, and fail2ban jail/ban controls. |
 | 🌐 **Nginx Manager** | Nginx virtual host scanner & server block inspector (domains, ports, SSL, document roots), integrated CodeMirror configuration editor, syntax testing (`nginx -t`), live reload (`nginx -s reload`), `access.log` & `error.log` live tail viewers, and Certbot SSL helper. |
 | 🌐 **Advanced Network** | NetworkManager adapter and profile inspector with IPv4/IPv6 addressing, MAC/MTU details, subnet calculator and gateway checks, DNS validation and presets, Ethernet/Wi-Fi/bridge profile creation with autoconnect and root-only keyfile secrets, VPN import/create for OpenVPN and WireGuard, and a Cloudflare-backed latency/speed test. |
-| 🔥 **Firewall Manager** | Firewalld zone manager (`public`, `work`, `home`, `internal`, `trusted`), TCP/UDP port rule management, service toggles (`http`, `https`, `ssh`, `dns`, `ftp`, `wireguard`), Rich Rules editor, Interface-to-Zone mapping, and **Panic Mode Emergency Toggle** (instantly block all network traffic). |
+| 🔥 **Firewall Manager** | Firewalld zone manager across all detected zones, service and TCP/UDP port rules, Rich Rules builder, interface-to-zone bindings with move-to-default, UFW basic-rule mode, listener checks, SSH lockout confirmations, and **Panic Mode Emergency Toggle**. |
 
 ### 📦 Package & Application Management
 | Module | Description & Capabilities |

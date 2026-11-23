@@ -1297,18 +1297,12 @@ fn firewall_panic_action(enable: bool, confirmed: bool) -> Result<(), String> {
         }
     }
 
+    // Panic mode is a runtime-only switch. `firewall-cmd` rejects combining
+    // --panic-on/--panic-off with --permanent, and there is no persistent
+    // panic state to write, so a second "permanent" phase would turn a
+    // successful toggle into a false failure.
     let arg = if enable { "--panic-on" } else { "--panic-off" };
-    run_firewall_program(FIREWALL_CMD_BIN, &[arg], "firewall-cmd")?;
-    if let Err(permanent_error) =
-        run_firewall_program(FIREWALL_CMD_BIN, &[arg, "--permanent"], "firewall-cmd")
-    {
-        let state = if enable { "enabled" } else { "disabled" };
-        return Err(format!(
-            "{permanent_error}; panic mode was {state} at runtime, but the persistent \
-             configuration was not"
-        ));
-    }
-    Ok(())
+    run_firewall_program(FIREWALL_CMD_BIN, &[arg], "firewall-cmd")
 }
 
 /// Run one package-manager operation. Non-zero exits are always errors: the

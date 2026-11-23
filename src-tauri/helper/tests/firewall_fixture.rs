@@ -823,7 +823,7 @@ fn guard_rich_rule_reject_for_ssh_with_explicit_confirmation_proceeds() {
     assert_eq!(
         calls().len(),
         2,
-        "runtime then permanent ran after confirmation"
+        "the rich rule runs runtime then permanent after confirmation"
     );
 }
 
@@ -941,7 +941,7 @@ fn guard_stray_trailing_argument_is_refused_not_treated_as_confirmation() {
 // ── firewall_panic (GROUP 3) ─────────────────────────────────────────────────
 
 #[test]
-fn panic_firewalld_enable_runs_runtime_then_permanent() {
+fn panic_firewalld_enable_uses_runtime_only() {
     let _guard = fixture(true);
 
     let run = run_helper(&["firewall_panic", "enable"]);
@@ -949,30 +949,24 @@ fn panic_firewalld_enable_runs_runtime_then_permanent() {
     assert!(run.stderr.is_empty(), "success prints nothing: {run:?}");
     assert_eq!(
         calls(),
-        vec![
-            "--panic-on",
-            "--panic-on --permanent",
-        ],
-        "runtime first, then permanent; no zone argument: {:?}", calls());
+        vec!["--panic-on"],
+        "panic is runtime-only; no permanent phase and no zone argument: {:?}", calls());
 }
 
 #[test]
-fn panic_firewalld_disable_runs_runtime_then_permanent() {
+fn panic_firewalld_disable_uses_runtime_only() {
     let _guard = fixture(true);
 
     let run = run_helper(&["firewall_panic", "disable"]);
     assert_eq!(run.code, 0, "disable must succeed: {run:?}");
     assert_eq!(
         calls(),
-        vec![
-            "--panic-off",
-            "--panic-off --permanent",
-        ],
-        "disabling uses --panic-off in both phases: {:?}", calls());
+        vec!["--panic-off"],
+        "disabling uses only --panic-off: {:?}", calls());
 }
 
 #[test]
-fn panic_runtime_failure_stops_before_permanent() {
+fn panic_runtime_failure_is_reported() {
     let _guard = fixture(true);
     set_ctl("fail-runtime");
 
@@ -985,32 +979,19 @@ fn panic_runtime_failure_stops_before_permanent() {
     assert_eq!(
         calls(),
         vec!["--panic-on"],
-        "the permanent step must never run after a runtime failure: {:?}", calls());
+        "panic mode has exactly one runtime command: {:?}", calls());
 }
 
 #[test]
-fn panic_permanent_failure_reports_the_partial_state_and_no_rollback() {
+fn panic_never_combines_the_switch_with_permanent() {
     let _guard = fixture(true);
-    set_ctl("fail-permanent");
 
     let run = run_helper(&["firewall_panic", "enable"]);
-    assert_ne!(run.code, 0, "a permanent failure must fail the action: {run:?}");
-    assert!(
-        run.stderr.contains("BY-STUB: injected permanent failure"),
-        "the permanent step's stderr must be preserved: {run:?}"
-    );
-    assert!(
-        run.stderr.contains("enabled at runtime, but the persistent configuration was not"),
-        "the partial state must be explicit: {run:?}"
-    );
-    assert!(
-        !run.stderr.to_lowercase().contains("rollback"),
-        "no rollback may be promised: {run:?}"
-    );
+    assert_eq!(run.code, 0, "enable must succeed: {run:?}");
     assert_eq!(
         calls(),
-        vec!["--panic-on", "--panic-on --permanent"],
-        "both steps were attempted: {:?}", calls());
+        vec!["--panic-on"],
+        "firewall-cmd rejects --panic-on with --permanent: {:?}", calls());
 }
 
 #[test]
@@ -1066,8 +1047,8 @@ fn panic_enable_with_explicit_confirmation_proceeds_during_a_session() {
     assert_eq!(run.code, 0, "explicit confirmation permits panic: {run:?}");
     assert_eq!(
         calls().len(),
-        2,
-        "runtime then permanent ran after confirmation"
+        1,
+        "panic runs exactly one runtime command after confirmation"
     );
 }
 
@@ -1078,7 +1059,7 @@ fn panic_enable_without_a_session_needs_no_confirmation() {
 
     let run = run_helper(&["firewall_panic", "enable"]);
     assert_eq!(run.code, 0, "no session: enable must proceed: {run:?}");
-    assert_eq!(calls().len(), 2);
+    assert_eq!(calls().len(), 1);
 }
 
 #[test]
@@ -1130,7 +1111,7 @@ fn panic_disable_does_not_need_confirmation_or_a_probe() {
         run.code, 0,
         "disabling panic mode must remain possible: {run:?}"
     );
-    assert_eq!(calls().len(), 2);
+    assert_eq!(calls().len(), 1);
 }
 
 #[test]
