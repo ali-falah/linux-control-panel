@@ -165,9 +165,9 @@
     </div>
 
     {#if activeSubTab === 'installed'}
-      <Button variant="ghost" class="btn-sm" onclick={loadSystemCoprs} disabled={loadingSystemCoprs}>
+      <button class="header-refresh-btn" onclick={loadSystemCoprs} disabled={loadingSystemCoprs}>
         <RefreshCw size={13} class={loadingSystemCoprs ? 'animate-spin-slow' : ''} /> Refresh
-      </Button>
+      </button>
     {/if}
   </div>
 
@@ -569,6 +569,7 @@
     line-height: 1.5;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -594,6 +595,11 @@
     gap: 6px;
     font-size: 12px;
     font-weight: 600;
+    line-height: 1;
+    box-sizing: border-box;
+    /* Text and icon-only buttons share one height: the icon-only link button
+       would otherwise be a couple of pixels shorter than Enable/Disable. */
+    min-height: 32px;
     padding: 6px 14px;
     border-radius: 7px;
     cursor: pointer;
@@ -606,7 +612,8 @@
     background: var(--color-surface, rgba(255, 255, 255, 0.05));
     border: 1px solid var(--color-border);
     color: var(--color-text-secondary);
-    padding: 6px 10px;
+    width: 32px;
+    padding: 0;
   }
   .copr-btn-link:hover {
     background: rgba(59, 130, 246, 0.12);

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { statusStore } from './status.svelte.ts';
+import { isPolicyRuleError, statusStore } from './status.svelte.ts';
 
 const OFF = { on: false, expires_at: null, error: null };
 
@@ -63,5 +63,37 @@ describe('admin mode state', () => {
       error: null,
     });
     expect(statusStore.adminModeRemaining).toBeNull();
+  });
+});
+
+describe('policy rule repair detection', () => {
+  it('offers the repair only for the missing or stale rule errors', () => {
+    expect(
+      isPolicyRuleError(
+        'PolicyKit did not keep the administrator authorization. Is the panel\'s polkit rule installed?'
+      )
+    ).toBe(true);
+    expect(
+      isPolicyRuleError(
+        'the installed PolicyKit rule /etc/polkit-1/rules.d/50-linux-control-panel.rules could not be read: No such file or directory'
+      )
+    ).toBe(true);
+    expect(
+      isPolicyRuleError('the installed PolicyKit rule is stale or was modified; reinstall it')
+    ).toBe(true);
+  });
+
+  it('does not offer the repair for unrelated failures', () => {
+    for (const error of [
+      null,
+      undefined,
+      '',
+      'Admin mode was not enabled.',
+      'The administrator helper is not installed, so admin mode cannot be enabled.',
+      "Cannot read properties of undefined (reading 'invoke')",
+      'PolicyKit (pkcheck) is not available: missing',
+    ]) {
+      expect(isPolicyRuleError(error)).toBe(false);
+    }
   });
 });

@@ -11,26 +11,26 @@ use commands::{
         cron_list_timers, cron_toggle_timer,
     },
     admin::{
-        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_status,
-        helper_installed,
+        admin_install_helper, admin_mode_off, admin_mode_on, admin_mode_state, admin_policy_repair,
+        admin_policy_status, helper_installed,
     },
     dnf_history::{
         dnf_autoremove, dnf_check, dnf_clean_all, dnf_list_versions, dnf_makecache_cmd,
-        dnf_package_info, dnf_search_packages, list_dnf_history, undo_transaction,
+        dnf_package_info, dnf_search_packages, dnf_search_packages_structured, dnf_history_info, list_dnf_history, undo_transaction,
         dnf_check_updates, dnf_update_advisories, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
-    env_manager::{read_env_vars, write_env_vars},
+    env_manager::{read_env_file, write_env_file},
     firewall_manager::{
         get_firewall_state, get_zone_rules, modify_firewall_rule, toggle_panic_mode,
         firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
         firewall_modify_rich_rule, firewall_change_interface_zone, firewall_check_port_listener,
     },
     flatpak_rpm::{detect_duplicates, list_flatpaks, list_rpms, preview_rpm_removal, remove_flatpak, remove_rpm},
-    hosts_manager::{read_hosts, write_hosts},
+    hosts_manager::{read_hosts, read_hosts_raw, preview_hosts, write_hosts},
     repo_manager::{add_repo, list_repos, run_makecache, toggle_repo, save_repo_details, test_repo_mirror_speeds, validate_all_repos, delete_repo, clean_repo_cache, bulk_disable_repos},
     service_manager::{
-        get_service_logs, list_all_units, read_unit_file, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
+        get_service_logs, list_all_units, read_unit_file, read_unit_override, create_unit_file, unit_file_exists, unit_action, write_unit_file, unit_daemon_reload, get_boot_blame,
         get_boot_times, get_boot_critical_chain, get_unit_dependencies, get_services_status,
     },
     startup_manager::{
@@ -64,19 +64,21 @@ use commands::{
     network_manager::{
         network_get_interfaces, network_get_dns,
         network_list_connections, network_get_connection,
-        network_save_connection, network_delete_connection,
+        network_save_connection, network_store_connection_secret, network_create_bridge,
+        network_delete_connection,
         network_up_connection, network_down_connection,
         network_set_interface_state,
         network_get_vpn_profiles, network_import_vpn_profile, network_create_vpn_profile,
         network_test_ping, network_test_download, network_test_upload,
     },
-    device_manager::{device_get_all, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test, device_get_pci_driver, device_set_module_state},
+    device_manager::{device_get_all, device_get_all_detailed, device_get_smart_drives, device_get_smart_data, device_get_topology, device_trigger_self_test, device_get_pci_driver, device_set_module_state, device_reset_pci_driver},
     app_manager::{
-        list_desktop_apps, get_app_meta, get_app_details, uninstall_app,
+        list_desktop_apps, get_app_meta, get_app_metas, get_app_details, uninstall_app,
         get_flatpak_permissions, set_flatpak_permission, get_app_dependencies,
-        scan_local_appimages, register_appimage, launch_desktop_app, reveal_in_file_manager
+        scan_local_appimages, register_appimage, read_appimage_icon, delete_appimage,
+        launch_desktop_app, reveal_in_file_manager
     },
-    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
+    system_info::{get_network_interfaces, get_system_stats, get_system_stats_history, get_disk_usage, get_process_list, get_process_details, kill_process, renice_process, get_network_traffic, get_smart_health, get_os_info, get_distro_info, get_disk_io_stats, get_active_connections, get_current_user, get_system_events, get_network_details, ping_gateway, get_cpu_temperature, get_last_system_update, get_failed_services_count, get_failed_services, get_storage_distribution, open_folder, get_app_version},
     journal_viewer::{get_journal_logs, count_journal_entries, start_journal_live_stream, stop_journal_live_stream, export_journal_logs_to_file},
     security_auditor::{
         security_run_audit,
@@ -90,11 +92,11 @@ use commands::{
     },
     audit_log::{
         get_auth_events, check_auditd_status, setup_auditd_rules,
-        get_command_audit_logs, get_runtime_threats
+        get_command_audit_logs, get_runtime_threats, get_threat_rules
     },
     ssh_cert_vault::{
         vault_list_ssh_keys, vault_generate_ssh_key, vault_delete_ssh_key,
-        vault_list_ssh_client_config, vault_save_ssh_client_config, vault_delete_ssh_client_host,
+        vault_list_ssh_client_config, vault_upsert_ssh_client_host, vault_delete_ssh_client_host,
         vault_list_known_hosts, vault_remove_known_host, vault_clear_known_hosts,
         vault_list_authorized_keys, vault_add_authorized_key, vault_remove_authorized_key,
         vault_get_sshd_hardening, vault_list_ssl_certs, vault_test_remote_ssl,
@@ -106,15 +108,15 @@ use commands::{
         ai_diagnose_log_error, ai_explain_dnf_conflict,
         ai_generate_nginx_rule, ai_generate_firewall_rule,
         ai_generate_terminal_command, ai_test_cloud_connection,
-        open_system_config_file,
     },
     pm2_manager::{
         pm2_get_system_status, pm2_list_processes, pm2_process_action,
         pm2_start_custom_process, pm2_save_dump, pm2_resurrect_dump,
-        pm2_get_saved_dump_apps, pm2_start_saved_app, pm2_delete_saved_app,
-        pm2_flush_logs, pm2_read_logs, pm2_clear_logs,
+        pm2_get_saved_dump_apps, pm2_get_dump_info, pm2_start_saved_app, pm2_delete_saved_app,
+        pm2_scale, pm2_flush_logs, pm2_read_logs,
+        pm2_get_log_overview, pm2_export_log,
         pm2_list_ecosystem_files, pm2_read_ecosystem_file,
-        pm2_write_ecosystem_file, pm2_start_ecosystem, pm2_get_startup_status,
+        pm2_write_ecosystem_file, pm2_validate_ecosystem, pm2_start_ecosystem, pm2_get_startup_status,
     },
 };
 
@@ -198,6 +200,8 @@ pub fn run() {
             list_dnf_history,
             undo_transaction,
             dnf_search_packages,
+            dnf_search_packages_structured,
+            dnf_history_info,
             dnf_package_info,
             dnf_list_versions,
             dnf_clean_all,
@@ -214,6 +218,7 @@ pub fn run() {
             admin_mode_off,
             admin_mode_state,
             admin_policy_status,
+            admin_policy_repair,
             dnf_read_log,
             dnf_check_lock_status,
             dnf_kill_lock,
@@ -242,6 +247,9 @@ pub fn run() {
             unit_action,
             get_service_logs,
             read_unit_file,
+            read_unit_override,
+            create_unit_file,
+            unit_file_exists,
             write_unit_file,
             unit_daemon_reload,
             get_boot_blame,
@@ -251,6 +259,8 @@ pub fn run() {
             get_services_status,
             // Hosts Manager
             read_hosts,
+            read_hosts_raw,
+            preview_hosts,
             write_hosts,
             // User Manager
             list_users,
@@ -285,8 +295,8 @@ pub fn run() {
             cron_list_timers,
             cron_toggle_timer,
             // Environment Manager
-            read_env_vars,
-            write_env_vars,
+            read_env_file,
+            write_env_file,
             // Nginx Manager
             nginx_check_installed,
             nginx_service_status,
@@ -340,6 +350,8 @@ pub fn run() {
             network_list_connections,
             network_get_connection,
             network_save_connection,
+            network_store_connection_secret,
+            network_create_bridge,
             network_delete_connection,
             network_up_connection,
             network_down_connection,
@@ -352,15 +364,18 @@ pub fn run() {
             network_test_upload,
             // Device Manager
             device_get_all,
+            device_get_all_detailed,
             device_get_smart_drives,
             device_get_smart_data,
             device_get_topology,
             device_trigger_self_test,
             device_get_pci_driver,
             device_set_module_state,
+            device_reset_pci_driver,
             // App Manager
             list_desktop_apps,
             get_app_meta,
+            get_app_metas,
             get_app_details,
             uninstall_app,
             get_flatpak_permissions,
@@ -368,6 +383,8 @@ pub fn run() {
             get_app_dependencies,
             scan_local_appimages,
             register_appimage,
+            read_appimage_icon,
+            delete_appimage,
             launch_desktop_app,
             reveal_in_file_manager,
             // System Info
@@ -376,6 +393,7 @@ pub fn run() {
             get_system_stats_history,
             get_disk_usage,
             get_process_list,
+            get_process_details,
             kill_process,
             renice_process,
             get_network_traffic,
@@ -429,12 +447,13 @@ pub fn run() {
             setup_auditd_rules,
             get_command_audit_logs,
             get_runtime_threats,
+            get_threat_rules,
             // SSH & SSL Vault
             vault_list_ssh_keys,
             vault_generate_ssh_key,
             vault_delete_ssh_key,
             vault_list_ssh_client_config,
-            vault_save_ssh_client_config,
+            vault_upsert_ssh_client_host,
             vault_delete_ssh_client_host,
             vault_list_known_hosts,
             vault_remove_known_host,
@@ -460,7 +479,6 @@ pub fn run() {
             ai_generate_firewall_rule,
             ai_generate_terminal_command,
             ai_test_cloud_connection,
-            open_system_config_file,
             // PM2 Process Manager
             pm2_get_system_status,
             pm2_list_processes,
@@ -469,14 +487,18 @@ pub fn run() {
             pm2_save_dump,
             pm2_resurrect_dump,
             pm2_get_saved_dump_apps,
+            pm2_get_dump_info,
             pm2_start_saved_app,
             pm2_delete_saved_app,
+            pm2_scale,
             pm2_flush_logs,
             pm2_read_logs,
-            pm2_clear_logs,
+            pm2_get_log_overview,
+            pm2_export_log,
             pm2_list_ecosystem_files,
             pm2_read_ecosystem_file,
             pm2_write_ecosystem_file,
+            pm2_validate_ecosystem,
             pm2_start_ecosystem,
             pm2_get_startup_status,
         ])
@@ -492,13 +514,27 @@ pub fn run() {
                 ),
             );
             if let Err(error) =
-                crate::utils::root_policy::verify_installed_polkit_state()
+                crate::utils::root_policy::verify_installed_polkit_policy()
             {
                 log_to_file(
                     "WARN",
                     &format!(
                         "PolicyKit policy verification failed: {error}. Privileged actions \
                          will be refused until the shipped policy is reinstalled."
+                    ),
+                );
+            }
+            // A rules.d file this user cannot read is expected on Fedora
+            // (`0750 root:polkitd`) and is not a fault; only a readable file
+            // that does not match is worth a warning.
+            if let crate::utils::root_policy::PolkitRuleCheck::Mismatch(error) =
+                crate::utils::root_policy::polkit_rule_check()
+            {
+                log_to_file(
+                    "WARN",
+                    &format!(
+                        "PolicyKit rule verification failed: {error}. Admin mode will offer \
+                         to repair the rule."
                     ),
                 );
             }

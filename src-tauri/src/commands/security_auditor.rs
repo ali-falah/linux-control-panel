@@ -29,6 +29,91 @@ async fn check_sysctl_tampered() -> bool {
     false
 }
 
+/// Findings whose hardened value is written into `/etc/sysctl.d`, which is
+/// exactly what [`check_sysctl_tampered`] watches. Every id here is one the
+/// panel can actually fix (`fixKernelParam` in SecurityAuditor, or the AI
+/// advisor's hardcoded lookup for `kernel_rp_filter` and `kernel_sysrq`).
+const SYSCTL_FINDING_IDS: &[&str] = &[
+    "kernel_aslr",
+    "kernel_syncookies",
+    "kernel_ipforward",
+    "kernel_kptr",
+    "kernel_dmesg",
+    "kernel_icmp_redirect",
+    "fs_coredump",
+    "net_src_route",
+    "net_bogus_icmp",
+    "net_martians",
+    "kernel_rp_filter",
+    "kernel_sysrq",
+];
+
+/// Mark every resolved sysctl-backed finding as modified when the hardening
+/// directory changed after the last fix.
+fn flag_sysctl_tamper(findings: &mut [SecurityFinding]) {
+    for f in findings.iter_mut() {
+        if f.is_resolved && SYSCTL_FINDING_IDS.contains(&f.id.as_str()) {
+            f.tamper_flag = Some("modified after fix — rescan required.".to_string());
+        }
+    }
+}
+
+/// Turn the threat-scan outcome into findings.
+///
+/// A clean scan adds nothing. A failure adds one unresolved finding so the
+/// category reports "unknown" instead of being displayed as healthy — the
+/// empty case is what the UI renders as *Zero Active Runtime Threats, 100%
+/// HEALTHY*, and an unevaluated scan is not evidence of a clean system.
+fn runtime_threat_findings(
+    result: Result<Vec<crate::commands::audit_log::RuntimeThreat>, String>,
+) -> Vec<SecurityFinding> {
+    let threats = match result {
+        Ok(threats) => threats,
+        Err(error) => {
+            return vec![SecurityFinding {
+                id: "threat_scan_unavailable".to_string(),
+                title: "Runtime threat scan did not complete".to_string(),
+                description: format!(
+                    "The continuous threat engine could not be evaluated: {error}. \
+                     Treat this category as unknown rather than clean."
+                ),
+                severity: "Warning".to_string(),
+                countermeasure: "Check that journalctl is readable, then rescan.".to_string(),
+                category: "Runtime Threats".to_string(),
+                has_auto_fix: false,
+                is_resolved: false,
+                reference: None,
+                tamper_flag: None,
+            }];
+        }
+    };
+
+    threats
+        .into_iter()
+        .enumerate()
+        .map(|(t_idx, t)| {
+            let id = if t.id.ends_with(&format!("_{}", t_idx)) {
+                t.id
+            } else {
+                format!("{}_{}", t.id, t_idx)
+            };
+            SecurityFinding {
+                id,
+                title: t.title,
+                description: t.description,
+                severity: t.severity,
+                countermeasure: "Investigate log events in Command Audit or Auth Events."
+                    .to_string(),
+                category: "Runtime Threats".to_string(),
+                has_auto_fix: false,
+                is_resolved: false,
+                reference: None,
+                tamper_flag: None,
+            }
+        })
+        .collect()
+}
+
 
 /// Forward one closed security action to the installed helper. The helper
 /// re-validates the action's operands and owns the privileged execution.
@@ -1470,36 +1555,26 @@ pub async fn security_run_audit(force_refresh: Option<bool>) -> Result<SecurityR
         // ── Sysctl Tamper Check ────────────────────────────────────────────────
         let sysctl_tampered = check_sysctl_tampered().await;
         if sysctl_tampered {
-            for f in &mut findings {
-                if f.is_resolved && (f.id == "aslr" || f.id == "syncookies" || f.id == "ipfwd" || f.id == "kptr" || f.id == "dmesg_r" || f.id == "coredump" || f.id == "bogus_icmp" || f.id == "martians" || f.id == "src_route") {
-                    f.tamper_flag = Some("modified after fix — rescan required.".to_string());
-                }
-            }
+            flag_sysctl_tamper(&mut findings);
         }
 
         // ── Load and inject Runtime Threats (with strict 1s timeout) ───────────
-        let mut threat_issues = 0;
-        if let Ok(Ok(threats)) = tokio::time::timeout(
+        // A timeout or a failure must never be read as "no threats": an empty
+        // Runtime Threats category renders as "Zero Active Runtime Threats —
+        // 100% healthy", so an unevaluated scan has to leave a finding behind.
+        let scan = tokio::time::timeout(
             tokio::time::Duration::from_millis(1000),
-            crate::commands::audit_log::get_runtime_threats(Some(7), None, None)
-        ).await {
-            for (t_idx, t) in threats.into_iter().enumerate() {
-                threat_issues += 1;
-                let id = if t.id.ends_with(&format!("_{}", t_idx)) { t.id } else { format!("{}_{}", t.id, t_idx) };
-                findings.push(SecurityFinding {
-                    id,
-                    title: t.title,
-                    description: t.description,
-                    severity: t.severity,
-                    countermeasure: "Investigate log events in Command Audit or Auth Events.".to_string(),
-                    category: "Runtime Threats".to_string(),
-                    has_auto_fix: false,
-                    is_resolved: false,
-                    reference: None,
-                    tamper_flag: None,
-                });
-            }
-        }
+            crate::commands::audit_log::get_runtime_threats(Some(7), None, None),
+        )
+        .await;
+        let threat_findings = match scan {
+            Ok(result) => runtime_threat_findings(result),
+            Err(_) => runtime_threat_findings(Err(
+                "the scan exceeded its 1 second budget".to_string(),
+            )),
+        };
+        let threat_issues = threat_findings.len() as u32;
+        findings.extend(threat_findings);
 
         // ── Build category scores ─────────────────────────────────────────────
         let cat_score = |cur: u32, max: u32| if max > 0 { cur * 100 / max } else { 100 };
@@ -2170,5 +2245,86 @@ Mode from config file:   disabled
         assert_eq!(selinux_scoring(SelinuxEvaluation::Disabled), (5, 0));
         assert_eq!(selinux_scoring(SelinuxEvaluation::AppArmor), (0, 0));
         assert_eq!(selinux_scoring(SelinuxEvaluation::Unknown), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod security_scan_tests {
+    use super::{
+        flag_sysctl_tamper, runtime_threat_findings, SecurityFinding, SYSCTL_FINDING_IDS,
+    };
+
+    fn finding(id: &str, resolved: bool) -> SecurityFinding {
+        SecurityFinding {
+            id: id.to_string(),
+            title: String::new(),
+            description: String::new(),
+            severity: "Warning".to_string(),
+            countermeasure: String::new(),
+            category: "Kernel".to_string(),
+            has_auto_fix: true,
+            is_resolved: resolved,
+            reference: None,
+            tamper_flag: None,
+        }
+    }
+
+    #[test]
+    fn tamper_is_flagged_only_on_fixed_sysctl_findings() {
+        let mut findings = vec![
+            finding("kernel_aslr", true),
+            finding("kernel_icmp_redirect", true),
+            finding("kernel_sysrq", true),
+            finding("net_src_route", true),
+            finding("ssh_port", true),
+            finding("kernel_aslr", false),
+        ];
+        flag_sysctl_tamper(&mut findings);
+        assert!(findings[0].tamper_flag.is_some(), "kernel_aslr");
+        assert!(findings[1].tamper_flag.is_some(), "kernel_icmp_redirect");
+        assert!(findings[2].tamper_flag.is_some(), "kernel_sysrq");
+        assert!(findings[3].tamper_flag.is_some(), "net_src_route");
+        assert!(findings[4].tamper_flag.is_none(), "ssh_port is not a sysctl fix");
+        assert!(findings[5].tamper_flag.is_none(), "an unfixed finding cannot be tampered");
+    }
+
+    #[test]
+    fn every_sysctl_fix_the_panel_offers_is_covered_by_the_tamper_list() {
+        // Exactly the ids reachable through fixKernelParam (SecurityAuditor) and
+        // the AI advisor's hardcoded lookup for rp_filter / sysrq.
+        for id in [
+            "kernel_aslr",
+            "kernel_syncookies",
+            "kernel_ipforward",
+            "kernel_kptr",
+            "kernel_dmesg",
+            "kernel_icmp_redirect",
+            "fs_coredump",
+            "net_src_route",
+            "net_bogus_icmp",
+            "net_martians",
+            "kernel_rp_filter",
+            "kernel_sysrq",
+        ] {
+            assert!(
+                SYSCTL_FINDING_IDS.contains(&id),
+                "{id} is fixable but the tamper list does not cover it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_threat_scan_reports_unknown_instead_of_clean() {
+        assert!(
+            runtime_threat_findings(Ok(Vec::new())).is_empty(),
+            "a clean scan must stay empty"
+        );
+
+        let failed = runtime_threat_findings(Err("journalctl is not readable".to_string()));
+        assert_eq!(failed.len(), 1, "a failed scan must not look like zero threats");
+        assert_eq!(failed[0].id, "threat_scan_unavailable");
+        assert_eq!(failed[0].category, "Runtime Threats");
+        assert!(!failed[0].is_resolved);
+        assert_ne!(failed[0].severity, "Critical", "an unknown scan must not cap the score");
     }
 }

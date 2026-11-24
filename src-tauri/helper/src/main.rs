@@ -25,6 +25,7 @@ use root_policy::{
     is_valid_account_name, nginx_config_remove_path_valid, nginx_config_path_valid,
     nginx_link_as_valid, nginx_site_unlink_path_valid, validate_nginx_config_content,
     validate_profile_sh_content, validate_profile_sh_path, var_www_is_protected,
+    validate_environment_content, ENVIRONMENT_CONTENT_MAX, ENVIRONMENT_PATH,
     firewall_rich_rule_valid, firewall_port_value_valid, firewall_service_name_valid,
     firewall_zone_name_valid, firewall_interface_name_valid, FirewallRichRule,
     FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
@@ -1297,18 +1298,12 @@ fn firewall_panic_action(enable: bool, confirmed: bool) -> Result<(), String> {
         }
     }
 
+    // Panic mode is a runtime-only switch. `firewall-cmd` rejects combining
+    // --panic-on/--panic-off with --permanent, and there is no persistent
+    // panic state to write, so a second "permanent" phase would turn a
+    // successful toggle into a false failure.
     let arg = if enable { "--panic-on" } else { "--panic-off" };
-    run_firewall_program(FIREWALL_CMD_BIN, &[arg], "firewall-cmd")?;
-    if let Err(permanent_error) =
-        run_firewall_program(FIREWALL_CMD_BIN, &[arg, "--permanent"], "firewall-cmd")
-    {
-        let state = if enable { "enabled" } else { "disabled" };
-        return Err(format!(
-            "{permanent_error}; panic mode was {state} at runtime, but the persistent \
-             configuration was not"
-        ));
-    }
-    Ok(())
+    run_firewall_program(FIREWALL_CMD_BIN, &[arg], "firewall-cmd")
 }
 
 /// Run one package-manager operation. Non-zero exits are always errors: the
@@ -2207,6 +2202,69 @@ fn security_apply_action(op: &str) -> Result<(), String> {
     }
 }
 
+/// `audit_setup`: install and load the fixed auditd rule set. No operands.
+fn audit_setup_action() -> Result<(), String> {
+    if resolve_root_program("auditctl").is_none() {
+        if let Some(dnf) = resolve_root_program("dnf") {
+            run_firewall_program(&dnf, &["install", "-y", "audit"], "dnf")?;
+        } else if let Some(apt) = resolve_root_program("apt-get") {
+            run_firewall_program(&apt, &["update"], "apt-get")?;
+            run_firewall_program(&apt, &["install", "-y", "auditd"], "apt-get")?;
+        } else {
+            return Err(
+                "lcp-admin: auditctl is not installed and no supported package manager was found"
+                    .to_string(),
+            );
+        }
+        if resolve_root_program("auditctl").is_none() {
+            return Err("lcp-admin: the audit package did not provide auditctl".to_string());
+        }
+    }
+
+    let rules_dir = std::path::Path::new("/etc/audit/rules.d");
+    if std::fs::symlink_metadata(rules_dir)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing a symlinked audit rules directory".to_string());
+    }
+    std::fs::create_dir_all(rules_dir)
+        .map_err(|e| format!("lcp-admin: could not create the audit rules directory ({e})"))?;
+    let rules_path = rules_dir.join("99-control-panel.rules");
+    if std::fs::symlink_metadata(&rules_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing to replace a symlinked audit rules file".to_string());
+    }
+    let tmp = rules_dir.join(format!("99-control-panel.rules.tmp.{}", std::process::id()));
+    let content = "-a always,exit -F arch=b64 -S execve -k cmd_audit\n\
+-w /etc/passwd -p wa -k identity\n\
+-w /etc/sudoers -p wa -k sudoers_change\n\
+-w /etc/sysctl.d/ -p wa -k sysctl_tamper\n";
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("lcp-admin: could not write the audit rules ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &rules_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("lcp-admin: could not install the audit rules ({e})"));
+    }
+
+    let augenrules = resolve_root_program("augenrules")
+        .ok_or_else(|| "lcp-admin: augenrules is not available; install the audit package".to_string())?;
+    run_firewall_program(&augenrules, &["--load"], "augenrules")?;
+
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        return Err("lcp-admin: systemctl is not available".to_string());
+    }
+    if run_firewall_program(SYSTEMCTL_BIN, &["enable", "--now", "auditd"], "systemctl").is_err() {
+        run_firewall_program(SYSTEMCTL_BIN, &["restart", "auditd"], "systemctl")?;
+    }
+    Ok(())
+}
+
 /// `unit_action <verb> <unit>`: the system-scope unit actions. The shared
 /// policy enforces unit-name grammar and the protected-unit rules; --user
 /// actions stay unprivileged in the app.
@@ -2233,6 +2291,80 @@ fn write_systemd_override(path: &str, content: &str) -> Result<(), String> {
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("lcp-admin: could not replace {path} ({e})"));
+    }
+    Ok(())
+}
+
+/// `unit_create <unit>`: create `/etc/systemd/system/<unit>` with content
+/// from stdin. A new unit is never allowed to overwrite an existing unit or a
+/// symlink; failure to reload rolls the new file back.
+fn unit_create_action(unit: &str) -> Result<(), String> {
+    root_policy::service_unit_name_valid(unit)?;
+    let content = read_stdin_content(64 * 1024, "unit file")?;
+    if content.trim().is_empty() {
+        return Err("lcp-admin: a new unit file must not be empty".to_string());
+    }
+    if content.contains('\0') {
+        return Err("lcp-admin: the unit file must not contain NUL bytes".to_string());
+    }
+    let root = std::path::Path::new(SYSTEMD_UNIT_ROOT);
+    if root
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("lcp-admin: refusing a symlinked systemd unit root".to_string());
+    }
+    let path = format!("{SYSTEMD_UNIT_ROOT}/{unit}");
+    if let Ok(metadata) = std::path::Path::new(&path).symlink_metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("lcp-admin: refusing to replace a symlinked unit: {path}"));
+        }
+        return Err(format!(
+            "lcp-admin: the unit {path} already exists; use the override editor instead"
+        ));
+    }
+    // Write a temporary file and hard-link it into place: link(2) fails if the
+    // target already exists, which closes the check-then-rename race.
+    let tmp = format!("{path}.tmp.{}", std::process::id());
+    std::fs::write(&tmp, &content)
+        .map_err(|e| format!("lcp-admin: could not write {tmp} ({e})"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
+    }
+    if let Err(error) = std::fs::hard_link(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(format!(
+                "lcp-admin: the unit {path} already exists; use the override editor instead"
+            ));
+        }
+        return Err(format!("lcp-admin: could not create {path} ({error})"));
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if !std::path::Path::new(SYSTEMCTL_BIN).is_file() {
+        let _ = std::fs::remove_file(&path);
+        return Err("lcp-admin: the unit was not created because systemctl is not available".to_string());
+    }
+    if let Err(reload_error) = run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl") {
+        let removed = std::fs::remove_file(&path);
+        let retry = if removed.is_ok() {
+            run_firewall_program(SYSTEMCTL_BIN, &["daemon-reload"], "systemctl")
+        } else {
+            Err("lcp-admin: retry reload skipped because the new unit could not be removed".to_string())
+        };
+        let prefix = if retry.is_err() {
+            "RECOVERY_REQUIRED: "
+        } else {
+            "lcp-admin: "
+        };
+        let removal_note = if removed.is_ok() {
+            "the new unit was removed from disk and daemon-reload was retried"
+        } else {
+            "the new unit could NOT be removed from disk"
+        };
+        return Err(format!("{prefix}{reload_error}; {removal_note}"));
     }
     Ok(())
 }
@@ -2437,10 +2569,11 @@ fn process_owner_is_invoking_user(text: &str, invoking_uid: u32) -> Result<(), S
     Ok(())
 }
 
-fn process_owner_uid(pid: u32) -> Result<u32, String> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .map_err(|e| format!("lcp-admin: the process {pid} status could not be read ({e})"))?;
-    process_owner_uid_from_status(&status)
+/// Read a process status document from `/proc`, for the ownership check the
+/// renice action performs before touching another process.
+fn process_status_text(pid: u32) -> Result<String, String> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|e| format!("lcp-admin: the process {pid} status could not be read ({e})"))
 }
 
 /// `process_renice <pid> <priority>`: the privileged negative-niceness action.
@@ -2458,12 +2591,8 @@ fn process_renice_action(pid: &str, priority: &str) -> Result<(), String> {
     let invoking_uid = invoking_uid().ok_or_else(|| {
         "lcp-admin: the invoking user could not be determined; refusing to renice".to_string()
     })?;
-    let owner = process_owner_uid(pid)?;
-    if owner != invoking_uid {
-        return Err(format!(
-            "lcp-admin: process {pid} belongs to another user; refusing to renice"
-        ));
-    }
+    let status = process_status_text(pid)?;
+    process_owner_is_invoking_user(&status, invoking_uid)?;
     let priority_text = priority.to_string();
     let pid_text = pid.to_string();
     let renice = resolve_trusted_program("renice")?;
@@ -2500,13 +2629,21 @@ fn smart_health_action(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `smart_data <device>`: `smartctl -a -j`, preserving JSON even when
-/// smartctl exits non-zero for a warning.
-fn smart_data_action(device: &str) -> Result<(), String> {
+/// `smart_data <device> [type]`: `smartctl -a -j`, preserving JSON even when
+/// smartctl exits non-zero for a warning. The optional type is the one
+/// `smartctl --scan -j` reported and enables USB bridges and RAID controllers
+/// that need `-d sat`/`-d megaraid,0`.
+fn smart_data_action(device: &str, device_type: Option<&str>) -> Result<(), String> {
     smart_device_valid(device)?;
     let smartctl = resolve_trusted_program("smartctl")?;
-    let output = std::process::Command::new(smartctl)
-        .args(["-a", "-j", device])
+    let mut command = std::process::Command::new(smartctl);
+    command.args(["-a", "-j"]);
+    if let Some(device_type) = device_type {
+        root_policy::smart_device_type_valid(device_type)?;
+        command.args(["-d", device_type]);
+    }
+    command.arg(device);
+    let output = command
         .output()
         .map_err(|_| "lcp-admin: smartctl could not be started".to_string())?;
     if !output.stdout.is_empty() {
@@ -2538,6 +2675,94 @@ fn smart_self_test_action(device: &str, test_type: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `inventory_scan`: read the full hardware tree as root, so serial numbers
+/// and capabilities that unprivileged lshw hides are available.
+fn inventory_scan_action() -> Result<(), String> {
+    let lshw = resolve_trusted_program("lshw")?;
+    let output = std::process::Command::new(lshw)
+        .arg("-json")
+        .output()
+        .map_err(|_| "lcp-admin: lshw could not be started".to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "lcp-admin: lshw failed".to_string()
+        } else {
+            format!("lcp-admin: lshw failed: {stderr}")
+        });
+    }
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|_| "lcp-admin: could not write lshw output".to_string())?;
+    Ok(())
+}
+
+/// `pci_reset <slot>`: unbind and rebind one PCI function's driver. This is
+/// the device-level reset that works while the module is still bound; it never
+/// unloads a kernel module and never accepts a driver path from the caller.
+fn pci_reset_action(slot: &str) -> Result<(), String> {
+    root_policy::pci_slot_valid(slot)?;
+    // Resetting the controller that owns the boot disk, the display, a bridge,
+    // or the USB controller can take the session (or the machine) down. Those
+    // are exactly the devices a user must not casually detach here.
+    let class_text = std::fs::read_to_string(format!("/sys/bus/pci/devices/{slot}/class"))
+        .map_err(|e| format!("lcp-admin: could not read the PCI class of {slot}: {e}"))?;
+    let class_hex = class_text.trim().trim_start_matches("0x");
+    let class = u32::from_str_radix(class_hex, 16)
+        .map_err(|_| format!("lcp-admin: invalid PCI class for {slot}"))?;
+    let base = (class >> 16) & 0xff;
+    let sub = (class >> 8) & 0xff;
+    let blocked = base == 0x01 // mass storage
+        || base == 0x03 // display
+        || base == 0x06 // bridge
+        || (base == 0x0c && sub == 0x03); // USB controller
+    if blocked {
+        return Err(format!(
+            "lcp-admin: refusing to reset PCI device {slot}: storage, display, bridge and USB controllers can take the system down"
+        ));
+    }
+    let device_link = format!("/sys/bus/pci/devices/{slot}/driver");
+    let driver_path = std::fs::canonicalize(&device_link).map_err(|_| {
+        format!("lcp-admin: no driver is bound to PCI device {slot}")
+    })?;
+    let drivers_root = std::fs::canonicalize("/sys/bus/pci/drivers")
+        .map_err(|_| "lcp-admin: /sys/bus/pci/drivers is not readable".to_string())?;
+    if driver_path == drivers_root || !driver_path.starts_with(&drivers_root) {
+        return Err(format!(
+            "lcp-admin: the driver path for {slot} is not inside /sys/bus/pci/drivers"
+        ));
+    }
+    let unbind = driver_path.join("unbind");
+    let bind = driver_path.join("bind");
+    if !unbind.is_file() || !bind.is_file() {
+        return Err(format!(
+            "lcp-admin: the driver for PCI device {slot} does not expose bind/unbind"
+        ));
+    }
+    std::fs::write(&unbind, slot).map_err(|e| {
+        format!("lcp-admin: could not unbind PCI device {slot}: {e}")
+    })?;
+    // udev may rebind the function on its own. Give it a moment, then bind
+    // explicitly; EEXIST/BUSY after an automatic rebind is a success.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let bind_result = std::fs::write(&bind, slot);
+    if std::fs::canonicalize(&device_link).is_err() {
+        if let Err(e) = bind_result {
+            return Err(format!(
+                "lcp-admin: PCI device {slot} was unbound but could not be rebound: {e}"
+            ));
+        }
+        if std::fs::canonicalize(&device_link).is_err() {
+            return Err(format!(
+                "lcp-admin: PCI device {slot} was unbound but is still detached"
+            ));
+        }
+    }
+    println!("lcp-admin: PCI device {slot} driver reset successfully.");
+    Ok(())
+}
+
 /// Named actions the helper performs itself, instead of executing a root
 /// program. Their arguments are validated by `check_helper_action` in
 /// root_policy.rs, so the helper only ever `exec`s programs for the generic
@@ -2561,7 +2786,7 @@ fn smart_self_test_action(device: &str, test_type: &str) -> Result<(), String> {
 /// caller. Until then the action name is refused at dispatch, fail-closed.
 const ROOT_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
-    "write_profile_sh", "restore_profile_sh",
+    "write_profile_sh", "write_environment_file", "restore_profile_sh",
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
@@ -2570,6 +2795,7 @@ const ROOT_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "repo_config_manager_set", "repo_config_manager_unset",
     "firewall_zone_rule", "firewall_rich_rule",
     "firewall_panic",
     "firewall_interface_zone",
@@ -2590,8 +2816,10 @@ const ROOT_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "audit_setup",
     "unit_action",
     "unit_dropin_write",
+    "unit_create",
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
@@ -2599,6 +2827,9 @@ const ROOT_ACTIONS: &[&str] = &[
     "smart_health",
     "smart_data",
     "smart_self_test",
+    "inventory_scan",
+    "pci_reset",
+    "nm_store_keyfile_secret",
 ];
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -2720,6 +2951,14 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes exactly one profile file path."
                 ))
             }
+        } else if requested == "write_environment_file" {
+            if args.len() == 1 {
+                write_environment_file_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no arguments; the content arrives on stdin."
+                ))
+            }
         } else if requested == "restore_profile_sh" {
             if args.len() == 3 {
                 restore_profile_sh_action(&args[1], &args[2])
@@ -2826,6 +3065,14 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes exactly an import type and a file path."
                 ))
             }
+        } else if requested == "nm_store_keyfile_secret" {
+            if args.len() == 3 {
+                nm_store_keyfile_secret_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes a connection name and vpn-password|wifi-psk."
+                ))
+            }
         } else if requested == "repo_toggle_enable" {
             if args.len() == 3 {
                 repo_toggle_enable_action(&args[1], &args[2])
@@ -2897,11 +3144,27 @@ fn main() {
                 ))
             }
         } else if requested == "smart_data" {
-            if args.len() == 2 {
-                smart_data_action(&args[1])
+            match args.len() {
+                2 => smart_data_action(&args[1], None),
+                3 => smart_data_action(&args[1], Some(&args[2])),
+                _ => Err(format!(
+                    "lcp-admin: the action '{requested}' takes a device path and an optional smartctl device type."
+                )),
+            }
+        } else if requested == "inventory_scan" {
+            if args.len() == 1 {
+                inventory_scan_action()
             } else {
                 Err(format!(
-                    "lcp-admin: the action '{requested}' takes exactly one device path."
+                    "lcp-admin: the action '{requested}' takes no arguments."
+                ))
+            }
+        } else if requested == "pci_reset" {
+            if args.len() == 2 {
+                pci_reset_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one PCI slot address."
                 ))
             }
         } else if requested == "smart_self_test" {
@@ -2936,12 +3199,28 @@ fn main() {
                     "lcp-admin: the action '{requested}' takes no further arguments."
                 ))
             }
+        } else if requested == "audit_setup" {
+            if args.len() == 1 {
+                audit_setup_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no arguments."
+                ))
+            }
         } else if requested == "unit_action" {
             if args.len() == 3 {
                 unit_action_action(&args[1], &args[2])
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes a verb and a unit name."
+                ))
+            }
+        } else if requested == "unit_create" {
+            if args.len() == 2 {
+                unit_create_action(&args[1])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly one unit name."
                 ))
             }
         } else if requested == "unit_dropin_write" {
@@ -3131,6 +3410,22 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly one repository id."
+                ))
+            }
+        } else if requested == "repo_config_manager_set" {
+            if args.len() == 3 {
+                repo_config_manager_set_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repository id and 0 or 1."
+                ))
+            }
+        } else if requested == "repo_config_manager_unset" {
+            if args.len() == 3 {
+                repo_config_manager_unset_action(&args[1], &args[2])
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes exactly a repository id and an option name."
                 ))
             }
         } else if args.len() == 2 {
@@ -3576,6 +3871,20 @@ fn write_user_ssh_keys_action(username: &str) -> Result<(), String> {
 /// existing `.sh` atomically and preserves its owner and mode; creates new
 /// files as `0644 root:root`. Symlinks are never followed — an existing
 /// symlinked destination is refused, not written through.
+/// The `write_environment_file` action: publishes `/etc/environment` from
+/// stdin. The destination is a constant — no argv names a path — and the
+/// content must satisfy the same shared policy the app checks before the
+/// privileged call. The write core keeps a revision backup and publishes
+/// atomically.
+fn write_environment_file_action() -> Result<(), String> {
+    let content = read_stdin_content(ENVIRONMENT_CONTENT_MAX as u64, "environment file")?;
+    validate_environment_content(&content)?;
+    if let Some(backup) = install_root_owned_file(ENVIRONMENT_PATH, &content, "environment file")? {
+        println!("{backup}");
+    }
+    Ok(())
+}
+
 fn write_profile_sh_action(path: &str) -> Result<(), String> {
     // both halves of the policy hold independently — the helper must not
     // depend on the app having validated anything
@@ -4447,9 +4756,293 @@ fn nginx_www_install_action(dest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The `nmcli_connection_save <add|modify> <connection> <setting.prop> <value>...`
-/// action: creates or modifies an nmcli connection profile. All operands are
-/// validated by `check_nmcli_connection_save` before this point runs.
+/// NetworkManager's system connection keyfiles.
+#[cfg(feature = "test-fixture")]
+const NM_KEYFILE_DIR: &str = "/tmp/lcp-admin-test-fixture/etc/NetworkManager/system-connections";
+#[cfg(not(feature = "test-fixture"))]
+const NM_KEYFILE_DIR: &str = "/etc/NetworkManager/system-connections";
+
+fn keyfile_connection_id(content: &str) -> Option<String> {
+    let mut in_connection = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_connection = trimmed.eq_ignore_ascii_case("[connection]");
+            continue;
+        }
+        if !in_connection {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            if key.trim() == "id" {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn section_bounds(lines: &[String], section: &str) -> Option<(usize, usize)> {
+    let header = format!("[{section}]");
+    let start = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case(&header))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim().starts_with('['))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    Some((start, end))
+}
+
+fn set_keyfile_value(
+    lines: &mut Vec<String>,
+    section: &str,
+    key: &str,
+    value: &str,
+    create_section: bool,
+) -> Result<(), String> {
+    let Some((start, mut end)) = section_bounds(lines, section) else {
+        if !create_section {
+            return Err(format!(
+                "lcp-admin: the NetworkManager keyfile has no [{section}] section"
+            ));
+        }
+        lines.push(format!("[{section}]"));
+        lines.push(format!("{key}={value}"));
+        return Ok(());
+    };
+
+    let prefix = format!("{key}=");
+    for line in lines.iter_mut().take(end).skip(start + 1) {
+        if line.trim_start().starts_with(&prefix) {
+            *line = format!("{key}={value}");
+            return Ok(());
+        }
+    }
+
+    // Insert before the next section; avoid leaving a trailing blank before it.
+    if end > start + 1 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    lines.insert(end, format!("{key}={value}"));
+    Ok(())
+}
+
+fn escaped_keyfile_secret(secret: &str) -> Result<String, String> {
+    if secret.is_empty() {
+        return Err("lcp-admin: the secret must not be empty".to_string());
+    }
+    if secret.contains('\n') || secret.contains('\r') || secret.contains('\0') {
+        return Err("lcp-admin: the secret must be a single line".to_string());
+    }
+    Ok(secret.replace('\\', "\\\\"))
+}
+
+fn update_keyfile_secret(content: &str, kind: &str, secret: &str) -> Result<String, String> {
+    let escaped = escaped_keyfile_secret(secret)?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+
+    match kind {
+        "vpn-password" => {
+            set_keyfile_value(&mut lines, "vpn", "password-flags", "0", false)?;
+            set_keyfile_value(&mut lines, "vpn-secrets", "password", &escaped, true)?;
+        }
+        "wifi-psk" => {
+            set_keyfile_value(&mut lines, "wifi-security", "psk-flags", "0", false)?;
+            set_keyfile_value(&mut lines, "wifi-security", "psk", &escaped, false)?;
+        }
+        _ => return Err("lcp-admin: unsupported keyfile secret kind".to_string()),
+    }
+
+    let mut content = lines.join("\n");
+    content.push('\n');
+    Ok(content)
+}
+
+fn find_keyfile(connection: &str) -> Result<std::path::PathBuf, String> {
+    let entries = std::fs::read_dir(NM_KEYFILE_DIR)
+        .map_err(|e| format!("lcp-admin: could not read {NM_KEYFILE_DIR}: {e}"))?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("nmconnection") {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+            _ => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        if keyfile_connection_id(&content).as_deref() == Some(connection) {
+            matches.push(path);
+        }
+    }
+    match matches.len() {
+        0 => Err(format!(
+            "lcp-admin: no NetworkManager keyfile belongs to connection '{connection}'"
+        )),
+        1 => Ok(matches.remove(0)),
+        _ => Err(format!(
+            "lcp-admin: more than one NetworkManager keyfile belongs to connection '{connection}'"
+        )),
+    }
+}
+
+/// Copy the `security.selinux` xattr from the existing keyfile onto the
+/// temporary replacement. The rename below keeps the temporary inode, so the
+/// original label has to travel with it; otherwise NetworkManager may be
+/// denied access on an enforcing system.
+///
+/// Returns Ok when the platform has no SELinux label to copy.
+fn copy_security_label(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    // The fixture build runs unprivileged in /tmp, where test files have no
+    // production label; there is nothing to preserve.
+    if cfg!(feature = "test-fixture") {
+        return Ok(());
+    }
+
+    let from_c = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| "lcp-admin: the keyfile path contains a NUL byte".to_string())?;
+    let to_c = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| "lcp-admin: the temporary keyfile path contains a NUL byte".to_string())?;
+    // The literal includes the terminating NUL required by getxattr(2).
+    let name = b"security.selinux\0";
+
+    let size = unsafe {
+        libc::getxattr(
+            from_c.as_ptr(),
+            name.as_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size <= 0 {
+        // ENODATA (no label) and ENOTSUP (no SELinux) are the normal cases.
+        return Ok(());
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let copied = unsafe {
+        libc::getxattr(
+            from_c.as_ptr(),
+            name.as_ptr().cast(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if copied <= 0 {
+        return Ok(());
+    }
+
+    let applied = unsafe {
+        libc::setxattr(
+            to_c.as_ptr(),
+            name.as_ptr().cast(),
+            buffer.as_ptr().cast(),
+            copied as usize,
+            0,
+        )
+    };
+    if applied != 0 {
+        return Err(format!(
+            "lcp-admin: could not copy the SELinux label to the keyfile: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn write_private_keyfile(path: &std::path::Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "lcp-admin: the NetworkManager keyfile has no parent directory".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("connection.nmconnection");
+    let tmp = parent.join(format!(".{file_name}.lcp-{}.tmp", std::process::id()));
+
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("lcp-admin: could not create a keyfile: {e}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("lcp-admin: could not write the keyfile: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("lcp-admin: could not sync the keyfile: {e}"))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("lcp-admin: could not secure the keyfile: {e}"))?;
+        copy_security_label(path, &tmp)?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("lcp-admin: could not replace the keyfile: {e}"))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// `nm_store_keyfile_secret <connection> <vpn-password|wifi-psk>` with the
+/// secret supplied on stdin. NetworkManager reads secrets from its root-only
+/// keyfile, so the secret never appears in a process argument list.
+fn nm_store_keyfile_secret_action(connection: &str, kind: &str) -> Result<(), String> {
+    // A trailing newline is a transport artifact, never part of a PSK or
+    // password. Interior newlines stay refused by `escaped_keyfile_secret`.
+    let secret = read_stdin_content(4096, "secret")?;
+    let secret = secret.trim_end_matches(['\r', '\n']);
+    let path = find_keyfile(connection)?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("lcp-admin: could not inspect the keyfile: {e}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("lcp-admin: the NetworkManager keyfile is not a regular file".to_string());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("lcp-admin: could not read the keyfile: {e}"))?;
+    let updated = update_keyfile_secret(&content, kind, &secret)?;
+    write_private_keyfile(&path, &updated)?;
+
+    let nmcli = resolve_trusted_program("nmcli")?;
+    let output = std::process::Command::new(nmcli)
+        .args(["connection", "reload"])
+        .output()
+        .map_err(|e| format!("lcp-admin: nmcli could not be started: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "lcp-admin: the secret was stored but NetworkManager reload failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    println!("lcp-admin: stored the {kind} secret for '{connection}'.");
+    Ok(())
+}
+
+/// The `nmcli_connection_save` action (add/modify + property pairs):
+/// Creates or modifies a connection profile. All operands are validated by
+/// `check_nmcli_connection_save` before this point runs.
 fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
     // args[0] is the action name; args[1..] = [verb, connection, prop, value, ...]
     let verb = args.get(1).ok_or_else(|| {
@@ -4460,10 +5053,73 @@ fn nmcli_connection_save_action(args: &[String]) -> Result<(), String> {
     })?;
     let nmcli = resolve_trusted_program("nmcli")?;
     let mut cmd = std::process::Command::new(nmcli);
-    cmd.arg("connection").arg(verb.as_str()).arg(connection.as_str());
-    for pair in args[3..].chunks(2) {
-        cmd.arg(pair[0].as_str()).arg(pair[1].as_str());
+    cmd.arg("connection").arg(verb.as_str());
+
+    // The app speaks one dialect for both verbs: `setting.property value`
+    // pairs. `nmcli connection add` additionally requires `type` and takes
+    // `con-name`/`ifname`/`master`/`slave-type` as options before those pairs;
+    // a bare connection name is not an argument to `add`.
+    let pairs: Vec<(&str, &str)> = args[3..]
+        .chunks(2)
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+
+    if verb == "add" {
+        let type_value = pairs
+            .iter()
+            .find(|(key, _)| *key == "connection.type")
+            .map(|(_, value)| *value)
+            .ok_or_else(|| {
+                "lcp-admin: a new connection requires connection.type (for example connection.type ethernet)."
+                    .to_string()
+            })?;
+        cmd.arg("type").arg(type_value);
+
+        let id = pairs
+            .iter()
+            .find(|(key, _)| *key == "connection.id")
+            .map(|(_, value)| *value)
+            .unwrap_or(connection);
+        cmd.arg("con-name").arg(id);
+
+        for option in ["connection.interface-name", "connection.master", "connection.slave-type"] {
+            if let Some((_, value)) = pairs.iter().find(|(key, _)| *key == option) {
+                let flag = match option {
+                    "connection.interface-name" => "ifname",
+                    "connection.master" => "master",
+                    _ => "slave-type",
+                };
+                cmd.arg(flag).arg(*value);
+            }
+        }
+
+        for (key, value) in &pairs {
+            if matches!(
+                *key,
+                "connection.type"
+                    | "connection.id"
+                    | "connection.interface-name"
+                    | "connection.master"
+                    | "connection.slave-type"
+            ) {
+                continue;
+            }
+            cmd.arg(*key).arg(*value);
+        }
+    } else {
+        cmd.arg(connection.as_str());
+        for (key, value) in &pairs {
+            // The app cannot place an empty string in privileged argv; this
+            // sentinel is the documented clear instruction for nmcli.
+            let value = if *value == root_policy::HELPER_CLEAR_VALUE {
+                ""
+            } else {
+                *value
+            };
+            cmd.arg(*key).arg(value);
+        }
     }
+
     let output = cmd.output().map_err(|e| {
         format!("lcp-admin: failed to spawn nmcli: {e}")
     })?;
@@ -5016,6 +5672,95 @@ fn repo_clean_cache_action(repo_id: &str) -> Result<(), String> {
         }
         Err(failure) => Err(format!("lcp-admin: {}", failure.reason())),
     }
+}
+
+/// The `repo_config_manager_set <repo_id> <0|1>` action: writes dnf5's own
+/// `<repo_id>.enabled` override with `config-manager setopt`.
+///
+/// This is the only channel the panel uses to enable or disable a dnf repo.
+/// It never edits the repository file, so a repo whose configuration lives
+/// under the package-owned `/usr/share/dnf5/repos.d` toggles correctly while
+/// that file stays read-only.
+///
+/// No fallback: the app only calls this on a host where dnf5 is the package
+/// manager, and `dnf4`/`apt` do not implement the same override file. A
+/// failure is surfaced as-is.
+fn repo_config_manager_set_action(repo_id: &str, value: &str) -> Result<(), String> {
+    repo_config_manager_set_action_with(run_repo_program, repo_id, value)
+}
+
+/// Testable core of the set action: validation happens before `run` is
+/// called, and `run` receives the exact argv the helper would execute.
+fn repo_config_manager_set_action_with(
+    run: impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+    repo_id: &str,
+    value: &str,
+) -> Result<(), String> {
+    // Both halves of the policy hold independently — re-validate here even
+    // though the app already validated.
+    use root_policy::{ensure_safe_operand, repo_override_id_valid};
+    ensure_safe_operand(repo_id, "repository id")?;
+    if !repo_override_id_valid(repo_id) {
+        return Err(format!(
+            "lcp-admin: the repository id contains characters config-manager cannot read: {repo_id}"
+        ));
+    }
+    if value != "0" && value != "1" {
+        return Err(format!(
+            "lcp-admin: the enabled value must be 0 or 1, got: {value}"
+        ));
+    }
+
+    let option = format!("{repo_id}.enabled={value}");
+    run(
+        "dnf5",
+        &[
+            "config-manager",
+            "setopt",
+            &option,
+            "--create-missing-dir",
+        ],
+        "dnf5 config-manager setopt",
+    )
+    .map_err(|failure| format!("lcp-admin: {}", failure.reason()))
+}
+
+/// The `repo_config_manager_unset <repo_id> <option>` action: removes one
+/// option from dnf5's override section for `<repo_id>` with
+/// `config-manager unsetopt`. Used by delete cleanup so an override cannot
+/// outlive the repository file.
+///
+/// No fallback for the same reason as `repo_config_manager_set_action`.
+fn repo_config_manager_unset_action(repo_id: &str, option: &str) -> Result<(), String> {
+    repo_config_manager_unset_action_with(run_repo_program, repo_id, option)
+}
+
+/// Testable core of the unset action — see `repo_config_manager_set_action_with`.
+fn repo_config_manager_unset_action_with(
+    run: impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+    repo_id: &str,
+    option: &str,
+) -> Result<(), String> {
+    use root_policy::{ensure_safe_operand, repo_override_id_valid, repo_override_option_valid};
+    ensure_safe_operand(repo_id, "repository id")?;
+    if !repo_override_id_valid(repo_id) {
+        return Err(format!(
+            "lcp-admin: the repository id contains characters config-manager cannot read: {repo_id}"
+        ));
+    }
+    if !repo_override_option_valid(option) {
+        return Err(format!(
+            "lcp-admin: the option name must be lowercase letters, digits and underscores, got: {option}"
+        ));
+    }
+
+    let operand = format!("{repo_id}.{option}");
+    run(
+        "dnf5",
+        &["config-manager", "unsetopt", &operand],
+        "dnf5 config-manager unsetopt",
+    )
+    .map_err(|failure| format!("lcp-admin: {}", failure.reason()))
 }
 /// The `write_repo_file <path>` action: writes the repository-manager's one
 /// allowed root-owned file kind — a `.repo`/`.list`/`.sources` file in one of
@@ -5648,6 +6393,8 @@ mod root_actions_gate_tests {
             "repo_delete",
             "repo_makecache",
             "repo_clean_cache",
+            "repo_config_manager_set",
+            "repo_config_manager_unset",
         ] {
             assert!(ROOT_ACTIONS.contains(&action), "gate lost '{action}'");
         }
@@ -5914,6 +6661,137 @@ mod repo_add_action_tests {
                 "repo_add must not silently overwrite: {args:?}"
             );
         }
+    }
+
+}
+
+/// Argument-shape tests for the two config-manager actions. The injected
+/// runner records argv; no dnf5 is spawned and no override file is touched.
+#[cfg(test)]
+mod repo_config_manager_action_tests {
+    use super::{
+        repo_config_manager_set_action_with, repo_config_manager_unset_action_with,
+        RepoProgramFailure,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Call = (String, Vec<String>, String);
+    type Recorder = Rc<RefCell<Vec<Call>>>;
+
+    /// A runner that records every call and always succeeds.
+    fn recording() -> (
+        impl Fn(&str, &[&str], &str) -> Result<(), RepoProgramFailure>,
+        Recorder,
+    ) {
+        let calls: Recorder = Rc::new(RefCell::new(Vec::new()));
+        let sink = calls.clone();
+        let run = move |program: &str, args: &[&str], label: &str| {
+            sink.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                label.to_string(),
+            ));
+            Ok(())
+        };
+        (run, calls)
+    }
+
+    #[test]
+    fn setopt_argv_is_exact_and_uses_dnf5() {
+        let (run, calls) = recording();
+        repo_config_manager_set_action_with(run, "fedora", "1").unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![(
+                "dnf5".to_string(),
+                vec![
+                    "config-manager".to_string(),
+                    "setopt".to_string(),
+                    "fedora.enabled=1".to_string(),
+                    "--create-missing-dir".to_string(),
+                ],
+                "dnf5 config-manager setopt".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn setopt_refuses_values_other_than_0_or_1_before_spawning() {
+        for value in ["", "2", "true", "yes", "0 ", "-1"] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_set_action_with(run, "fedora", value);
+            assert!(result.is_err(), "value {value:?} must be refused");
+            assert!(calls.borrow().is_empty(), "value {value:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn setopt_refuses_unsafe_repo_ids_before_spawning() {
+        for id in [
+            "",
+            "-fedora",
+            "fedora extra",
+            "fedora/../../x",
+            "fedora\nx",
+            "fedora\rx",
+            "fedora\0x",
+        ] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_set_action_with(run, id, "1");
+            assert!(result.is_err(), "id {id:?} must be refused");
+            assert!(calls.borrow().is_empty(), "id {id:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn unsetopt_argv_is_exact_and_uses_dnf5() {
+        let (run, calls) = recording();
+        repo_config_manager_unset_action_with(run, "fedora", "enabled").unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![(
+                "dnf5".to_string(),
+                vec![
+                    "config-manager".to_string(),
+                    "unsetopt".to_string(),
+                    "fedora.enabled".to_string(),
+                ],
+                "dnf5 config-manager unsetopt".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn unsetopt_refuses_unsafe_option_names_before_spawning() {
+        for option in [
+            "",
+            "Enabled",
+            "enabled=1",
+            "--enabled",
+            "enabled extra",
+            "enabled\r",
+            "enabled\0",
+        ] {
+            let (run, calls) = recording();
+            let result = repo_config_manager_unset_action_with(run, "fedora", option);
+            assert!(result.is_err(), "option {option:?} must be refused");
+            assert!(calls.borrow().is_empty(), "option {option:?} must not spawn dnf5");
+        }
+    }
+
+    #[test]
+    fn config_manager_failures_keep_their_reason() {
+        let run = |_: &str, _: &[&str], _: &str| {
+            Err::<(), _>(RepoProgramFailure::Failed(
+                "override file is read-only".to_string(),
+            ))
+        };
+        let error = repo_config_manager_set_action_with(run, "fedora", "0").unwrap_err();
+        assert!(
+            error.contains("override file is read-only"),
+            "the dnf5 reason must be preserved: {error}"
+        );
     }
 }
 
@@ -6186,7 +7064,9 @@ mod firewall_ssh_guard_tests {
 
 #[cfg(test)]
 mod process_ownership_tests {
-    use super::{process_owner_is_invoking_user, process_owner_uid, process_owner_uid_from_status};
+    use super::{
+        process_owner_is_invoking_user, process_owner_uid_from_status, process_status_text,
+    };
 
     const OWN: &str = "Name:\ttest\nUid:\t1000\t1000\t1000\t1000\n";
     const OTHER: &str = "Name:\tother\nUid:\t0\t0\t0\t0\n";
@@ -6210,7 +7090,7 @@ mod process_ownership_tests {
         assert!(process_owner_uid_from_status("Uid:\tnot-a-number\t0\t0\t0\n").is_err());
         assert!(process_owner_uid_from_status("Uid:\n").is_err());
         assert!(
-            process_owner_uid(u32::MAX).is_err(),
+            process_status_text(u32::MAX).is_err(),
             "a missing process status must fail closed"
         );
     }
@@ -6309,5 +7189,43 @@ mod trusted_program_tests {
     #[test]
     fn a_real_system_binary_is_trusted() {
         trusted_program("/usr/bin/true").expect("/usr/bin/true is root-owned and trusted");
+    }
+}
+
+#[cfg(test)]
+mod keyfile_secret_tests {
+    use super::*;
+
+    const VPN: &str = "[connection]\nid=Work VPN\nuuid=1234\ntype=vpn\n\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=vpn.example.com\n\n[ipv4]\nmethod=auto\n";
+
+    #[test]
+    fn connection_id_is_read_from_the_connection_section() {
+        assert_eq!(keyfile_connection_id(VPN).as_deref(), Some("Work VPN"));
+        assert_eq!(keyfile_connection_id("[vpn]\nid=nope\n"), None);
+    }
+
+    #[test]
+    fn vpn_secret_sets_password_flags_and_password_without_losing_fields() {
+        let updated = update_keyfile_secret(VPN, "vpn-password", "s3cret").unwrap();
+        assert!(updated.contains("password-flags=0"), "{updated}");
+        assert!(updated.contains("[vpn-secrets]\npassword=s3cret"), "{updated}");
+        assert!(updated.contains("remote=vpn.example.com"), "{updated}");
+        assert!(updated.contains("[ipv4]\nmethod=auto"), "{updated}");
+    }
+
+    #[test]
+    fn wifi_secret_sets_psk_flags_and_psk() {
+        let wifi = "[connection]\nid=Home Wi-Fi\n\n[wifi-security]\nkey-mgmt=wpa-psk\n\n[ipv4]\nmethod=auto\n";
+        let updated = update_keyfile_secret(wifi, "wifi-psk", "pa\\ss").unwrap();
+        assert!(updated.contains("psk-flags=0"), "{updated}");
+        assert!(updated.contains("psk=pa\\\\ss"), "{updated}");
+        assert!(updated.contains("key-mgmt=wpa-psk"), "{updated}");
+    }
+
+    #[test]
+    fn secrets_must_be_single_line_and_non_empty() {
+        assert!(update_keyfile_secret(VPN, "vpn-password", "").is_err());
+        assert!(update_keyfile_secret(VPN, "vpn-password", "two\nlines").is_err());
+        assert!(update_keyfile_secret(VPN, "vpn-password", "nul\0byte").is_err());
     }
 }

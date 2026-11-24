@@ -76,3 +76,24 @@ Examples of the class of bug worth reporting (not fixing unasked):
 - `uiStore.someMethod()` where the store has no such member → runtime TypeError
 - Svelte compiler warnings (a11y_*, css_unused_selector, state_referenced_locally)
  
+IMPORTANT — SINGLE SOURCE OF TRUTH RULE (enforce before writing any code):
+
+Before implementing anything, scan the codebase for:
+- Existing CSS classes, design tokens, or style patterns that already cover what you need — reuse them, never duplicate.
+- Existing utility functions, helpers, or modules with similar functionality — extend or call them, never rewrite.
+- Existing validators, constants, or type definitions already in root_policy.rs, privilege.rs, or any shared module — import and reuse, never copy inline.
+- Existing error-message strings or response-shape patterns already in use — match them exactly for consistency.
+
+If you find an existing thing that covers the need: USE IT. Do not create a new one alongside it.
+If you find something that almost covers the need: EXTEND IT (with minimal change, following existing naming and style). Do not duplicate it.
+If nothing exists: CREATE IT once, in the right shared location, so future code can reuse it.
+
+NEVER:
+- Define the same constant, validator, CSS class, or function in two places.
+- Reimplement logic that already exists elsewhere, even if it seems simpler to inline it.
+- Create a new helper when an existing one could be extended by one parameter.
+- Copy-paste code blocks between files; extract to a shared module instead.
+
+Before writing each function, type, constant, or style rule: search first. If found, reuse. If not found, place it where it can be reused by future code.
+
+This applies to: Rust code, Svelte components, CSS/styles, TypeScript utilities, test helpers, fixture setup code, error messages, and argv/command shapes.

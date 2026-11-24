@@ -28,6 +28,21 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Does this admin-mode error point at the missing rules.d rule — the one
+ * failure with a one-click fix?
+ *
+ * A dismissed prompt, a missing helper or a broken `invoke` are not repaired
+ * by installing the rule, and offering the button for them would just raise a
+ * pointless prompt. The backend's rule errors are worded "the installed
+ * PolicyKit rule …" and "PolicyKit did not keep the administrator
+ * authorization. Is the panel's polkit rule installed?".
+ */
+export function isPolicyRuleError(error: string | null | undefined): boolean {
+  if (!error) return false;
+  return /polkit rule|policykit rule|administrator authorization/i.test(error);
+}
+
 class StatusStore {
   lastEntry = $state<StatusEntry | null>(null);
   busy = $state(false);
@@ -124,5 +139,28 @@ export async function setAdminMode(on: boolean): Promise<void> {
   } catch (error) {
     statusStore.applyAdminMode({ on: false, expires_at: null, error: errorText(error) });
     statusStore.adminActionError = errorText(error);
+  }
+}
+
+/**
+ * Install (or repair) the PolicyKit rule that upgrades the helper's
+ * authorisation to a kept one. Without it `admin_mode_on` can never turn ON
+ * and every privileged action prompts again — a source checkout and an
+ * AppImage never run the package scripts that would have placed it.
+ *
+ * Exactly one prompt, and only when the rule is not already installed
+ * byte for byte. Returns the backend message for a toast.
+ */
+export async function repairAdminPolicy(): Promise<string> {
+  statusStore.adminActionError = null;
+  statusStore.clearAdminNotice();
+  try {
+    const message = await invoke<string>('admin_policy_repair');
+    // Read the real state back: a repair clears the "rule missing" error too.
+    await refreshAdminModeState();
+    return message;
+  } catch (error) {
+    statusStore.adminActionError = errorText(error);
+    throw error;
   }
 }

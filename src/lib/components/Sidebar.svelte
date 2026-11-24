@@ -182,9 +182,9 @@
 >
   <!-- Logo -->
   <button class="sidebar-logo" onclick={() => uiStore.toggleSidebar()} title={uiStore.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
-    <div class="logo-icon">
-      <img src="/app-icon.png" alt="Control Panel" class="logo-img" />
-    </div>
+    <span class="logo-icon" aria-hidden="true">
+      <img src="/app-icon-mark.png" alt="" class="logo-img" />
+    </span>
     {#if !uiStore.sidebarCollapsed}
       <div class="logo-text">
         <span class="logo-title">Control Panel</span>
@@ -315,7 +315,7 @@
             <div class="group-items">
               {#each filteredItems as item, itemIdx}
                 {@const isActive = uiStore.activeTab === item.id}
-                {@const isFirstResult = searchQuery.trim() && itemIdx === 0}
+                {@const isFirstResult = Boolean(searchQuery.trim()) && itemIdx === 0}
                 <button
                   class="nav-item"
                   class:active={isActive}
@@ -390,7 +390,7 @@
     min-width: 220px;
     height: 100%;
     background: var(--color-sidebar-bg);
-    border-right: 1px solid rgba(59, 73, 76, 0.5);
+    border-right: 1px solid var(--color-sidebar-border);
     transition: width 0.22s cubic-bezier(0.25, 1, 0.5, 1),
                 min-width 0.22s cubic-bezier(0.25, 1, 0.5, 1),
                 padding 0.22s cubic-bezier(0.25, 1, 0.5, 1);
@@ -591,24 +591,32 @@
   }.sidebar-logo:hover .logo-chevron {
     color: var(--color-accent);
   }.logo-icon {
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
     flex-shrink: 0;
     overflow: visible;
-    background: transparent;
     border: none;
-    filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.35));
-    transition: transform 0.18s ease, filter 0.18s ease;
+    border-radius: 10px;
+    background:
+      linear-gradient(145deg,
+        color-mix(in srgb, var(--color-accent) 30%, #ffffff),
+        color-mix(in srgb, var(--color-accent) 8%, #ffffff));
+    box-shadow: 0 5px 16px -7px var(--color-accent-glow);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
   }.sidebar-logo:hover .logo-icon {
-    transform: scale(1.08);
-    filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.65));
+    transform: translateY(-1px);
+    background:
+      linear-gradient(145deg,
+        color-mix(in srgb, var(--color-accent) 38%, #ffffff),
+        color-mix(in srgb, var(--color-accent) 14%, #ffffff));
+    box-shadow: 0 8px 20px -7px var(--color-accent-glow);
   }.logo-img {
-    width: 100%;
-    height: 100%;
+    width: 24px;
+    height: 26px;
     object-fit: contain;
+    filter: drop-shadow(0 1px 2px rgba(2, 12, 24, 0.18));
   }.logo-text {
     display: flex;
     flex-direction: column;
@@ -623,13 +631,27 @@
     letter-spacing: -0.01em;
     line-height: 1.2;
   }.logo-version {
-    font-size: 10px;
-    color: var(--color-text-muted);
+    align-self: flex-start;
+    margin-top: 3px;
+    padding: 1.5px 6px;
+    border-radius: 999px;
+    background: var(--color-accent-muted);
+    color: var(--color-text-accent);
     font-family: var(--font-mono);
-    letter-spacing: 0.04em;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    line-height: 1.35;
+    transition: background 0.15s ease, color 0.15s ease;
+  }.sidebar-logo:hover .logo-version {
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   }.sidebar-divider {
     height: 1px;
-    background: rgba(59, 73, 76, 0.45);
+    background: linear-gradient(90deg,
+      transparent,
+      color-mix(in srgb, var(--color-text-primary) 14%, transparent) 18%,
+      color-mix(in srgb, var(--color-text-primary) 14%, transparent) 82%,
+      transparent);
     margin: 0 2px 8px;
     flex-shrink: 0;
   }/* ── Search ───────────────────────────────────────────────────────── */ .sidebar-search {

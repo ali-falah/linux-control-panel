@@ -3,20 +3,25 @@
   import type { Snippet } from 'svelte';
   import { portal } from '../../actions/portal.ts';
 
-  interface Props extends HTMLSelectAttributes {
+  interface Props extends Omit<HTMLSelectAttributes, 'size'> {
     label?: string;
+    ariaLabel?: string;
     id?: string;
+    /** 'sm' matches .btn-sm (28px) for toolbars; 'md' (36px) suits forms. */
+    size?: 'sm' | 'md';
     children?: Snippet;
     onchange?: (e: any) => void;
   }
 
   let { 
     label,
+    ariaLabel,
     id = Math.random().toString(36).substring(2, 9),
     class: className = '',
     value = $bindable(),
     children,
     style = '',
+    size = 'md',
     onchange,
     ...rest 
   }: Props = $props();
@@ -151,6 +156,7 @@
     type="button"
     class="ui-select-trigger"
     class:open={isOpen}
+    class:sm={size === 'sm'}
     class:disabled={rest.disabled}
     onclick={() => { if (!rest.disabled) isOpen = !isOpen; }}
     onkeydown={handleTriggerKeydown}
@@ -159,7 +165,7 @@
     aria-expanded={isOpen}
     aria-haspopup="listbox"
     aria-controls="{id}-listbox"
-    aria-label={label || 'Select option'}
+    aria-label={label || ariaLabel || 'Select option'}
     {style}
   >
     <span class="ui-select-value">{activeLabel}</span>
@@ -180,6 +186,12 @@
       style={dropdownStyle}
       role="listbox"
       tabindex="-1"
+      onwheel={(event) => {
+        // A fixed-position listbox does not reliably scroll on wheel in
+        // WebKitGTK; drive it explicitly and keep the page still.
+        event.preventDefault();
+        event.currentTarget.scrollTop += event.deltaY;
+      }}
     >
       {#each options as opt}
         <button
@@ -235,9 +247,20 @@
     transition: all 0.15s ease;
   }
 
+  .ui-select-trigger.sm {
+    height: 28px;
+  }
+
   .ui-select-trigger:hover:not(.disabled) {
     border-color: var(--color-border-hover);
     background-color: var(--color-bg-hover);
+  }
+
+  /* Keyboard focus has to stay visible: the trigger clears the outline for
+     the mouse, so the ring is drawn the way the inputs draw theirs. */
+  .ui-select-trigger:focus-visible {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 2px var(--color-accent-muted);
   }
 
   .ui-select-trigger.open {

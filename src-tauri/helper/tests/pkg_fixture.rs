@@ -20,9 +20,7 @@ const LOG: &str = "/tmp/lcp-admin-test-fixture/log/calls.log";
 
 const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
 
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
-use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug)]
 struct Run {
@@ -45,10 +43,14 @@ fn run_helper(args: &[&str]) -> Run {
     }
 }
 
-fn fixture(with_stubs: bool) -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn fixture(with_stubs: bool) -> std::fs::File {
+    // The fixture directory is shared by every test binary, and each binary is
+    // its own process — an in-process Mutex cannot serialise them. The flock is
+    // released by the kernel even if this test panics or the process dies.
+    let lock_file = std::fs::File::create(format!("{FIXTURE_ROOT}.lock"))
+        .expect("fixture lock file could not be created");
+    rustix::fs::flock(&lock_file, rustix::fs::FlockOperation::LockExclusive)
+        .expect("the fixture lock could not be taken");
     let _ = std::fs::remove_dir_all(FIXTURE_ROOT);
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/bin")).unwrap();
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/log")).unwrap();
@@ -108,7 +110,7 @@ exit 0
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
-    guard
+    lock_file
 }
 
 fn calls() -> Vec<String> {

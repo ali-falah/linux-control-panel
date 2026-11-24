@@ -159,6 +159,7 @@
               <span class="badge badge-muted">{aiStore.activeLogService}</span>
             </div>
             <pre class="snippet-preview"><code>{aiStore.activeLogContext.slice(0, 200)}...</code></pre>
+            <div class="redaction-note">Sensitive values (keys, tokens, passwords, emails) are redacted before sending.</div>
           </div>
 
         {:else if aiStore.activeModalType === 'dnf'}
@@ -167,6 +168,7 @@
               <span class="badge badge-warning"><Package size={11} /> DNF Package Manager</span>
             </div>
             <pre class="snippet-preview"><code>{aiStore.activeDnfOutput.slice(0, 200)}...</code></pre>
+            <div class="redaction-note">Sensitive values (keys, tokens, passwords, emails) are redacted before sending.</div>
           </div>
 
         {:else if aiStore.activeModalType === 'nginx'}
@@ -233,7 +235,7 @@
                     title="Apply the pre-validated fix using the application's built-in hardened command"
                   >
                     {#if applyingFix}
-                      <RefreshCw size={13} class="spin" /> Applying…
+                      <RefreshCw size={13} class="animate-spin-slow" /> Applying…
                     {:else}
                       <Lock size={13} /> Apply Verified Fix
                     {/if}
@@ -404,9 +406,9 @@
             <AlertTriangle size={32} class="text-error" />
             <div class="error-title">AI Processing Failed</div>
             <div class="error-msg">{aiStore.analysisError}</div>
-            <Button variant="outline" size="sm" onclick={handleRetry}>
-              <RefreshCw size={13} /> Retry Operation
-            </Button>
+            <button class="header-refresh-btn" onclick={handleRetry} disabled={aiStore.analyzing}>
+              <RefreshCw size={13} class={aiStore.analyzing ? 'animate-spin-slow' : ''} /> Retry Operation
+            </button>
           </div>
         {/if}
       </div>
@@ -841,4 +843,9 @@
 
   :global(.spin) { animation: spin 1s linear infinite; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .redaction-note {
+    margin-top: 6px;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
 </style>

@@ -5,7 +5,6 @@
 #![cfg(feature = "test-fixture")]
 
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
 
 const FIXTURE_ROOT: &str = "/tmp/lcp-admin-test-fixture";
 const LOG: &str = "/tmp/lcp-admin-test-fixture/log/calls.log";
@@ -14,7 +13,6 @@ const NMCLI_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/nmcli";
 const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
 const UUID: &str = "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d";
 
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 struct Run {
@@ -23,10 +21,14 @@ struct Run {
     stderr: String,
 }
 
-fn fixture() -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn fixture() -> std::fs::File {
+    // The fixture directory is shared by every test binary, and each binary is
+    // its own process — an in-process Mutex cannot serialise them. The flock is
+    // released by the kernel even if this test panics or the process dies.
+    let lock_file = std::fs::File::create(format!("{FIXTURE_ROOT}.lock"))
+        .expect("fixture lock file could not be created");
+    rustix::fs::flock(&lock_file, rustix::fs::FlockOperation::LockExclusive)
+        .expect("the fixture lock could not be taken");
     let _ = std::fs::remove_dir_all(FIXTURE_ROOT);
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/bin")).unwrap();
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/log")).unwrap();
@@ -39,7 +41,7 @@ exit 0
         std::fs::write(path, STUB).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    guard
+    lock_file
 }
 
 fn run_helper(args: &[&str]) -> Run {

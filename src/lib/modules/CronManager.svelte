@@ -1,140 +1,191 @@
 <script lang="ts">
-  import { tableFeatures } from '../actions/tableFeatures';
+  import { onMount } from 'svelte';
   import Button from '../components/ui/Button.svelte';
   import Badge from '../components/ui/Badge.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
+  import KpiCard from '../components/ui/KpiCard.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
-    Clock, Plus, Trash2, RefreshCw, ShieldAlert, Shield, FolderOpen,
-    Copy, Check, Timer, CalendarClock, Info
+    Clock, Plus, Trash2, RefreshCw, ShieldAlert, FolderOpen,
+    Copy, Check, Timer, CalendarClock, Info, Lock, User, PlayCircle
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
+  import {
+    scheduleError, nextRun, humanizeSchedule,
+    relativeLabel, relativePast, absoluteLabel, epochLabel
+  } from '../utils/cronSchedule.ts';
 
   interface CronJob {
-    raw: string;
+    id: string;
     schedule: string;
     command: string;
-    is_root: boolean;
+    user: string;
+    source: 'user' | 'system';
+    file: string;
+    raw: string;
+    editable: boolean;
+    occurrence: number;
+  }
+
+  interface CronState {
+    user: string;
+    jobs: CronJob[];
+    errors: string[];
   }
 
   interface SystemdTimer {
     unit: string;
     activates: string;
-    status: string;
     description: string;
+    enabled: boolean;
+    active: boolean;
+    state: string;
+    status: string;
+    next_run: number | null;
+    last_run: number | null;
   }
 
   type View = 'cron' | 'timers';
+  type Scope = 'all' | 'user' | 'system';
+  type TimerScope = 'all' | 'active' | 'inactive';
 
   let view = $state<View>(
     uiStore.targetSubTab && ['cron', 'timers'].includes(uiStore.targetSubTab)
-      ? (uiStore.targetSubTab as any)
+      ? (uiStore.targetSubTab as View)
       : 'cron'
   );
   if (uiStore.targetSubTab && ['cron', 'timers'].includes(uiStore.targetSubTab)) {
     uiStore.targetSubTab = null;
   }
-  let jobs = $state<CronJob[]>([]);
+
+  let cronState = $state<CronState>({ user: '', jobs: [], errors: [] });
   let timers = $state<SystemdTimer[]>([]);
   let loading = $state(true);
+  let loaded = $state(false);
+  let loadError = $state('');
+  let timerError = $state('');
 
   let showAdd = $state(false);
-  let isRootJob = $state(false);
-  let newSchedule = $state('* * * * *');
+  let adding = $state(false);
+  let newSchedule = $state('0 3 * * *');
   let newCommand = $state('');
   let filterQuery = $state('');
-  let copiedKey = $state<string | null>(null);
+  let scope = $state<Scope>('all');
+  let timerScope = $state<TimerScope>('all');
+  let copiedId = $state<string | null>(null);
+  let nowTick = $state(Date.now());
 
-  // ── Schedule helpers ──────────────────────────────────────────────────
-  const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-  const NAMED_SCHEDULES: Record<string, string> = {
-    '@reboot': 'On every system boot',
-    '@yearly': 'Once a year, on 1 January',
-    '@annually': 'Once a year, on 1 January',
-    '@monthly': 'Once a month, on day 1',
-    '@weekly': 'Once a week, on Sunday',
-    '@daily': 'Once a day, at midnight',
-    '@midnight': 'Once a day, at midnight',
-    '@hourly': 'Once an hour, on the hour'
-  };
-
-  function isValidSchedule(expr: string): boolean {
-    const s = expr.trim().toLowerCase();
-    if (!s) return false;
-    if (s.startsWith('@')) return s in NAMED_SCHEDULES;
-    const parts = s.split(/\s+/);
-    if (parts.length !== 5) return false;
-    return parts.every(p => /^[\d*/,-]+$/.test(p));
-  }
-
-  /** Turns a raw cron expression into something a human can read at a glance. */
-  function humanizeSchedule(expr: string): string {
-    const s = expr.trim().toLowerCase();
-    if (NAMED_SCHEDULES[s]) return NAMED_SCHEDULES[s];
-
-    const parts = s.split(/\s+/);
-    if (parts.length !== 5) return 'Custom schedule';
-
-    const [min, hour, dom, mon, dow] = parts;
-    const hhmm = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
-
-    if (min === '*' && hour === '*') return 'Every minute';
-    if (/^\*\/\d+$/.test(min) && hour === '*') return `Every ${parseInt(min.slice(2), 10)} minutes`;
-    if (/^\d+\/\d+$/.test(min) && hour === '*') return `Every ${parseInt(min.split('/')[1], 10)} minutes`;
-    if (min === '0' && hour === '*') return 'Every hour, on the hour';
-    if (/^\*\/\d+$/.test(hour) && min === '0') return `Every ${parseInt(hour.slice(2), 10)} hours`;
-    if (dom === '*' && mon === '*' && dow === '*' && /^\d+$/.test(hour) && /^\d+$/.test(min)) {
-      return `Every day at ${hhmm}`;
+  // ── View data ─────────────────────────────────────────────────────────
+  const scheduleViews = $derived.by(() => {
+    nowTick;
+    const views = new Map<string, { human: string; next: Date | null; relative: string; absolute: string }>();
+    for (const job of cronState.jobs) {
+      if (views.has(job.schedule)) continue;
+      const next = nextRun(job.schedule);
+      views.set(job.schedule, {
+        human: humanizeSchedule(job.schedule),
+        next,
+        relative: next
+          ? relativeLabel(next, nowTick)
+          : (job.schedule.trim().toLowerCase() === '@reboot' ? 'At boot' : '—'),
+        absolute: next ? absoluteLabel(next) : ''
+      });
     }
-    if (dom === '*' && mon === '*' && /^\d+$/.test(dow) && hour === '0' && min === '0') {
-      return `Every ${DAY_NAMES[Number(dow) % 7]}`;
-    }
-    if (/^\d+$/.test(dom) && dom !== '*' && hour === '0' && min === '0') {
-      return `On day ${dom} of each month`;
-    }
-    if (/^\d+$/.test(dom) && dom !== '*' && /^\d+$/.test(mon) && mon !== '*') {
-      return `On day ${dom} of ${MONTH_NAMES[Number(mon) % 12]}`;
-    }
-    if (/^\d+$/.test(hour) && /^\d+$/.test(min)) return `At ${hhmm}`;
-    return 'Custom schedule';
-  }
-
-  // ── Derived data ──────────────────────────────────────────────────────
-  const filteredJobs = $derived.by(() => {
-    const q = filterQuery.trim().toLowerCase();
-    if (!q) return jobs;
-    return jobs.filter(
-      j =>
-        j.command.toLowerCase().includes(q) ||
-        j.schedule.toLowerCase().includes(q) ||
-        humanizeSchedule(j.schedule).toLowerCase().includes(q) ||
-        (j.is_root ? 'root system' : 'user').includes(q)
-    );
+    return views;
   });
 
-  const filteredTimers = $derived.by(() => {
-    const q = filterQuery.trim().toLowerCase();
-    if (!q) return timers;
-    return timers.filter(
-      t =>
-        t.unit.toLowerCase().includes(q) ||
-        t.activates.toLowerCase().includes(q) ||
-        t.status.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q)
-    );
+  const userJobCount = $derived(cronState.jobs.filter((job) => job.source === 'user').length);
+  const systemJobCount = $derived(cronState.jobs.filter((job) => job.source === 'system').length);
+  const enabledTimerCount = $derived(timers.filter((timer) => timer.enabled).length);
+  const activeTimerCount = $derived(timers.filter((timer) => timer.active).length);
+
+  const nextEvent = $derived.by(() => {
+    nowTick;
+    let best: { at: number; label: string; hint: string; short: string } | null = null;
+
+    for (const timer of timers) {
+      if (!timer.next_run) continue;
+      const at = timer.next_run * 1000;
+      if (!best || at < best.at) {
+        best = {
+          at,
+          label: timer.unit,
+          hint: 'systemd timer',
+          short: timer.unit.replace(/\.timer$/, '')
+        };
+      }
+    }
+    for (const job of cronState.jobs) {
+      const next = scheduleViews.get(job.schedule)?.next;
+      if (!next) continue;
+      if (!best || next.getTime() < best.at) {
+        const binary = job.command.trim().split(/\s+/)[0] ?? job.command;
+        best = {
+          at: next.getTime(),
+          label: job.command,
+          hint: job.schedule,
+          short: binary.split('/').pop() || binary
+        };
+      }
+    }
+    return best;
   });
 
-  const scheduleValid = $derived(isValidSchedule(newSchedule));
+  const visibleJobs = $derived.by(() => {
+    const query = filterQuery.trim().toLowerCase();
+    const list = cronState.jobs.filter((job) => {
+      if (scope === 'user' && job.source !== 'user') return false;
+      if (scope === 'system' && job.source !== 'system') return false;
+      if (!query) return true;
+      return [
+        job.command,
+        job.schedule,
+        job.user,
+        job.file,
+        scheduleViews.get(job.schedule)?.human ?? ''
+      ].some((value) => value.toLowerCase().includes(query));
+    });
+
+    return list.sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'user' ? -1 : 1;
+      const nextA = scheduleViews.get(a.schedule)?.next?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const nextB = scheduleViews.get(b.schedule)?.next?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      return nextA - nextB || a.raw.localeCompare(b.raw);
+    });
+  });
+
+  const visibleTimers = $derived.by(() => {
+    const query = filterQuery.trim().toLowerCase();
+    return timers.filter((timer) => {
+      if (timerScope === 'active' && !timer.active) return false;
+      if (timerScope === 'inactive' && timer.active) return false;
+      if (!query) return true;
+      return [timer.unit, timer.activates, timer.description, timer.status]
+        .some((value) => value.toLowerCase().includes(query));
+    });
+  });
+
+  const errors = $derived([
+    ...cronState.errors,
+    ...(timerError ? [`Systemd timers: ${timerError}`] : [])
+  ]);
+
+  const scheduleValid = $derived(scheduleError(newSchedule) === null);
+  const previewHuman = $derived(scheduleValid ? humanizeSchedule(newSchedule) : '');
+  const previewNext = $derived.by(() => {
+    nowTick;
+    if (!scheduleValid) return '';
+    const next = nextRun(newSchedule);
+    return next ? `${relativeLabel(next, nowTick)} · ${absoluteLabel(next)}` : 'Runs once at boot';
+  });
   const canSave = $derived(newCommand.trim().length > 0 && scheduleValid);
 
   // ── Data ──────────────────────────────────────────────────────────────
@@ -142,44 +193,69 @@
     loading = true;
     statusStore.setBusy('Loading scheduled tasks…');
     try {
-      const [cj, st] = await Promise.all([
-        invoke<CronJob[]>('list_cron_jobs'),
+      const [cronResult, timerResult] = await Promise.allSettled([
+        invoke<CronState>('list_cron_jobs'),
         invoke<SystemdTimer[]>('cron_list_timers')
       ]);
-      jobs = cj;
-      timers = st;
-      statusStore.setLastCommand('crontab -l; systemctl list-timers', 0, true);
-    } catch (e) {
-      uiStore.addToast(`Failed to load tasks: ${e}`, 'error');
+
+      let anySuccess = false;
+      if (cronResult.status === 'fulfilled') {
+        cronState = cronResult.value;
+        anySuccess = true;
+      } else {
+        cronState = {
+          user: cronState.user,
+          jobs: [],
+          errors: [`Your crontab could not be read: ${cronResult.reason}`]
+        };
+      }
+
+      if (timerResult.status === 'fulfilled') {
+        timers = timerResult.value;
+        timerError = '';
+        anySuccess = true;
+      } else {
+        timers = [];
+        timerError = String(timerResult.reason);
+      }
+
+      loadError = anySuccess ? '' : 'Scheduled task data is unavailable.';
+      statusStore.setLastCommand('crontab -l; systemctl list-timers', 0, anySuccess);
+    } catch (error) {
+      loadError = String(error);
       statusStore.setLastCommand('crontab -l; systemctl list-timers', 1, false);
     } finally {
       loading = false;
+      loaded = true;
       statusStore.clearBusy();
     }
   }
 
   async function addJob() {
-    if (!canSave) return;
+    if (!canSave || adding) return;
+    adding = true;
     statusStore.setBusy('Adding cron job…');
+    const entry = `${newSchedule.trim()} ${newCommand.trim()}`;
     try {
-      await invoke('add_cron_job', { schedule: newSchedule, command: newCommand, isRoot: isRootJob });
-      statusStore.setLastCommand(`(crontab -l; echo "${newSchedule} ${newCommand}") | crontab -`, 0, true);
-      uiStore.addToast('Cron job added', 'success');
+      await invoke('add_cron_job', { schedule: newSchedule, command: newCommand });
+      statusStore.setLastCommand(`crontab - (append) <<< "${entry}"`, 0, true);
+      uiStore.addToast('Job added to your crontab', 'success');
       showAdd = false;
       newCommand = '';
       await loadData();
-    } catch (e) {
-      uiStore.addToast(`Failed to add cron job: ${e}`, 'error');
-      statusStore.setLastCommand(`(crontab -l; echo "${newSchedule} ${newCommand}") | crontab -`, 1, false);
+    } catch (error) {
+      statusStore.setLastCommand(`crontab - (append) <<< "${entry}"`, 1, false);
+      uiStore.addToast(`Could not add the job: ${error}`, 'error');
     } finally {
+      adding = false;
       statusStore.clearBusy();
     }
   }
 
   function confirmDelete(job: CronJob) {
     uiStore.confirm(
-      'Delete Cron Job',
-      `Are you sure you want to delete this scheduled task?\n\n${job.raw}`,
+      'Delete scheduled task',
+      `This removes the line from your crontab:\n\n${job.raw}\n\n${humanizeSchedule(job.schedule)}`,
       () => doDelete(job),
       true
     );
@@ -188,46 +264,47 @@
   async function doDelete(job: CronJob) {
     statusStore.setBusy('Deleting cron job…');
     try {
-      await invoke('delete_cron_job', { raw: job.raw, isRoot: job.is_root });
-      statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 0, true);
-      uiStore.addToast('Cron job deleted', 'success');
+      await invoke('delete_cron_job', { raw: job.raw, occurrence: job.occurrence });
+      statusStore.setLastCommand(`crontab - (remove) <<< "${job.raw}"`, 0, true);
+      uiStore.addToast('Job deleted', 'success');
       await loadData();
-    } catch (e) {
-      uiStore.addToast(`Failed to delete cron job: ${e}`, 'error');
-      statusStore.setLastCommand(`crontab -l | grep -v "${job.raw}" | crontab -`, 1, false);
+    } catch (error) {
+      statusStore.setLastCommand(`crontab - (remove) <<< "${job.raw}"`, 1, false);
+      uiStore.addToast(`Could not delete the job: ${error}`, 'error');
+      await loadData();
     } finally {
       statusStore.clearBusy();
     }
   }
 
-  async function copyCommand(job: CronJob) {
+  async function copyJob(job: CronJob) {
     try {
-      await navigator.clipboard.writeText(job.command);
-      copiedKey = job.raw;
-      uiStore.addToast('Command copied to clipboard', 'success');
-      setTimeout(() => { copiedKey = null; }, 1500);
+      await navigator.clipboard.writeText(job.raw);
+      copiedId = job.id;
+      uiStore.addToast('Crontab line copied', 'success');
+      setTimeout(() => { copiedId = null; }, 1500);
     } catch {
-      uiStore.addToast('Failed to copy command', 'error');
+      uiStore.addToast('Could not copy the line', 'error');
     }
   }
 
-  /** A timer is "on" when the unit is loaded and active — the badge and the
-   *  switch must always agree, otherwise the control lies to the user. */
-  function timerIsActive(timer: SystemdTimer) {
-    return timer.status.toLowerCase().startsWith('active');
-  }
-
-  async function toggleTimer(timer: SystemdTimer) {
-    const enable = !timerIsActive(timer);
-    statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} timer ${timer.unit}…`);
+  async function toggleTimer(timer: SystemdTimer, enable: boolean) {
+    statusStore.setBusy(`${enable ? 'Enabling' : 'Disabling'} ${timer.unit}…`);
     try {
       await invoke('cron_toggle_timer', { unit: timer.unit, enable });
       uiStore.addToast(`Timer ${timer.unit} ${enable ? 'enabled' : 'disabled'}`, 'success');
       statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} --now ${timer.unit}`, 0, true);
       await loadData();
-    } catch (e) {
-      uiStore.addToast(`Failed to toggle timer: ${e}`, 'error');
+    } catch (error) {
+      const message = String(error);
+      if (message.includes('Admin mode is off')) {
+        uiStore.addToast('Turn on Admin mode in the status bar to change timers.', 'warning');
+      } else {
+        uiStore.addToast(`Could not update ${timer.unit}: ${message}`, 'error');
+      }
       statusStore.setLastCommand(`systemctl ${enable ? 'enable' : 'disable'} --now ${timer.unit}`, 1, false);
+      // The switch flips locally first; reload so it mirrors the real cronState.
+      await loadData();
     } finally {
       statusStore.clearBusy();
     }
@@ -243,452 +320,818 @@
         multiple: false,
         filters: [{ name: 'Scripts', extensions: ['sh', 'bash', 'py', 'pl'] }]
       });
-      if (selected && typeof selected === 'string') {
-        newCommand = selected;
-      }
-    } catch (e) {
-      uiStore.addToast(`Failed to open file dialog: ${e}`, 'error');
+      if (selected && typeof selected === 'string') newCommand = selected;
+    } catch (error) {
+      uiStore.addToast(`Could not open the file dialog: ${error}`, 'error');
     }
   }
 
-  $effect(() => { loadData(); });
+  onMount(() => {
+    loadData();
+    const timer = setInterval(() => { nowTick = Date.now(); }, 30_000);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <div class="module-page">
-  <PageHeader title="Scheduled Tasks" subtitle="Manage system and user cron jobs, and systemd timers" icon={Clock}>
+  <PageHeader title="Scheduled Tasks" subtitle="Cron jobs and systemd timers on this machine" icon={Clock}>
     <TabGroup
+      size="sm"
       tabs={[
-        { id: 'cron', label: 'Cron Jobs', count: jobs.length },
+        { id: 'cron', label: 'Cron Jobs', count: cronState.jobs.length },
         { id: 'timers', label: 'Systemd Timers', count: timers.length }
       ]}
       bind:activeTab={view}
       onchange={() => (filterQuery = '')}
     />
-    <Button variant="ghost" onclick={loadData} disabled={loading}>
+    <button class="header-refresh-btn" onclick={loadData} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Reload
-    </Button>
+    </button>
     {#if view === 'cron'}
-      <Button variant="primary" onclick={() => showAdd = true}>
+      <Button size="sm" variant="primary" onclick={() => (showAdd = true)}>
         <Plus size={14} /> Add Job
       </Button>
     {/if}
   </PageHeader>
 
-  <SideDrawer bind:isOpen={showAdd} title="Create Scheduled Task" width="520px">
-    <div class="drawer-form">
-      <div class="field">
-        <label class="field-label" for="cron-schedule">Schedule</label>
-        <input
-          id="cron-schedule"
-          class="input mono-input"
-          bind:value={newSchedule}
-          spellcheck="false"
-          autocomplete="off"
-        />
-        <div class="schedule-preview" class:invalid={!scheduleValid}>
-          <CalendarClock size={13} />
-          <span>
-            {scheduleValid
-              ? humanizeSchedule(newSchedule)
-              : 'Invalid schedule — use 5 fields (min hour dom mon dow) or @reboot / @hourly / @daily / @weekly'}
-          </span>
-        </div>
-        <div class="preset-row">
-          <Button variant="outline" size="sm" onclick={() => setPreset('* * * * *')}>Every Min</Button>
-          <Button variant="outline" size="sm" onclick={() => setPreset('0 * * * *')}>Hourly</Button>
-          <Button variant="outline" size="sm" onclick={() => setPreset('0 0 * * *')}>Daily</Button>
-          <Button variant="outline" size="sm" onclick={() => setPreset('0 0 * * 0')}>Weekly</Button>
-          <Button variant="outline" size="sm" onclick={() => setPreset('@reboot')}>On Boot</Button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label" for="cron-command">Command to Execute</label>
-        <div class="value-group">
-          <input
-            id="cron-command"
-            class="input mono-input"
-            bind:value={newCommand}
-            placeholder="/path/to/script.sh"
-            spellcheck="false"
-            autocomplete="off"
-          />
-          <button type="button" class="group-btn" onclick={browseFile} title="Browse for a script file">
-            <FolderOpen size={14} />
-          </button>
-        </div>
-      </div>
-
-      <div class="field">
-        <div class="toggle-row">
-          <Toggle checked={isRootJob} onToggle={(val) => (isRootJob = val)} />
-          <div class="toggle-text">
-            <span class="toggle-title">Run as Root User</span>
-            <span class="toggle-desc">
-              {isRootJob
-                ? 'System crontab (/etc/crontab) — runs as root on every boot'
-                : 'Your user crontab (crontab -l) — runs as your account'}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div class="drawer-actions">
-        <Button variant="ghost" onclick={() => showAdd = false}>Cancel</Button>
-        <Button variant="primary" onclick={addJob} disabled={!canSave}>
-          Save Job
-        </Button>
-      </div>
-    </div>
-  </SideDrawer>
-
-  <div class="card task-card">
-    <!-- Card header band: source context + count + filter -->
-    <div class="task-card-header">
-      <span class="task-file-chip">
-        {#if view === 'cron'}<Clock size={14} />{:else}<Timer size={14} />{/if}
-      </span>
-      <span class="task-card-title">
-        {view === 'cron' ? 'User & System Crontab' : 'Systemd Timers'}
-      </span>
-      <Badge variant="muted">
-        {view === 'cron' ? filteredJobs.length : filteredTimers.length}
-        {view === 'cron'
-          ? (filteredJobs.length === 1 ? 'job' : 'jobs')
-          : (filteredTimers.length === 1 ? 'timer' : 'timers')}
-      </Badge>
-      <div class="task-card-actions">
-        <SearchBar
-          bind:value={filterQuery}
-          placeholder={view === 'cron' ? 'Filter jobs…' : 'Filter timers…'}
-          style="width: 220px"
-        />
-      </div>
-    </div>
-
-    {#if loading}
-      <div class="task-loading">
-        <RefreshCw size={22} class="animate-spin-slow" />
-        <span>{view === 'cron' ? 'Loading cron jobs…' : 'Loading systemd timers…'}</span>
-      </div>
-    {:else if view === 'cron'}
-      {#if filteredJobs.length === 0}
-        <div class="task-empty">
-          <EmptyState
-            icon={filterQuery ? Info : Clock}
-            title={filterQuery ? 'No jobs match your filter' : 'No Scheduled Tasks'}
-            description={filterQuery
-              ? `Nothing matched "${filterQuery}". Try a different term.`
-              : 'You haven\'t added any cron jobs yet. Create one to run a command on a schedule.'}
-            actionLabel={filterQuery ? 'Clear filter' : 'Add First Job'}
-            actionIcon={filterQuery ? undefined : Plus}
-            onAction={() => (filterQuery ? (filterQuery = '') : (showAdd = true))}
-          />
-        </div>
-      {:else}
-        <div class="task-table-wrap">
-          <table use:tableFeatures>
-            <thead>
-              <tr>
-                <th class="task-col-icon"></th>
-                <th style="width: 200px">Schedule</th>
-                <th>Command</th>
-                <th style="width: 100px">Scope</th>
-                <th style="width: 76px; text-align: right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each filteredJobs as job}
-                <tr>
-                  <td class="task-col-icon">
-                    <span class="task-row-chip"><Clock size={11} /></span>
-                  </td>
-                  <td>
-                    <div class="schedule-cell">
-                      <span class="schedule-human">{humanizeSchedule(job.schedule)}</span>
-                      <code class="schedule-raw">{job.schedule}</code>
-                    </div>
-                  </td>
-                  <td>
-                    <span class="task-command">{job.command}</span>
-                  </td>
-                  <td>
-                    {#if job.is_root}
-                      <Badge variant="error"><ShieldAlert size={10} /> Root</Badge>
-                    {:else}
-                      <Badge variant="info"><Shield size={10} /> User</Badge>
-                    {/if}
-                  </td>
-                  <td class="task-actions">
-                    <button
-                      type="button"
-                      class="action-btn"
-                      onclick={() => copyCommand(job)}
-                      title="Copy command"
-                      aria-label="Copy command"
-                    >
-                      {#if copiedKey === job.raw}<Check size={14} />{:else}<Copy size={14} />{/if}
-                    </button>
-                    <button
-                      type="button"
-                      class="action-btn"
-                      onclick={() => confirmDelete(job)}
-                      title="Delete job"
-                      aria-label="Delete job"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    {:else}
-      {#if filteredTimers.length === 0}
-        <div class="task-empty">
-          <EmptyState
-            icon={filterQuery ? Info : Timer}
-            title={filterQuery ? 'No timers match your filter' : 'No Systemd Timers Found'}
-            description={filterQuery
-              ? `Nothing matched "${filterQuery}". Try a different term.`
-              : 'This system has no systemd timer units.'}
-            actionLabel={filterQuery ? 'Clear filter' : ''}
-            onAction={() => (filterQuery = '')}
-          />
-        </div>
-      {:else}
-        <div class="task-table-wrap">
-          <table use:tableFeatures>
-            <thead>
-              <tr>
-                <th class="task-col-icon"></th>
-                <th style="width: 210px">Timer Unit</th>
-                <th style="width: 150px">Status</th>
-                <th>Description</th>
-                <th style="width: 76px; text-align: right">Enabled</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each filteredTimers as timer}
-                <tr>
-                  <td class="task-col-icon">
-                    <span class="task-row-chip"><Timer size={11} /></span>
-                  </td>
-                  <td>
-                    <div class="unit-cell">
-                      <code class="task-unit" title={timer.unit}>{timer.unit}</code>
-                      <code class="unit-activates" title={timer.activates}>{timer.activates}</code>
-                    </div>
-                  </td>
-                  <td>
-                    <Badge variant={timerIsActive(timer) ? 'success' : 'muted'}>{timer.status}</Badge>
-                  </td>
-                  <td><span class="task-desc" title={timer.description || '—'}>{timer.description || '—'}</span></td>
-                  <td class="task-actions">
-                    <Toggle
-                      checked={timerIsActive(timer)}
-                      onToggle={() => toggleTimer(timer)}
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    {/if}
+  <div class="cron-overview">
+    <KpiCard icon={User} value={userJobCount} label="Your jobs" subtext={cronState.user || 'crontab'} />
+    <KpiCard icon={Lock} value={systemJobCount} label="System jobs" subtext="read-only" />
+    <KpiCard
+      icon={Timer}
+      value={enabledTimerCount}
+      label="Timers enabled"
+      subtext={`${activeTimerCount} running`}
+    />
+    <KpiCard
+      icon={PlayCircle}
+      value={nextEvent ? relativeLabel(new Date(nextEvent.at), nowTick) : '—'}
+      label="Next run"
+      subtext={nextEvent ? nextEvent.short : 'Nothing yet'}
+      title={nextEvent ? `${nextEvent.label} — ${nextEvent.hint}` : 'No upcoming run found'}
+    />
   </div>
+
+  {#if errors.length > 0}
+    <div class="cron-notice" role="status">
+      <ShieldAlert size={16} />
+      <div>
+        <strong>Some schedules could not be read</strong>
+        {#each errors as error}
+          <p>{error}</p>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  {#if !loaded && loading}
+    <div class="cron-card cron-loading">
+      <RefreshCw size={22} class="animate-spin-slow" />
+      <span>Loading scheduled tasks…</span>
+    </div>
+  {:else if !loaded && loadError}
+    <EmptyState
+      icon={ShieldAlert}
+      title="Scheduled task data unavailable"
+      description={loadError}
+      actionLabel="Retry"
+      actionIcon={RefreshCw}
+      onAction={loadData}
+    />
+  {:else if view === 'cron'}
+    <section class="cron-card">
+      <div class="card-head">
+        <span class="head-chip"><CalendarClock size={15} /></span>
+        <div class="head-copy">
+          <h3>Command schedules</h3>
+          <p>
+            {cronState.user ? `${cronState.user}'s crontab` : 'Your crontab'}
+            {#if systemJobCount > 0}· plus {systemJobCount} read-only system {systemJobCount === 1 ? 'entry' : 'entries'}{/if}
+          </p>
+        </div>
+        <div class="head-tools">
+          <div class="seg" role="group" aria-label="Filter by scope">
+            {#each [
+              { id: 'all' as Scope, label: 'All', count: cronState.jobs.length },
+              { id: 'user' as Scope, label: 'Yours', count: userJobCount },
+              { id: 'system' as Scope, label: 'System', count: systemJobCount }
+            ] as option}
+              <button
+                type="button"
+                class:active={scope === option.id}
+                aria-pressed={scope === option.id}
+                onclick={() => (scope = option.id)}
+              >
+                {option.label}<span>{option.count}</span>
+              </button>
+            {/each}
+          </div>
+          <SearchBar
+            bind:value={filterQuery}
+            placeholder="Filter jobs…"
+            style="width: 200px"
+          />
+        </div>
+      </div>
+
+      {#if visibleJobs.length === 0}
+        <div class="card-empty">
+          <EmptyState
+            icon={filterQuery || scope !== 'all' ? Info : Clock}
+            title={filterQuery || scope !== 'all' ? 'No jobs match this view' : 'No scheduled commands'}
+            description={filterQuery
+              ? `Nothing matched "${filterQuery}". Try a different term.`
+              : 'Commands added here run on the schedule you choose, using your account.'}
+            actionLabel={filterQuery || scope !== 'all' ? 'Clear filters' : 'Add your first job'}
+            actionIcon={filterQuery || scope !== 'all' ? undefined : Plus}
+            onAction={() => {
+              if (filterQuery || scope !== 'all') {
+                filterQuery = '';
+                scope = 'all';
+              } else {
+                showAdd = true;
+              }
+            }}
+          />
+        </div>
+      {:else}
+        <div class="task-list">
+          {#each visibleJobs as job (job.id)}
+            {@const scheduleView = scheduleViews.get(job.schedule)}
+            <div class="task-row" class:readonly={!job.editable}>
+              <span class="task-chip"><Clock size={13} /></span>
+
+              <div class="task-main">
+                <div class="task-top">
+                  <span class="task-title">{scheduleView?.human ?? 'Custom schedule'}</span>
+                  <code class="task-raw">{job.schedule}</code>
+                  <span class="next-chip" title={scheduleView?.absolute || 'No upcoming run'}>
+                    <PlayCircle size={11} />{scheduleView?.relative ?? '—'}
+                  </span>
+                </div>
+                <div class="task-bottom">
+                  <code class="task-command" title={job.command}>{job.command}</code>
+                </div>
+              </div>
+
+              <div class="task-meta">
+                {#if job.source === 'user'}
+                  <Badge variant="info"><User size={10} /> {job.user}</Badge>
+                {:else}
+                  <Badge variant="muted" title={job.file}><Lock size={10} /> {job.user}</Badge>
+                  <span class="source-path" title={job.file}>{job.file}</span>
+                {/if}
+              </div>
+
+              <div class="task-actions">
+                <button
+                  type="button"
+                  class="action-btn"
+                  onclick={() => copyJob(job)}
+                  title="Copy the crontab line"
+                  aria-label="Copy the crontab line"
+                >
+                  {#if copiedId === job.id}<Check size={14} />{:else}<Copy size={14} />{/if}
+                </button>
+                {#if job.editable}
+                  <button
+                    type="button"
+                    class="action-btn danger"
+                    onclick={() => confirmDelete(job)}
+                    title="Delete this job"
+                    aria-label="Delete this job"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                {:else}
+                  <span class="lock-note" title="System cron files are shown read-only">read-only</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+  {:else}
+    <section class="cron-card">
+      <div class="card-head">
+        <span class="head-chip"><Timer size={15} /></span>
+        <div class="head-copy">
+          <h3>Systemd timers</h3>
+          <p>Boot-enabled state and the unit each timer activates</p>
+        </div>
+        <div class="head-tools">
+          <div class="seg" role="group" aria-label="Filter by run state">
+            {#each [
+              { id: 'all' as TimerScope, label: 'All', count: timers.length },
+              { id: 'active' as TimerScope, label: 'Running', count: activeTimerCount },
+              { id: 'inactive' as TimerScope, label: 'Stopped', count: timers.length - activeTimerCount }
+            ] as option}
+              <button
+                type="button"
+                class:active={timerScope === option.id}
+                aria-pressed={timerScope === option.id}
+                onclick={() => (timerScope = option.id)}
+              >
+                {option.label}<span>{option.count}</span>
+              </button>
+            {/each}
+          </div>
+          <SearchBar
+            bind:value={filterQuery}
+            placeholder="Filter timers…"
+            style="width: 200px"
+          />
+        </div>
+      </div>
+
+      {#if visibleTimers.length === 0}
+        <div class="card-empty">
+          <EmptyState
+            icon={filterQuery || timerScope !== 'all' ? Info : Timer}
+            title={filterQuery || timerScope !== 'all' ? 'No timers match this view' : 'No systemd timers'}
+            description={filterQuery
+              ? `Nothing matched "${filterQuery}". Try a different term.`
+              : 'This system has no timer units installed.'}
+            actionLabel={filterQuery || timerScope !== 'all' ? 'Clear filters' : ''}
+            onAction={() => {
+              filterQuery = '';
+              timerScope = 'all';
+            }}
+          />
+        </div>
+      {:else}
+        <div class="task-list">
+          {#each visibleTimers as timer (timer.unit)}
+            <div class="task-row">
+              <span class="task-chip timer"><Timer size={13} /></span>
+
+              <div class="task-main">
+                <div class="task-top">
+                  <code class="task-unit">{timer.unit}</code>
+                  <span class="state-chip" class:on={timer.active} class:off={!timer.active}>
+                    <span class="state-dot"></span>{timer.status}
+                  </span>
+                  {#if timer.next_run}
+                    <span class="next-chip" title={epochLabel(timer.next_run)}>
+                      <PlayCircle size={11} />{relativeLabel(new Date(timer.next_run * 1000), nowTick)}
+                    </span>
+                  {:else}
+                    <span class="next-chip muted"><PlayCircle size={11} />no next run</span>
+                  {/if}
+                </div>
+                <div class="task-bottom">
+                  <span class="task-desc" title={timer.description || timer.activates}>
+                    {timer.description || `Activates ${timer.activates}`}
+                  </span>
+                  {#if timer.last_run}
+                    <span class="task-sub">· last ran {relativePast(timer.last_run, nowTick)}</span>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="task-meta">
+                <code class="source-path" title={timer.activates}>{timer.activates}</code>
+              </div>
+
+              <div class="task-actions timer-actions">
+                <span class="switch-caption" class:on={timer.enabled}>
+                  {timer.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+                <Toggle
+                  checked={timer.enabled}
+                  disabled={loading}
+                  onToggle={(value) => toggleTimer(timer, value)}
+                  aria-label={`Enable ${timer.unit} at boot`}
+                  title="Enabled at boot — switching also starts or stops the timer"
+                />
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+  {/if}
 </div>
 
-<style>
-  /* ── Card shell ─────────────────────────────────────────────── */
-  /* Hugs its content instead of stretching into an empty slab */
-  .task-card {
-    padding: 0;
-    overflow: hidden;
-    flex: 0 1 auto;
-    max-height: 100%;
-    display: flex;
-    flex-direction: column;
-  }
+<SideDrawer bind:isOpen={showAdd} title="New scheduled task" width="520px">
+  <div class="drawer-form">
+    <div class="target-note">
+      <User size={15} />
+      <div>
+        <strong>Added to {cronState.user ? `${cronState.user}'s` : 'your'} crontab</strong>
+        <span>The command runs with your permissions. System cron files stay read-only.</span>
+      </div>
+    </div>
 
-  /* Header band — raised surface so it reads as a header, not as content */
-  .task-card-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: var(--color-bg-raised);
-    border-bottom: 1px solid var(--color-border);
+    <div class="field">
+      <label class="field-label" for="cron-schedule">Schedule</label>
+      <input
+        id="cron-schedule"
+        class="input mono-input"
+        bind:value={newSchedule}
+        spellcheck="false"
+        autocomplete="off"
+        aria-invalid={!scheduleValid}
+      />
+      <div class="schedule-preview" class:invalid={!scheduleValid}>
+        <CalendarClock size={14} />
+        <div class="preview-text">
+          <strong>{scheduleValid ? previewHuman : 'Invalid schedule'}</strong>
+          <span>
+            {scheduleValid
+              ? previewNext
+              : scheduleError(newSchedule)}
+          </span>
+        </div>
+      </div>
+      <div class="preset-grid">
+        {#each [
+          { label: 'Every minute', value: '* * * * *' },
+          { label: 'Every 5 min', value: '*/5 * * * *' },
+          { label: 'Hourly', value: '0 * * * *' },
+          { label: 'Daily 03:00', value: '0 3 * * *' },
+          { label: 'Weekdays 09:00', value: '0 9 * * 1-5' },
+          { label: 'At boot', value: '@reboot' }
+        ] as preset}
+          <button
+            type="button"
+            class="preset-btn"
+            class:selected={newSchedule === preset.value}
+            onclick={() => setPreset(preset.value)}
+          >
+            {preset.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="cron-command">Command</label>
+      <div class="value-group">
+        <input
+          id="cron-command"
+          class="input mono-input"
+          bind:value={newCommand}
+          placeholder="/usr/local/bin/backup.sh"
+          spellcheck="false"
+          autocomplete="off"
+          onkeydown={(event) => event.key === 'Enter' && addJob()}
+        />
+        <button type="button" class="group-btn" onclick={browseFile} title="Browse for a script">
+          <FolderOpen size={14} />
+        </button>
+      </div>
+      <span class="field-hint">Use an absolute path — cron starts jobs with a minimal PATH.</span>
+    </div>
+
+    <div class="line-preview">
+      <span>Crontab line</span>
+      <code>{newSchedule.trim() || '* * * * *'} {newCommand.trim() || '…'}</code>
+    </div>
+
+    <div class="drawer-actions">
+      <Button variant="ghost" onclick={() => (showAdd = false)}>Cancel</Button>
+      <Button variant="primary" onclick={addJob} disabled={!canSave || adding} loading={adding}>
+        <Plus size={14} /> Add job
+      </Button>
+    </div>
+  </div>
+</SideDrawer>
+
+<style>
+  .cron-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
     flex-shrink: 0;
   }
 
-  .task-file-chip {
+  .cron-card {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+
+  .cron-loading {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 54px 24px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+  }
+
+  .cron-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px 13px;
+    border-radius: 9px;
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+    font-size: 11.5px;
+    flex-shrink: 0;
+  }
+
+  .cron-notice strong {
+    display: block;
+    font-size: 12px;
+    margin-bottom: 2px;
+  }
+
+  .cron-notice p {
+    margin: 1px 0 0;
+    color: var(--color-text-secondary);
+    line-height: 1.4;
+  }
+
+  /* ── Card header ─────────────────────────────────────────────── */
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--color-bg-raised);
+    border-bottom: 1px solid var(--color-border-subtle);
+    flex-wrap: wrap;
+  }
+
+  .head-chip {
     display: grid;
     place-items: center;
-    width: 26px;
-    height: 26px;
-    border-radius: 7px;
-    background: var(--color-module-icon-bg);
-    border: 1px solid var(--color-module-icon-border);
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: var(--color-accent-muted);
     color: var(--color-accent);
     flex-shrink: 0;
   }
 
-  .task-card-title {
+  .head-copy {
+    min-width: 0;
+  }
+
+  .head-copy h3 {
+    margin: 0;
     font-size: 13px;
     font-weight: 700;
     color: var(--color-text-primary);
-    white-space: nowrap;
   }
 
-  .task-card-actions {
+  .head-copy p {
+    margin: 1px 0 0;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+
+  .head-tools {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
-  /* ── Table ──────────────────────────────────────────────────── */
-  .task-table-wrap {
-    overflow: auto;
-    flex: 1;
+  .seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--color-bg-card);
+  }
+
+  .seg button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 9px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .seg button span {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-text-muted) 14%, transparent);
+  }
+
+  .seg button:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-hover);
+  }
+
+  .seg button.active {
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+  }
+
+  .seg button.active span {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+
+  /* ── Rows ────────────────────────────────────────────────────── */
+  .task-list {
+    overflow-y: auto;
     min-height: 0;
   }
 
-  /* Honour the column widths so long values truncate instead of pushing
-     the action column off-screen */
-  .task-table-wrap :global(table) {
-    table-layout: fixed;
-    width: 100%;
+  .task-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    transition: background 0.14s ease;
   }
 
-  .task-table-wrap :global(tbody td) {
-    padding: 7px 12px;
+  .task-row:last-child {
+    border-bottom: none;
   }
 
-  .task-col-icon {
-    width: 34px;
-    padding-left: 16px;
-    padding-right: 0;
+  .task-row:hover {
+    background: var(--color-bg-hover);
   }
 
-  .task-row-chip {
+  .task-row.readonly {
+    background: color-mix(in srgb, var(--color-text-muted) 3%, transparent);
+  }
+
+  .task-chip {
     display: grid;
     place-items: center;
-    width: 20px;
-    height: 20px;
-    border-radius: 5px;
-    background: var(--color-bg-raised);
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .task-row.readonly .task-chip {
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
     color: var(--color-text-muted);
   }
 
-  /* Schedule: plain-language first, raw expression underneath */
-  .schedule-cell {
+  .task-main {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
 
-  .schedule-human {
+  .task-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .task-title {
     font-size: 12.5px;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--color-text-primary);
+    white-space: nowrap;
   }
 
-  .schedule-raw {
+  .task-raw,
+  .task-unit {
     font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--color-text-muted);
+    padding: 0 5px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--color-text-muted) 8%, transparent);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .task-unit {
+    font-size: 12px;
+    color: var(--color-text-primary);
+    background: transparent;
+    padding: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .next-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--color-accent);
+    background: var(--color-accent-muted);
+    border-radius: 999px;
+    padding: 1px 7px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .next-chip.muted {
+    color: var(--color-text-muted);
+    background: color-mix(in srgb, var(--color-text-muted) 8%, transparent);
+  }
+
+  .task-bottom {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
   }
 
   .task-command {
     font-family: var(--font-mono);
-    font-size: 12.5px;
-    color: var(--color-text-primary);
-    /* break on spaces only — never mid-path */
-    word-break: normal;
-    overflow-wrap: break-word;
-  }
-
-  .task-unit {
-    font-family: var(--font-mono);
     font-size: 11.5px;
     color: var(--color-text-secondary);
-    display: block;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
-  /* Unit + the service it activates, stacked — saves a whole column */
-  .unit-cell {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .unit-activates {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
+  .task-row.readonly .task-command {
     color: var(--color-text-muted);
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .task-desc {
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--color-text-secondary);
-    display: block;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
-  /* ── Row actions ────────────────────────────────────────────── */
-  .task-actions {
-    text-align: right;
-    white-space: nowrap;
-  }
-
-  .task-actions :global(.action-btn) {
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border-radius: 6px;
+  .task-sub {
+    font-size: 10.5px;
     color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  /* Destructive action stays quiet until hovered */
-  .task-actions :global(.action-btn:last-child:hover) {
+  .state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .state-chip.on {
+    color: var(--color-success);
+  }
+
+  .state-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-text-muted) 18%, transparent);
+  }
+
+  .state-chip.on .state-dot {
+    background: var(--color-success);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-success) 20%, transparent);
+  }
+
+  .task-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    max-width: 190px;
+  }
+
+  .source-path {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+  }
+
+  .task-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    min-width: 64px;
+    justify-content: flex-end;
+  }
+
+  .action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+
+  .action-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .action-btn.danger:hover {
     background: var(--color-error-muted);
     color: var(--color-error);
   }
 
-  /* ── Empty & loading ───────────────────────────────────────── */
-  .task-empty {
-    padding: 20px;
-  }
-
-  .task-loading {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 60px 24px;
+  .lock-note {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     color: var(--color-text-muted);
-    font-size: 13px;
   }
 
-  /* ── Add-job drawer ────────────────────────────────────────── */
+  .timer-actions {
+    gap: 8px;
+    min-width: 118px;
+  }
+
+  .switch-caption {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .switch-caption.on {
+    color: var(--color-success);
+  }
+
+  .card-empty {
+    padding: 18px;
+  }
+
+  /* The card is already a frame; flatten the empty state inside it. */
+  .card-empty :global(.empty-state-wrap),
+  :global(html.light-mode) .card-empty :global(.empty-state-wrap) {
+    border: none;
+    background: transparent !important;
+    padding: 34px 22px;
+  }
+
+  /* ── Drawer ──────────────────────────────────────────────────── */
   .drawer-form {
     display: flex;
     flex-direction: column;
     gap: 18px;
+  }
+
+  .target-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
+  }
+
+  .target-note strong {
+    display: block;
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }
+
+  .target-note span {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--color-text-secondary);
   }
 
   .field {
@@ -710,43 +1153,90 @@
     font-size: 12.5px;
   }
 
+  .field-hint {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }
+
   .schedule-preview {
     display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 7px 10px;
-    border-radius: 7px;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
     background: var(--color-accent-muted);
-    border: 1px solid var(--color-accent-glow);
     color: var(--color-accent);
-    font-size: 11.5px;
-    font-weight: 600;
+  }
+
+  .preview-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .preview-text strong {
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }
+
+  .preview-text span {
+    font-size: 10.5px;
+    color: var(--color-text-secondary);
   }
 
   .schedule-preview.invalid {
     background: var(--color-error-muted);
-    border-color: rgba(239, 68, 68, 0.25);
     color: var(--color-error);
-    font-weight: 500;
   }
 
-  .preset-row {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 2px;
+  .schedule-preview.invalid .preview-text strong {
+    color: var(--color-error);
+  }
+
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .preset-btn {
+    width: 100%;
+  }
+
+  .preset-btn {
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: color-mix(in srgb, var(--color-text-muted) 8%, transparent);
+    color: var(--color-text-secondary);
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+
+  .preset-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+  }
+
+  .preset-btn.selected {
+    background: var(--color-accent-muted);
+    color: var(--color-accent);
   }
 
   .value-group {
     display: flex;
     align-items: stretch;
-    gap: 0;
   }
 
   .value-group .input {
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
     min-width: 0;
+    flex: 1;
   }
 
   .group-btn {
@@ -761,46 +1251,43 @@
     border-radius: 0 6px 6px 0;
     color: var(--color-text-muted);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: background 0.15s ease, color 0.15s ease;
   }
 
   .group-btn:hover {
     color: var(--color-accent);
     background: var(--color-accent-muted);
-    border-color: var(--color-accent);
   }
 
-  .toggle-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: var(--color-bg-surface);
-  }
-
-  .toggle-text {
+  .line-preview {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
+    padding: 9px 11px;
+    border-radius: 8px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border-subtle);
   }
 
-  .toggle-title {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-
-  .toggle-desc {
-    font-size: 11.5px;
+  .line-preview span {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     color: var(--color-text-muted);
+  }
+
+  .line-preview code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
   }
 
   .drawer-actions {
     display: flex;
-    gap: 12px;
+    gap: 10px;
     justify-content: flex-end;
-    margin-top: 4px;
+    margin-top: 2px;
   }
 </style>

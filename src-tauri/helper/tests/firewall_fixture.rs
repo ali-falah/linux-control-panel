@@ -25,9 +25,7 @@ const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
 // Same value the helper concedes to the test-fixture feature.
 const SS_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/ss";
 
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
-use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug)]
 struct Run {
@@ -53,10 +51,14 @@ fn run_helper(args: &[&str]) -> Run {
 /// Take the fixture lock, wipe and rebuild the fixture tree (optionally
 /// with the stub binaries so the helper "finds" a backend), then return
 /// the guard that serializes every test against the shared root.
-fn fixture(with_stubs: bool) -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn fixture(with_stubs: bool) -> std::fs::File {
+    // The fixture directory is shared by every test binary, and each binary is
+    // its own process — an in-process Mutex cannot serialise them. The flock is
+    // released by the kernel even if this test panics or the process dies.
+    let lock_file = std::fs::File::create(format!("{FIXTURE_ROOT}.lock"))
+        .expect("fixture lock file could not be created");
+    rustix::fs::flock(&lock_file, rustix::fs::FlockOperation::LockExclusive)
+        .expect("the fixture lock could not be taken");
     let _ = std::fs::remove_dir_all(FIXTURE_ROOT);
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/bin")).unwrap();
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/log")).unwrap();
@@ -103,7 +105,7 @@ fn fixture(with_stubs: bool) -> MutexGuard<'static, ()> {
         std::fs::write(SYSTEMCTL_BIN, SYSTEMCTL_STUB).unwrap();
         std::fs::set_permissions(SYSTEMCTL_BIN, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    guard
+    lock_file
 }
 
 fn calls() -> Vec<String> {
@@ -821,7 +823,7 @@ fn guard_rich_rule_reject_for_ssh_with_explicit_confirmation_proceeds() {
     assert_eq!(
         calls().len(),
         2,
-        "runtime then permanent ran after confirmation"
+        "the rich rule runs runtime then permanent after confirmation"
     );
 }
 
@@ -939,7 +941,7 @@ fn guard_stray_trailing_argument_is_refused_not_treated_as_confirmation() {
 // ── firewall_panic (GROUP 3) ─────────────────────────────────────────────────
 
 #[test]
-fn panic_firewalld_enable_runs_runtime_then_permanent() {
+fn panic_firewalld_enable_uses_runtime_only() {
     let _guard = fixture(true);
 
     let run = run_helper(&["firewall_panic", "enable"]);
@@ -947,30 +949,24 @@ fn panic_firewalld_enable_runs_runtime_then_permanent() {
     assert!(run.stderr.is_empty(), "success prints nothing: {run:?}");
     assert_eq!(
         calls(),
-        vec![
-            "--panic-on",
-            "--panic-on --permanent",
-        ],
-        "runtime first, then permanent; no zone argument: {:?}", calls());
+        vec!["--panic-on"],
+        "panic is runtime-only; no permanent phase and no zone argument: {:?}", calls());
 }
 
 #[test]
-fn panic_firewalld_disable_runs_runtime_then_permanent() {
+fn panic_firewalld_disable_uses_runtime_only() {
     let _guard = fixture(true);
 
     let run = run_helper(&["firewall_panic", "disable"]);
     assert_eq!(run.code, 0, "disable must succeed: {run:?}");
     assert_eq!(
         calls(),
-        vec![
-            "--panic-off",
-            "--panic-off --permanent",
-        ],
-        "disabling uses --panic-off in both phases: {:?}", calls());
+        vec!["--panic-off"],
+        "disabling uses only --panic-off: {:?}", calls());
 }
 
 #[test]
-fn panic_runtime_failure_stops_before_permanent() {
+fn panic_runtime_failure_is_reported() {
     let _guard = fixture(true);
     set_ctl("fail-runtime");
 
@@ -983,32 +979,19 @@ fn panic_runtime_failure_stops_before_permanent() {
     assert_eq!(
         calls(),
         vec!["--panic-on"],
-        "the permanent step must never run after a runtime failure: {:?}", calls());
+        "panic mode has exactly one runtime command: {:?}", calls());
 }
 
 #[test]
-fn panic_permanent_failure_reports_the_partial_state_and_no_rollback() {
+fn panic_never_combines_the_switch_with_permanent() {
     let _guard = fixture(true);
-    set_ctl("fail-permanent");
 
     let run = run_helper(&["firewall_panic", "enable"]);
-    assert_ne!(run.code, 0, "a permanent failure must fail the action: {run:?}");
-    assert!(
-        run.stderr.contains("BY-STUB: injected permanent failure"),
-        "the permanent step's stderr must be preserved: {run:?}"
-    );
-    assert!(
-        run.stderr.contains("enabled at runtime, but the persistent configuration was not"),
-        "the partial state must be explicit: {run:?}"
-    );
-    assert!(
-        !run.stderr.to_lowercase().contains("rollback"),
-        "no rollback may be promised: {run:?}"
-    );
+    assert_eq!(run.code, 0, "enable must succeed: {run:?}");
     assert_eq!(
         calls(),
-        vec!["--panic-on", "--panic-on --permanent"],
-        "both steps were attempted: {:?}", calls());
+        vec!["--panic-on"],
+        "firewall-cmd rejects --panic-on with --permanent: {:?}", calls());
 }
 
 #[test]
@@ -1064,8 +1047,8 @@ fn panic_enable_with_explicit_confirmation_proceeds_during_a_session() {
     assert_eq!(run.code, 0, "explicit confirmation permits panic: {run:?}");
     assert_eq!(
         calls().len(),
-        2,
-        "runtime then permanent ran after confirmation"
+        1,
+        "panic runs exactly one runtime command after confirmation"
     );
 }
 
@@ -1076,7 +1059,7 @@ fn panic_enable_without_a_session_needs_no_confirmation() {
 
     let run = run_helper(&["firewall_panic", "enable"]);
     assert_eq!(run.code, 0, "no session: enable must proceed: {run:?}");
-    assert_eq!(calls().len(), 2);
+    assert_eq!(calls().len(), 1);
 }
 
 #[test]
@@ -1128,7 +1111,7 @@ fn panic_disable_does_not_need_confirmation_or_a_probe() {
         run.code, 0,
         "disabling panic mode must remain possible: {run:?}"
     );
-    assert_eq!(calls().len(), 2);
+    assert_eq!(calls().len(), 1);
 }
 
 #[test]

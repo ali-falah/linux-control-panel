@@ -1,17 +1,17 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { 
     Layers, Play, Square, RotateCw, Trash2, Plus, Terminal, 
     FileCode, Settings, Cpu, HardDrive, Shield, AlertTriangle, 
     CheckCircle2, Copy, Check, Eye, RefreshCcw, Save, Zap,
     FileText, ArrowDown, Search, Folder, TerminalSquare, Info,
-    Activity, Clock, ChevronRight, Hash, Box, KeyRound, Database, Sparkles
+    Activity, Clock, ChevronRight, Hash, Box, KeyRound, Database, Sparkles,
+    LayoutGrid, Table2, Pause, Download
   } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import PageHeader from '../components/PageHeader.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
-  import KpiCard from '../components/ui/KpiCard.svelte';
   import SearchBar from '../components/ui/SearchBar.svelte';
   import Select from '../components/ui/Select.svelte';
   import Button from '../components/ui/Button.svelte';
@@ -59,6 +59,36 @@
     env_vars: Record<string, string>;
     version?: string;
     created_at?: number;
+    namespace?: string;
+    interpreter?: string;
+    node_version?: string;
+    max_memory_restart?: string;
+    is_module?: boolean;
+  }
+
+  interface Pm2DumpInfo {
+    exists: boolean;
+    modified?: number | null;
+    size: number;
+  }
+
+  type Pm2ActivityTone = 'info' | 'success' | 'warning' | 'error';
+
+  interface Pm2Activity {
+    id: number;
+    time: number;
+    title: string;
+    detail?: string;
+    tone: Pm2ActivityTone;
+    pmId?: number;
+    kind: string;
+  }
+
+  interface ProcessSnapshot {
+    name: string;
+    status: string;
+    restarts: number;
+    unstable: number;
   }
 
   interface Pm2EcosystemFile {
@@ -76,8 +106,23 @@
     startup_command_hint: string;
   }
 
+  interface Pm2LogFileInfo {
+    name: string;
+    size: number;
+  }
+
+  interface Pm2LogOverview {
+    directory: string;
+    total_size: number;
+    files: Pm2LogFileInfo[];
+    hidden_files?: number;
+    logrotate_installed: boolean;
+    logrotate_version?: string | null;
+  }
+
   interface Pm2SavedDumpApp {
     name: string;
+    namespace: string;
     script_path: string;
     cwd: string;
     exec_mode: string;
@@ -97,32 +142,81 @@
     raw: string;
     level: 'error' | 'warn' | 'info';
     timestamp?: string;
+    context?: string;
     message: string;
   }
 
-  // Active Top Navigation Scope
-  let activeTab = $state<'fleet' | 'ecosystem' | 'daemon'>('fleet');
+  // Active Top Navigation Scope. A GlobalSearch request captured at mount
+  // always wins over a persisted tab.
+  const initialTargetSubTab = uiStore.targetSubTab;
+  let activeTab = $state<'fleet' | 'ecosystem' | 'daemon'>(
+    initialTargetSubTab === 'ecosystem' || initialTargetSubTab === 'daemon'
+      ? initialTargetSubTab
+      : 'fleet'
+  );
 
   // Loading and State
   let loading = $state(true);
   let refreshing = $state(false);
+  let fleetError = $state<string | null>(null);
+
+  // Dump drift, activity and process operations
+  let dumpInfo = $state<Pm2DumpInfo | null>(null);
+  let showActivityDrawer = $state(false);
+  let activityLog = $state<Pm2Activity[]>([]);
+  let showScaleModal = $state(false);
+  let scaleTarget = $state<Pm2Process | null>(null);
+  let scaleInstances = $state(1);
+  let scaling = $state(false);
+  let restartEvents = $state<Record<number, number[]>>({});
+  let dismissedStorms = $state<Set<number>>(new Set());
+
+  let activitySeq = 0;
+  const ACTIVITY_KEY = 'lcp_pm2_activity_v1';
+  const RESTART_WINDOW_MS = 5 * 60 * 1000;
+  const RESTART_THRESHOLD = 3;
+  let lastProcessSnapshot = new Map<number, ProcessSnapshot>();
+  let hasProcessBaseline = false;
+  let suppressProcessEvents = new Map<number, number>();
+  let suppressAllProcessEventsUntil = 0;
   let showEcosystemDiffModal = $state(false);
   let systemStatus = $state<Pm2SystemStatus | null>(null);
   let processes = $state<Pm2Process[]>([]);
   let ecosystemFiles = $state<Pm2EcosystemFile[]>([]);
   let startupStatus = $state<Pm2StartupStatus | null>(null);
   let savedDumpApps = $state<Pm2SavedDumpApp[]>([]);
+  let savedDumpLoaded = $state(false);
 
   // Master-Detail & SideDrawer Selection State
   let selectedProcessId = $state<number | null>(null);
   let showProcessDrawer = $state(false);
+  let showLogsDrawer = $state(false);
+  let logFollow = $state(true);
   let drawerTab = $state<'vitals' | 'env'>('vitals');
   let selectedInspectorTab = $state<'logs' | 'vitals' | 'env'>('logs');
+  let procContextMenu = $state<{
+    show: boolean;
+    x: number;
+    y: number;
+    process: Pm2Process | null;
+  }>({ show: false, x: 0, y: 0, process: null });
 
   // Filters & Search
   let searchQuery = $state('');
   let statusFilter = $state<'all' | 'online' | 'stopped' | 'errored'>('all');
+  let namespaceFilter = $state('all');
+  let fleetView = $state<'cards' | 'table'>('cards');
+  let processSortKey = $state<'name' | 'status' | 'cpu' | 'memory' | 'restarts' | 'uptime' | 'instances'>('name');
+  let processSortAsc = $state(true);
+  let processPollPaused = $state(false);
+  let lastProcessUpdate = $state<Date | null>(null);
+  let processHistory = $state<Record<number, { cpu: number[]; mem: number[] }>>({});
+  let revealedEnvKeys = $state<Set<string>>(new Set());
   let envSearchQuery = $state('');
+
+  let uiStateLoaded = $state(false);
+  const UI_STATE_KEY = 'lcp_pm2_ui_v1';
+  const HISTORY_LIMIT = 40;
 
   // Copy Feedback
   let copiedCommand = $state<string | null>(null);
@@ -158,6 +252,92 @@
     return { label: 'Generic Executable', badge: '⚙️ Binary / Script', type: 'generic' };
   });
 
+  /** Folders that sit between a project root and its real entrypoint. */
+  const GENERIC_SCRIPT_DIRS = new Set([
+    'dist',
+    'build',
+    'out',
+    'src',
+    'public',
+    'static',
+    'bin',
+    'lib',
+    'coverage',
+    '.next',
+    'node_modules',
+  ]);
+
+  let launchPathLooksLikeFolder = $derived.by(() => {
+    const raw = launchForm.script_path.trim();
+    if (!raw) return false;
+    if (raw.endsWith('/')) return true;
+    const base = raw.split('/').filter(Boolean).pop() || '';
+    // An ecosystem file is a file even though it is not an executable.
+    if (base.includes('.')) return false;
+    return GENERIC_SCRIPT_DIRS.has(base.toLowerCase());
+  });
+
+  function slugName(value: string): string {
+    return value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  /**
+   * Derive a sane process name and working directory from an entrypoint,
+   * skipping bundler output folders such as dist/ or build/.
+   */
+  function inferLaunchHints(forceName = false, forceCwd = false) {
+    const raw = launchForm.script_path.trim().replace(/\/+$/, '');
+    if (!raw) return;
+    const segments = raw.split('/').filter(Boolean);
+    const fileName = segments.pop() || '';
+    if (!fileName) return;
+
+    const dirSegments = [...segments];
+    while (
+      dirSegments.length > 0 &&
+      GENERIC_SCRIPT_DIRS.has((dirSegments[dirSegments.length - 1] || '').toLowerCase())
+    ) {
+      dirSegments.pop();
+    }
+    const dirPath = raw.startsWith('/') ? `/${dirSegments.join('/')}` : '';
+
+    if (dirPath && (forceCwd || !launchForm.cwd.trim())) {
+      launchForm.cwd = dirPath;
+    }
+
+    if (forceName || !launchForm.name.trim()) {
+      const baseName = fileName.replace(/\.[^/.]+$/, '');
+      const parent = dirSegments[dirSegments.length - 1] || '';
+      let inferred = baseName;
+      if (['index', 'main', 'app', 'server', 'start', 'cli'].includes(baseName.toLowerCase())) {
+        inferred = parent || baseName;
+      }
+      let slug = slugName(inferred);
+      if (!slug) slug = slugName(baseName);
+      if (slug) launchForm.name = slug;
+    }
+  }
+
+  let launchDuplicateError = $derived.by(() => {
+    const raw = launchForm.script_path.trim();
+    if (!raw) return '';
+    const name = launchForm.name.trim();
+    const sameScript = processes.find((proc) => proc.script_path === raw);
+    if (sameScript) {
+      return `That entrypoint is already managed as "${sameScript.name}" (#${sameScript.pm_id}). Use Restart instead of launching a duplicate.`;
+    }
+    if (name) {
+      const sameName = processes.find((proc) => proc.name === name);
+      if (sameName) {
+        return `The name "${name}" is already in use by ${sameName.script_path}. Choose another name.`;
+      }
+    }
+    return '';
+  });
+
   let livePm2Command = $derived.by(() => {
     let cmd = `pm2 start "${launchForm.script_path || '<script_path>'}"`;
     if (launchForm.name && launchForm.name.trim()) cmd += ` --name "${launchForm.name.trim()}"`;
@@ -180,6 +360,11 @@
   let ecosystemContent = $state('');
   let originalEcosystemContent = $state('');
   let isEcosystemDirty = $derived(ecosystemContent !== originalEcosystemContent);
+  let ecosystemOnly = $state('');
+  let ecosystemEnv = $state('');
+  let ecosystemValidationError = $state('');
+  let ecosystemValidating = $state(false);
+  let ecosystemLoadToken = 0;
   let showNewEcosystemModal = $state(false);
   let newEcosystemPath = $state('');
   let newEcosystemTemplate = $state<'express' | 'nest' | 'next' | 'microservice'>('express');
@@ -189,14 +374,21 @@
   let rawLogText = $state<string>('');
   let logSearchQuery = $state('');
   let logAutoRefresh = $state(true);
+  let logErrorsOnly = $state(false);
+  let logAtBottom = $state(true);
+  let logOverview = $state<Pm2LogOverview | null>(null);
+  let logOverviewLoading = $state(false);
+  let exportingLog = $state(false);
   let logRefreshInterval = $state(2); // seconds
   let logTailLines = $state('200');
   let logLoading = $state(false);
   let logContainerRef = $state<HTMLDivElement | null>(null);
+  let logLoadToken = 0;
 
   // Timers
   let refreshTimer: any = null;
   let logStreamTimer: any = null;
+  let processesInFlight = false;
 
   // Aggregate Metrics Computed
   let totalApps = $derived(processes.length);
@@ -207,31 +399,133 @@
   let totalCpuPercent = $derived(processes.reduce((acc, p) => acc + (p.cpu || 0), 0));
 
   // Filtered Processes for Master Pane
-  let filteredProcesses = $derived(
-    processes.filter(p => {
-      if (statusFilter === 'online' && p.status !== 'online') return false;
-      if (statusFilter === 'stopped' && p.status !== 'stopped') return false;
-      if (statusFilter === 'errored' && p.status !== 'errored') return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchName = p.name.toLowerCase().includes(q);
-        const matchId = p.pm_id.toString().includes(q);
-        const matchPid = p.pid?.toString().includes(q);
-        const matchPath = p.script_path.toLowerCase().includes(q);
-        return matchName || matchId || matchPid || matchPath;
+  let namespaceOptions = $derived.by(() => {
+    const names = new Set(processes.map((proc) => proc.namespace || 'default'));
+    return [...names].sort();
+  });
+
+  function toggleProcessSort(key: typeof processSortKey) {
+    if (processSortKey === key) {
+      processSortAsc = !processSortAsc;
+    } else {
+      processSortKey = key;
+      processSortAsc = key === 'name' || key === 'status';
+    }
+  }
+
+  function processSortValue(proc: Pm2Process, key: typeof processSortKey): number | string {
+    switch (key) {
+      case 'status':
+        return proc.status;
+      case 'cpu':
+        return proc.cpu || 0;
+      case 'memory':
+        return proc.memory || 0;
+      case 'restarts':
+        return proc.restarts || 0;
+      case 'uptime':
+        return proc.uptime ? Date.now() - proc.uptime : 0;
+      case 'instances':
+        return proc.instances || 0;
+      default:
+        return proc.name;
+    }
+  }
+
+  let filteredProcesses = $derived.by(() => {
+    const query = searchQuery.trim().toLowerCase();
+    const list = processes.filter((proc) => {
+      if (statusFilter === 'online' && proc.status !== 'online') return false;
+      if (statusFilter === 'stopped' && proc.status !== 'stopped') return false;
+      if (statusFilter === 'errored' && proc.status !== 'errored') return false;
+      if (namespaceFilter !== 'all' && (proc.namespace || 'default') !== namespaceFilter) {
+        return false;
+      }
+      if (query) {
+        return (
+          proc.name.toLowerCase().includes(query) ||
+          proc.pm_id.toString().includes(query) ||
+          proc.pid?.toString().includes(query) ||
+          proc.script_path.toLowerCase().includes(query)
+        );
       }
       return true;
-    })
-  );
+    });
 
-  // Active Selected Process in Detail View
+    return list.sort((a, b) => {
+      const left = processSortValue(a, processSortKey);
+      const right = processSortValue(b, processSortKey);
+      let result =
+        typeof left === 'string' && typeof right === 'string'
+          ? left.localeCompare(right)
+          : Number(left) - Number(right);
+      if (result === 0) result = a.pm_id - b.pm_id;
+      return processSortAsc ? result : -result;
+    });
+  });
+
+  // Selected process must belong to the current filter, otherwise the detail
+  // pane would show an app the list says is filtered out.
   let selectedProcess = $derived.by<Pm2Process | null>(() => {
-    if (selectedProcessId === null) {
-      return filteredProcesses.length > 0 ? filteredProcesses[0] : (processes.length > 0 ? processes[0] : null);
+    // Follow the explicit selection only. Falling back to the first filtered
+    // process would silently retarget the drawer's actions (stop, restart,
+    // scale, delete) at an app the user never selected when a filter hides
+    // the current one.
+    if (selectedProcessId === null) return null;
+    return processes.find(p => p.pm_id === selectedProcessId) ?? null;
+  });
+
+  // Restart storms (3+ restarts in five minutes) and dump drift.
+  let restartStorms = $derived.by(() => {
+    const now = Date.now();
+    return processes
+      .filter((proc) => !proc.is_module && !dismissedStorms.has(proc.pm_id))
+      .map((proc) => ({
+        process: proc,
+        count: (restartEvents[proc.pm_id] || []).filter(
+          (stamp) => now - stamp <= RESTART_WINDOW_MS
+        ).length,
+      }))
+      .filter((item) => item.count >= RESTART_THRESHOLD)
+      .sort((a, b) => b.count - a.count);
+  });
+
+  let dumpDrift = $derived.by(() => {
+    if (!savedDumpLoaded) {
+      // Without a successful dump read, every live app would look unsaved and
+      // the banner would invite a save that drops saved-but-stopped apps.
+      return { hasDrift: false, notSaved: [] as Pm2Process[], notRunning: [], noDump: false };
     }
-    const found = processes.find(p => p.pm_id === selectedProcessId);
-    if (found) return found;
-    return filteredProcesses.length > 0 ? filteredProcesses[0] : (processes.length > 0 ? processes[0] : null);
+    const live = processes.filter((proc) => !proc.is_module);
+    const saved = savedDumpApps.filter((app) => !app.name.startsWith('pm2-'));
+    const savedKeys = new Set(
+      saved.map((app) => `${app.namespace || 'default'}:${app.name}`)
+    );
+    const savedScripts = new Set(
+      saved.map((app) => app.script_path).filter((path) => Boolean(path))
+    );
+    const liveKeys = new Set(
+      live.map((proc) => `${proc.namespace || 'default'}:${proc.name}`)
+    );
+    const liveScripts = new Set(
+      live.map((proc) => proc.script_path).filter((path) => Boolean(path))
+    );
+    const notSaved = live.filter(
+      (proc) =>
+        !savedKeys.has(`${proc.namespace || 'default'}:${proc.name}`) &&
+        !(proc.script_path && savedScripts.has(proc.script_path))
+    );
+    const notRunning = saved.filter(
+      (app) =>
+        !liveKeys.has(`${app.namespace || 'default'}:${app.name}`) &&
+        !(app.script_path && liveScripts.has(app.script_path))
+    );
+    return {
+      hasDrift: notSaved.length > 0 || notRunning.length > 0,
+      notSaved,
+      notRunning,
+      noDump: dumpInfo !== null && !dumpInfo.exists,
+    };
   });
 
   // Filtered Environment Variables
@@ -240,10 +534,22 @@
     const entries = Object.entries(selectedProcess.env_vars);
     if (!envSearchQuery.trim()) return entries;
     const q = envSearchQuery.toLowerCase();
-    return entries.filter(([k, v]) => k.toLowerCase().includes(q) || v.toLowerCase().includes(q));
+    return entries.filter(
+      ([k, v]) =>
+        k.toLowerCase().includes(q) ||
+        ((!envIsSensitive(k) || revealedEnvKeys.has(k)) && v.toLowerCase().includes(q))
+    );
   });
 
-  // Parsed Log Lines with Level & Timestamp Detection
+  function stripAnsi(value: string): string {
+    return value
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+      // Some log files have had the ESC byte removed but keep the SGR codes.
+      .replace(/\[\d{1,3}(?:;\d{1,3})*m/g, '');
+  }
+
+  // Parsed log lines with level, timestamp and Nest context.
   let parsedLogs = $derived.by<ParsedLogLine[]>(() => {
     if (!rawLogText || rawLogText.trim().length === 0) return [];
     const lines = rawLogText.split('\n');
@@ -251,27 +557,50 @@
     const search = logSearchQuery.trim().toLowerCase();
 
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      const line = stripAnsi(lines[i]);
       if (!line && i === lines.length - 1) continue;
+
+      let level: 'error' | 'warn' | 'info' = 'info';
+      let timestamp: string | undefined;
+      let context: string | undefined;
+      let message = line;
+
+      const nest = line.match(
+        /^\[Nest\]\s+\d+\s+-\s+(.+?)\s+(LOG|ERROR|WARN|DEBUG|VERBOSE|FATAL)\s+(?:\[([^\]]+)\]\s+)?(.*)$/i
+      );
+      if (nest) {
+        timestamp = nest[1].trim();
+        const nestLevel = nest[2].toUpperCase();
+        level = nestLevel === 'ERROR' || nestLevel === 'FATAL' ? 'error' : nestLevel === 'WARN' ? 'warn' : 'info';
+        context = nest[3]?.trim();
+        message = nest[4] || '';
+      } else {
+        // Word-boundary matching, so "preferred", "stderr" or a user name
+        // containing "err" are not mistaken for error lines.
+        if (
+          /\b(error|err|fatal|exception|failure|failed|critical|panic)\b|\[(error|fatal)\]|\bERR!/i.test(
+            line
+          )
+        ) {
+          level = 'error';
+        } else if (/\b(warn|warning)\b|\[warn\]/i.test(line)) {
+          level = 'warn';
+        }
+
+        const tsMatch = line.match(
+          /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?):?\s*(.*)$/
+        );
+        if (tsMatch) {
+          timestamp = tsMatch[1];
+          message = tsMatch[2] || '';
+        }
+      }
 
       if (search && !line.toLowerCase().includes(search)) {
         continue;
       }
-
-      let level: 'error' | 'warn' | 'info' = 'info';
-      const lower = line.toLowerCase();
-      if (lower.includes('err') || lower.includes('error') || lower.includes('failed') || lower.includes('exception') || lower.includes('fatal')) {
-        level = 'error';
-      } else if (lower.includes('warn') || lower.includes('warning')) {
-        level = 'warn';
-      }
-
-      let timestamp: string | undefined = undefined;
-      let message = line;
-      const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?):?\s*(.*)$/);
-      if (tsMatch) {
-        timestamp = tsMatch[1];
-        message = tsMatch[2] || '';
+      if (logErrorsOnly && level !== 'error') {
+        continue;
       }
 
       result.push({
@@ -279,7 +608,8 @@
         raw: line,
         level,
         timestamp,
-        message
+        context,
+        message,
       });
     }
     return result;
@@ -307,6 +637,392 @@
     return `${days}d ${hours % 24}h`;
   }
 
+  function formatRelativeTime(unixSeconds?: number | null): string {
+    if (!unixSeconds) return 'never';
+    const seconds = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+    if (seconds < 10) return 'just now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
+
+  function sparklinePoints(
+    values: number[],
+    width: number,
+    height: number,
+    maximum?: number
+  ): string {
+    if (values.length < 2) return '';
+    const ceiling = maximum && maximum > 0 ? maximum : Math.max(...values, 1);
+    return values
+      .map((value, index) => {
+        const x = (index / (values.length - 1)) * width;
+        const y = height - Math.min(1, Math.max(0, value / ceiling)) * height;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  }
+
+  function parseMemoryLimit(value?: string | null): number | null {
+    if (!value) return null;
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*([KMG])?$/i);
+    if (!match) return null;
+    const unit = (match[2] || 'M').toUpperCase();
+    const factor = unit === 'G' ? 1024 ** 3 : unit === 'M' ? 1024 ** 2 : unit === 'K' ? 1024 : 1;
+    return Math.round(parseFloat(match[1]) * factor);
+  }
+
+  function memoryLimitLabel(value?: string | null): string {
+    const bytes = parseMemoryLimit(value);
+    return bytes ? formatBytes(bytes) : '';
+  }
+
+  function envIsSensitive(key: string): boolean {
+    return /(SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|AUTH|API[_-]?KEY|ACCESS[_-]?KEY|(^|_)KEY($|_))/i.test(
+      key
+    );
+  }
+
+  function envDisplayValue(key: string, value: string): string {
+    return envIsSensitive(key) && !revealedEnvKeys.has(key) ? '••••••••' : value;
+  }
+
+  function toggleEnvReveal(key: string) {
+    const next = new Set(revealedEnvKeys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    revealedEnvKeys = next;
+  }
+
+  async function copyPm2Command(proc: Pm2Process) {
+    const command = `pm2 restart ${proc.name}`;
+    try {
+      await navigator.clipboard.writeText(command);
+      uiStore.showToast(`Copied ${command}`, 'info');
+    } catch {
+      uiStore.showToast('Could not copy the PM2 command', 'error');
+    }
+  }
+
+  function loadUiState() {
+    try {
+      const raw = localStorage.getItem(UI_STATE_KEY);
+      if (!raw) return;
+      const state = JSON.parse(raw);
+      if (state.fleetView === 'cards' || state.fleetView === 'table') fleetView = state.fleetView;
+      if (['all', 'online', 'stopped', 'errored'].includes(state.statusFilter)) {
+        statusFilter = state.statusFilter;
+      }
+      if (typeof state.searchQuery === 'string') searchQuery = state.searchQuery;
+      if (typeof state.namespaceFilter === 'string') namespaceFilter = state.namespaceFilter;
+      if (typeof state.processPollPaused === 'boolean') processPollPaused = state.processPollPaused;
+      if (
+        ['name', 'status', 'cpu', 'memory', 'restarts', 'uptime', 'instances'].includes(
+          state.processSortKey
+        )
+      ) {
+        processSortKey = state.processSortKey;
+      }
+      if (typeof state.processSortAsc === 'boolean') processSortAsc = state.processSortAsc;
+      if (state.selectedProcessId === null || typeof state.selectedProcessId === 'number') {
+        selectedProcessId = state.selectedProcessId;
+      }
+      if (
+        !initialTargetSubTab &&
+        !uiStore.targetSubTab &&
+        ['fleet', 'ecosystem', 'daemon'].includes(state.activeTab)
+      ) {
+        activeTab = state.activeTab;
+      }
+    } catch {
+      // Ignore a corrupt UI state cache.
+    }
+  }
+
+  $effect(() => {
+    const snapshot = {
+      fleetView,
+      statusFilter,
+      searchQuery,
+      namespaceFilter,
+      processPollPaused,
+      processSortKey,
+      processSortAsc,
+      selectedProcessId,
+      activeTab,
+    };
+    if (!uiStateLoaded) return;
+    try {
+      localStorage.setItem(UI_STATE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // A full/disabled storage must not break the page.
+    }
+  });
+
+  $effect(() => {
+    const target = uiStore.targetSubTab;
+    if (!target) return;
+    if (target === 'ecosystem' || target === 'daemon') {
+      activeTab = target;
+    } else if (target === 'fleet' || target === 'processes' || target === 'logs') {
+      activeTab = 'fleet';
+    }
+    uiStore.targetSubTab = null;
+  });
+
+  // Keep unsaved ecosystem edits from disappearing on app close or reload.
+  // Switching tabs keeps the editor state, so only file switches need a modal.
+  $effect(() => {
+    if (!isEcosystemDirty || typeof window === 'undefined') return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  });
+
+  // Also guard in-app module switches: leaving unmounts this page and would
+  // silently discard the draft.
+  $effect(() => {
+    if (!isEcosystemDirty) return;
+    return uiStore.registerLeaveGuard(() => isEcosystemDirty);
+  });
+
+  $effect(() => {
+    // Wait for the first process scan before deciding a saved namespace no
+    // longer exists.
+    if (processes.length === 0) return;
+    if (namespaceFilter !== 'all' && !namespaceOptions.includes(namespaceFilter)) {
+      namespaceFilter = 'all';
+    }
+  });
+
+  let envRevealOwner: number | null = null;
+  $effect(() => {
+    // A revealed secret belongs to one process only; never carry it over to
+    // another app that happens to use the same variable name.
+    if (selectedProcessId === envRevealOwner) return;
+    envRevealOwner = selectedProcessId;
+    if (revealedEnvKeys.size > 0) revealedEnvKeys = new Set();
+  });
+
+  function formatActivityTime(time: number): string {
+    return new Date(time).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+
+  function persistActivity() {
+    try {
+      localStorage.setItem(ACTIVITY_KEY, JSON.stringify(activityLog.slice(0, 50)));
+    } catch {
+      // A full/disabled storage must not break PM2 actions.
+    }
+  }
+
+  function loadActivity() {
+    try {
+      const raw = localStorage.getItem(ACTIVITY_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      activityLog = parsed
+        .filter(
+          (event) =>
+            event &&
+            typeof event.id === 'number' &&
+            typeof event.time === 'number' &&
+            typeof event.title === 'string'
+        )
+        .slice(0, 50);
+      activitySeq = activityLog.reduce(
+        (max, event) => Math.max(max, event.id || 0),
+        0
+      );
+    } catch {
+      // Ignore a corrupt activity cache.
+    }
+  }
+
+  function recordActivity(
+    title: string,
+    detail: string | undefined,
+    tone: Pm2ActivityTone = 'info',
+    pmId?: number,
+    kind = 'event'
+  ) {
+    activityLog = [
+      { id: ++activitySeq, time: Date.now(), title, detail, tone, pmId, kind },
+      ...activityLog,
+    ].slice(0, 50);
+    persistActivity();
+  }
+
+  function clearActivity() {
+    activityLog = [];
+    persistActivity();
+  }
+
+  function dismissStorm(pmId: number) {
+    dismissedStorms = new Set(dismissedStorms).add(pmId);
+  }
+
+  function viewStormProcess(proc: Pm2Process) {
+    openLogsForProcess(proc);
+  }
+
+  function openActivityProcess(event: Pm2Activity) {
+    if (event.pmId == null) return;
+    const proc = processes.find((item) => item.pm_id === event.pmId);
+    if (!proc) {
+      uiStore.showToast('That process is no longer running.', 'warning');
+      return;
+    }
+    showActivityDrawer = false;
+    openLogsForProcess(proc);
+  }
+
+  function openScaleModal(proc: Pm2Process) {
+    scaleTarget = proc;
+    scaleInstances = Math.max(1, proc.instances || 1);
+    showScaleModal = true;
+  }
+
+  async function submitScale() {
+    if (!scaleTarget) return;
+    const instances = Number(scaleInstances);
+    if (!Number.isInteger(instances) || instances < 1 || instances > 64) {
+      uiStore.showToast('Instances must be an integer between 1 and 64.', 'warning');
+      return;
+    }
+    scaling = true;
+    try {
+      const name = scaleTarget.name;
+      const pmId = scaleTarget.pm_id;
+      const msg = await invoke<string>('pm2_scale', { name, instances });
+      uiStore.showToast(msg, 'success');
+      recordActivity(`Scaled ${name}`, `${instances} instance(s)`, 'success', pmId, 'scale');
+      showScaleModal = false;
+      await loadProcesses(false);
+    } catch (err: any) {
+      uiStore.showToast(err || 'Failed to scale application', 'error');
+    } finally {
+      scaling = false;
+    }
+  }
+
+  /** Compare the new poll with the previous one to surface crashes/restarts. */
+  function detectProcessChanges(next: Pm2Process[]) {
+    if (!hasProcessBaseline) {
+      lastProcessSnapshot = new Map(
+        next.map((proc) => [
+          proc.pm_id,
+          {
+            name: proc.name,
+            status: proc.status,
+            restarts: proc.restarts,
+            unstable: proc.unstable_restarts,
+          },
+        ])
+      );
+      hasProcessBaseline = true;
+      return;
+    }
+
+    const now = Date.now();
+    const nextRestartEvents = { ...restartEvents };
+
+    for (const proc of next) {
+      if (proc.is_module) continue;
+      const old = lastProcessSnapshot.get(proc.pm_id);
+      if (!old) continue;
+
+      const suppressed =
+        now < (suppressProcessEvents.get(proc.pm_id) ?? 0) ||
+        now < suppressAllProcessEventsUntil;
+
+      if (!suppressed && proc.restarts > old.restarts) {
+        const delta = proc.restarts - old.restarts;
+        const stamps = [
+          ...(nextRestartEvents[proc.pm_id] || []).filter(
+            (stamp) => now - stamp <= RESTART_WINDOW_MS
+          ),
+          ...Array.from({ length: Math.min(delta, 10) }, () => now),
+        ];
+        nextRestartEvents[proc.pm_id] = stamps;
+        if (dismissedStorms.has(proc.pm_id)) {
+          const nextDismissed = new Set(dismissedStorms);
+          nextDismissed.delete(proc.pm_id);
+          dismissedStorms = nextDismissed;
+        }
+        recordActivity(
+          `Restarted ${proc.name}`,
+          `${delta} restart${delta === 1 ? '' : 's'} recorded`,
+          'warning',
+          proc.pm_id,
+          'restart'
+        );
+      }
+
+      if (!suppressed && proc.unstable_restarts > old.unstable) {
+        recordActivity(
+          `Unstable restarts: ${proc.name}`,
+          `${proc.unstable_restarts} unstable restart(s)`,
+          'error',
+          proc.pm_id,
+          'unstable'
+        );
+      }
+
+      if (!suppressed && proc.status !== old.status) {
+        if (proc.status === 'errored') {
+          recordActivity(
+            `${proc.name} is errored`,
+            `PID ${proc.pid ?? '—'}`,
+            'error',
+            proc.pm_id,
+            'status'
+          );
+        } else if (proc.status === 'stopped') {
+          recordActivity(
+            `${proc.name} stopped`,
+            `Previous state: ${old.status}`,
+            'warning',
+            proc.pm_id,
+            'status'
+          );
+        } else if (proc.status === 'online' && old.status !== 'online') {
+          recordActivity(
+            `${proc.name} is online`,
+            `PID ${proc.pid ?? '—'}`,
+            'success',
+            proc.pm_id,
+            'status'
+          );
+        }
+      }
+    }
+
+    restartEvents = nextRestartEvents;
+    lastProcessSnapshot = new Map(
+      next.map((proc) => [
+        proc.pm_id,
+        {
+          name: proc.name,
+          status: proc.status,
+          restarts: proc.restarts,
+          unstable: proc.unstable_restarts,
+        },
+      ])
+    );
+  }
+
   function copyToClipboard(text: string, identifier: string) {
     navigator.clipboard.writeText(text).then(() => {
       copiedCommand = identifier;
@@ -328,46 +1044,185 @@
 
   function copyCurrentLogs() {
     if (!rawLogText) return;
-    navigator.clipboard.writeText(rawLogText).then(() => {
+    navigator.clipboard.writeText(stripAnsi(rawLogText)).then(() => {
       copiedLogs = true;
       setTimeout(() => copiedLogs = false, 2000);
     });
   }
 
-  // Load all PM2 Data
+  function handleLogScroll() {
+    const container = logContainerRef;
+    if (!container) return;
+    const atBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
+    logAtBottom = atBottom;
+    // Pause following while the user reads older lines, and resume once they
+    // scroll back to the newest output.
+    logFollow = atBottom;
+  }
+
+  function jumpToLatest() {
+    logFollow = true;
+    logAtBottom = true;
+    if (logContainerRef) {
+      logContainerRef.scrollTop = logContainerRef.scrollHeight;
+    }
+  }
+
+  function currentLogPath(): string {
+    if (!selectedProcess) return '';
+    return selectedLogType === 'err'
+      ? selectedProcess.err_log_path
+      : selectedProcess.out_log_path;
+  }
+
+  async function openLogFolder() {
+    const home = systemStatus?.pm2_home;
+    const directory = logOverview?.directory || (home ? `${home}/logs` : '');
+    if (!directory) {
+      uiStore.showToast('The PM2 log folder is not known yet.', 'warning');
+      return;
+    }
+    try {
+      await invoke('open_folder', { path: directory });
+    } catch (err: any) {
+      uiStore.showToast(String(err) || 'Could not open the log folder', 'error');
+    }
+  }
+
+  async function downloadLogFile() {
+    const logPath = currentLogPath();
+    if (!logPath) {
+      uiStore.showToast('Select a process with a log file first.', 'warning');
+      return;
+    }
+    exportingLog = true;
+    try {
+      const saved = await invoke<string>('pm2_export_log', { logPath });
+      uiStore.showToast(`Saved log to ${saved}`, 'success');
+    } catch (err: any) {
+      uiStore.showToast(String(err) || 'Could not export the log file', 'error');
+    } finally {
+      exportingLog = false;
+    }
+  }
+
+  async function loadLogOverview() {
+    logOverviewLoading = true;
+    try {
+      logOverview = await invoke<Pm2LogOverview>('pm2_get_log_overview');
+    } catch {
+      logOverview = null;
+    } finally {
+      logOverviewLoading = false;
+    }
+  }
+
+  /** Merge the live process list into the saved dump metadata. */
+  function mergeSavedDumpState(list: Pm2SavedDumpApp[]): Pm2SavedDumpApp[] {
+    return list.map((app) => {
+      const appNamespace = app.namespace || 'default';
+      const match = processes.find(
+        (proc) =>
+          (proc.name === app.name &&
+            (proc.namespace || 'default') === appNamespace) ||
+          (!!app.script_path && proc.script_path === app.script_path)
+      );
+      return {
+        ...app,
+        is_currently_running: match?.status === 'online',
+        current_pm_id: match?.pm_id,
+      };
+    });
+  }
+
+  /** Cheap telemetry refresh: only the live process list. */
+  async function loadProcesses(silent = true) {
+    if (processesInFlight) return;
+    processesInFlight = true;
+    try {
+      const procList = await invoke<Pm2Process[]>('pm2_list_processes');
+      detectProcessChanges(procList);
+
+      const nextHistory = { ...processHistory };
+      const currentIds = new Set(procList.map((proc) => proc.pm_id));
+      for (const proc of procList) {
+        const previous = nextHistory[proc.pm_id] ?? { cpu: [], mem: [] };
+        nextHistory[proc.pm_id] = {
+          cpu: [...previous.cpu, proc.cpu].slice(-HISTORY_LIMIT),
+          mem: [...previous.mem, proc.memory].slice(-HISTORY_LIMIT),
+        };
+      }
+      for (const key of Object.keys(nextHistory)) {
+        if (!currentIds.has(Number(key))) delete nextHistory[Number(key)];
+      }
+      processHistory = nextHistory;
+
+      processes = procList;
+      lastProcessUpdate = new Date();
+      fleetError = null;
+      if (procList.length > 0) {
+        if (selectedProcessId === null || !procList.some((p) => p.pm_id === selectedProcessId)) {
+          selectedProcessId = procList[0].pm_id;
+        }
+      } else {
+        selectedProcessId = null;
+      }
+      if (savedDumpApps.length > 0) {
+        savedDumpApps = mergeSavedDumpState(savedDumpApps);
+      }
+    } catch (err: any) {
+      fleetError = err?.message || String(err);
+      if (!silent) throw err;
+    } finally {
+      processesInFlight = false;
+    }
+  }
+
+  /** Slower data: ecosystem files, startup service and saved dump. */
+  async function loadAuxiliary() {
+    logOverviewLoading = true;
+    const [ecoList, startStatus, savedList, dump, measuredLogs] = await Promise.all([
+      invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => null),
+      invoke<Pm2StartupStatus>('pm2_get_startup_status').catch(() => null),
+      invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => null),
+      invoke<Pm2DumpInfo>('pm2_get_dump_info').catch(() => null),
+      invoke<Pm2LogOverview>('pm2_get_log_overview').catch(() => null)
+    ]);
+    // Keep the previous model when a call fails. Replacing a failed saved-dump
+    // read with an empty list would make every live app look unsaved and invite
+    // a "Save dump" that drops the saved-but-stopped apps.
+    if (ecoList) ecosystemFiles = ecoList;
+    if (startStatus) startupStatus = startStatus;
+    if (savedList) {
+      savedDumpApps = mergeSavedDumpState(savedList);
+      savedDumpLoaded = true;
+    }
+    if (dump) dumpInfo = dump;
+    if (measuredLogs) logOverview = measuredLogs;
+    logOverviewLoading = false;
+
+    if (ecoList && ecoList.length > 0 && !selectedEcosystemFile) {
+      selectEcosystemFile(ecoList[0]);
+    }
+  }
+
+  // Full load: status once, processes, then the slower ecosystem/dump data.
   async function loadData(silent = false) {
     if (!silent) refreshing = true;
     try {
       const status = await invoke<Pm2SystemStatus>('pm2_get_system_status');
       systemStatus = status;
-
       if (status.installed) {
-        const [procList, ecoList, startStatus, savedList] = await Promise.all([
-          invoke<Pm2Process[]>('pm2_list_processes').catch(() => []),
-          invoke<Pm2EcosystemFile[]>('pm2_list_ecosystem_files', { customDirs: null }).catch(() => []),
-          invoke<Pm2StartupStatus>('pm2_get_startup_status').catch(() => null),
-          invoke<Pm2SavedDumpApp[]>('pm2_get_saved_dump_apps').catch(() => [])
-        ]);
-        processes = procList;
-        ecosystemFiles = ecoList;
-        startupStatus = startStatus;
-        savedDumpApps = savedList;
-
-        // Auto-select first process if none selected or selected was removed
-        if (procList.length > 0) {
-          if (selectedProcessId === null || !procList.some(p => p.pm_id === selectedProcessId)) {
-            selectedProcessId = procList[0].pm_id;
-          }
-        } else {
-          selectedProcessId = null;
-        }
-
-        if (ecoList.length > 0 && !selectedEcosystemFile) {
-          selectEcosystemFile(ecoList[0]);
-        }
+        await loadProcesses(false);
+        await loadAuxiliary();
       }
     } catch (err: any) {
-      uiStore.showToast(err.message || 'Failed to communicate with PM2', 'error');
+      if (!silent) {
+        uiStore.showToast(err.message || 'Failed to communicate with PM2', 'error');
+      } else {
+        fleetError = err?.message || String(err);
+      }
     } finally {
       loading = false;
       refreshing = false;
@@ -375,15 +1230,59 @@
   }
 
   // Lifecycle Actions
-  async function handleProcessAction(action: string, target: string | number) {
+  async function handleProcessAction(action: string, target: string | number, confirmed = false) {
+    if (!confirmed && (action === 'stop' || action === 'restart') && target !== 'all') {
+      const proc = processes.find((process) => process.pm_id === Number(target));
+      if (proc) {
+        const stopping = action === 'stop';
+        uiStore.confirm(
+          `${stopping ? 'Stop' : 'Restart'} "${proc.name}"?`,
+          stopping
+            ? `This stops ${proc.name} (ID #${proc.pm_id}) until it is started again. All of its instances will stop.`
+            : `This briefly interrupts ${proc.name} (ID #${proc.pm_id}) while PM2 restarts it. Use Reload for zero downtime instead.`,
+          () => handleProcessAction(action, target, true),
+          stopping
+        );
+        return;
+      }
+    }
+
+    // Silence poll-derived events for this app while the action settles; the
+    // action itself is recorded explicitly below.
+    const suppressUntil = Date.now() + 8000;
+    if (target === 'all') {
+      suppressAllProcessEventsUntil = suppressUntil;
+    } else {
+      suppressProcessEvents.set(Number(target), suppressUntil);
+    }
     try {
       const msg = await invoke<string>('pm2_process_action', {
         action,
         target: target.toString()
       });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
-      if (activeTab === 'fleet' && selectedInspectorTab === 'logs') {
+
+      const targetId = target === 'all' ? null : Number(target);
+      const proc = targetId != null ? processes.find((p) => p.pm_id === targetId) : null;
+      const labels: Record<string, string> = {
+        start: 'Started',
+        stop: 'Stopped',
+        restart: 'Restarted',
+        reload: 'Reloaded',
+        delete: 'Deleted',
+        reset: 'Reset restart counters for',
+      };
+      const tone: Pm2ActivityTone =
+        action === 'delete' ? 'error' : action === 'stop' ? 'warning' : action === 'reset' ? 'info' : 'success';
+      recordActivity(
+        `${labels[action] || action} ${proc?.name || (target === 'all' ? 'all processes' : `#${target}`)}`,
+        undefined,
+        tone,
+        targetId ?? undefined,
+        'action'
+      );
+      await loadProcesses(false);
+      if (activeTab === 'fleet' && showLogsDrawer && selectedInspectorTab === 'logs') {
         loadLogs();
       }
     } catch (err: any) {
@@ -395,7 +1294,8 @@
     try {
       const msg = await invoke<string>('pm2_save_dump');
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      recordActivity('Saved process dump', `${processes.length} app(s)`, 'success', undefined, 'dump');
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to save PM2 dump', 'error');
     }
@@ -405,7 +1305,10 @@
     try {
       const msg = await invoke<string>('pm2_resurrect_dump');
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      recordActivity('Resurrected saved dump', `${savedDumpApps.length} saved app(s)`, 'success', undefined, 'dump');
+      suppressAllProcessEventsUntil = Date.now() + 8000;
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to resurrect PM2 dump', 'error');
     }
@@ -416,36 +1319,54 @@
       const msg = await invoke<string>('pm2_start_saved_app', {
         name: app.name,
         scriptPath: app.script_path,
+        namespace: app.namespace || 'default',
         cwd: app.cwd || null,
         execMode: app.exec_mode || null,
         instances: app.instances || null,
         watch: app.watch || null,
-        args: app.args && app.args.length > 0 ? app.args : null
+        maxMemoryRestart: app.max_memory_restart || null,
+        args: app.args && app.args.length > 0 ? app.args : null,
+        envVars: app.env_vars && Object.keys(app.env_vars).length > 0 ? app.env_vars : null
       });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      recordActivity(`Started saved app ${app.name}`, app.script_path, 'success', undefined, 'action');
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || `Failed to start saved app ${app.name}`, 'error');
     }
   }
 
-  async function handleDeleteSavedApp(name: string) {
+  async function handleDeleteSavedApp(app: Pm2SavedDumpApp) {
     try {
-      const msg = await invoke<string>('pm2_delete_saved_app', { name });
+      const msg = await invoke<string>('pm2_delete_saved_app', {
+        name: app.name,
+        namespace: app.namespace || 'default'
+      });
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      recordActivity(`Removed ${app.name} from dump`, undefined, 'warning', undefined, 'dump');
+      await loadAuxiliary();
     } catch (err: any) {
-      uiStore.showToast(err || `Failed to delete ${name} from dump`, 'error');
+      uiStore.showToast(err || `Failed to delete ${app.name} from dump`, 'error');
     }
   }
 
   async function handleFlushLogs(target?: string | number) {
+    const hasTarget = target !== undefined && target !== null && target !== '';
     try {
       const msg = await invoke<string>('pm2_flush_logs', {
-        target: target ? target.toString() : null
+        target: hasTarget ? target.toString() : null
       });
       uiStore.showToast(msg, 'success');
+      recordActivity(
+        'Flushed logs',
+        hasTarget ? `Process #${target}` : 'All PM2 logs',
+        'info',
+        typeof target === 'number' ? target : undefined,
+        'logs'
+      );
       loadLogs();
+      void loadLogOverview();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to flush logs', 'error');
     }
@@ -467,7 +1388,7 @@
     const targetName = proc ? `"${proc.name}" (ID #${proc.pm_id})` : 'all PM2 processes';
     const targetId = proc ? proc.pm_id : undefined;
     uiStore.confirm(
-      'Flush Application Logs',
+      proc ? 'Flush Application Logs' : 'Flush All PM2 Logs',
       `Are you sure you want to flush/clear the stdout & stderr log files for ${targetName}? Existing log history on disk will be emptied.`,
       () => handleFlushLogs(targetId),
       true
@@ -502,11 +1423,14 @@
     );
   }
 
-  function promptDeleteSavedApp(name: string) {
+  function promptDeleteSavedApp(app: Pm2SavedDumpApp) {
+    const label = app.namespace && app.namespace !== 'default'
+      ? `${app.name} (${app.namespace})`
+      : app.name;
     uiStore.confirm(
-      `Remove "${name}" from Saved Dump`,
-      `Are you sure you want to remove "${name}" from ~/.pm2/dump.pm2? It will no longer be restored automatically on system reboot.`,
-      () => handleDeleteSavedApp(name),
+      `Remove "${label}" from Saved Dump`,
+      `Are you sure you want to remove "${label}" from ~/.pm2/dump.pm2? It will no longer be restored automatically on system reboot.`,
+      () => handleDeleteSavedApp(app),
       true
     );
   }
@@ -514,6 +1438,7 @@
   // Logs stream handling for currently selected process
   async function loadLogs() {
     if (!systemStatus?.installed) return;
+    const token = ++logLoadToken;
     logLoading = true;
     try {
       let logPath = '';
@@ -528,28 +1453,101 @@
           logPath,
           lines: parseInt(logTailLines, 10) || 200
         });
+        if (token !== logLoadToken) return;
         rawLogText = content;
+        await tick();
+        if (logContainerRef) {
+          if (logFollow) {
+            logContainerRef.scrollTop = logContainerRef.scrollHeight;
+            logAtBottom = true;
+          } else {
+            logAtBottom =
+              logContainerRef.scrollHeight -
+                logContainerRef.scrollTop -
+                logContainerRef.clientHeight <=
+              24;
+          }
+        }
+      } else {
+        // Never leave another process's text under this app's header.
+        rawLogText = selectedProcess
+          ? `[No log file is configured for "${selectedProcess.name}".]`
+          : '';
       }
     } catch (err: any) {
+      if (token !== logLoadToken) return;
       rawLogText = `[Error reading logs: ${err}]`;
     } finally {
-      logLoading = false;
+      if (token === logLoadToken) logLoading = false;
     }
   }
 
-  // Select a process in the Master list (1-click opens details drawer)
-  function handleSelectProcess(id: number, openDrawer = true) {
+  // Select a process for the live logs drawer. The details drawer is explicit.
+  function handleSelectProcess(id: number, openDetails = false) {
     selectedProcessId = id;
-    if (openDrawer) {
+    if (openDetails) {
+      showLogsDrawer = false;
       showProcessDrawer = true;
+    } else {
+      selectedInspectorTab = 'logs';
+      showLogsDrawer = true;
+      logFollow = true;
+      logAtBottom = true;
+      loadLogs();
     }
+  }
+
+  function openLogsForProcess(proc: Pm2Process) {
+    statusFilter = 'all';
+    searchQuery = '';
+    namespaceFilter = 'all';
+    logSearchQuery = '';
+    logErrorsOnly = false;
+    selectedProcessId = proc.pm_id;
+    selectedInspectorTab = 'logs';
+    activeTab = 'fleet';
+    showProcessDrawer = false;
+    showLogsDrawer = true;
+    logFollow = true;
+    logAtBottom = true;
     loadLogs();
+  }
+
+  function openProcessContextMenu(event: MouseEvent, proc: Pm2Process) {
+    event.preventDefault();
+    event.stopPropagation();
+    procContextMenu = {
+      show: true,
+      x: Math.min(event.clientX, window.innerWidth - 250),
+      y: Math.min(event.clientY, window.innerHeight - 340),
+      process: proc,
+    };
+  }
+
+  function closeProcessContextMenu() {
+    if (procContextMenu.show) {
+      procContextMenu = { ...procContextMenu, show: false, process: null };
+    }
   }
 
   // Launch custom process
   async function launchProcess() {
     if (!launchForm.script_path.trim()) {
       uiStore.showToast('Please specify a script or entry file path', 'warning');
+      return;
+    }
+
+    inferLaunchHints();
+
+    if (launchPathLooksLikeFolder) {
+      uiStore.showToast(
+        'That path looks like a folder. Select the entry file inside it, such as dist/main.js.',
+        'warning'
+      );
+      return;
+    }
+    if (launchDuplicateError) {
+      uiStore.showToast(launchDuplicateError, 'warning');
       return;
     }
 
@@ -578,9 +1576,17 @@
       });
 
       uiStore.showToast(msg, 'success');
+      recordActivity(
+        `Launched ${launchForm.name.trim() || launchForm.script_path.trim()}`,
+        launchForm.script_path.trim(),
+        'success',
+        undefined,
+        'action'
+      );
       showLaunchModal = false;
       resetLaunchForm();
-      await loadData(true);
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to start process', 'error');
     }
@@ -602,26 +1608,7 @@
       });
       if (selected && typeof selected === 'string') {
         launchForm.script_path = selected;
-
-        // Auto-infer CWD if empty
-        const pathSegments = selected.split('/');
-        const fileName = pathSegments.pop() || '';
-        const dirPath = pathSegments.join('/') || '/';
-
-        if (!launchForm.cwd || launchForm.cwd.trim() === '') {
-          launchForm.cwd = dirPath;
-        }
-
-        // Auto-infer App Name if empty
-        if (!launchForm.name || launchForm.name.trim() === '') {
-          const baseName = fileName.replace(/\.[^/.]+$/, '');
-          if (['index', 'main', 'app', 'server', 'dist', 'bin'].includes(baseName.toLowerCase()) && pathSegments.length > 0) {
-            const parentDir = pathSegments[pathSegments.length - 1];
-            launchForm.name = parentDir || baseName;
-          } else {
-            launchForm.name = baseName || 'app';
-          }
-        }
+        inferLaunchHints();
       }
     } catch (e) {
       uiStore.showToast(`File selection error: ${e}`, 'error');
@@ -723,34 +1710,148 @@
   }
 
   // Ecosystem file handling
-  async function selectEcosystemFile(file: Pm2EcosystemFile) {
-    selectedEcosystemFile = file;
+  async function applyEcosystemFile(file: Pm2EcosystemFile) {
+    const token = ++ecosystemLoadToken;
     try {
       const content = await invoke<string>('pm2_read_ecosystem_file', { path: file.path });
+      // A slower read from a previously-clicked file must not overwrite the
+      // file the user selected last.
+      if (token !== ecosystemLoadToken) return;
+      // Only switch the editor after the content is in hand. Switching first
+      // would leave the old file's text paired with the new file's path, and a
+      // later save could write it to the wrong config.
+      selectedEcosystemFile = file;
       ecosystemContent = content;
       originalEcosystemContent = content;
+      ecosystemOnly = '';
+      ecosystemEnv = '';
+      ecosystemValidationError = '';
     } catch (err: any) {
+      if (token !== ecosystemLoadToken) return;
       uiStore.showToast(`Failed to read ${file.name}: ${err}`, 'error');
     }
   }
 
-  function openSaveEcosystemModal() {
+  function selectEcosystemFile(file: Pm2EcosystemFile) {
+    if (selectedEcosystemFile?.path === file.path) return;
+    if (isEcosystemDirty) {
+      uiStore.confirm(
+        'Unsaved Ecosystem Changes',
+        `${selectedEcosystemFile?.name ?? 'The current config'} has unsaved changes. Opening ${file.name} will discard them. Continue?`,
+        () => applyEcosystemFile(file),
+        true
+      );
+      return;
+    }
+    void applyEcosystemFile(file);
+  }
+
+  async function validateEcosystemContent(): Promise<boolean> {
+    if (!selectedEcosystemFile) return false;
+    ecosystemValidating = true;
+    ecosystemValidationError = '';
+    try {
+      await invoke('pm2_validate_ecosystem', {
+        path: selectedEcosystemFile.path,
+        content: ecosystemContent,
+      });
+      return true;
+    } catch (err: any) {
+      ecosystemValidationError = String(err);
+      return false;
+    } finally {
+      ecosystemValidating = false;
+    }
+  }
+
+  async function saveEcosystemFile(): Promise<boolean> {
+    const file = selectedEcosystemFile;
+    if (!file) return false;
+    const content = ecosystemContent;
+    try {
+      await invoke<string>('pm2_write_ecosystem_file', {
+        path: file.path,
+        content,
+        createOnly: false,
+      });
+      // Do not clear the dirty state of a different file if the user managed
+      // to switch while the write was in flight.
+      if (selectedEcosystemFile?.path === file.path) {
+        originalEcosystemContent = content;
+        ecosystemValidationError = '';
+      }
+      uiStore.showToast(`Saved ${file.name}`, 'success');
+      recordActivity(`Saved ${file.name}`, file.path, 'success', undefined, 'ecosystem');
+      return true;
+    } catch (err: any) {
+      if (selectedEcosystemFile?.path === file.path) {
+        ecosystemValidationError = String(err);
+        showEcosystemDiffModal = false;
+      }
+      uiStore.showToast('The ecosystem file could not be saved. See the editor error.', 'error');
+      return false;
+    }
+  }
+
+  async function openSaveEcosystemModal() {
     if (!selectedEcosystemFile) return;
+    if (!(await validateEcosystemContent())) {
+      uiStore.showToast('Fix the syntax errors before saving.', 'error');
+      return;
+    }
     showEcosystemDiffModal = true;
   }
 
   async function startEcosystemFile() {
     if (!selectedEcosystemFile) return;
+    if (isEcosystemDirty) {
+      uiStore.confirm(
+        'Save Before Starting',
+        `${selectedEcosystemFile.name} has unsaved changes. Save them before PM2 starts this config?`,
+        async () => {
+          if (await saveEcosystemFile()) {
+            await startEcosystemFile();
+          }
+        },
+        false
+      );
+      return;
+    }
+
+    const only = ecosystemOnly
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .join(',');
+    const environment = ecosystemEnv.trim();
     try {
       const msg = await invoke<string>('pm2_start_ecosystem', {
         path: selectedEcosystemFile.path,
-        only: null,
-        envName: null
+        only: only || null,
+        envName: environment || null
       });
+      ecosystemValidationError = '';
       uiStore.showToast(msg, 'success');
-      await loadData(true);
+      const detail = [
+        selectedEcosystemFile.path,
+        only ? `--only ${only}` : '',
+        environment ? `--env ${environment}` : ''
+      ].filter(Boolean).join(' · ');
+      recordActivity(
+        `Started ecosystem ${selectedEcosystemFile.name}`,
+        detail,
+        'success',
+        undefined,
+        'ecosystem'
+      );
+      await loadProcesses(false);
+      await loadAuxiliary();
     } catch (err: any) {
-      uiStore.showToast(err || 'Failed to start ecosystem file', 'error');
+      const message = String(err);
+      if (/syntax|invalid json|unsupported ecosystem/i.test(message)) {
+        ecosystemValidationError = message;
+      }
+      uiStore.showToast(message || 'Failed to start ecosystem file', 'error');
     }
   }
 
@@ -833,29 +1934,42 @@
       const content = generateTemplateContent(newEcosystemTemplate);
       await invoke<string>('pm2_write_ecosystem_file', {
         path: newEcosystemPath.trim(),
-        content
+        content,
+        createOnly: true
       });
       uiStore.showToast('Ecosystem configuration created successfully', 'success');
+      recordActivity('Created ecosystem config', newEcosystemPath.trim(), 'success', undefined, 'ecosystem');
       showNewEcosystemModal = false;
-      await loadData(true);
+      await loadAuxiliary();
     } catch (err: any) {
       uiStore.showToast(err || 'Failed to create ecosystem file', 'error');
     }
   }
 
   onMount(() => {
+    loadUiState();
+    uiStateLoaded = true;
+    loadActivity();
     loadData();
 
     // 3s Live Telemetry Refresh
     refreshTimer = setInterval(() => {
-      if (systemStatus?.installed && activeTab === 'fleet') {
-        loadData(true);
+      if (systemStatus?.installed && activeTab === 'fleet' && !processPollPaused) {
+        // Only live telemetry; ecosystem scans and systemctl do not belong on
+        // a three-second loop.
+        loadProcesses(true);
       }
     }, 3000);
 
     // 2s Logs Auto-Stream Refresh
     logStreamTimer = setInterval(() => {
-      if (systemStatus?.installed && activeTab === 'fleet' && selectedInspectorTab === 'logs' && logAutoRefresh) {
+      if (
+        systemStatus?.installed &&
+        activeTab === 'fleet' &&
+        showLogsDrawer &&
+        selectedInspectorTab === 'logs' &&
+        logAutoRefresh
+      ) {
         loadLogs();
       }
     }, logRefreshInterval * 1000);
@@ -913,8 +2027,15 @@
         { id: 'daemon', label: 'Daemon & Saved Apps', count: savedDumpApps.length }
       ]}
       bind:activeTab
-      onchange={(t: any) => {
-        if (t === 'fleet' && selectedInspectorTab === 'logs') loadLogs();
+      onchange={async (t: string) => {
+        if (t === 'fleet') {
+          if (showLogsDrawer && selectedInspectorTab === 'logs') loadLogs();
+        } else if (t === 'daemon') {
+          await loadProcesses(true);
+          await loadAuxiliary();
+        } else if (t === 'ecosystem') {
+          await loadAuxiliary();
+        }
       }}
     />
 
@@ -933,42 +2054,211 @@
   </div>
 
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
-  <!-- 3. TOP TELEMETRY KPI CARDS BANNER -->
+  <!-- 3. COMPACT FLEET HEALTH STRIP -->
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
   {#if systemStatus?.installed}
-    <div class="kpi-grid">
-      <KpiCard
-        icon={Layers}
-        value={totalApps}
-        label="Managed Apps"
-        subtext="{onlineApps} running"
-        statusType="info"
-      />
+    <div class="fleet-strip">
+      <div class="fleet-status-group" role="group" aria-label="Filter processes by status">
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'all'}
+          aria-pressed={statusFilter === 'all'}
+          onclick={() => statusFilter = 'all'}
+          title="Show every process"
+        >
+          <Layers size={13} />
+          <strong>{totalApps}</strong>
+          <span>Apps</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'online'}
+          aria-pressed={statusFilter === 'online'}
+          onclick={() => statusFilter = 'online'}
+          title="Show online processes"
+        >
+          <span class="status-dot online"></span>
+          <strong>{onlineApps}</strong>
+          <span>Online</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'stopped'}
+          aria-pressed={statusFilter === 'stopped'}
+          onclick={() => statusFilter = 'stopped'}
+          title="Show stopped processes"
+        >
+          <span class="status-dot stopped"></span>
+          <strong>{stoppedApps}</strong>
+          <span>Stopped</span>
+        </button>
+        <button
+          type="button"
+          class="fleet-stat"
+          class:active={statusFilter === 'errored'}
+          aria-pressed={statusFilter === 'errored'}
+          onclick={() => statusFilter = 'errored'}
+          title="Show errored processes"
+        >
+          <span class="status-dot errored"></span>
+          <strong>{erroredApps}</strong>
+          <span>Errored</span>
+        </button>
+      </div>
 
-      <KpiCard
-        icon={CheckCircle2}
-        value={onlineApps}
-        label="Online"
-        subtext={stoppedApps + erroredApps === 0 ? 'All healthy' : `${stoppedApps + erroredApps} stopped/errored`}
-        statusType={erroredApps > 0 ? 'error' : 'success'}
-      />
+      <span class="strip-sep"></span>
 
-      <KpiCard
-        icon={Cpu}
-        value="{totalCpuPercent.toFixed(1)}%"
-        label="Cluster CPU"
-        subtext="Aggregate load"
-        statusType="info"
-      />
+      <span class="fleet-metric" title="Aggregate CPU across managed processes">
+        <Cpu size={13} /><strong>{totalCpuPercent.toFixed(1)}%</strong><span>CPU</span>
+      </span>
+      <span class="fleet-metric" title="Combined resident memory">
+        <HardDrive size={13} /><strong>{formatBytes(totalMemoryBytes)}</strong><span>RAM</span>
+      </span>
 
-      <KpiCard
-        icon={HardDrive}
-        value={formatBytes(totalMemoryBytes)}
-        label="Memory Heap"
-        subtext="Combined RAM"
-        statusType="info"
-      />
+      {#if dumpInfo}
+        <span
+          class="fleet-metric"
+          class:stale={dumpInfo.modified
+            ? Date.now() / 1000 - dumpInfo.modified > 24 * 3600
+            : false}
+          title={dumpInfo.exists
+            ? `dump.pm2 · ${dumpInfo.size} bytes${dumpInfo.modified && Date.now() / 1000 - dumpInfo.modified > 24 * 3600 ? ' · older than 24 hours' : ''}`
+            : 'No dump file has been saved yet'}
+        >
+          <Database size={13} />
+          {#if dumpInfo.exists}
+            <strong>{savedDumpApps.length}</strong><span>saved · {formatRelativeTime(dumpInfo.modified)}</span>
+          {:else}
+            <span>No dump</span>
+          {/if}
+        </span>
+      {/if}
+
+      {#if lastProcessUpdate}
+        <span
+          class="fleet-metric"
+          title={`Last process update at ${lastProcessUpdate.toLocaleTimeString()}`}
+        >
+          <Clock size={13} />
+          <span>{processPollPaused ? 'paused' : formatRelativeTime(lastProcessUpdate.getTime() / 1000)}</span>
+        </span>
+      {/if}
+
+      <div class="strip-actions">
+        <Button
+          variant={processPollPaused ? 'primary' : 'ghost'}
+          size="xs"
+          onclick={() => processPollPaused = !processPollPaused}
+          title={processPollPaused ? 'Resume process telemetry' : 'Pause process telemetry'}
+        >
+          {#if processPollPaused}<Play size={12} /> Resume{:else}<Pause size={12} /> Pause{/if}
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          onclick={() => showActivityDrawer = true}
+          title="Recent PM2 actions and incidents"
+        >
+          <Clock size={12} /> Activity
+          {#if activityLog.length > 0}<span class="activity-count">{activityLog.length}</span>{/if}
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          onclick={promptReloadAll}
+          disabled={onlineApps === 0}
+          title="Zero-downtime reload for all online apps"
+        >
+          <Zap size={12} /> Reload all
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          onclick={promptStopAll}
+          disabled={onlineApps === 0}
+          title="Stop every online app"
+        >
+          <Square size={12} /> Stop all
+        </Button>
+        <KebabMenu align="right" title="Fleet actions">
+          <button class="menu-item" onclick={() => handleProcessAction('start', 'all')}>
+            <Play size={14} class="text-emerald" />
+            <span>Start all</span>
+          </button>
+          <button class="menu-item" onclick={handleSaveDump}>
+            <Save size={14} class="text-accent" />
+            <span>Save process list</span>
+          </button>
+          <button class="menu-item" onclick={promptResurrect}>
+            <RefreshCcw size={14} class="text-purple" />
+            <span>Resurrect saved dump</span>
+          </button>
+          <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
+          <button class="menu-item" onclick={() => promptFlushLogs(null)}>
+            <Trash2 size={14} class="text-amber" />
+            <span>Flush all logs</span>
+          </button>
+        </KebabMenu>
+      </div>
     </div>
+
+    {#if fleetError}
+      <div class="fleet-error" role="alert">
+        <AlertTriangle size={14} />
+        <span>PM2 is not responding: {fleetError}</span>
+        <Button variant="outline" size="xs" onclick={() => loadData()}>Retry</Button>
+      </div>
+    {/if}
+
+    {#if dumpInfo && dumpDrift.hasDrift}
+      <div class="drift-banner" role="status">
+        <Database size={14} />
+        <div class="drift-copy">
+          <strong>{dumpDrift.noDump ? 'No saved dump yet' : 'Saved dump is out of date'}</strong>
+          <span>
+            {#if dumpDrift.notSaved.length > 0}
+              {dumpDrift.notSaved.length} live app{dumpDrift.notSaved.length === 1 ? '' : 's'} not in the dump.
+            {/if}
+            {#if dumpDrift.notRunning.length > 0}
+              {dumpDrift.notRunning.length} saved app{dumpDrift.notRunning.length === 1 ? '' : 's'} not running.
+            {/if}
+          </span>
+        </div>
+        <div class="drift-actions">
+          {#if dumpDrift.notSaved.length > 0 || dumpDrift.noDump}
+            <Button variant="primary" size="xs" onclick={handleSaveDump}>
+              <Save size={12} /> Save dump
+            </Button>
+          {/if}
+          {#if dumpDrift.notRunning.length > 0}
+            <Button variant="outline" size="xs" onclick={promptResurrect}>
+              <RefreshCcw size={12} /> Resurrect
+            </Button>
+          {/if}
+          <Button variant="ghost" size="xs" onclick={() => activeTab = 'daemon'}>Review</Button>
+        </div>
+      </div>
+    {/if}
+
+    {#each restartStorms as storm (storm.process.pm_id)}
+      <div class="storm-banner" role="alert">
+        <AlertTriangle size={14} />
+        <div class="storm-copy">
+          <strong>{storm.process.name}</strong> restarted {storm.count} times in the last 5 minutes.
+        </div>
+        <div class="storm-actions">
+          <Button variant="outline" size="xs" onclick={() => viewStormProcess(storm.process)}>
+            View logs
+          </Button>
+          <Button variant="ghost" size="xs" onclick={() => dismissStorm(storm.process.pm_id)}>
+            Dismiss
+          </Button>
+        </div>
+      </div>
+    {/each}
   {/if}
 
   <!-- ═════════════════════════════════════════════════════════════════════════ -->
@@ -1075,147 +2365,297 @@
       <!-- VIEW 1: MASTER-DETAIL SPLIT CONSOLE (FLEET & LIVE INSPECTOR) -->
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       {#if activeTab === 'fleet'}
-        <div class="fleet-split-container">
-          <!-- ── MASTER PANE: PROCESSES LIST (360px) ────────────────────────── -->
+        {#if processes.length === 0}
+          <div class="fleet-empty">
+            <div class="fleet-empty-hero">
+              <div class="fleet-empty-icon"><Layers size={34} /></div>
+              <h2>No PM2 applications yet</h2>
+              <p>
+                Launch your first Node.js app, restore a saved process list, or start an ecosystem
+                config. PM2 keeps it running and restarts it automatically if it crashes.
+              </p>
+              <div class="fleet-empty-actions">
+                <Button variant="primary" onclick={() => showLaunchModal = true}>
+                  <Plus size={15} /> Launch application
+                </Button>
+                {#if savedDumpApps.length > 0}
+                  <Button variant="outline" onclick={promptResurrect}>
+                    <RefreshCcw size={14} /> Restore saved dump ({savedDumpApps.length})
+                  </Button>
+                {/if}
+                <Button variant="outline" onclick={() => activeTab = 'ecosystem'}>
+                  <FileCode size={14} /> Browse ecosystem configs
+                </Button>
+              </div>
+            </div>
+
+            {#if savedDumpApps.length > 0}
+              <div class="fleet-empty-saved">
+                <div class="fleet-empty-saved-head">
+                  <span><Database size={13} /> Saved processes ({savedDumpApps.length})</span>
+                  <Button variant="ghost" size="xs" onclick={promptResurrect}>
+                    <RefreshCcw size={12} /> Resurrect all
+                  </Button>
+                </div>
+                {#each savedDumpApps as app (app.namespace + ':' + app.name)}
+                  <div class="fleet-empty-saved-row">
+                    <div class="fleet-empty-saved-info">
+                      <strong>{app.name}</strong>
+                      <span title={app.script_path}>{app.script_path.split('/').pop() || app.script_path}</span>
+                    </div>
+                    <Button variant="primary" size="xs" onclick={() => handleStartSavedApp(app)}>
+                      <Play size={11} /> Run
+                    </Button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="fleet-workspace">
+          <!-- ── PROCESSES PANE ─────────────────────────────────────────────── -->
           <div class="fleet-master-pane">
             <!-- Search & Filter Header -->
             <div class="master-header">
               <div class="master-search-row">
                 <SearchBar
                   bind:value={searchQuery}
-                  placeholder="Filter apps by name, PID, ID..."
-                  style="margin: 0; width: 100%;"
+                  placeholder="Filter by name, PID, ID…"
+                  style="margin: 0; flex: 1; min-width: 0;"
                 />
+                <div class="master-sort-wrap">
+                  <Select
+                    value={processSortKey}
+                    size="sm"
+                    ariaLabel="Sort processes by"
+                    style="width: 100%;"
+                    onchange={(event) => {
+                      const key = event.target.value as typeof processSortKey;
+                      processSortKey = key;
+                      processSortAsc = key === 'name' || key === 'status';
+                    }}
+                  >
+                    <option value="name">Name</option>
+                    <option value="status">Status</option>
+                    <option value="cpu">CPU</option>
+                    <option value="memory">Memory</option>
+                    <option value="restarts">Restarts</option>
+                    <option value="uptime">Uptime</option>
+                    <option value="instances">Instances</option>
+                  </Select>
+                </div>
+                <button
+                  type="button"
+                  class="sort-dir-btn"
+                  onclick={() => processSortAsc = !processSortAsc}
+                  title={processSortAsc ? 'Sort ascending' : 'Sort descending'}
+                  aria-label={processSortAsc ? 'Sort ascending' : 'Sort descending'}
+                >
+                  {processSortAsc ? '↑' : '↓'}
+                </button>
               </div>
+              <div class="master-toolbar-row">
+                {#if namespaceOptions.length > 1}
+                  <div class="master-ns-wrap">
+                    <Select
+                      bind:value={namespaceFilter}
+                      size="sm"
+                      ariaLabel="Filter by namespace"
+                      style="width: 100%;"
+                    >
+                      <option value="all">All namespaces</option>
+                      {#each namespaceOptions as namespace}
+                        <option value={namespace}>{namespace}</option>
+                      {/each}
+                    </Select>
+                  </div>
+                {/if}
 
-              <div class="master-pills-row">
-                <div class="pills-group">
+                <div class="view-toggle" role="group" aria-label="Fleet view">
                   <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'all'}
-                    onclick={() => statusFilter = 'all'}
+                    type="button"
+                    class:active={fleetView === 'cards'}
+                    aria-pressed={fleetView === 'cards'}
+                    onclick={() => fleetView = 'cards'}
+                    title="Card view"
                   >
-                    All ({processes.length})
+                    <LayoutGrid size={13} />
                   </button>
                   <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'online'}
-                    onclick={() => statusFilter = 'online'}
+                    type="button"
+                    class:active={fleetView === 'table'}
+                    aria-pressed={fleetView === 'table'}
+                    onclick={() => fleetView = 'table'}
+                    title="Table view"
                   >
-                    Online ({onlineApps})
-                  </button>
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'stopped'}
-                    onclick={() => statusFilter = 'stopped'}
-                  >
-                    Stopped ({stoppedApps})
-                  </button>
-                  <button
-                    class="pill-btn"
-                    class:active={statusFilter === 'errored'}
-                    onclick={() => statusFilter = 'errored'}
-                  >
-                    Errored ({erroredApps})
+                    <Table2 size={13} />
                   </button>
                 </div>
 
-                <KebabMenu align="left" title="Cluster Bulk Actions">
-                  <button class="menu-item" onclick={() => handleProcessAction('start', 'all')}>
-                    <Play size={14} class="text-emerald" />
-                    <span>Start All Processes</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptReloadAll}>
-                    <Zap size={14} class="text-accent" />
-                    <span>Reload All (0-Downtime)</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptStopAll}>
-                    <Square size={14} class="text-amber" />
-                    <span>Stop All Processes</span>
-                  </button>
-
-                  <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
-
-                  <button class="menu-item" onclick={handleSaveDump}>
-                    <Save size={14} class="text-accent" />
-                    <span>Save Process List (pm2 save)</span>
-                  </button>
-
-                  <button class="menu-item" onclick={promptResurrect}>
-                    <RefreshCcw size={14} class="text-purple" />
-                    <span>Resurrect Saved Apps (pm2 resurrect)</span>
-                  </button>
-                </KebabMenu>
+                <span class="master-count">{filteredProcesses.length} / {processes.length}</span>
               </div>
             </div>
 
             <!-- Scrollable Process Cards List -->
-            <div class="master-cards-list">
+            <div class="master-cards-list" class:table-list={fleetView === 'table'}>
               {#if filteredProcesses.length === 0}
                 <div class="empty-list-container">
                   <EmptyState
                     icon={Layers}
-                    title="No active processes"
-                    description={processes.length === 0 
-                      ? "No Node.js applications are currently running in PM2 memory." 
-                      : "No processes match the current search filter."}
-                    actionLabel={processes.length === 0 ? "Launch App" : "Clear Filter"}
-                    actionIcon={Plus}
-                    onAction={() => {
-                      if (processes.length === 0) showLaunchModal = true;
-                      else { searchQuery = ''; statusFilter = 'all'; }
-                    }}
+                    title="No apps match"
+                    description="No processes match the current search or status filter."
+                    actionLabel="Clear filters"
+                    actionIcon={RefreshCcw}
+                    onAction={() => { searchQuery = ''; statusFilter = 'all'; namespaceFilter = 'all'; }}
                   />
-
-                  {#if processes.length === 0 && savedDumpApps.length > 0}
-                    <!-- Quick Saved Apps Restore Box -->
-                    <div class="saved-dump-quick-section">
-                      <div class="quick-section-header">
-                        <div class="quick-section-title">
-                          <Database size={13} class="text-accent" />
-                          <span>Saved in dump ({savedDumpApps.length}):</span>
-                        </div>
-                        <Button variant="ghost" size="xs" onclick={promptResurrect} title="Restore all saved applications">
-                          <RefreshCcw size={11} />
-                          <span>Resurrect All</span>
-                        </Button>
-                      </div>
-                      <div class="quick-dump-list">
-                        {#each savedDumpApps as app}
-                          <div class="quick-dump-item">
-                            <div class="quick-item-info">
-                              <span class="quick-item-name font-mono">{app.name}</span>
-                              <span class="quick-item-path" title={app.script_path}>{app.script_path.split('/').pop() || app.script_path}</span>
-                            </div>
-                            <Button
-                              variant="primary"
-                              size="xs"
-                              onclick={() => handleStartSavedApp(app)}
-                              title="Start {app.name} now"
-                            >
-                              <Play size={11} />
-                              <span>Run</span>
-                            </Button>
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
-                  {:else if processes.length === 0}
-                    <div class="resurrect-hint-row">
-                      <Button variant="outline" size="sm" onclick={promptResurrect}>
-                        <RefreshCcw size={13} />
-                        <span>Restore Saved Dump</span>
-                      </Button>
-                    </div>
-                  {/if}
                 </div>
+              {:else if fleetView === 'table'}
+                <Table class="fleet-table" style="border:none; border-radius:0; width:100%;">
+                  <thead>
+                    <tr>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('name')}>
+                        <div class="th-content">App <span class="th-sort-icon">{processSortKey === 'name' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('status')}>
+                        <div class="th-content">Status <span class="th-sort-icon">{processSortKey === 'status' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('cpu')}>
+                        <div class="th-content">CPU <span class="th-sort-icon">{processSortKey === 'cpu' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('memory')}>
+                        <div class="th-content">RAM <span class="th-sort-icon">{processSortKey === 'memory' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('restarts')}>
+                        <div class="th-content">RST <span class="th-sort-icon">{processSortKey === 'restarts' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th class="sortable-th" onclick={() => toggleProcessSort('uptime')}>
+                        <div class="th-content">Up <span class="th-sort-icon">{processSortKey === 'uptime' ? (processSortAsc ? '↑' : '↓') : '↕'}</span></div>
+                      </th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each filteredProcesses as p (p.pm_id)}
+                      {@const memoryLimit = parseMemoryLimit(p.max_memory_restart)}
+                      {@const memoryRatio = memoryLimit ? (p.memory || 0) / memoryLimit : 0}
+                      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                      <tr
+                        class:selected={selectedProcess?.pm_id === p.pm_id}
+                        tabindex="0"
+                        class="fleet-row"
+                        onclick={() => handleSelectProcess(p.pm_id)}
+                        oncontextmenu={(event) => openProcessContextMenu(event, p)}
+                        onkeydown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            handleSelectProcess(p.pm_id);
+                          }
+                        }}
+                      >
+                        <td>
+                          <div class="fleet-app-cell">
+                            <span class="status-dot {p.status}"></span>
+                            <div class="fleet-app-info">
+                              <span class="fleet-app-name" title={p.name}>{p.name}</span>
+                              <span class="fleet-app-sub">
+                                #{p.pm_id} · {p.exec_mode === 'cluster_mode' ? `cluster×${p.instances}` : 'fork'}
+                                {#if p.namespace && p.namespace !== 'default'} · {p.namespace}{/if}
+                                {#if p.is_module} · module{/if}
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span class="status-text {p.status}">{p.status}</span>
+                        </td>
+                        <td class="fleet-num">{p.cpu.toFixed(1)}%</td>
+                        <td
+                          class="fleet-num"
+                          title={memoryLimit
+                            ? `${formatBytes(p.memory)} of ${memoryLimitLabel(p.max_memory_restart)}`
+                            : formatBytes(p.memory)}
+                        >
+                          {formatBytes(p.memory)}
+                          {#if memoryLimit}
+                            <span class="fleet-limit" class:warn={memoryRatio > 0.8}>
+                              /{memoryLimitLabel(p.max_memory_restart)}
+                            </span>
+                          {/if}
+                        </td>
+                        <td class="fleet-num" class:text-rose={p.unstable_restarts > 0}>
+                          {p.restarts}{#if p.unstable_restarts > 0} ⚠{/if}
+                        </td>
+                        <td class="fleet-num">{p.status === 'online' ? formatUptime(p.uptime) : '—'}</td>
+                        <td
+                          class="fleet-actions"
+                          onclick={(event) => event.stopPropagation()}
+                          onkeydown={(event) => event.stopPropagation()}
+                        >
+                          <KebabMenu align="right" title="Process actions">
+                            <button class="menu-item" onclick={() => openLogsForProcess(p)}>
+                              <Terminal size={14} class="text-accent" />
+                              <span>View logs</span>
+                            </button>
+                            <button class="menu-item" onclick={() => handleSelectProcess(p.pm_id, true)}>
+                              <Info size={14} class="text-accent" />
+                              <span>Details &amp; environment</span>
+                            </button>
+                            <button class="menu-item" onclick={() => copyPm2Command(p)}>
+                              <Copy size={14} class="text-accent" />
+                              <span>Copy pm2 command</span>
+                            </button>
+                            {#if p.status === 'online'}
+                              <button class="menu-item" onclick={() => handleProcessAction('reload', p.pm_id)}>
+                                <Zap size={14} class="text-accent" />
+                                <span>Reload (zero downtime)</span>
+                              </button>
+                              <button class="menu-item" onclick={() => handleProcessAction('restart', p.pm_id)}>
+                                <RotateCw size={14} />
+                                <span>Restart</span>
+                              </button>
+                              <button class="menu-item" onclick={() => handleProcessAction('stop', p.pm_id)}>
+                                <Square size={14} class="text-amber" />
+                                <span>Stop</span>
+                              </button>
+                            {:else}
+                              <button class="menu-item" onclick={() => handleProcessAction('start', p.pm_id)}>
+                                <Play size={14} class="text-emerald" />
+                                <span>Start</span>
+                              </button>
+                            {/if}
+                            {#if p.exec_mode === 'cluster_mode'}
+                              <button class="menu-item" onclick={() => openScaleModal(p)}>
+                                <Layers size={14} class="text-accent" />
+                                <span>Scale instances…</span>
+                              </button>
+                            {/if}
+                            <button class="menu-item" onclick={() => handleProcessAction('reset', p.pm_id)}>
+                              <RefreshCcw size={14} class="text-accent" />
+                              <span>Reset restart counters</span>
+                            </button>
+                            <button class="menu-item" onclick={() => promptFlushLogs(p)}>
+                              <Trash2 size={14} class="text-amber" />
+                              <span>Flush logs</span>
+                            </button>
+                            <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
+                            <button class="menu-item text-danger" onclick={() => promptDeleteProcess(p)}>
+                              <Trash2 size={14} class="text-error" />
+                              <span>Delete process</span>
+                            </button>
+                          </KebabMenu>
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </Table>
               {:else}
                 {#each filteredProcesses as p (p.pm_id)}
                   {@const isSelected = selectedProcess?.pm_id === p.pm_id}
                   {@const isOnline = p.status === 'online'}
                   {@const isErrored = p.status === 'errored'}
+                  {@const memoryLimit = parseMemoryLimit(p.max_memory_restart)}
+                  {@const memoryRatio = memoryLimit ? (p.memory || 0) / memoryLimit : 0}
+                  {@const history = processHistory[p.pm_id]}
 
                   <div 
                     class="proc-card"
@@ -1224,6 +2664,7 @@
                     role="button"
                     tabindex="0"
                     onclick={() => handleSelectProcess(p.pm_id)}
+                    oncontextmenu={(event) => openProcessContextMenu(event, p)}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSelectProcess(p.pm_id); }}
                   >
                     <!-- Card Top Line: Status Dot, Name, ID, Mode -->
@@ -1236,6 +2677,9 @@
                         <span class="proc-id-tag font-mono">#{p.pm_id}</span>
                         {#if p.version}
                           <span class="proc-version-tag">v{p.version}</span>
+                        {/if}
+                        {#if p.is_module}
+                          <span class="proc-version-tag">module</span>
                         {/if}
                       </div>
 
@@ -1262,19 +2706,36 @@
                             style="width: {Math.min(100, p.cpu)}%; background: {p.cpu > 80 ? 'var(--color-error)' : p.cpu > 40 ? 'var(--color-warning)' : 'var(--color-accent)'};"
                           ></div>
                         </div>
+                        <svg class="meter-spark cpu-spark" viewBox="0 0 100 16" preserveAspectRatio="none">
+                          <polyline points={sparklinePoints(history?.cpu || [], 100, 16, 100)} />
+                        </svg>
                       </div>
 
                       <div class="meter-col">
                         <div class="meter-label-row">
                           <span class="m-label">RAM</span>
-                          <span class="m-val font-mono">{formatBytes(p.memory)}</span>
+                          <span class="m-val font-mono">
+                            {formatBytes(p.memory)}
+                            {#if memoryLimit}<span class="limit-hint"> / {memoryLimitLabel(p.max_memory_restart)}</span>{/if}
+                          </span>
                         </div>
                         <div class="mini-track">
-                          <div 
-                            class="mini-bar mem-bar" 
-                            style="width: {Math.min(100, (p.memory / (1024 * 1024 * 1024)) * 100)}%;"
+                          <div
+                            class="mini-bar mem-bar"
+                            style="width: {memoryLimit
+                              ? Math.min(100, memoryRatio * 100)
+                              : Math.min(100, (p.memory / (1024 * 1024 * 1024)) * 100)}%; background: {memoryRatio > 0.9
+                              ? 'var(--color-error)'
+                              : memoryRatio > 0.8
+                                ? 'var(--color-warning)'
+                                : '#a855f7'};"
                           ></div>
                         </div>
+                        <svg class="meter-spark mem-spark" viewBox="0 0 100 16" preserveAspectRatio="none">
+                          <polyline
+                            points={sparklinePoints(history?.mem || [], 100, 16, memoryLimit || undefined)}
+                          />
+                        </svg>
                       </div>
                     </div>
 
@@ -1295,6 +2756,13 @@
                       </div>
 
                       <div class="proc-hover-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+                        <button
+                          class="card-action-btn"
+                          onclick={() => handleSelectProcess(p.pm_id, true)}
+                          title="Inspect application details"
+                        >
+                          <Info size={12} />
+                        </button>
                         {#if isOnline}
                           <button
                             class="card-action-btn action-restart"
@@ -1326,13 +2794,39 @@
                             <Play size={12} />
                           </button>
                         {/if}
-                        <button
-                          class="card-action-btn action-delete"
-                          onclick={(e) => { e.stopPropagation(); promptDeleteProcess(p); }}
-                          title="Delete process"
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                        <KebabMenu align="right" title="More actions">
+                          <button class="menu-item" onclick={() => openLogsForProcess(p)}>
+                            <Terminal size={14} class="text-accent" />
+                            <span>View logs</span>
+                          </button>
+                          <button class="menu-item" onclick={() => handleSelectProcess(p.pm_id, true)}>
+                            <Info size={14} class="text-accent" />
+                            <span>Details &amp; environment</span>
+                          </button>
+                          <button class="menu-item" onclick={() => copyPm2Command(p)}>
+                            <Copy size={14} class="text-accent" />
+                            <span>Copy pm2 command</span>
+                          </button>
+                          {#if p.exec_mode === 'cluster_mode'}
+                            <button class="menu-item" onclick={() => openScaleModal(p)}>
+                              <Layers size={14} class="text-accent" />
+                              <span>Scale instances…</span>
+                            </button>
+                          {/if}
+                          <button class="menu-item" onclick={() => handleProcessAction('reset', p.pm_id)}>
+                            <RefreshCcw size={14} class="text-accent" />
+                            <span>Reset restart counters</span>
+                          </button>
+                          <button class="menu-item" onclick={() => promptFlushLogs(p)}>
+                            <Trash2 size={14} class="text-amber" />
+                            <span>Flush logs</span>
+                          </button>
+                          <div style="height: 1px; background: var(--color-border-subtle); margin: 4px 0;"></div>
+                          <button class="menu-item text-danger" onclick={() => promptDeleteProcess(p)}>
+                            <Trash2 size={14} class="text-error" />
+                            <span>Delete process</span>
+                          </button>
+                        </KebabMenu>
                       </div>
                     </div>
                   </div>
@@ -1341,9 +2835,187 @@
             </div>
           </div>
 
-          <!-- ── DETAIL PANE: LIVE REAL-TIME LOGS TERMINAL DECK ──────────────── -->
-          <div class="fleet-detail-pane">
+          <aside class="fleet-saved-pane">
+            <div class="saved-pane-head">
+              <div class="saved-pane-title">
+                <Database size={15} />
+                <span>Saved processes</span>
+              </div>
+              <Button variant="ghost" size="xs" onclick={() => activeTab = 'daemon'} title="Open the saved apps manager">
+                Manage
+              </Button>
+            </div>
+            <div class="saved-pane-meta">
+              {#if dumpInfo?.exists}
+                <span>{savedDumpApps.length} app{savedDumpApps.length === 1 ? '' : 's'} · saved {formatRelativeTime(dumpInfo.modified)}</span>
+              {:else}
+                <span>No dump file yet</span>
+              {/if}
+              {#if dumpDrift.hasDrift}
+                <span class="saved-pane-warn">
+                  {#if dumpDrift.notRunning.length > 0}{dumpDrift.notRunning.length} not running{/if}
+                  {#if dumpDrift.notRunning.length > 0 && dumpDrift.notSaved.length > 0} · {/if}
+                  {#if dumpDrift.notSaved.length > 0}{dumpDrift.notSaved.length} not saved{/if}
+                </span>
+              {/if}
+            </div>
+            <div class="saved-pane-actions">
+              <Button variant="outline" size="xs" onclick={handleSaveDump}>
+                <Save size={12} /> Save
+              </Button>
+              <Button
+                variant="outline"
+                size="xs"
+                onclick={promptResurrect}
+                disabled={savedDumpApps.length === 0}
+              >
+                <RefreshCcw size={12} /> Resurrect
+              </Button>
+            </div>
+
+            {#if savedDumpApps.length === 0}
+              <p class="saved-pane-empty">No saved apps yet. Save the current fleet to persist it across reboots.</p>
+            {:else}
+              <div class="saved-pane-list">
+                {#each savedDumpApps as app (app.namespace + ':' + app.name)}
+                  <div class="saved-pane-row">
+                    <span class="status-dot {app.is_currently_running ? 'online' : 'stopped'}"></span>
+                    <div class="saved-pane-info">
+                      <strong title={app.name}>{app.name}</strong>
+                      <span title={app.script_path}>{app.script_path.split('/').pop() || app.script_path}</span>
+                    </div>
+                    {#if app.is_currently_running && app.current_pm_id != null}
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onclick={() => {
+                          const proc = processes.find((item) => item.pm_id === app.current_pm_id);
+                          if (proc) openLogsForProcess(proc);
+                        }}
+                        title="Open this app's logs"
+                      >
+                        Logs
+                      </Button>
+                    {:else}
+                      <Button
+                        variant="primary"
+                        size="xs"
+                        onclick={() => handleStartSavedApp(app)}
+                        title="Start this saved app"
+                      >
+                        <Play size={11} /> Run
+                      </Button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </aside>
+          </div>
+
+          <SideDrawer
+            bind:isOpen={showLogsDrawer}
+            title={`Logs — ${selectedProcess?.name ?? 'PM2'}`}
+            width="900px"
+          >
+            <div class="logs-drawer">
             {#if selectedProcess}
+              {@const detailMemoryLimit = parseMemoryLimit(selectedProcess.max_memory_restart)}
+              <div class="detail-app-head">
+                <div class="detail-app-identity">
+                  <span class="status-dot {selectedProcess.status}"></span>
+                  <strong class="detail-app-name" title={selectedProcess.name}>{selectedProcess.name}</strong>
+                  <span class="proc-id-tag">#{selectedProcess.pm_id}</span>
+                  <span class="mode-tag {selectedProcess.exec_mode === 'cluster_mode' ? 'cluster' : 'fork'}">
+                    {selectedProcess.exec_mode === 'cluster_mode' ? `cluster (${selectedProcess.instances})` : 'fork'}
+                  </span>
+                </div>
+                <div class="detail-app-meta">
+                  <span>CPU <strong>{selectedProcess.cpu.toFixed(1)}%</strong></span>
+                  <span>
+                    RAM <strong>{formatBytes(selectedProcess.memory)}</strong>
+                    {#if detailMemoryLimit}<span class="limit-hint"> / {memoryLimitLabel(selectedProcess.max_memory_restart)}</span>{/if}
+                  </span>
+                  <span>{selectedProcess.status === 'online' ? formatUptime(selectedProcess.uptime) : 'stopped'}</span>
+                  {#if selectedProcess.node_version}
+                    <span title="Node.js version">node {selectedProcess.node_version}</span>
+                  {/if}
+                  {#if selectedProcess.interpreter && selectedProcess.interpreter !== 'node'}
+                    <span title="Interpreter">{selectedProcess.interpreter}</span>
+                  {/if}
+                  {#if selectedProcess.namespace && selectedProcess.namespace !== 'default'}
+                    <span title="PM2 namespace">{selectedProcess.namespace}</span>
+                  {/if}
+                </div>
+                <div class="detail-app-actions">
+                  {#if selectedProcess.status === 'online'}
+                    <button
+                      class="card-action-btn action-reload"
+                      onclick={() => handleProcessAction('reload', selectedProcess!.pm_id)}
+                      title="Reload (zero downtime)"
+                    >
+                      <Zap size={13} />
+                    </button>
+                    <button
+                      class="card-action-btn action-restart"
+                      onclick={() => handleProcessAction('restart', selectedProcess!.pm_id)}
+                      title="Restart"
+                    >
+                      <RotateCw size={13} />
+                    </button>
+                    <button
+                      class="card-action-btn action-stop"
+                      onclick={() => handleProcessAction('stop', selectedProcess!.pm_id)}
+                      title="Stop"
+                    >
+                      <Square size={13} />
+                    </button>
+                  {:else}
+                    <button
+                      class="card-action-btn action-start"
+                      onclick={() => handleProcessAction('start', selectedProcess!.pm_id)}
+                      title="Start"
+                    >
+                      <Play size={13} />
+                    </button>
+                  {/if}
+                  <button
+                    class="card-action-btn"
+                    onclick={() => showProcessDrawer = true}
+                    title="Inspect details and environment"
+                  >
+                    <Info size={13} />
+                  </button>
+                  <KebabMenu align="right" title="Application options">
+                    <button class="menu-item" onclick={() => showProcessDrawer = true}>
+                      <Info size={14} class="text-accent" />
+                      <span>Details &amp; environment</span>
+                    </button>
+                    <button class="menu-item" onclick={() => copyPm2Command(selectedProcess!)}>
+                      <Copy size={14} class="text-accent" />
+                      <span>Copy pm2 command</span>
+                    </button>
+                    {#if selectedProcess.exec_mode === 'cluster_mode'}
+                      <button class="menu-item" onclick={() => openScaleModal(selectedProcess!)}>
+                        <Layers size={14} class="text-accent" />
+                        <span>Scale instances…</span>
+                      </button>
+                    {/if}
+                    <button class="menu-item" onclick={() => handleProcessAction('reset', selectedProcess!.pm_id)}>
+                      <RefreshCcw size={14} class="text-accent" />
+                      <span>Reset restart counters</span>
+                    </button>
+                    <button class="menu-item" onclick={() => promptFlushLogs(selectedProcess)}>
+                      <Trash2 size={14} class="text-error" />
+                      <span>Flush logs</span>
+                    </button>
+                    <button class="menu-item text-danger" onclick={() => promptDeleteProcess(selectedProcess!)}>
+                      <Trash2 size={14} class="text-error" />
+                      <span>Delete process</span>
+                    </button>
+                  </KebabMenu>
+                </div>
+              </div>
               <div class="logs-deck-wrap">
                 <!-- Logs Top Controls Ribbon -->
                 <div class="logs-deck-controls">
@@ -1372,7 +3044,8 @@
                       <Select
                         bind:value={logTailLines}
                         onchange={() => loadLogs()}
-                        style="width: 95px; height: 28px;"
+                        size="sm"
+                        style="width: 95px;"
                       >
                         <option value="100">100</option>
                         <option value="200">200</option>
@@ -1390,6 +3063,16 @@
                     />
 
                     <Button
+                      variant={logErrorsOnly ? 'primary' : 'outline'}
+                      size="sm"
+                      onclick={() => logErrorsOnly = !logErrorsOnly}
+                      title="Show only ERROR lines"
+                    >
+                      <AlertTriangle size={12} />
+                      <span>Errors</span>
+                    </Button>
+
+                    <Button
                       variant={logAutoRefresh ? 'primary' : 'outline'}
                       size="sm"
                       onclick={() => logAutoRefresh = !logAutoRefresh}
@@ -1399,10 +3082,36 @@
                       <span>{logAutoRefresh ? 'Live (2s)' : 'Paused'}</span>
                     </Button>
 
+                    <Button
+                      variant={logFollow ? 'outline' : 'ghost'}
+                      size="sm"
+                      onclick={() => {
+                        if (logFollow) {
+                          logFollow = false;
+                        } else {
+                          jumpToLatest();
+                        }
+                      }}
+                      title="Auto-scroll to the newest log line"
+                    >
+                      <ArrowDown size={12} />
+                      <span>{logFollow ? 'Following' : 'Follow'}</span>
+                    </Button>
+
                     <KebabMenu align="right" title="Application & Log Options">
                       <button class="menu-item" onclick={() => showProcessDrawer = true}>
                         <Info size={14} class="text-accent" />
                         <span>App Details & Telemetry</span>
+                      </button>
+
+                      <button class="menu-item" onclick={openLogFolder}>
+                        <Folder size={14} class="text-accent" />
+                        <span>Open log folder</span>
+                      </button>
+
+                      <button class="menu-item" onclick={downloadLogFile} disabled={exportingLog}>
+                        <Download size={14} class="text-accent" />
+                        <span>{exportingLog ? 'Saving log…' : 'Download log'}</span>
                       </button>
 
                       <button class="menu-item" onclick={copyCurrentLogs}>
@@ -1421,6 +3130,10 @@
                         <Trash2 size={14} class="text-error" />
                         <span>Flush Logs</span>
                       </button>
+                      <button class="menu-item text-danger" onclick={() => promptFlushLogs(null)}>
+                        <Trash2 size={14} class="text-error" />
+                        <span>Flush all logs</span>
+                      </button>
                     </KebabMenu>
                   </div>
                 </div>
@@ -1434,12 +3147,31 @@
                         {selectedLogType === 'err' ? selectedProcess.err_log_path : selectedProcess.out_log_path}
                       </span>
                     </div>
-                    <span class="log-count-tag font-mono">
-                      {parsedLogs.length} lines rendered
-                    </span>
+                    <div class="log-header-actions">
+                      <button
+                        type="button"
+                        class="log-header-btn"
+                        onclick={openLogFolder}
+                        title="Open log folder"
+                      >
+                        <Folder size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="log-header-btn"
+                        onclick={downloadLogFile}
+                        disabled={exportingLog}
+                        title="Download the full log file"
+                      >
+                        <Download size={12} />
+                      </button>
+                      <span class="log-count-tag font-mono">
+                        {parsedLogs.length} lines
+                      </span>
+                    </div>
                   </div>
 
-                  <div class="log-lines-container" bind:this={logContainerRef}>
+                  <div class="log-lines-container" bind:this={logContainerRef} onscroll={handleLogScroll}>
                     {#if logLoading && parsedLogs.length === 0}
                       <div class="log-state-msg">
                         <RotateCw size={22} class="spin text-accent" />
@@ -1448,46 +3180,61 @@
                     {:else if parsedLogs.length === 0}
                       <div class="log-state-msg">
                         <Terminal size={28} class="text-muted" />
-                        <p>No log output recorded in this file yet.</p>
+                        <p>
+                          {logSearchQuery.trim() || logErrorsOnly
+                            ? 'No log lines match the current filters.'
+                            : 'No log output recorded in this file yet.'}
+                        </p>
                       </div>
                     {:else}
                       <div class="log-table">
+                        <div class="log-table-head">
+                          <span>#</span>
+                          <span>Time</span>
+                          <span>Level</span>
+                          <span>Context</span>
+                          <span>Message</span>
+                        </div>
                         {#each parsedLogs as entry}
                           <div class="log-row {entry.level === 'error' ? 'row-error' : entry.level === 'warn' ? 'row-warn' : ''}">
                             <span class="log-line-no font-mono">{entry.lineNumber}</span>
-                            
-                            {#if entry.timestamp}
-                              <span class="log-ts font-mono">{entry.timestamp}</span>
-                            {/if}
-
-                            {#if entry.level === 'error'}
-                              <span class="log-level-badge level-err">ERR</span>
-                            {:else if entry.level === 'warn'}
-                              <span class="log-level-badge level-warn">WARN</span>
-                            {/if}
-
+                            <span class="log-ts font-mono">{entry.timestamp || '—'}</span>
+                            <span class="log-level-badge {entry.level === 'error' ? 'level-err' : entry.level === 'warn' ? 'level-warn' : 'level-info'}">
+                              {entry.level === 'error' ? 'ERROR' : entry.level === 'warn' ? 'WARN' : 'INFO'}
+                            </span>
+                            <span class="log-context font-mono" title={entry.context || ''}>{entry.context || '—'}</span>
                             <span class="log-msg font-mono">{entry.message}</span>
                           </div>
                         {/each}
                       </div>
                     {/if}
                   </div>
+                  {#if !logAtBottom}
+                    <button
+                      type="button"
+                      class="jump-latest-btn"
+                      onclick={jumpToLatest}
+                      title="Jump to the newest log line"
+                    >
+                      <ArrowDown size={14} />
+                      <span>Jump to latest</span>
+                    </button>
+                  {/if}
                 </div>
               </div>
             {:else}
-              <!-- Empty Selection State -->
               <div class="no-selection-wrap">
-                <Layers size={44} class="text-muted" />
-                <h3>No Application Selected</h3>
-                <p>Click on any Node.js process on the left to inspect its real-time logs and open application details in the side drawer.</p>
-                <Button variant="primary" onclick={() => showLaunchModal = true}>
-                  <Plus size={14} />
-                  <span>Launch Application</span>
+                <Layers size={40} class="text-muted" />
+                <h3>No application matches</h3>
+                <p>Clear the search or status filter to bring your applications back.</p>
+                <Button variant="outline" onclick={() => { searchQuery = ''; statusFilter = 'all'; namespaceFilter = 'all'; }}>
+                  <RefreshCcw size={14} /> Clear filters
                 </Button>
               </div>
             {/if}
-          </div>
-        </div>
+            </div>
+          </SideDrawer>
+        {/if}
 
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       <!-- VIEW 2: ECOSYSTEM CONFIGURATIONS STUDIO -->
@@ -1551,10 +3298,10 @@
                     variant="outline"
                     size="sm"
                     onclick={openSaveEcosystemModal}
-                    disabled={!isEcosystemDirty}
+                    disabled={!isEcosystemDirty || ecosystemValidating}
                   >
                     <Save size={13} />
-                    <span>Save</span>
+                    <span>{ecosystemValidating ? 'Checking…' : 'Save'}</span>
                   </Button>
 
                   <Button
@@ -1569,12 +3316,56 @@
                 </div>
               </div>
 
+              <div class="ecosystem-start-options">
+                <label class="eco-option-field">
+                  <span>Only apps</span>
+                  <input
+                    class="form-input form-input-sm"
+                    bind:value={ecosystemOnly}
+                    list="ecosystem-app-names"
+                    placeholder="api,worker"
+                    title="Comma-separated app names; leave empty to start every app in the config"
+                  />
+                </label>
+                <label class="eco-option-field">
+                  <span>Environment</span>
+                  <input
+                    class="form-input form-input-sm"
+                    bind:value={ecosystemEnv}
+                    placeholder="e.g. production"
+                  />
+                </label>
+                <span class="eco-option-hint">
+                  Optional <code>--only</code> and <code>--env</code> flags for <code>pm2 start</code>
+                </span>
+                <datalist id="ecosystem-app-names">
+                  {#each selectedEcosystemFile.app_names as appName}
+                    <option value={appName}></option>
+                  {/each}
+                </datalist>
+              </div>
+
+              {#if ecosystemValidationError}
+                <div class="ecosystem-validation-error" role="alert">
+                  <AlertTriangle size={13} class="flex-shrink-0" />
+                  <pre>{ecosystemValidationError}</pre>
+                  <button
+                    type="button"
+                    class="eco-error-close"
+                    onclick={() => ecosystemValidationError = ''}
+                    aria-label="Dismiss validation error"
+                  >
+                    ×
+                  </button>
+                </div>
+              {/if}
+
               <div class="code-editor-wrap">
                 <CodeEditor
                   value={ecosystemContent}
                   language="javascript"
                   height="100%"
-                  onchange={(newVal) => ecosystemContent = newVal}
+                  onchange={(newVal) => { ecosystemContent = newVal; ecosystemValidationError = ''; }}
                 />
               </div>
             {:else}
@@ -1591,6 +3382,19 @@
       <!-- VIEW 3: DAEMON RUNTIME & SYSTEMD STARTUP -->
       <!-- ═══════════════════════════════════════════════════════════════════════ -->
       {:else if activeTab === 'daemon'}
+        <div class="pm2-scope-note">
+          <Info size={14} class="flex-shrink-0" />
+          <div>
+            <strong>Scope: current user only</strong>
+            <p>
+              This view reads the PM2 instance for
+              <code>{startupStatus?.user || 'the current user'}</code> in
+              <code>{systemStatus.pm2_home}</code>. Apps started by root or another Linux user
+              are not visible from this page.
+            </p>
+          </div>
+        </div>
+
         <div class="daemon-grid">
           <!-- Daemon Status Card -->
           <div class="daemon-card">
@@ -1687,6 +3491,105 @@
             </div>
           </div>
 
+          <!-- Log Health & Rotation Card -->
+          <div class="daemon-card log-health-card">
+            <div class="daemon-card-header">
+              <div class="icon-bubble" style="background: rgba(56, 189, 248, 0.12); color: #38bdf8;">
+                <FileText size={18} />
+              </div>
+              <div>
+                <h3>Log Health &amp; Rotation</h3>
+                <p>
+                  {logOverview?.directory || `${systemStatus.pm2_home}/logs`}
+                </p>
+              </div>
+            </div>
+
+            {#if logOverviewLoading && !logOverview}
+              <p class="daemon-note">
+                <RotateCw size={13} class="spin" /> Measuring log files…
+              </p>
+            {:else if logOverview}
+              <div class="log-health-summary">
+                <div>
+                  <span class="log-health-label">Total log size</span>
+                  <strong class="log-health-value font-mono">{formatBytes(logOverview.total_size)}</strong>
+                </div>
+                <div>
+                  <span class="log-health-label">pm2-logrotate</span>
+                  {#if logOverview.logrotate_installed}
+                    <span class="badge badge-success">
+                      Installed{logOverview.logrotate_version ? ` v${logOverview.logrotate_version}` : ''}
+                    </span>
+                  {:else}
+                    <span class="badge badge-neutral">Not installed</span>
+                  {/if}
+                </div>
+              </div>
+
+              {#if logOverview.files.length > 0}
+                <div class="log-file-list">
+                  {#each logOverview.files as file}
+                    <div class="log-file-row">
+                      <span class="log-file-name font-mono" title={file.name}>{file.name}</span>
+                      <span class="log-file-size font-mono">{formatBytes(file.size)}</span>
+                    </div>
+                  {/each}
+                  {#if logOverview.hidden_files}
+                    <div class="log-file-row log-file-more">
+                      <span>+{logOverview.hidden_files} more files</span>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <p class="daemon-note">No log files have been written yet.</p>
+              {/if}
+
+              {#if !logOverview.logrotate_installed}
+                <div class="logrotate-install">
+                  <p>Install rotation to stop logs from growing without limit:</p>
+                  <div class="code-terminal">
+                    <code>pm2 install pm2-logrotate</code>
+                    <button
+                      class="copy-btn"
+                      onclick={() => copyToClipboard('pm2 install pm2-logrotate', 'logrotate')}
+                      title="Copy install command"
+                    >
+                      {#if copiedCommand === 'logrotate'}
+                        <Check size={14} class="text-emerald" />
+                      {:else}
+                        <Copy size={14} />
+                      {/if}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            {:else}
+              <p class="daemon-note">Log metrics are unavailable.</p>
+            {/if}
+
+            <div class="card-footer-actions">
+              <Button variant="outline" size="sm" onclick={openLogFolder} title="Open the PM2 log directory">
+                <Folder size={12} />
+                <span>Open folder</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={loadLogOverview}
+                disabled={logOverviewLoading}
+                title="Measure log files again"
+              >
+                <RefreshCcw size={12} class={logOverviewLoading ? 'spin' : ''} />
+                <span>Refresh</span>
+              </Button>
+              <Button variant="outline" size="sm" onclick={() => promptFlushLogs(null)} title="Empty every PM2 log file">
+                <Trash2 size={12} class="text-amber" />
+                <span>Flush all</span>
+              </Button>
+            </div>
+          </div>
+
           <!-- Saved Applications Snapshot Catalog Card (Full Width) -->
           <div class="daemon-card dump-catalog-card">
             <div class="daemon-card-header">
@@ -1696,7 +3599,16 @@
               <div class="catalog-header-flex">
                 <div>
                   <h3>Saved Applications Snapshot</h3>
-                  <p>Applications persisted in <code>{systemStatus.pm2_home}/dump.pm2</code> ({savedDumpApps.length} apps saved)</p>
+                  <p>
+                    Applications persisted in <code>{systemStatus.pm2_home}/dump.pm2</code>
+                    ({savedDumpApps.length} apps saved)
+                    {#if dumpInfo?.exists}
+                      · last saved {formatRelativeTime(dumpInfo.modified)}
+                      ({(dumpInfo.size / 1024).toFixed(1)} KB)
+                    {:else}
+                      · no dump file yet
+                    {/if}
+                  </p>
                 </div>
                 <div class="catalog-header-actions">
                   <Button variant="outline" size="sm" onclick={handleSaveDump} title="Overwrite dump with current running processes">
@@ -1725,6 +3637,9 @@
                       <div class="saved-app-identity">
                         <span class="status-dot {app.is_currently_running ? 'online' : 'stopped'}"></span>
                         <span class="saved-app-name font-mono">{app.name}</span>
+                        {#if app.namespace && app.namespace !== 'default'}
+                          <span class="mode-badge" title="PM2 namespace">{app.namespace}</span>
+                        {/if}
                         <span class="mode-badge {app.exec_mode.includes('cluster') ? 'cluster' : 'fork'}">
                           {app.exec_mode.includes('cluster') ? `cluster (${app.instances})` : 'fork'}
                         </span>
@@ -1783,7 +3698,7 @@
                         <Button
                           variant="ghost"
                           size="xs"
-                          onclick={() => promptDeleteSavedApp(app.name)}
+                          onclick={() => promptDeleteSavedApp(app)}
                           title="Remove this app entry from dump.pm2"
                         >
                           <Trash2 size={12} class="text-error" />
@@ -1797,6 +3712,11 @@
           </div>
         </div>
       {/if}
+    {:else if loading}
+      <div class="pm2-loading">
+        <RotateCw size={22} class="spin" />
+        <span>Connecting to PM2…</span>
+      </div>
     {/if}
   </div>
 </div>
@@ -1805,6 +3725,8 @@
 <!-- SIDE DRAWER: APPLICATION DETAILS INSPECTOR -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if selectedProcess}
+  {@const selectedHistory = processHistory[selectedProcess.pm_id]}
+  {@const selectedMemoryLimit = parseMemoryLimit(selectedProcess.max_memory_restart)}
   <SideDrawer
     bind:isOpen={showProcessDrawer}
     title="{selectedProcess.name} (#{selectedProcess.pm_id})"
@@ -1927,6 +3849,9 @@
                 style="width: {Math.min(100, selectedProcess.cpu)}%; background: {selectedProcess.cpu > 80 ? 'var(--color-error)' : selectedProcess.cpu > 40 ? 'var(--color-warning)' : 'var(--color-accent)'};"
               ></div>
             </div>
+            <svg class="vital-spark cpu-spark" viewBox="0 0 100 18" preserveAspectRatio="none">
+              <polyline points={sparklinePoints(selectedHistory?.cpu || [], 100, 18, 100)} />
+            </svg>
             <span class="vital-sub">Multi-core process load</span>
           </div>
 
@@ -1935,13 +3860,21 @@
               <span class="vital-card-title">Memory Heap</span>
               <HardDrive size={15} class="text-purple" />
             </div>
-            <span class="vital-value font-mono text-purple">{formatBytes(selectedProcess.memory)}</span>
+            <span class="vital-value font-mono text-purple">
+              {formatBytes(selectedProcess.memory)}
+              {#if selectedMemoryLimit}<span class="vital-limit">/ {memoryLimitLabel(selectedProcess.max_memory_restart)}</span>{/if}
+            </span>
             <div class="v-track">
               <div
                 class="v-bar"
-                style="width: {Math.min(100, (selectedProcess.memory / (1024 * 1024 * 1024)) * 100)}%; background: #a855f7;"
+                style="width: {Math.min(100, selectedMemoryLimit ? (selectedProcess.memory / selectedMemoryLimit) * 100 : (selectedProcess.memory / (1024 * 1024 * 1024)) * 100)}%; background: {selectedMemoryLimit && selectedProcess.memory / selectedMemoryLimit > 0.8 ? 'var(--color-warning)' : '#a855f7'};"
               ></div>
             </div>
+            <svg class="vital-spark mem-spark" viewBox="0 0 100 18" preserveAspectRatio="none">
+              <polyline
+                points={sparklinePoints(selectedHistory?.mem || [], 100, 18, selectedMemoryLimit || undefined)}
+              />
+            </svg>
             <span class="vital-sub">RSS resident memory</span>
           </div>
 
@@ -2004,6 +3937,32 @@
             </div>
 
             <div class="detail-row">
+              <span class="detail-label">Namespace</span>
+              <span class="detail-val font-mono">{selectedProcess.namespace || 'default'}</span>
+            </div>
+
+            {#if selectedProcess.node_version}
+              <div class="detail-row">
+                <span class="detail-label">Node.js Version</span>
+                <span class="detail-val font-mono">{selectedProcess.node_version}</span>
+              </div>
+            {/if}
+
+            {#if selectedProcess.interpreter}
+              <div class="detail-row">
+                <span class="detail-label">Interpreter</span>
+                <span class="detail-val font-mono">{selectedProcess.interpreter}</span>
+              </div>
+            {/if}
+
+            {#if selectedProcess.max_memory_restart}
+              <div class="detail-row">
+                <span class="detail-label">Memory Limit</span>
+                <span class="detail-val font-mono">{selectedProcess.max_memory_restart}</span>
+              </div>
+            {/if}
+
+            <div class="detail-row">
               <span class="detail-label">Watch Mode</span>
               <span class="detail-val">{selectedProcess.watch ? 'Enabled (auto-restarts on code change)' : 'Disabled'}</span>
             </div>
@@ -2064,8 +4023,11 @@
             <SearchBar
               bind:value={envSearchQuery}
               placeholder="Search environment keys or values..."
-              style="margin: 0; width: 100%;"
+              style="margin: 0; flex: 1; min-width: 0;"
             />
+            <span class="env-mask-note" title="Keys such as TOKEN, SECRET, PASSWORD and API_KEY are masked">
+              <Eye size={12} /> Sensitive values are masked
+            </span>
           </div>
 
           {#if filteredEnvVars.length === 0}
@@ -2089,14 +4051,27 @@
                       <td class="font-mono" style="font-weight: 600; color: var(--color-accent); vertical-align: top; padding-top: 9px;">
                         {k}
                       </td>
-                      <td class="font-mono" style="word-break: break-all; vertical-align: top; padding-top: 9px;" title={v || ''}>
+                      <td
+                        class="font-mono"
+                        style="word-break: break-all; vertical-align: top; padding-top: 9px;"
+                        title={envIsSensitive(k) && !revealedEnvKeys.has(k) ? 'Sensitive value hidden' : v || ''}
+                      >
                         {#if v === '' || v === undefined || v === null}
                           <span class="empty-env-tag font-mono">(empty string)</span>
                         {:else}
-                          <span>{v}</span>
+                          <span>{envDisplayValue(k, v)}</span>
                         {/if}
                       </td>
-                      <td style="text-align: right; vertical-align: top; padding-top: 6px;">
+                      <td style="text-align: right; vertical-align: top; padding-top: 6px; white-space: nowrap;">
+                        {#if envIsSensitive(k)}
+                          <button
+                            class="action-btn"
+                            onclick={() => toggleEnvReveal(k)}
+                            title={revealedEnvKeys.has(k) ? 'Hide value' : 'Reveal value'}
+                          >
+                            <Eye size={13} />
+                          </button>
+                        {/if}
                         <button
                           class="action-btn"
                           onclick={() => copyValue(v || '', k)}
@@ -2116,6 +4091,53 @@
     </div>
   </SideDrawer>
 {/if}
+
+<SideDrawer bind:isOpen={showActivityDrawer} title="PM2 Activity" width="520px">
+  <div class="activity-drawer">
+    <div class="activity-head">
+      <div>
+        <strong>Recent activity</strong>
+        <span>Actions and incidents, newest first (last 50).</span>
+      </div>
+      <Button variant="outline" size="xs" onclick={clearActivity} disabled={activityLog.length === 0}>
+        <Trash2 size={12} /> Clear
+      </Button>
+    </div>
+
+    {#if activityLog.length === 0}
+      <div class="activity-empty">
+        <Clock size={28} />
+        <p>No activity recorded yet.</p>
+      </div>
+    {:else}
+      <div class="activity-list">
+        {#each activityLog as event (event.id)}
+          <div class="activity-row tone-{event.tone}">
+            <span class="activity-dot"></span>
+            <div class="activity-body">
+              <div class="activity-title">{event.title}</div>
+              {#if event.detail}
+                <div class="activity-detail">{event.detail}</div>
+              {/if}
+              <div class="activity-time">{formatActivityTime(event.time)}</div>
+            </div>
+            {#if event.pmId != null}
+              <Button
+                variant="outline"
+                size="xs"
+                onclick={() => openActivityProcess(event)}
+                title="Open logs for this process"
+              >
+                <Terminal size={12} />
+                <span>Open logs</span>
+              </Button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
+</SideDrawer>
 
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 <!-- MODAL: LAUNCH NEW APP (3-STEP GUIDED WIZARD) -->
@@ -2161,6 +4183,7 @@
                   type="text"
                   placeholder="/var/www/my-app/dist/main.js, ./server.js, or script.py"
                   bind:value={launchForm.script_path}
+                  onblur={() => inferLaunchHints()}
                   class="form-input"
                 />
                 <Button variant="outline" onclick={browseScriptFile} title="Browse for executable script file">
@@ -2168,6 +4191,25 @@
                   <span>Browse...</span>
                 </Button>
               </div>
+
+              <small class="form-help">
+                Select the entry <strong>file</strong> (for example <code>dist/main.js</code>), not its folder.
+              </small>
+
+              {#if launchPathLooksLikeFolder}
+                <div class="launch-warning">
+                  <AlertTriangle size={13} class="flex-shrink-0" />
+                  <span>
+                    That looks like a folder or build directory. Pick the entry file inside it, such as
+                    <code>dist/main.js</code>.
+                  </span>
+                </div>
+              {:else if launchDuplicateError}
+                <div class="launch-warning">
+                  <AlertTriangle size={13} class="flex-shrink-0" />
+                  <span>{launchDuplicateError}</span>
+                </div>
+              {/if}
 
               {#if detectedRuntime}
                 <div class="runtime-badge-pill">
@@ -2422,7 +4464,7 @@
             <Button
               variant="outline"
               onclick={launchProcess}
-              disabled={!launchForm.script_path.trim()}
+              disabled={!launchForm.script_path.trim() || launchPathLooksLikeFolder || !!launchDuplicateError}
               title="Launch immediately with standard defaults"
             >
               <Zap size={13} class="text-amber" />
@@ -2435,6 +4477,18 @@
                   uiStore.showToast('Please specify a script path first', 'warning');
                   return;
                 }
+                if (launchPathLooksLikeFolder) {
+                  uiStore.showToast(
+                    'Select the entry file inside that folder, such as dist/main.js.',
+                    'warning'
+                  );
+                  return;
+                }
+                if (launchDuplicateError) {
+                  uiStore.showToast(launchDuplicateError, 'warning');
+                  return;
+                }
+                inferLaunchHints();
                 launchStep = 2;
               }}
             >
@@ -2471,6 +4525,56 @@
 {/if}
 
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: SCALE APPLICATION -->
+{#if showScaleModal && scaleTarget}
+  <div use:portal class="modal-backdrop" onclick={() => showScaleModal = false} role="presentation">
+    <div
+      class="modal-card scale-modal-card"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="scale-modal-title"
+      tabindex="-1"
+    >
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <Layers size={18} class="text-accent" />
+          <h3 id="scale-modal-title">Scale {scaleTarget.name}</h3>
+        </div>
+        <button class="modal-close-btn" onclick={() => showScaleModal = false}>×</button>
+      </div>
+      <div class="modal-body">
+        <p class="scale-copy">
+          This application is running in cluster mode with
+          <strong>{scaleTarget.instances}</strong> instance(s). PM2 will add or remove workers without
+          a full restart.
+        </p>
+        <label class="form-label" for="scale-instances">Instances</label>
+        <div class="scale-input-row">
+          <input
+            id="scale-instances"
+            class="form-input"
+            type="number"
+            min="1"
+            max="64"
+            bind:value={scaleInstances}
+          />
+          <span class="scale-hint">1–64 workers</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <Button variant="outline" onclick={() => showScaleModal = false} disabled={scaling}>
+          Cancel
+        </Button>
+        <Button variant="primary" onclick={submitScale} disabled={scaling}>
+          {scaling ? 'Scaling…' : 'Apply'}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <!-- MODAL: NEW ECOSYSTEM FILE -->
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 {#if showNewEcosystemModal}
@@ -2525,7 +4629,93 @@
   </div>
 {/if}
 
-<!-- Universal Config Diff Modal for PM2 Ecosystem -->
+<!-- Process right-click context menu -->
+{#if procContextMenu.show && procContextMenu.process}
+  <div
+    class="process-context-menu"
+    style="left: {procContextMenu.x}px; top: {procContextMenu.y}px;"
+    role="menu"
+    tabindex="-1"
+    onclick={(event) => event.stopPropagation()}
+    onkeydown={(event) => event.stopPropagation()}
+    oncontextmenu={(event) => event.preventDefault()}
+  >
+    <div class="ctx-menu-title" title={procContextMenu.process.name}>
+      <span class="status-dot {procContextMenu.process.status}"></span>
+      <span>{procContextMenu.process.name}</span>
+      <span class="ctx-menu-id">#{procContextMenu.process.pm_id}</span>
+    </div>
+
+    <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); openLogsForProcess(proc); }}>
+      <Terminal size={14} class="text-accent" />
+      <span>View logs</span>
+    </button>
+    <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleSelectProcess(proc.pm_id, true); }}>
+      <Info size={14} class="text-accent" />
+      <span>Details &amp; environment</span>
+    </button>
+    <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); copyPm2Command(proc); }}>
+      <Copy size={14} class="text-accent" />
+      <span>Copy pm2 command</span>
+    </button>
+
+    <div class="ctx-sep"></div>
+
+    {#if procContextMenu.process.status === 'online'}
+      <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleProcessAction('reload', proc.pm_id); }}>
+        <Zap size={14} class="text-accent" />
+        <span>Reload (zero downtime)</span>
+      </button>
+      <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleProcessAction('restart', proc.pm_id); }}>
+        <RotateCw size={14} />
+        <span>Restart</span>
+      </button>
+      <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleProcessAction('stop', proc.pm_id); }}>
+        <Square size={14} class="text-amber" />
+        <span>Stop</span>
+      </button>
+    {:else}
+      <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleProcessAction('start', proc.pm_id); }}>
+        <Play size={14} class="text-emerald" />
+        <span>Start</span>
+      </button>
+    {/if}
+
+    {#if procContextMenu.process.exec_mode === 'cluster_mode'}
+      <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); openScaleModal(proc); }}>
+        <Layers size={14} class="text-accent" />
+        <span>Scale instances…</span>
+      </button>
+    {/if}
+    <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); handleProcessAction('reset', proc.pm_id); }}>
+      <RefreshCcw size={14} class="text-accent" />
+      <span>Reset restart counters</span>
+    </button>
+    <button class="ctx-item" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); promptFlushLogs(proc); }}>
+      <Trash2 size={14} class="text-amber" />
+      <span>Flush logs</span>
+    </button>
+
+    <div class="ctx-sep"></div>
+
+    <button class="ctx-item ctx-danger" role="menuitem" onclick={() => { const proc = procContextMenu.process!; closeProcessContextMenu(); promptDeleteProcess(proc); }}>
+      <Trash2 size={14} />
+      <span>Delete process</span>
+    </button>
+  </div>
+{/if}
+
+<svelte:window
+  onclick={closeProcessContextMenu}
+  oncontextmenu={() => {
+    if (procContextMenu.show) closeProcessContextMenu();
+  }}
+  onkeydown={(event) => {
+    if (event.key === 'Escape') closeProcessContextMenu();
+  }}
+  onblur={closeProcessContextMenu}
+/>
+
 {#if selectedEcosystemFile}
   <ConfigDiffModal
     bind:show={showEcosystemDiffModal}
@@ -2535,17 +4725,73 @@
     newContent={ecosystemContent}
     warningMessage="Ensure module export syntax and process names are valid before saving."
     onconfirm={async () => {
-      await saveEcosystemFile();
-      showEcosystemDiffModal = false;
+      if (await saveEcosystemFile()) showEcosystemDiffModal = false;
     }}
     oncancel={() => showEcosystemDiffModal = false}
   />
 {/if}
 
-<style>/* Root Module Page */ .module-page {
+<style>/* Process right-click context menu */ .process-context-menu {
+    position: fixed;
+    z-index: 10000;
+    min-width: 232px;
+    padding: 5px;
+    background: var(--color-bg-popover, var(--color-bg-card));
+    border: 1px solid var(--color-border);
+    border-radius: 9px;
+    box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.28);
+  }.ctx-menu-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-bottom: 1px solid var(--color-border-subtle);
+    margin-bottom: 4px;
+  }.ctx-menu-title > span:nth-child(2) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.ctx-menu-id {
+    margin-left: auto;
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }.ctx-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-primary);
+    font-family: inherit;
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+  }.ctx-item:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
+  }.ctx-item.ctx-danger {
+    color: var(--color-error);
+  }.ctx-item.ctx-danger:hover {
+    background: rgba(244, 63, 94, 0.1);
+    color: var(--color-error);
+  }.ctx-sep {
+    height: 1px;
+    background: var(--color-border-subtle);
+    margin: 4px 2px;
+  }/* Root Module Page */ .module-page {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--page-content-gap);
     padding: 20px;
     position: absolute;
     inset: 0;
@@ -2583,30 +4829,159 @@
     justify-content: space-between;
     gap: 12px;
     flex-shrink: 0;
-  }/* 4 Top KPI Cards */ .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
+  }/* Compact fleet health strip */ .fleet-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
     flex-shrink: 0;
-  }
-@media (max-width: 1100px) {.kpi-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}/* Main Workspace Body */ .pm2-workspace-body {
+  }.fleet-status-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-wrap: wrap;
+  }.fleet-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }.fleet-stat strong {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }.fleet-stat:hover {
+    background: var(--color-bg-hover);
+  }.fleet-stat.active {
+    background: var(--color-bg-hover);
+    border-color: var(--color-border);
+    color: var(--color-text-secondary);
+  }.fleet-stat .status-dot {
+    width: 6px;
+    height: 6px;
+  }.strip-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--color-border);
+  }.fleet-metric {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }.fleet-metric strong {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-primary);
+  }.fleet-metric.stale {
+    color: var(--color-warning);
+  }.fleet-metric.stale strong {
+    color: var(--color-warning);
+  }.strip-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }.fleet-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    border-radius: 8px;
+    background: rgba(244, 63, 94, 0.08);
+    color: var(--color-warning);
+    font-size: 11px;
+    flex-shrink: 0;
+  }.fleet-error span {
+    flex: 1;
+    min-width: 0;
+  }.activity-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-text-secondary);
+  }.drift-banner,
+  .storm-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 11.5px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }.drift-banner {
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--color-warning);
+  }.drift-copy,
+  .storm-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+  }.drift-copy strong,
+  .storm-copy strong {
+    color: var(--color-text-primary);
+    font-size: 11.5px;
+  }.drift-copy span {
+    color: var(--color-text-muted);
+    font-size: 10.5px;
+  }.drift-actions,
+  .storm-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }.storm-banner {
+    border: 1px solid rgba(244, 63, 94, 0.35);
+    background: rgba(244, 63, 94, 0.08);
+    color: var(--color-error);
+  }.storm-copy {
+    color: var(--color-text-secondary);
+  }/* Main Workspace Body */ .pm2-workspace-body {
     flex: 1;
     min-height: 0;
     overflow: hidden;
     display: flex;
     flex-direction: column;
-  }/* ═════════════════════════════════════════════════════════════════════════ */ /* MASTER-DETAIL SPLIT CONTAINER */ /* ═════════════════════════════════════════════════════════════════════════ */ .fleet-split-container {
+  }.pm2-loading {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+  }/* ═════════════════════════════════════════════════════════════════════════ */ /* FLEET WORKSPACE: PROCESSES + SAVED DUMP */ /* ═════════════════════════════════════════════════════════════════════════ */ .fleet-workspace {
     display: flex;
     gap: 14px;
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }/* ── MASTER PANE (LEFT) ── */ .fleet-master-pane {
-    width: 360px;
-    flex-shrink: 0;
+  }/* ── PROCESSES PANE ── */ .fleet-master-pane {
+    flex: 1;
+    min-width: 0;
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 12px;
@@ -2615,70 +4990,182 @@
     overflow: hidden;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
   }.master-header {
-    padding: 12px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 6px;
     border-bottom: 1px solid var(--color-border-subtle);
     background: var(--color-bg-surface);
-  }.master-pills-row {
+  }.master-search-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 6px;
-  }.pills-group {
+  }.master-sort-wrap {
+    width: 112px;
+    flex-shrink: 0;
+  }.master-ns-wrap {
+    width: 132px;
+    flex-shrink: 0;
+  }.master-toolbar-row {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     flex-wrap: wrap;
-    flex: 1;
-    min-width: 0;
-  }.pill-btn {
-    padding: 3px 8px;
-    border-radius: 12px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    font-family: inherit;
+  }.master-count {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }.sort-dir-btn {
     display: inline-flex;
     align-items: center;
-    white-space: nowrap;
-  }.pill-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text-primary);
-  }.pill-btn.active {
-    background: var(--color-accent-muted);
-    color: var(--color-accent);
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg-surface);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }.sort-dir-btn:hover {
     border-color: var(--color-accent);
-    font-weight: 600;
+    color: var(--color-accent);
+  }.view-toggle {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg-surface);
+  }.view-toggle button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }.view-toggle button.active {
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
   }.empty-list-container {
+    grid-column: 1 / -1;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-  }.resurrect-hint-row {
-    display: flex;
-    justify-content: center;
   }/* Process Cards List */ .master-cards-list {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 10px;
+    padding: 8px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 8px;
+  }.master-cards-list.table-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    padding: 0;
+    gap: 0;
+  }@media (max-width: 760px) {
+    .master-cards-list:not(.table-list) {
+      grid-template-columns: 1fr;
+    }
+  }/* Dense fleet table */.fleet-table :global(table) {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+  }.fleet-table :global(thead th) {
+    padding: 5px 6px;
+    font-size: 9.5px;
+    white-space: nowrap;
+  }.fleet-table :global(tbody td) {
+    padding: 5px 6px;
+    font-size: 10.5px;
+  }.fleet-table :global(thead th.sortable-th) {
+    cursor: pointer;
+  }.fleet-table :global(.th-content) {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }.fleet-table :global(.th-sort-icon) {
+    font-size: 9px;
+    color: var(--color-accent);
+    opacity: 0.7;
+  }.fleet-row {
+    cursor: pointer;
+  }.fleet-row.selected {
+    background: var(--color-bg-hover);
+    box-shadow: inset 2px 0 0 var(--color-accent);
+  }.fleet-row:hover {
+    background: var(--color-bg-hover);
+  }.fleet-app-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }.fleet-app-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0;
+  }.fleet-app-name {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.fleet-app-sub {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.fleet-num {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-align: right;
+    white-space: nowrap;
+  }.fleet-limit {
+    font-size: 9px;
+    color: var(--color-text-muted);
+  }.fleet-limit.warn {
+    color: var(--color-warning);
+  }.status-text {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }.status-text.online {
+    color: var(--color-success);
+  }.status-text.stopped {
+    color: var(--color-text-muted);
+  }.status-text.errored {
+    color: var(--color-error);
+  }.fleet-actions {
+    text-align: right;
+    white-space: nowrap;
+  }.fleet-table :global(th:last-child),
+  .fleet-table :global(td:last-child) {
+    width: 76px;
   }/* Single Process Card */ .proc-card {
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border-subtle);
-    border-radius: 10px;
-    padding: 12px;
+    border-radius: 8px;
+    padding: 9px 10px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 5px;
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease;
     text-align: left;
@@ -2742,7 +5229,7 @@
     color: var(--color-text-secondary);
     border: 1px solid var(--color-border-subtle);
   }.proc-path-line {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--color-text-muted);
     font-family: var(--font-mono, monospace);
     white-space: nowrap;
@@ -2751,9 +5238,9 @@
   }/* Mini Meters */ .proc-meters-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    gap: 6px;
     background: var(--color-bg-surface);
-    padding: 6px 8px;
+    padding: 4px 6px;
     border-radius: 6px;
     border: 1px solid var(--color-border-subtle);
   }.meter-col {
@@ -2785,11 +5272,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-top: 4px;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 3px;
     border-top: 1px solid var(--color-border-subtle);
   }.proc-meta-tags {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     font-size: 11px;
     color: var(--color-text-muted);
@@ -2865,17 +5355,240 @@
       transform: scale(2);
       opacity: 0;
     }
-}/* ── DETAIL PANE (RIGHT) ── */ .fleet-detail-pane {
-    flex: 1;
+}@media (max-width: 980px) {
+  .fleet-workspace {
+    flex-direction: column;
+  }
+  .fleet-master-pane {
+    width: 100%;
+    min-height: 0;
+  }
+  .fleet-saved-pane {
+    width: 100%;
+    max-height: 38%;
+    flex-shrink: 0;
+  }
+}
+.detail-app-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+    flex-shrink: 0;
+  }.detail-app-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
+  }.detail-app-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+  }.detail-app-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    flex-wrap: wrap;
+  }.detail-app-meta strong {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }.detail-app-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }/* Full-width empty fleet onboarding */ .fleet-empty {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 24px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+  }.fleet-empty-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    max-width: 560px;
+  }.fleet-empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 68px;
+    height: 68px;
+    border-radius: 18px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    color: var(--color-accent);
+    margin-bottom: 2px;
+  }.fleet-empty-hero h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }.fleet-empty-hero p {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+  }.fleet-empty-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }.fleet-empty-saved {
+    width: min(560px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 10px;
+  }.fleet-empty-saved-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin-bottom: 2px;
+  }.fleet-empty-saved-head span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }.fleet-empty-saved-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 2px;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.fleet-empty-saved-row:last-child {
+    border-bottom: none;
+  }.fleet-empty-saved-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 1px;
+  }.fleet-empty-saved-info strong {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.fleet-empty-saved-info span {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }/* ── SAVED PROCESSES SIDE PANE ── */ .fleet-saved-pane {
+    width: 274px;
+    flex-shrink: 0;
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
     border-radius: 12px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    padding: 12px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  }.saved-pane-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 10px 7px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-bg-surface);
+  }.saved-pane-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--color-text-primary);
+  }.saved-pane-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 10px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.saved-pane-warn {
+    color: var(--color-warning);
+  }.saved-pane-actions {
+    display: flex;
+    gap: 6px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.saved-pane-empty {
+    padding: 14px 12px;
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--color-text-muted);
+  }.saved-pane-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }.saved-pane-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 7px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 7px;
+    background: var(--color-bg-raised);
+  }.saved-pane-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+    gap: 1px;
+  }.saved-pane-info strong {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.saved-pane-info span {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }.logs-proc-identity {
     display: flex;
     align-items: center;
@@ -2969,7 +5682,13 @@
     border: 1px solid rgba(0, 218, 243, 0.3);
     padding: 1px 6px;
     border-radius: 4px;
-  }/* ── TAB 1: LOGS DECK ── */ .logs-deck-wrap {
+  }/* ── TAB 1: LOGS DECK ── */ .logs-drawer {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }.logs-deck-wrap {
     flex: 1;
     min-height: 0;
     display: flex;
@@ -2980,7 +5699,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     min-height: 32px;
     position: relative;
     z-index: 30;
@@ -3051,27 +5770,76 @@
     color: var(--color-accent);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   }/* Terminal Log Card */ .log-stream-card {
+    position: relative;
     flex: 1;
     min-height: 0;
-    background: #090d13;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    --log-bg: #090d13;
+    --log-header-bg: #111722;
+    --log-border: rgba(255, 255, 255, 0.08);
+    --log-divider: rgba(255, 255, 255, 0.06);
+    --log-head-bg: #0d131c;
+    --log-text: #cbd5e1;
+    --log-muted: #94a3b8;
+    --log-ts: #64748b;
+    --log-faint: #475569;
+    --log-hover: rgba(255, 255, 255, 0.035);
+    --log-error-text: #fda4af;
+    --log-error-bg: rgba(244, 63, 94, 0.06);
+    --log-warn-text: #fde047;
+    --log-warn-bg: rgba(234, 179, 8, 0.05);
+    --log-info-bg: rgba(56, 189, 248, 0.12);
+    --log-info-text: #7dd3fc;
+    --log-info-border: rgba(56, 189, 248, 0.25);
+    --log-err-bg: rgba(244, 63, 94, 0.2);
+    --log-err-text: #fb7185;
+    --log-err-border: rgba(244, 63, 94, 0.4);
+    --log-warn-bg-badge: rgba(234, 179, 8, 0.2);
+    --log-warn-text-badge: #facc15;
+    --log-warn-border: rgba(234, 179, 8, 0.4);
+    background: var(--log-bg);
+    border: 1px solid var(--log-border);
     border-radius: 8px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }:global([data-theme="light"]) .log-stream-card,
+  :global(html.light-mode) .log-stream-card {
+    --log-bg: #ffffff;
+    --log-header-bg: #f8fafc;
+    --log-border: #e2e8f0;
+    --log-divider: #e2e8f0;
+    --log-head-bg: #f1f5f9;
+    --log-text: #334155;
+    --log-muted: #64748b;
+    --log-ts: #64748b;
+    --log-faint: #94a3b8;
+    --log-hover: #f1f5f9;
+    --log-error-text: #b91c1c;
+    --log-error-bg: #fef2f2;
+    --log-warn-text: #a16207;
+    --log-warn-bg: #fffbeb;
+    --log-info-bg: #e0f2fe;
+    --log-info-text: #0369a1;
+    --log-info-border: #bae6fd;
+    --log-err-bg: #fee2e2;
+    --log-err-text: #b91c1c;
+    --log-err-border: #fecaca;
+    --log-warn-bg-badge: #fef3c7;
+    --log-warn-text-badge: #b45309;
+    --log-warn-border: #fde68a;
   }.log-stream-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
-    background: #111722;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--log-header-bg);
+    border-bottom: 1px solid var(--log-divider);
   }.log-source-info {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--log-muted);
     overflow: hidden;
   }.log-source-path {
     white-space: nowrap;
@@ -3079,11 +5847,33 @@
     text-overflow: ellipsis;
   }.log-count-tag {
     font-size: 10px;
-    color: #64748b;
+    color: var(--log-ts);
+  }.log-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }.log-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--log-muted);
+    cursor: pointer;
+  }.log-header-btn:hover:not(:disabled) {
+    border-color: var(--log-border);
+    color: var(--color-accent);
+  }.log-header-btn:disabled {
+    opacity: 0.4;
+    cursor: wait;
   }.log-lines-container {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
+    overflow: auto;
     padding: 8px 12px;
     font-family: var(--font-mono, 'JetBrains Mono', monospace);
     font-size: 11.5px;
@@ -3091,46 +5881,80 @@
   }.log-table {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-  }.log-row {
-    display: flex;
-    align-items: flex-start;
+    gap: 1px;
+    min-width: 640px;
+  }.log-table-head {
+    display: grid;
+    grid-template-columns: 38px 138px 56px 96px minmax(0, 1fr);
     gap: 8px;
-    color: #cbd5e1;
-    padding: 1px 0;
-  }.log-row:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }.row-error {
-    color: #fda4af;
-  }.row-warn {
-    color: #fde047;
-  }.log-line-no {
-    color: #475569;
-    min-width: 32px;
-    text-align: right;
-    user-select: none;
-    font-size: 10.5px;
-  }.log-ts {
-    color: #64748b;
-    font-size: 10.5px;
-    flex-shrink: 0;
-  }.log-level-badge {
+    padding: 4px 6px;
+    margin: 0 -2px 2px;
+    position: sticky;
+    top: -8px;
+    z-index: 2;
+    background: var(--log-head-bg);
+    border-bottom: 1px solid var(--log-border);
+    font-family: var(--font-mono, monospace);
     font-size: 9px;
     font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--log-ts);
+  }.log-row {
+    display: grid;
+    grid-template-columns: 38px 138px 56px 96px minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    color: var(--log-text);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }.log-row:hover {
+    background: var(--log-hover);
+  }.row-error {
+    color: var(--log-error-text);
+    background: var(--log-error-bg);
+  }.row-warn {
+    color: var(--log-warn-text);
+    background: var(--log-warn-bg);
+  }.log-line-no {
+    color: var(--log-faint);
+    text-align: right;
+    user-select: none;
+    font-size: 10px;
+  }.log-ts {
+    color: var(--log-ts);
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }.log-level-badge {
+    font-size: 8.5px;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
     padding: 0 4px;
     border-radius: 3px;
-    flex-shrink: 0;
   }.level-err {
-    background: rgba(244, 63, 94, 0.2);
-    color: #fb7185;
-    border: 1px solid rgba(244, 63, 94, 0.4);
+    background: var(--log-err-bg);
+    color: var(--log-err-text);
+    border: 1px solid var(--log-err-border);
   }.level-warn {
-    background: rgba(234, 179, 8, 0.2);
-    color: #facc15;
-    border: 1px solid rgba(234, 179, 8, 0.4);
+    background: var(--log-warn-bg-badge);
+    color: var(--log-warn-text-badge);
+    border: 1px solid var(--log-warn-border);
+  }.level-info {
+    background: var(--log-info-bg);
+    color: var(--log-info-text);
+    border: 1px solid var(--log-info-border);
+  }.log-context {
+    font-size: 10px;
+    color: var(--log-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }.log-msg {
-    flex: 1;
-    word-break: break-all;
+    min-width: 0;
+    word-break: break-word;
     white-space: pre-wrap;
   }.log-state-msg {
     display: flex;
@@ -3140,8 +5964,28 @@
     height: 100%;
     min-height: 180px;
     gap: 10px;
-    color: #64748b;
+    color: var(--log-ts);
     font-size: 12px;
+  }.jump-latest-btn {
+    position: absolute;
+    right: 16px;
+    bottom: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-family: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+  }.jump-latest-btn:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
   }/* ── TAB 2: VITALS & METRICS ── */ .vitals-tab-wrap {
     flex: 1;
     min-height: 0;
@@ -3471,6 +6315,63 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }.ecosystem-start-options {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    background: var(--color-bg-card);
+  }.eco-option-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }.eco-option-field .form-input {
+    width: 170px;
+    margin: 0;
+  }.eco-option-hint {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    padding-bottom: 5px;
+  }.eco-option-hint code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-accent);
+  }.ecosystem-validation-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin: 8px 16px 0;
+    padding: 7px 9px;
+    border: 1px solid rgba(244, 63, 94, 0.35);
+    border-radius: 7px;
+    background: rgba(244, 63, 94, 0.08);
+    color: var(--color-error);
+    font-size: 11px;
+  }.ecosystem-validation-error pre {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    max-height: 130px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.45;
+  }.eco-error-close {
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
   }.code-editor-wrap {
     flex: 1;
     min-height: 0;
@@ -3494,7 +6395,32 @@
     font-size: 12px;
     max-width: 320px;
     margin: 0;
-  }/* ═════════════════════════════════════════════════════════════════════════ */ /* VIEW 3: DAEMON RUNTIME & STARTUP */ /* ═════════════════════════════════════════════════════════════════════════ */ .daemon-grid {
+  }/* ═════════════════════════════════════════════════════════════════════════ */ /* VIEW 3: DAEMON RUNTIME & STARTUP */ /* ═════════════════════════════════════════════════════════════════════════ */ .pm2-scope-note {
+    flex-shrink: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+    color: var(--color-text-secondary);
+    font-size: 11.5px;
+  }.pm2-scope-note strong {
+    display: block;
+    margin-bottom: 1px;
+    color: var(--color-text-primary);
+  }.pm2-scope-note p {
+    margin: 0;
+    line-height: 1.45;
+  }.pm2-scope-note code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-accent);
+  }.daemon-grid {
+    flex: 1;
+    min-height: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 14px;
@@ -3536,6 +6462,69 @@
     align-items: center;
     gap: 8px;
     margin-top: 4px;
+    flex-wrap: wrap;
+  }.log-health-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }.log-health-card {
+    grid-column: 1 / -1;
+  }.log-health-label {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }.log-health-value {
+    font-size: 16px;
+    color: var(--color-text-primary);
+  }.log-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+    background: var(--color-bg-surface);
+  }.log-file-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 10.5px;
+  }.log-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+  }.log-file-size {
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+  }.log-file-more {
+    padding-top: 3px;
+    border-top: 1px dashed var(--color-border-subtle);
+    color: var(--color-text-muted);
+    font-size: 10px;
+  }.logrotate-install {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }.logrotate-install p {
+    margin: 0;
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }.daemon-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 11px;
+    color: var(--color-text-muted);
   }.startup-hint-box {
     display: flex;
     flex-direction: column;
@@ -3674,58 +6663,6 @@
     display: flex;
     align-items: center;
     gap: 6px;
-  }/* Quick Saved Dump Runner in Fleet Master List */ .saved-dump-quick-section {
-    width: 100%;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 10px;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 8px;
-  }.quick-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }.quick-section-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }.quick-dump-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }.quick-dump-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    background: var(--color-bg-surface);
-    border: 1px solid var(--color-border-subtle);
-    border-radius: 6px;
-    padding: 6px 8px;
-  }.quick-item-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    overflow: hidden;
-  }.quick-item-name {
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }.quick-item-path {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }/* ═════════════════════════════════════════════════════════════════════════ */ /* NOT INSTALLED HERO CARD */ /* ═════════════════════════════════════════════════════════════════════════ */ .not-installed-card {
     background: var(--color-bg-card);
     border: 1px solid var(--color-border);
@@ -4057,6 +6994,20 @@
   }.form-help {
     font-size: 11px;
     color: var(--color-text-muted);
+  }.launch-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px 8px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--color-warning);
+    font-size: 11px;
+    line-height: 1.45;
+  }.launch-warning code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
   }.checkbox-label {
     display: flex;
     align-items: center;
@@ -4125,4 +7076,138 @@
     gap: 10px;
     border-top: 1px solid var(--color-border-subtle);
     background: var(--color-bg-surface);
+  }.meter-spark {
+    width: 100%;
+    height: 14px;
+    margin-top: 2px;
+  }.meter-spark polyline {
+    fill: none;
+    stroke-width: 1.2px;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }.meter-spark.cpu-spark polyline {
+    stroke: var(--color-info, #38bdf8);
+  }.meter-spark.mem-spark polyline {
+    stroke: #a855f7;
+  }.limit-hint {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }.vital-spark {
+    width: 100%;
+    height: 20px;
+    margin-top: 4px;
+  }.vital-spark polyline {
+    fill: none;
+    stroke-width: 1.5px;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }.vital-spark.cpu-spark polyline {
+    stroke: var(--color-accent);
+  }.vital-spark.mem-spark polyline {
+    stroke: #a855f7;
+  }.vital-limit {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }.env-mask-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }/* Activity drawer */ .activity-drawer {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+  }.activity-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }.activity-head > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }.activity-head strong {
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }.activity-head span {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+  }.activity-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 40px 16px;
+    color: var(--color-text-muted);
+    font-size: 11px;
+  }.activity-list {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 8px;
+  }.activity-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }.activity-row:last-child {
+    border-bottom: none;
+  }.activity-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-text-muted);
+    margin-top: 4px;
+    flex-shrink: 0;
+  }.activity-row.tone-success .activity-dot {
+    background: var(--color-success);
+  }.activity-row.tone-warning .activity-dot {
+    background: var(--color-warning);
+  }.activity-row.tone-error .activity-dot {
+    background: var(--color-error);
+  }.activity-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+  }.activity-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }.activity-detail {
+    font-size: 10.5px;
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }.activity-time {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--color-text-muted);
+  }/* Scale modal */ .scale-modal-card {
+    max-width: 440px;
+    width: 100%;
+  }.scale-copy {
+    margin: 0 0 14px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+  }.scale-input-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }.scale-input-row .form-input {
+    max-width: 120px;
+  }.scale-hint {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
   }</style>

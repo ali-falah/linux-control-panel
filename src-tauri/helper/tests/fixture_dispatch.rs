@@ -112,12 +112,18 @@ fn build_fixture() {
 
 /// Take the fixture lock, wipe and rebuild the tree; hold the guard for the
 /// rest of the test.
-fn fixture() -> MutexGuard<'static, ()> {
-    let guard = root_policy::FIXTURE_TEST_LOCK
+fn fixture() -> (MutexGuard<'static, ()>, std::fs::File) {
+    let in_process = root_policy::FIXTURE_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Same shared directory as the other test binaries, so the same
+    // cross-process lock applies on top of the in-process one.
+    let lock_file = std::fs::File::create(format!("{FIXTURE_ROOT}.lock"))
+        .expect("fixture lock file could not be created");
+    rustix::fs::flock(&lock_file, rustix::fs::FlockOperation::LockExclusive)
+        .expect("the fixture lock could not be taken");
     build_fixture();
-    guard
+    (in_process, lock_file)
 }
 
 /// Run the helper binary against the current fixture state.

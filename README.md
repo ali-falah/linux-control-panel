@@ -44,9 +44,10 @@
 ### 🌐 Server & Web
 | Module | Description & Capabilities |
 | :--- | :--- |
+| 🔐 **SSH & SSL Vault** | SSH key generation (Ed25519/RSA/ECDSA, optional passphrase via pty), `~/.ssh/config` host profiles with safe block editing, known_hosts inspection, authorized key management, live `sshd -T` hardening audit, local TLS certificate inventory with expiry tracking, remote TLS inspector, and fail2ban jail/ban controls. |
 | 🌐 **Nginx Manager** | Nginx virtual host scanner & server block inspector (domains, ports, SSL, document roots), integrated CodeMirror configuration editor, syntax testing (`nginx -t`), live reload (`nginx -s reload`), `access.log` & `error.log` live tail viewers, and Certbot SSL helper. |
-| 🌐 **Advanced Network** | NetworkManager connection inspector (Wi-Fi, Ethernet, VPN, Bridge, Loopback), IP v4/v6, MAC Address, MTU, Gateway, DNS configuration, **Wi-Fi Access Point Scanner** (SSID, Signal Strength dBm/%, WPA2/WPA3 security, connection wizard), and Gateway Ping Latency Tester. |
-| 🔥 **Firewall Manager** | Firewalld zone manager (`public`, `work`, `home`, `internal`, `trusted`), TCP/UDP port rule management, service toggles (`http`, `https`, `ssh`, `dns`, `ftp`, `wireguard`), Rich Rules editor, Interface-to-Zone mapping, and **Panic Mode Emergency Toggle** (instantly block all network traffic). |
+| 🌐 **Advanced Network** | NetworkManager adapter and profile inspector with IPv4/IPv6 addressing, MAC/MTU details, subnet calculator and gateway checks, DNS validation and presets, Ethernet/Wi-Fi/bridge profile creation with autoconnect and root-only keyfile secrets, VPN import/create for OpenVPN and WireGuard, and a Cloudflare-backed latency/speed test. |
+| 🔥 **Firewall Manager** | Firewalld zone manager across all detected zones, service and TCP/UDP port rules, Rich Rules builder, interface-to-zone bindings with move-to-default, UFW basic-rule mode, listener checks, SSH lockout confirmations, and **Panic Mode Emergency Toggle**. |
 
 ### 📦 Package & Application Management
 | Module | Description & Capabilities |
@@ -59,11 +60,11 @@
 ### ⚙️ System & Administration
 | Module | Description & Capabilities |
 | :--- | :--- |
-| ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), unit file inspector, and inline `journalctl -u` log stream. |
-| 🔌 **Device Manager** | PCI & USB Device Explorer (`lspci`, `lsusb`), Block Storage Devices (`lsblk`) with filesystem types & mount points, CPU/GPU hardware specs, Thermal Sensors inspector (core temps, fan speeds), and **SMART Disk Health & Self-Test Inspector** (`smartctl`). |
+| ⚙️ **Service Manager** | Systemd Unit Browser (Services, Timers, Sockets, Mounts, Targets), status filtering (`Active`, `Failed`, `Enabled`, `Disabled`), lifecycle controls (Start, Stop, Restart, Enable, Disable, Mask, Unmask), new-unit wizard, editable drop-in override plus read-only effective unit view, boot analyzer, and inline `journalctl -u` log stream. |
+| 🔌 **Device Manager** | Searchable hardware inventory (`lshw`) with class filters and an administrator detailed scan for serials/capabilities, a per-device details drawer with **PCI driver reset** and guarded module unload, **SMART health, key indicators, type-aware self-test progress & logs** (`smartctl`), and PCI/USB bus topology (`lspci`, `lsusb`). |
 | 👥 **User Manager** | System Users & Groups manager (`/etc/passwd`, `/etc/group`), user creation & deletion, password management, UID/GID config, default shell selector (`bash`, `zsh`, `fish`), **Sudoers Privilege Rule Builder** (`/etc/sudoers.d/`), and SSH Authorized Keys manager (`~/.ssh/authorized_keys`). |
 | 💻 **Shell Environment** | Graphical editor for shell environment files (`.bashrc`, `.zshrc`, `.bash_profile`), **Shell Aliases Manager** (create, edit, toggle, delete command aliases), **PATH Variable Visual Manager** (add, reorder, or remove directory paths), and shell config backup helper. |
-| 🌐 **Hosts Manager** | Graphical `/etc/hosts` domain mapping editor, IP-to-Domain entry management with status toggles (enable/disable without deletion), pre-configured adware/malware blocklist integration, and domain ping verification tool. |
+| 🌐 **Hosts Manager** | Graphical `/etc/hosts` editor with search, status and category filters, an add/edit drawer with IP/hostname/category validation, enable/disable and deletion, right-click row actions (edit, toggle, copy, Nginx VHost), duplicate-mapping warnings, and an exact diff preview before a polkit-authenticated save. |
 | ⏱️ **Cron Manager** | User Crontab & System Cron jobs inspector (`/etc/crontab`, `/etc/cron.*`), Visual Cron Expression Builder (Minute, Hour, Day, Month, Day of Week), syntax helper, job enable/disable toggle, and execution log stream. |
 | ⚙️ **Env Manager** | Global system environment variables manager (`/etc/environment`), PAM environment inspector (`~/.pam_environment`), create, edit, and remove system-wide environment variables. |
 
@@ -100,6 +101,9 @@ sudo dnf install -y \
   file \
   libappindicator-gtk3-devel \
   librsvg2-devel
+
+# Hardware inspection tools used by Device Manager
+sudo dnf install -y lshw smartmontools pciutils usbutils
 
 # Node.js (v20+)
 sudo dnf install -y nodejs npm
@@ -175,7 +179,19 @@ by the rules.d rule shipped by the RPM/DEB package at
 `/etc/polkit-1/rules.d/50-linux-control-panel.rules` — it matches the helper's
 two paths and nothing else. The helper's `install_polkit_rule` action can
 repair or reinstall that rule. AppImage builds do not install host system
-policy; install the policy and rule manually when using an AppImage.
+policy; install the policy and rule manually when using an AppImage:
+
+```bash
+sudo install -D -m 0644 -o root -g root \
+  src-tauri/polkit/50-linux-control-panel.rules \
+  /etc/polkit-1/rules.d/50-linux-control-panel.rules
+```
+
+When the rule is missing, the status bar's admin-mode toggle reports it and
+offers a **Repair** button: one PolicyKit prompt runs the helper's
+`install_polkit_rule` action, which writes only the fixed rule above, and the
+installed file is read back and verified. No password is spent on a toggle
+that PolicyKit would not keep.
 
 ---
 
@@ -187,6 +203,12 @@ cd src-tauri && cargo check
 
 # Run Rust unit tests
 cd src-tauri && cargo test
+
+# Check Svelte/TypeScript diagnostics
+npm run check
+
+# Run frontend unit tests
+npm test
 
 # Build frontend production bundle
 npm run build

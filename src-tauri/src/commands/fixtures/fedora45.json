@@ -1,0 +1,62 @@
+[
+  {
+    "id": "fedora",
+    "name": "Fedora 45 - x86_64",
+    "is_enabled": true,
+    "priority": 99,
+    "base_url": ["https://download.example.org/fedora/45/Everything/x86_64/os/"],
+    "metalink": "",
+    "mirrorlist": "",
+    "pkg_gpgcheck": true,
+    "repo_gpgcheck": false,
+    "repo_file_path": "/etc/yum.repos.d/fedora.repo"
+  },
+  {
+    "id": "updates",
+    "name": "Fedora 45 - x86_64 - Updates",
+    "is_enabled": true,
+    "priority": 99,
+    "base_url": ["https://download.example.org/fedora/45/Everything/x86_64/updates/"],
+    "metalink": "",
+    "mirrorlist": "",
+    "pkg_gpgcheck": true,
+    "repo_gpgcheck": false,
+    "repo_file_path": "/etc/yum.repos.d/fedora.repo"
+  },
+  {
+    "id": "updates-testing",
+    "name": "Fedora 45 - x86_64 - Test Updates",
+    "is_enabled": false,
+    "priority": 99,
+    "base_url": [],
+    "metalink": "https://mirrors.fedoraproject.org/metalink?repo=updates-testing-f45&arch=x86_64",
+    "mirrorlist": "",
+    "pkg_gpgcheck": true,
+    "repo_gpgcheck": false,
+    "repo_file_path": "/etc/yum.repos.d/fedora-updates-testing.repo"
+  },
+  {
+    "id": "fedora-cisco-openh264",
+    "name": "Fedora 45 openh264 (From Cisco)",
+    "is_enabled": false,
+    "priority": 99,
+    "base_url": ["https://codecs.fedoraproject.org/openh264/45/x86_64/os/"],
+    "metalink": "",
+    "mirrorlist": "",
+    "pkg_gpgcheck": true,
+    "repo_gpgcheck": false,
+    "repo_file_path": "/usr/share/dnf5/repos.d/fedora-cisco-openh264.repo"
+  },
+  {
+    "id": "copr:copr.fedorainfracloud.org:group_user:project",
+    "name": "Copr repo for project owned by group_user",
+    "is_enabled": true,
+    "priority": 50,
+    "base_url": ["https://download.copr.fedorainfracloud.org/results/group_user/project/fedora-45-x86_64/"],
+    "metalink": "",
+    "mirrorlist": "",
+    "pkg_gpgcheck": true,
+    "repo_gpgcheck": false,
+    "repo_file_path": "/etc/yum.repos.d/_copr:copr.fedorainfracloud.org:group_user:project.repo"
+  }
+]

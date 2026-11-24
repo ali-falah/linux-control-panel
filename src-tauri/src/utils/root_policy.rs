@@ -480,17 +480,60 @@ pub fn verify_installed_polkit_policy() -> Result<(), String> {
     )
 }
 
+/// What an unprivileged process can tell about the installed rules.d rule.
+///
+/// `/etc/polkit-1/rules.d` is `0750 root:polkitd` on a stock Fedora, so the
+/// app cannot read the file at all; only the helper (root) and PolicyKit
+/// itself can. Not being able to read it is therefore *not* evidence that the
+/// rule is missing or stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolkitRuleCheck {
+    /// Readable and byte-identical to `POLKIT_RULE_TEXT`.
+    Verified,
+    /// The file (or its directory) is not readable by this user.
+    Unreadable(String),
+    /// Readable but not byte-identical, or absent.
+    Mismatch(String),
+}
+
+/// Classify the installed rules.d rule without assuming the caller may read it.
+pub fn polkit_rule_check() -> PolkitRuleCheck {
+    classify_polkit_rule(std::fs::read_to_string(POLKIT_RULE_FILE))
+}
+
+fn classify_polkit_rule(read: std::io::Result<String>) -> PolkitRuleCheck {
+    match read {
+        Ok(text) if text == POLKIT_RULE_TEXT => PolkitRuleCheck::Verified,
+        Ok(_) => PolkitRuleCheck::Mismatch(
+            "the installed PolicyKit rule is stale or was modified; reinstall it with the \
+             helper's install_polkit_rule action"
+                .to_string(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            PolkitRuleCheck::Unreadable(format!(
+                "the installed PolicyKit rule {POLKIT_RULE_FILE} could not be read: {error}"
+            ))
+        }
+        Err(error) => PolkitRuleCheck::Mismatch(format!(
+            "the installed PolicyKit rule {POLKIT_RULE_FILE} is missing or unreadable: {error}"
+        )),
+    }
+}
+
 /// Verify the installed rules.d rule as well. The rule is what grants the
 /// five-minute keep, so a stale copy that mentions a generic action would
 /// weaken the boundary. This is a startup/status diagnostic rather than a hard
 /// execution gate: the helper's `install_polkit_rule` action must remain able
 /// to repair a missing rule.
+///
+/// Strict by design: callers that must work on a host where the rule is not
+/// readable use [`polkit_rule_check`] instead.
 pub fn verify_installed_polkit_state() -> Result<(), String> {
     verify_installed_polkit_policy()?;
-    let text = std::fs::read_to_string(POLKIT_RULE_FILE).map_err(|e| {
-        format!("the installed PolicyKit rule {} could not be read: {e}", POLKIT_RULE_FILE)
-    })?;
-    verify_polkit_rule_text(&text)
+    match polkit_rule_check() {
+        PolkitRuleCheck::Verified => Ok(()),
+        PolkitRuleCheck::Unreadable(message) | PolkitRuleCheck::Mismatch(message) => Err(message),
+    }
 }
 
 /// Verify the installed rules.d rule. It must be byte-identical to the text
@@ -554,6 +597,34 @@ pub fn ensure_safe_operand(value: &str, what: &str) -> Result<(), String> {
     }
     if value.contains('\n') || value.contains('\r') || value.contains('\0') {
         return Err(format!("The {what} must not contain control characters."));
+    }
+    Ok(())
+}
+
+/// Validate a path that is about to be handed to a desktop handler
+/// (`xdg-open`, a file manager) by `open_folder` and `reveal_in_file_manager`.
+///
+/// Both used to forward the webview's string verbatim, which let any URI
+/// scheme (`smb://…`, `file://…`), a relative path or a `..` escape reach the
+/// handler. The path must be absolute, contain no relative parts and exist.
+pub fn ensure_openable_path(path: &str) -> Result<(), String> {
+    use std::path::{Component, Path};
+
+    if path.trim().is_empty() {
+        return Err("No path was given.".to_string());
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("The path must be absolute, got: {path}"));
+    }
+    if candidate
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!("The path must not contain relative parts: {path}"));
+    }
+    if !candidate.exists() {
+        return Err(format!("The path does not exist: {path}"));
     }
     Ok(())
 }
@@ -1034,6 +1105,37 @@ pub fn validate_profile_sh_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Upper bound for `/etc/environment` content; shared with the helper so the
+/// privileged action and the app enforce the same limit.
+pub const ENVIRONMENT_CONTENT_MAX: usize = 256 * 1024;
+
+/// The one file the `write_environment_file` helper action may publish.
+pub const ENVIRONMENT_PATH: &str = "/etc/environment";
+
+/// `/etc/environment` is data read by PAM, not a shell script. The panel
+/// validates the variables it edits itself; this helper-side policy only keeps
+/// the file readable and bounded (valid UTF-8, no NUL/CR, sane line length,
+/// size limit) so a malformed document can never reach the PAM parser. The
+/// caller is a wheel member who authenticated through PolicyKit — the path is
+/// the restriction this action adds, and it is a constant.
+pub fn validate_environment_content(content: &str) -> Result<(), String> {
+    if content.len() > ENVIRONMENT_CONTENT_MAX {
+        return Err("The environment file is too large.".to_string());
+    }
+    if content.contains('\0') {
+        return Err("The environment file must not contain NUL bytes.".to_string());
+    }
+    if content.contains('\r') {
+        return Err("The environment file must use LF line endings.".to_string());
+    }
+    for (index, line) in content.lines().enumerate() {
+        if line.len() > 8192 {
+            return Err(format!("Line {} is longer than 8192 characters.", index + 1));
+        }
+    }
+    Ok(())
+}
+
 // ─── Repository content policy (F-2) ─────────────────────────────────────────
 //
 // `ensure_repo_file_path` confines *where* a repository file may live. That
@@ -1059,6 +1161,80 @@ pub(crate) const REPO_ALLOWED_DIRS: [&str; 3] = [
     "/tmp/lcp-admin-test-fixture/etc/dnf",
     "/tmp/lcp-admin-test-fixture/etc/apt/sources.list.d",
 ];
+
+/// dnf5 repo directories whose files are owned by packages or the
+/// distribution. dnf5 loads them, but the panel only ever toggles such a repo
+/// through `config-manager setopt` (the override file) — it never writes or
+/// deletes the file itself.
+pub const REPO_READ_ONLY_DIRS: [&str; 2] = ["/usr/share/dnf5/repos.d", "/etc/distro.repos.d"];
+
+/// The one dnf repo directory the panel may write. Kept separate from
+/// `REPO_ALLOWED_DIRS`, which also contains apt and dnf override paths.
+pub const USER_REPO_DIR: &str = "/etc/yum.repos.d";
+
+/// True when `path` lives in a package-owned dnf repository directory.
+///
+/// Lexical on purpose: the check runs on paths dnf5 reports and on paths the
+/// frontend sends back, before any root action. `Path::starts_with` compares
+/// whole components, so `/usr/share/dnf5/repos.d-evil` does not match.
+pub fn is_system_owned_repo_path(path: &str) -> bool {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return false;
+    }
+    REPO_READ_ONLY_DIRS
+        .iter()
+        .any(|dir| candidate.starts_with(dir))
+}
+
+/// True when `option` is a safe dnf option name for the
+/// `<repo_id>.<option>` operand of `config-manager unsetopt`.
+///
+/// The value becomes part of one argv element (never a shell word), but a
+/// name with `=`, whitespace or a leading dash would still change the
+/// operand's meaning, so only `[a-z][a-z0-9_]*` is accepted.
+pub fn repo_override_option_valid(option: &str) -> bool {
+    if option.is_empty() || option.len() > 64 {
+        return false;
+    }
+    let mut chars = option.chars();
+    let starts_with_letter = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    starts_with_letter
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// True when `repo_id` is safe inside the `<repo_id>.<option>` operand.
+///
+/// dnf repo ids are not restricted to the INI section shape used by
+/// `ensure_repo_section_id`: real ids contain `-`, `.`, `:` and `+` (COPR
+/// ids for example). This predicate keeps exactly that set and nothing that
+/// could be read as a separate operand or a path.
+pub fn repo_override_id_valid(repo_id: &str) -> bool {
+    !repo_id.is_empty()
+        && repo_id.len() <= 128
+        && !repo_id.starts_with('-')
+        && repo_id.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '+')
+        })
+}
+
+/// Repo id prefixes that identify the distribution's own repository families.
+///
+/// Real ids in these families vary by release and by variant
+/// (`fedora`, `fedora-source`, `updates-testing-debuginfo`, …), so the
+/// predicate matches the family prefix rather than an exact list. A repository
+/// with one of these ids is never deletable from the panel, wherever its file
+/// happens to live: removing it can leave the host without working updates.
+pub const PROTECTED_REPO_ID_PREFIXES: [&str; 3] = ["fedora", "updates", "rpmfusion-"];
+
+/// True when `repo_id` belongs to a distribution repository family.
+pub fn repo_id_is_protected(repo_id: &str) -> bool {
+    let id = repo_id.trim();
+    !id.is_empty()
+        && PROTECTED_REPO_ID_PREFIXES
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+}
 
 /// Upper bound for `[section]` ids.
 const REPO_SECTION_MAX: usize = 64;
@@ -1929,9 +2105,10 @@ pub fn security_ssh_param_valid(param: &str, value: &str) -> Result<(), String> 
         "PasswordAuthentication" => &["no", "yes"],
         "MaxAuthTries" => &["4", "6"],
         "LoginGraceTime" => &["60", "120"],
+        "X11Forwarding" => &["no", "yes"],
         _ => {
             return Err(format!(
-                "The SSH parameter must be PermitRootLogin, PasswordAuthentication, MaxAuthTries or LoginGraceTime, got: {param}"
+                "The SSH parameter must be PermitRootLogin, PasswordAuthentication, MaxAuthTries, LoginGraceTime or X11Forwarding, got: {param}"
             ))
         }
     };
@@ -1954,6 +2131,11 @@ pub fn security_kernel_param_valid(key: &str, value: &str) -> Result<(), String>
         "kernel.dmesg_restrict",
         "net.ipv4.conf.all.accept_redirects",
         "net.ipv4.conf.all.log_martians",
+        "fs.suid_dumpable",
+        "net.ipv4.conf.all.accept_source_route",
+        "net.ipv4.icmp_ignore_bogus_error_responses",
+        "net.ipv4.conf.all.rp_filter",
+        "kernel.sysrq",
     ];
     if !KEYS.contains(&key) {
         return Err(format!(
@@ -2041,7 +2223,7 @@ pub fn is_protected_admin_group(groupname: &str) -> bool {
 }
 
 /// Kernel module (`modprobe 8021q`, `rmmod floppy`).
-fn is_module_name(value: &str) -> bool {
+pub(crate) fn is_module_name(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()
@@ -2382,8 +2564,10 @@ fn check_dnf(args: &[String]) -> Result<(), String> {
         let arg = args[index].as_str();
         if arg.starts_with('-') {
             match arg {
-                // non-interactive and best-package selection on the update page
-                "-y" | "--best" | "--assumeno" | "--showduplicates" | "--only-upgrade" => {}
+                // non-interactive and best-package selection on the update page;
+                // --color=never keeps captured output free of ANSI escapes
+                "-y" | "--best" | "--assumeno" | "--showduplicates" | "--only-upgrade"
+                | "--color=never" | "--refresh" => {}
                 // the only --setopt key: digits-only default repo timeout
                 _ if is_dnf_timeout_setopt(arg) => {}
                 // restrict one call to a single repository id
@@ -2870,7 +3054,8 @@ fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
                 ));
             }
         }
-        // values are free-form but must not be empty or contain control chars
+        // Values are free-form. An empty value is meaningful: nmcli uses it to
+        // clear a property (e.g. `ipv4.addresses ""` when switching to DHCP).
         let value = args
             .get(index + 1)
             .ok_or_else(|| {
@@ -2880,13 +3065,6 @@ fn check_nmcli_connection_save(args: &[String]) -> Result<(), String> {
                     "every property must be followed by a value",
                 )
             })?;
-        if value.is_empty() {
-            return Err(operand_not_allowed(
-                PROGRAM,
-                setting,
-                "a property value must not be empty",
-            ));
-        }
         if value.contains('\n') || value.contains('\r') || value.contains('\0') {
             return Err(operand_not_allowed(
                 PROGRAM,
@@ -3342,6 +3520,42 @@ pub fn smart_test_type_valid(test_type: &str) -> Result<(), String> {
             "the SMART self-test type must be short|long|offline|conveyance, got: {test_type}"
         ))
     }
+}
+
+/// Optional smartctl `-d` device type, as reported by `smartctl --scan -j`.
+/// USB bridges and RAID controllers need values such as `sat` or
+/// `megaraid,0`; this accepts only one safe argument and never an option.
+pub fn smart_device_type_valid(device_type: &str) -> Result<(), String> {
+    if device_type.is_empty()
+        || device_type.len() > 40
+        || device_type.starts_with('-')
+        || !device_type
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '_' | '-' | '/'))
+    {
+        return Err(format!(
+            "the SMART device type must be one argument such as sat or megaraid,0, got: {device_type}"
+        ));
+    }
+    Ok(())
+}
+
+/// A PCI address such as "0000:00:1f.6". Only characters a sysfs path can
+/// contain are allowed, so the value can never traverse out of the PCI tree.
+pub fn pci_slot_valid(slot: &str) -> Result<(), String> {
+    if slot.is_empty()
+        || slot.len() > 16
+        || slot.matches(':').count() != 2
+        || !slot.contains('.')
+        || !slot
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'))
+    {
+        return Err(format!(
+            "the PCI slot must look like 0000:00:1f.6, got: {slot}"
+        ));
+    }
+    Ok(())
 }
 
 fn check_module_tools(program: &str, args: &[String]) -> Result<(), String> {
@@ -3860,6 +4074,11 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 /// sshd shape stays with `check_daemon_flags` (flags only: `-T` to print the
 /// effective configuration, `-t` to validate it — no operands, no key paths).
 
+/// Sentinel passed through the privileged argv (which forbids empty strings)
+/// for an nmcli property value that must be cleared. The helper translates it
+/// to an empty nmcli argument.
+pub const HELPER_CLEAR_VALUE: &str = "__LCP_CLEAR__";
+
 /// The helper's named-action calls (the first slice of the phase 3 CLI):
 /// `lcp-admin <action> [params]`.
 ///
@@ -3882,7 +4101,7 @@ fn check_no_flags_at_all(program: &str, args: &[String]) -> Result<(), String> {
 // assert its ROOT_ACTIONS gate list never drifts from this validation list.
 pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
-    "write_profile_sh", "restore_profile_sh",
+    "write_profile_sh", "write_environment_file", "restore_profile_sh",
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
@@ -3891,6 +4110,7 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "repo_toggle_enable", "repo_toggle_disable",
     "repo_add",
     "repo_delete", "repo_makecache", "repo_clean_cache",
+    "repo_config_manager_set", "repo_config_manager_unset",
     "firewall_zone_rule", "firewall_rich_rule",
     "firewall_panic",
     "firewall_interface_zone",
@@ -3911,8 +4131,10 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "security_ssh_param",
     "security_kernel_param",
     "security_lock_account",
+    "audit_setup",
     "unit_action",
     "unit_dropin_write",
+    "unit_create",
     "unit_daemon_reload",
     "copr_manage",
     "nmcli_interface_state",
@@ -3920,6 +4142,9 @@ pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "smart_health",
     "smart_data",
     "smart_self_test",
+    "inventory_scan",
+    "pci_reset",
+    "nm_store_keyfile_secret",
 ];
 
 /// The user-management actions take exactly one parameter: an account name.
@@ -4079,6 +4304,15 @@ const HELPER_REPO_MAKECACHE_ACTIONS: &[&str] = &["repo_makecache"];
 /// Validated by `ensure_safe_operand`.
 const HELPER_REPO_CLEAN_CACHE_ACTIONS: &[&str] = &["repo_clean_cache"];
 
+/// `repo_config_manager_set <repo_id> <0|1>` — writes dnf5's own
+/// `<repo_id>.enabled` override via `config-manager setopt`. The panel never
+/// edits a dnf repo file to enable or disable it.
+const HELPER_REPO_CONFIG_MANAGER_SET_ACTIONS: &[&str] = &["repo_config_manager_set"];
+
+/// `repo_config_manager_unset <repo_id> <option>` — removes one option from
+/// dnf5's override section for `<repo_id>` via `config-manager unsetopt`.
+const HELPER_REPO_CONFIG_MANAGER_UNSET_ACTIONS: &[&str] = &["repo_config_manager_unset"];
+
 /// `firewall_panic <enable|disable>` — firewalld panic mode. ufw is
 /// refused by the helper before any command. The trailing `confirm` is the
 /// GROUP 3 SSH-guard confirmation.
@@ -4120,6 +4354,7 @@ const HELPER_SECURITY_KERNEL_PARAM_ACTIONS: &[&str] = &["security_kernel_param"]
 const HELPER_SECURITY_LOCK_ACCOUNT_ACTIONS: &[&str] = &["security_lock_account"];
 const HELPER_UNIT_ACTION_ACTIONS: &[&str] = &["unit_action"];
 const HELPER_UNIT_DROPIN_ACTIONS: &[&str] = &["unit_dropin_write"];
+const HELPER_UNIT_CREATE_ACTIONS: &[&str] = &["unit_create"];
 const HELPER_UNIT_RECOVERY_ACTIONS: &[&str] = &["unit_daemon_reload"];
 const HELPER_COPR_ACTIONS: &[&str] = &["copr_manage"];
 const HELPER_NMCLI_INTERFACE_STATE_ACTIONS: &[&str] = &["nmcli_interface_state"];
@@ -4127,6 +4362,14 @@ const HELPER_PROCESS_RENICE_ACTIONS: &[&str] = &["process_renice"];
 const HELPER_SMART_HEALTH_ACTIONS: &[&str] = &["smart_health"];
 const HELPER_SMART_DATA_ACTIONS: &[&str] = &["smart_data"];
 const HELPER_SMART_SELF_TEST_ACTIONS: &[&str] = &["smart_self_test"];
+/// `inventory_scan` takes no parameters and returns `lshw -json` from root.
+const HELPER_INVENTORY_ACTIONS: &[&str] = &["inventory_scan"];
+/// `pci_reset <slot>` unbinds and rebinds one PCI function's driver.
+const HELPER_PCI_RESET_ACTIONS: &[&str] = &["pci_reset"];
+/// `nm_store_keyfile_secret <connection-name> <vpn-password|wifi-psk>` with
+/// the secret on stdin. The connection name is confined; the secret never
+/// appears in argv.
+const HELPER_NM_KEYFILE_SECRET_ACTIONS: &[&str] = &["nm_store_keyfile_secret"];
 const HELPER_SECURITY_CTRL_ALT_DEL_ACTIONS: &[&str] = &["security_ctrl_alt_del"];
 
 const HELPER_USER_MANAGEMENT_ACTIONS: &[&str] = &[
@@ -4427,6 +4670,26 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             action,
             "this action does not exist",
         ));
+    }
+    if action == "write_environment_file" {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments (the content arrives on stdin)",
+            ));
+        }
+        return Ok(());
+    }
+    if action == "audit_setup" {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments",
+            ));
+        }
+        return Ok(());
     }
     if HELPER_ACCOUNT_ACTIONS.contains(&action.as_str()) {
         let [_, account] = args else {
@@ -4763,6 +5026,62 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         ensure_safe_operand(repo_id, "repository id")?;
         return Ok(());
     }
+    if HELPER_REPO_CONFIG_MANAGER_SET_ACTIONS.contains(&action.as_str()) {
+        // args: [action, repo_id, 0|1] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repository id and 0 or 1",
+            ));
+        }
+        let repo_id = &args[1];
+        let value = &args[2];
+        ensure_safe_operand(repo_id, "repository id")?;
+        if !repo_override_id_valid(repo_id) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                repo_id,
+                "the repository id contains characters config-manager cannot read",
+            ));
+        }
+        if value != "0" && value != "1" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                value,
+                "the enabled value must be exactly 0 or 1",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_REPO_CONFIG_MANAGER_UNSET_ACTIONS.contains(&action.as_str()) {
+        // args: [action, repo_id, option] — three items total
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly a repository id and an option name",
+            ));
+        }
+        let repo_id = &args[1];
+        let option = &args[2];
+        ensure_safe_operand(repo_id, "repository id")?;
+        if !repo_override_id_valid(repo_id) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                repo_id,
+                "the repository id contains characters config-manager cannot read",
+            ));
+        }
+        if !repo_override_option_valid(option) {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                option,
+                "the option name must be lowercase letters, digits and underscores",
+            ));
+        }
+        return Ok(());
+    }
     if HELPER_FIREWALL_PANIC_ACTIONS.contains(&action.as_str()) {
         // args: [action, enable|disable, confirm?] — two items, or three
         // when the caller confirms.
@@ -4870,14 +5189,38 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     if HELPER_SMART_DATA_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 && args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a device path and an optional smartctl device type",
+            ));
+        }
+        smart_device_valid(&args[1])?;
+        if let Some(device_type) = args.get(2) {
+            smart_device_type_valid(device_type)?;
+        }
+        return Ok(());
+    }
+    if HELPER_INVENTORY_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments",
+            ));
+        }
+        return Ok(());
+    }
+    if HELPER_PCI_RESET_ACTIONS.contains(&action.as_str()) {
         if args.len() != 2 {
             return Err(operand_not_allowed(
                 "lcp-admin",
                 action,
-                "this action takes exactly one device path",
+                "this action takes exactly one PCI slot address",
             ));
         }
-        smart_device_valid(&args[1])?;
+        pci_slot_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_SMART_SELF_TEST_ACTIONS.contains(&action.as_str()) {
@@ -4890,6 +5233,31 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
         }
         smart_device_valid(&args[1])?;
         smart_test_type_valid(&args[2])?;
+        return Ok(());
+    }
+    if HELPER_NM_KEYFILE_SECRET_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 3 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes a connection name and vpn-password|wifi-psk",
+            ));
+        }
+        ensure_safe_operand(&args[1], "connection name")?;
+        if args[1].len() > 128 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[1],
+                "a connection name must be at most 128 characters",
+            ));
+        }
+        if args[2] != "vpn-password" && args[2] != "wifi-psk" {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                &args[2],
+                "the secret kind must be vpn-password or wifi-psk",
+            ));
+        }
         return Ok(());
     }
     if HELPER_NMCLI_INTERFACE_STATE_ACTIONS.contains(&action.as_str()) {
@@ -4934,6 +5302,17 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             ));
         }
         unit_action_valid(&args[1], &args[2])?;
+        return Ok(());
+    }
+    if HELPER_UNIT_CREATE_ACTIONS.contains(&action.as_str()) {
+        if args.len() != 2 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes exactly one unit name",
+            ));
+        }
+        service_unit_name_valid(&args[1])?;
         return Ok(());
     }
     if HELPER_UNIT_DROPIN_ACTIONS.contains(&action.as_str()) {
@@ -6046,8 +6425,9 @@ mod firewall_ordering_tests {
 #[cfg(test)]
 mod argument_policy_tests {
     use super::{
-        ensure_arguments_for_program as check, ensure_program_allowed, is_uuid,
-        nmcli_import_allowed_dirs, nmcli_import_path_valid,
+        ensure_arguments_for_program as check, ensure_program_allowed, is_system_owned_repo_path,
+        is_uuid, nmcli_import_allowed_dirs, nmcli_import_path_valid, repo_id_is_protected,
+        repo_override_id_valid, repo_override_option_valid, HELPER_CLEAR_VALUE,
     };
 
     #[test]
@@ -6056,6 +6436,95 @@ mod argument_policy_tests {
             ensure_program_allowed("/usr/bin/smartctl").is_err(),
             "the generic smartctl channel must be closed; SMART named actions are the only root path"
         );
+    }
+
+    #[test]
+    fn system_owned_repo_paths_are_the_package_owned_dnf_dirs() {
+        assert!(is_system_owned_repo_path("/usr/share/dnf5/repos.d/fedora.repo"));
+        assert!(is_system_owned_repo_path("/etc/distro.repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path("/etc/yum.repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path(
+            "/usr/share/dnf5/repos.d-evil/fedora.repo"
+        ));
+        assert!(!is_system_owned_repo_path("usr/share/dnf5/repos.d/fedora.repo"));
+        assert!(!is_system_owned_repo_path(""));
+    }
+
+    #[test]
+    fn repo_override_option_names_are_restricted_to_ini_shapes() {
+        assert!(repo_override_option_valid("enabled"));
+        assert!(repo_override_option_valid("repo_gpgcheck"));
+        assert!(repo_override_option_valid("metadata_expire"));
+        assert!(!repo_override_option_valid(""));
+        assert!(!repo_override_option_valid("Enabled"));
+        assert!(!repo_override_option_valid("enabled=1"));
+        assert!(!repo_override_option_valid("--enabled"));
+        assert!(!repo_override_option_valid("enabled extra"));
+        assert!(!repo_override_option_valid("enabled\r"));
+        assert!(!repo_override_option_valid("enabled\0"));
+        assert!(!repo_override_option_valid("é"));
+    }
+
+    #[test]
+    fn repo_override_ids_allow_real_dnf_id_alphabet() {
+        assert!(repo_override_id_valid("fedora"));
+        assert!(repo_override_id_valid("rpmfusion-free-updates"));
+        assert!(repo_override_id_valid("copr:copr.fedorainfracloud.org:group_user:project"));
+        assert!(repo_override_id_valid("42"));
+        assert!(!repo_override_id_valid(""));
+        assert!(!repo_override_id_valid("fedora extra"));
+        assert!(!repo_override_id_valid("fedora/../../x"));
+        assert!(!repo_override_id_valid("fedora\nenabled=1"));
+        assert!(!repo_override_id_valid("fedora\renabled=1"));
+        assert!(!repo_override_id_valid("fedora\0enabled=1"));
+        assert!(!repo_override_id_valid("--fedora"));
+    }
+
+    #[test]
+    fn protected_repo_ids_cover_the_distribution_families_only() {
+        // every release/variant of the distribution's own repositories
+        assert!(repo_id_is_protected("fedora"));
+        assert!(repo_id_is_protected("fedora-debuginfo"));
+        assert!(repo_id_is_protected("fedora-source"));
+        assert!(repo_id_is_protected("fedora-cisco-openh264"));
+        assert!(repo_id_is_protected("updates"));
+        assert!(repo_id_is_protected("updates-testing-debuginfo"));
+        assert!(repo_id_is_protected("rpmfusion-free"));
+        assert!(repo_id_is_protected("rpmfusion-nonfree-steam-source"));
+        // user, vendor and COPR repositories stay deletable
+        assert!(!repo_id_is_protected(""));
+        assert!(!repo_id_is_protected("beekeeper-studio"));
+        assert!(!repo_id_is_protected("google-chrome"));
+        assert!(!repo_id_is_protected(
+            "copr:copr.fedorainfracloud.org:group_user:project"
+        ));
+        // COPR ids mention the word but do not start with a protected family
+        assert!(!repo_id_is_protected("my-fedora-mirror"));
+    }
+
+    #[test]
+    fn an_unreadable_polkit_rule_is_not_a_stale_rule() {
+        use super::{classify_polkit_rule, PolkitRuleCheck, POLKIT_RULE_TEXT};
+
+        assert_eq!(
+            classify_polkit_rule(Ok(POLKIT_RULE_TEXT.to_string())),
+            PolkitRuleCheck::Verified
+        );
+        assert!(matches!(
+            classify_polkit_rule(Ok("// something else\n".to_string())),
+            PolkitRuleCheck::Mismatch(_)
+        ));
+        assert!(matches!(
+            classify_polkit_rule(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            PolkitRuleCheck::Mismatch(_)
+        ));
+        // Fedora ships rules.d as 0750 root:polkitd: only the helper can read it.
+        assert!(matches!(
+            classify_polkit_rule(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            PolkitRuleCheck::Unreadable(_)
+        ));
     }
 
     #[test]
@@ -6490,6 +6959,17 @@ mod argument_policy_tests {
                 "yes",
             ],
         );
+        // The helper translates this sentinel to nmcli's empty clear value;
+        // the privileged argv itself must never contain an empty argument.
+        ok(
+            "nmcli_connection_save",
+            &[
+                "modify",
+                "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+                "ipv4.addresses",
+                HELPER_CLEAR_VALUE,
+            ],
+        );
         refused(
             "nmcli_connection_save",
             &["delete", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses", "1.2.3.4/24"],
@@ -6503,6 +6983,51 @@ mod argument_policy_tests {
         refused(
             "nmcli_connection_save",
             &["add", "8a3b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "ipv4.addresses"],
+        );
+    }
+
+    // ── nm_store_keyfile_secret: connection + kind, secret on stdin ──
+    #[test]
+    fn nm_store_keyfile_secret_validates_connection_and_kind() {
+        ok(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "vpn-password"],
+        );
+        ok(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Home Wi-Fi", "wifi-psk"],
+        );
+
+        refused("lcp-admin", &["nm_store_keyfile_secret"]);
+        refused("lcp-admin", &["nm_store_keyfile_secret", "Work VPN"]);
+        refused(
+            "lcp-admin",
+            &[
+                "nm_store_keyfile_secret",
+                "Work VPN",
+                "vpn-password",
+                "extra",
+            ],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "--connection", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work\nVPN", "vpn-password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "password"],
+        );
+        refused(
+            "lcp-admin",
+            &["nm_store_keyfile_secret", "Work VPN", "vpn-secrets"],
         );
     }
 
@@ -6789,6 +7314,37 @@ mod argument_policy_tests {
         refused("lcp-admin", &["repo_delete"]);
         refused("lcp-admin", &["repo_delete", "--evil"]);
         refused("lcp-admin", &["repo_delete", ""]);
+    }
+
+    #[test]
+    fn repo_config_manager_set_dispatch_validates_id_and_value() {
+        ok("lcp-admin", &["repo_config_manager_set", "fedora", "1"]);
+        ok("lcp-admin", &["repo_config_manager_set", "fedora", "0"]);
+        ok(
+            "lcp-admin",
+            &["repo_config_manager_set", "copr:copr.fedorainfracloud.org:group_user:project", "1"],
+        );
+        refused("lcp-admin", &["repo_config_manager_set", "fedora"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora", "2"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora", "true"]);
+        refused("lcp-admin", &["repo_config_manager_set", "--evil", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora extra", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "fedora/../../x", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set", "", "1"]);
+        refused("lcp-admin", &["repo_config_manager_set"]);
+    }
+
+    #[test]
+    fn repo_config_manager_unset_dispatch_validates_id_and_option() {
+        ok("lcp-admin", &["repo_config_manager_unset", "fedora", "enabled"]);
+        ok("lcp-admin", &["repo_config_manager_unset", "fedora", "gpgcheck"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "enabled=1"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "--evil"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", "Enabled"]);
+        refused("lcp-admin", &["repo_config_manager_unset", "fedora", ""]);
+        refused("lcp-admin", &["repo_config_manager_unset", "", "enabled"]);
+        refused("lcp-admin", &["repo_config_manager_unset"]);
     }
 
     #[test]
@@ -8564,9 +9120,9 @@ mod user_management_validator_tests {
 #[cfg(test)]
 mod security_action_validator_tests {
     use super::{
-        ctrl_alt_del_verb_valid, ensure_arguments_for_program, security_apply_op_valid,
-        security_kernel_param_valid, security_service_unit_valid, security_service_verb_valid,
-        security_ssh_param_valid,
+        ctrl_alt_del_verb_valid, ensure_arguments_for_program, ensure_openable_path,
+        security_apply_op_valid, security_kernel_param_valid, security_service_unit_valid,
+        security_service_verb_valid, security_ssh_param_valid,
     };
 
     fn check_lcp(args: &[&str]) -> Result<(), String> {
@@ -8607,6 +9163,8 @@ mod security_action_validator_tests {
             ("MaxAuthTries", "6"),
             ("LoginGraceTime", "60"),
             ("LoginGraceTime", "120"),
+            ("X11Forwarding", "no"),
+            ("X11Forwarding", "yes"),
         ] {
             security_ssh_param_valid(param, value)
                 .unwrap_or_else(|e| panic!("{param}={value}: {e}"));
@@ -8617,6 +9175,7 @@ mod security_action_validator_tests {
             ("MaxAuthTries", "9"),
             ("Banner", "none"),
             ("LoginGraceTime", "30"),
+            ("X11Forwarding", "maybe"),
         ] {
             assert!(
                 security_ssh_param_valid(param, value).is_err(),
@@ -8632,12 +9191,19 @@ mod security_action_validator_tests {
             "kernel.dmesg_restrict",
             "net.ipv4.conf.all.accept_redirects",
             "net.ipv4.conf.all.log_martians",
+            "fs.suid_dumpable",
+            "net.ipv4.conf.all.accept_source_route",
+            "net.ipv4.icmp_ignore_bogus_error_responses",
+            "net.ipv4.conf.all.rp_filter",
+            "kernel.sysrq",
         ] {
             security_kernel_param_valid(key, "1").unwrap_or_else(|e| panic!("{key}: {e}"));
         }
         for (key, value) in [
             ("kernel.panic", "1"),
             ("net.ipv4.ip_forward", "yes"),
+            ("fs.suid_dumpable", "yes"),
+            ("vm.swappiness", "60"),
             ("kernel.dmesg_restrict", "1
 "),
             ("kernel.dmesg_restrict", ""),
@@ -8658,6 +9224,26 @@ mod security_action_validator_tests {
         }
         for op in ["", "reboot", "password_policy_extra"] {
             assert!(security_apply_op_valid(op).is_err(), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn only_existing_absolute_paths_reach_a_desktop_handler() {
+        let existing = std::env::temp_dir();
+        let existing = existing.to_string_lossy();
+        ensure_openable_path(&existing).unwrap_or_else(|e| panic!("{existing}: {e}"));
+
+        for path in [
+            "",
+            "   ",
+            "smb://fileserver/share",
+            "file:///etc/passwd",
+            "relative/dir",
+            "../etc",
+            "/tmp/../etc/passwd",
+            "/definitely/not/a/real/path-12345",
+        ] {
+            assert!(ensure_openable_path(path).is_err(), "{path:?} must be refused");
         }
     }
 
@@ -8744,9 +9330,12 @@ mod service_manager_validator_tests {
 
     #[test]
     fn unit_action_gate_enforces_shapes() {
+        check_lcp(&["audit_setup"]).expect("valid audit setup");
+        assert!(check_lcp(&["audit_setup", "extra"]).is_err());
         check_lcp(&["unit_action", "restart", "nginx.service"]).expect("valid action");
         check_lcp(&["unit_action", "mask", "cups.service"]).expect("valid mask");
         check_lcp(&["unit_dropin_write", "nginx.service"]).expect("valid dropin");
+        check_lcp(&["unit_create", "my-app.service"]).expect("valid create");
         check_lcp(&["unit_daemon_reload"]).expect("valid recovery");
         for args in [
             vec!["unit_action", "restart"],
@@ -8755,6 +9344,7 @@ mod service_manager_validator_tests {
             vec!["unit_action", "restart", "nginx"],
             vec!["unit_dropin_write"],
             vec!["unit_dropin_write", "-bad.service"],
+            vec!["unit_create", "-bad.service"],
             vec!["unit_daemon_reload", "extra"],
         ] {
             assert!(check_lcp(&args).is_err(), "{args:?} must be refused");
@@ -9079,6 +9669,36 @@ mod system_info_validator_tests {
     }
 
     #[test]
+    fn smart_device_type_is_one_safe_argument() {
+        use super::smart_device_type_valid;
+        for device_type in ["sat", "nvme", "scsi", "megaraid,0", "aacraid,0,0,0", "usbasm1352r,0"] {
+            smart_device_type_valid(device_type).expect("valid smartctl device type");
+        }
+        for device_type in ["", "-d", "sat --all", "sat;reboot", "sat/../x", "x".repeat(41).as_str()] {
+            assert!(
+                smart_device_type_valid(device_type).is_err(),
+                "{device_type:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn pci_slots_are_validated_before_any_sysfs_access() {
+        use super::pci_slot_valid;
+        for slot in ["0000:00:1f.6", "0000:3b:00.0", "0000:00:02.0"] {
+            pci_slot_valid(slot).expect("valid PCI slot");
+        }
+        for slot in ["", "../../etc/shadow", "0000:00:1f.6/../../x", "::::", "0000:00:1f"] {
+            assert!(pci_slot_valid(slot).is_err(), "{slot:?} must be refused");
+        }
+        check_lcp(&["pci_reset", "0000:00:1f.6"]).expect("valid PCI reset gate shape");
+        assert!(check_lcp(&["pci_reset", "../../etc/shadow"]).is_err());
+        assert!(check_lcp(&["pci_reset"]).is_err());
+        check_lcp(&["inventory_scan"]).expect("inventory scan takes no arguments");
+        assert!(check_lcp(&["inventory_scan", "x"]).is_err());
+    }
+
+    #[test]
     fn smart_device_only_accepts_a_direct_non_symlink_device_path() {
         assert!(smart_device_valid("/etc/passwd").is_err());
         assert!(smart_device_valid("/dev/../etc/passwd").is_err());
@@ -9106,6 +9726,8 @@ mod system_info_validator_tests {
             smart_device_valid(&device_str).expect("fixture regular file is allowed");
             check_lcp(&["smart_health", &device_str]).expect("valid health gate shape");
             check_lcp(&["smart_data", &device_str]).expect("valid data gate shape");
+            check_lcp(&["smart_data", &device_str, "sat"]).expect("valid typed data gate shape");
+            assert!(check_lcp(&["smart_data", &device_str, "sat --all"]).is_err());
             check_lcp(&["smart_self_test", &device_str, "long"])
                 .expect("valid self-test gate shape");
 
@@ -9118,5 +9740,31 @@ mod system_info_validator_tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&device);
         }
+    }
+}
+
+#[cfg(test)]
+mod environment_content_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_documents_the_panel_writes() {
+        for content in [
+            "",
+            "# header\n\nPATH=\"/usr/local/bin:/usr/bin\"\n",
+            "EDITOR=vim\nJAVA_HOME=\"/usr/lib/jvm/java-21\"\n",
+            "export LEGACY=1\n",
+            "not an assignment\n",
+        ] {
+            assert!(validate_environment_content(content).is_ok(), "{content:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_control_characters_and_oversized_lines() {
+        assert!(validate_environment_content("FOO=a\0b\n").is_err());
+        assert!(validate_environment_content("FOO=a\rb\n").is_err());
+        assert!(validate_environment_content(&format!("FOO={}\n", "x".repeat(9000))).is_err());
+        assert!(validate_environment_content(&"#\n".repeat(ENVIRONMENT_CONTENT_MAX / 2 + 1)).is_err());
     }
 }

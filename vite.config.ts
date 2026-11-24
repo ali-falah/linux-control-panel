@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
 import { compile, preprocess } from "svelte/compiler";
@@ -39,6 +39,11 @@ function svelteStyleFallback() {
 
   return {
     name: "svelte-style-fallback",
+    // Development only. The fallback compiles styles with the dev scope hash
+    // (`s-<filename hash>`); a production build must keep the styles the
+    // Svelte plugin compiles with its production scope hash (`svelte-<hash>`),
+    // otherwise every component style ships under a class the DOM never gets.
+    apply: "serve" as const,
     enforce: "pre" as const,
     configResolved(config: { root: string }) {
       root = config.root;
@@ -103,6 +108,17 @@ export default defineConfig(async () => ({
     tailwindcss(),
     svelte(),
   ],
+
+  // Svelte 5 ships browser and server entry points; component tests must load
+  // the browser build, not the server build.
+  resolve: {
+    conditions: ["browser"],
+  },
+
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./vitest-setup.ts"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   // prevent vite from obscuring rust errors

@@ -1,0 +1,53 @@
+======== "demo" repository configuration: ========
+auto_import_local_keys = 0
+bandwidth = 0
+baseurl = https://example.com/repo,https://example.com/repo2
+build_cache = 1
+cachedir = /tmp/opencode/live-root/home/ali/.cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 1
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = 
+includepkgs = 
+ip_resolve = whatever
+max_downloads_per_mirror = 3
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 172800
+metalink
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Demo Renamed
+password = 
+pkg_gpgcheck = 1
+priority = 42
+protected_packages = dnf5,glob:/etc/dnf/protected.d/*.conf,dnf5
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = 
+user_agent = libdnf (Fedora Linux 45; workstation; Linux.x86_64)
+username = 

@@ -456,7 +456,41 @@ export function validateDnsServers(dnsRaw: string): DnsValidationResult {
 }
 
 /**
- * Validates IPv6 Address with prefix length and Gateway.
+ * Validate comma/space separated IPv6 DNS servers. Each entry must be a plain
+ * IPv6 literal (DNS servers do not use CIDR prefixes).
+ */
+export function validateIpv6DnsServers(dnsRaw: string): DnsValidationResult {
+  const raw = (dnsRaw || '').trim();
+  if (!raw) return { raw, servers: [], isValid: true, errors: [] };
+
+  const items = raw.split(/[, ]+/).filter(Boolean);
+  const servers: { ip: string; isValid: boolean; error?: string }[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (seen.has(trimmed)) {
+      const err = `Duplicate DNS server '${trimmed}'`;
+      servers.push({ ip: trimmed, isValid: false, error: err });
+      errors.push(err);
+      continue;
+    }
+    seen.add(trimmed);
+    if (trimmed.includes('/') || !validateIpv6Address(`${trimmed}/128`).isValid) {
+      const err = `'${trimmed}' is not a valid IPv6 address`;
+      servers.push({ ip: trimmed, isValid: false, error: err });
+      errors.push(err);
+    } else {
+      servers.push({ ip: trimmed, isValid: true });
+    }
+  }
+
+  return { raw, servers, isValid: errors.length === 0, errors };
+}
+
+/**
+ * Validates an IPv6 address with prefix length and an optional gateway.
  */
 export function validateIpv6Address(ipWithPrefix: string, gatewayStr: string = ''): Ipv6ValidationResult {
   const raw = (ipWithPrefix || '').trim();
@@ -495,6 +529,18 @@ export function validateIpv6Address(ipWithPrefix: string, gatewayStr: string = '
   for (const c of chunks) {
     if (!/^[0-9a-fA-F]{1,4}$/.test(c)) {
       errors.push(`Invalid IPv6 hexadecimal segment '${c}'.`);
+    }
+  }
+
+  const gateway = gatewayStr.trim();
+  if (gateway) {
+    if (gateway.includes('/')) {
+      errors.push('The IPv6 gateway must be a plain address without a prefix length.');
+    } else {
+      const gatewayCheck = validateIpv6Address(`${gateway}/128`);
+      if (!gatewayCheck.isValid) {
+        errors.push(`Gateway '${gateway}' is not a valid IPv6 address.`);
+      }
     }
   }
 

@@ -4,12 +4,12 @@
     height = '20px',
     borderRadius = '4px',
     style = ''
-  } = $props<{
+  }: {
     width?: string;
     height?: string;
     borderRadius?: string;
     style?: string;
-  }>();
+  } = $props();
 </script>
 
 <div 

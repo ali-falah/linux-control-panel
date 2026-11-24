@@ -1,11 +1,12 @@
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 static LIVE_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LIVE_STREAM_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Default number of entries returned for an explicit time range.
 /// Old behaviour was a hard 150 (no range) / 2000 (with range) — far too small
@@ -21,6 +22,8 @@ const ABSOLUTE_MAX_ENTRIES: usize = 200_000;
 /// (which also carries __CURSOR, __MONOTONIC_TIMESTAMP, _BOOT_ID, …).
 #[derive(Debug, Clone, Serialize)]
 pub struct JournalEntry {
+    #[serde(rename = "__CURSOR")]
+    pub cursor: String,
     #[serde(rename = "__REALTIME_TIMESTAMP")]
     pub ts: String,
     #[serde(rename = "PRIORITY")]
@@ -66,6 +69,8 @@ pub struct JournalPage {
     pub truncated: bool,
     /// timestamp (µs) of the oldest entry in this page — used to fetch older entries
     pub oldest_ts: Option<String>,
+    /// journal cursor of the oldest entry — used for true cursor paging
+    pub oldest_cursor: Option<String>,
     /// wall-clock time the fetch took
     pub elapsed_ms: u64,
 }
@@ -73,6 +78,11 @@ pub struct JournalPage {
 /// Parse one `journalctl -o json` line into a compact entry.
 fn parse_journal_line(line: &str) -> Option<JournalEntry> {
     let value: Value = serde_json::from_str(line).ok()?;
+    let cursor = value
+        .get("__CURSOR")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let text = |key: &str| -> String {
         value
             .get(key)
@@ -94,6 +104,7 @@ fn parse_journal_line(line: &str) -> Option<JournalEntry> {
     };
 
     Some(JournalEntry {
+        cursor,
         ts: text("__REALTIME_TIMESTAMP"),
         // journald emits PRIORITY as a string ("6"), not a number
         prio: value
@@ -127,6 +138,9 @@ pub async fn get_journal_logs(
     since_filter: Option<String>,
     until_filter: Option<String>,
     max_entries: Option<usize>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
+    cursor: Option<String>,
 ) -> Result<JournalPage, String> {
     let started = std::time::Instant::now();
     let limit = max_entries
@@ -134,6 +148,19 @@ pub async fn get_journal_logs(
         .clamp(100, ABSOLUTE_MAX_ENTRIES);
 
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
+
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
+
+    let cursor_filter = cursor.filter(|c| !c.trim().is_empty());
+    if let Some(ref cursor) = cursor_filter {
+        cmd.arg("--cursor").arg(cursor);
+        cmd.arg("--reverse");
+    }
 
     // Ask for one extra entry so we can tell the user the range was truncated
     cmd.arg("-n").arg((limit + 1).to_string());
@@ -186,24 +213,37 @@ pub async fn get_journal_logs(
         .await
         .map_err(|e| format!("Failed to read journalctl output: {e}"))?
     {
-        if entries.len() >= limit {
-            truncated = true;
-            break;
-        }
         if line.trim().is_empty() {
             continue;
         }
         if let Some(entry) = parse_journal_line(&line) {
+            if let Some(ref cursor) = cursor_filter {
+                if entry.cursor == *cursor {
+                    continue;
+                }
+            }
             entries.push(entry);
+            if entries.len() > limit {
+                truncated = true;
+                break;
+            }
         }
     }
 
     let _ = child.kill().await;
 
-    // journalctl emits oldest first — the UI wants newest first
-    entries.reverse();
+    // Without a cursor journalctl emits oldest first; with --reverse it is
+    // already newest first. Both paths want newest first.
+    if cursor_filter.is_none() {
+        entries.reverse();
+    }
+    // The extra record used to detect truncation is the oldest one.
+    if truncated && entries.len() > limit {
+        entries.pop();
+    }
 
     let oldest_ts = entries.last().map(|e| e.ts.clone());
+    let oldest_cursor = entries.last().map(|e| e.cursor.clone());
     let returned = entries.len();
 
     Ok(JournalPage {
@@ -211,6 +251,7 @@ pub async fn get_journal_logs(
         returned,
         truncated,
         oldest_ts,
+        oldest_cursor,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -226,9 +267,19 @@ pub async fn count_journal_entries(
     priority: Option<u8>,
     since_filter: Option<String>,
     until_filter: Option<String>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
 ) -> Result<u64, String> {
     let mut cmd = crate::utils::privilege::tokio::Command::new("journalctl");
-    cmd.arg("-o").arg("cat");
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
+    // JSON is one line per entry, so multi-line messages are counted once.
+    cmd.arg("-o").arg("json");
+    cmd.arg("--output-fields=MESSAGE");
     cmd.arg("--no-pager");
 
     if let Some(unit) = unit_filter {
@@ -268,20 +319,29 @@ pub async fn count_journal_entries(
         .ok_or_else(|| "journalctl produced no stdout".to_string())?;
 
     let mut reader = BufReader::new(stdout).lines();
-    let mut count: u64 = 0;
 
-    while let Some(line) = reader
-        .next_line()
-        .await
-        .map_err(|e| format!("Failed to read journalctl output: {e}"))?
-    {
-        if !line.trim().is_empty() {
-            count += 1;
+    let counted = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
+        let mut count: u64 = 0;
+        while let Some(line) = reader
+            .next_line()
+            .await
+            .map_err(|e| format!("Failed to read journalctl output: {e}"))?
+        {
+            if !line.trim().is_empty() {
+                count += 1;
+            }
         }
-    }
+        Ok::<u64, String>(count)
+    })
+    .await;
 
     let _ = child.kill().await;
-    Ok(count)
+
+    match counted {
+        Ok(Ok(count)) => Ok(count),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Counting the selected range took too long; narrow the range.".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -289,53 +349,72 @@ pub async fn start_journal_live_stream(
     app: AppHandle,
     unit_filter: Option<String>,
     priority: Option<u8>,
+    user_mode: Option<bool>,
+    boot: Option<bool>,
 ) -> Result<(), String> {
-    if LIVE_STREAM_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(()); // Stream already running
+    let generation = LIVE_STREAM_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    LIVE_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+
+    let mut cmd = tokio::process::Command::new("journalctl");
+    if user_mode.unwrap_or(false) {
+        cmd.arg("--user");
+    }
+    if boot.unwrap_or(false) {
+        cmd.arg("-b");
+    }
+    cmd.args(["-f", "-n", "0", "-o", "json", "--no-pager"]);
+    cmd.kill_on_drop(true);
+
+    if let Some(unit) = unit_filter {
+        let clean = unit.trim().to_string();
+        if !clean.is_empty() {
+            cmd.args(["-u", &clean]);
+        }
     }
 
+    if let Some(prio) = priority {
+        cmd.args(["-p", &prio.to_string()]);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        format!("Failed to start journalctl -f: {e}")
+    })?;
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        "journalctl -f produced no stdout".to_string()
+    })?;
+
     tokio::spawn(async move {
-        let mut cmd = tokio::process::Command::new("journalctl");
-        cmd.args(["-f", "-n", "0", "-o", "json", "--no-pager"]);
+        let mut reader = BufReader::new(stdout).lines();
 
-        if let Some(unit) = unit_filter {
-            let clean = unit.trim().to_string();
-            if !clean.is_empty() {
-                cmd.args(["-u", &clean]);
-            }
-        }
-
-        if let Some(prio) = priority {
-            cmd.args(["-p", &prio.to_string()]);
-        }
-
-        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-
-        if let Ok(mut child) = cmd.spawn() {
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = BufReader::new(stdout).lines();
-                while LIVE_STREAM_ACTIVE.load(Ordering::SeqCst) {
-                    tokio::select! {
-                        line_res = reader.next_line() => {
-                            match line_res {
-                                Ok(Some(line)) => {
-                                    if !line.trim().is_empty() {
-                                        // emit the same compact shape the page fetch returns
-                                        if let Some(entry) = parse_journal_line(&line) {
-                                            let _ = app.emit("journal-live-log", entry);
-                                        }
-                                    }
+        while LIVE_STREAM_ACTIVE.load(Ordering::SeqCst)
+            && LIVE_STREAM_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            tokio::select! {
+                line_res = reader.next_line() => {
+                    match line_res {
+                        Ok(Some(line)) => {
+                            if !line.trim().is_empty() {
+                                if let Some(entry) = parse_journal_line(&line) {
+                                    let _ = app.emit("journal-live-log", entry);
                                 }
-                                _ => break,
                             }
                         }
-                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+                        _ => break,
                     }
                 }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
             }
-            let _ = child.kill().await;
         }
-        LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+
+        let _ = child.kill().await;
+        if LIVE_STREAM_GENERATION.load(Ordering::SeqCst) == generation {
+            LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -343,20 +422,121 @@ pub async fn start_journal_live_stream(
 
 #[tauri::command]
 pub fn stop_journal_live_stream() {
+    LIVE_STREAM_GENERATION.fetch_add(1, Ordering::SeqCst);
     LIVE_STREAM_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// The export filename comes from the webview, so it may only ever be a single
+/// path component: `Path::join` honours `../` and replaces the base outright
+/// for an absolute name, either of which would write anywhere the user can.
+fn ensure_export_filename(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("The export file name is empty.".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("Refused to write an export to '{name}'."));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(format!("The export file name must not contain a path: {name}"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(format!("The export file name contains unsupported characters: {name}"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn export_journal_logs_to_file(filename: String, content: String) -> Result<String, String> {
+    let name = filename.trim();
+    ensure_export_filename(name)?;
+
     let download_dir = dirs::download_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
-    let target_path = download_dir.join(&filename);
+    let target_path = download_dir.join(name);
     tokio::fs::write(&target_path, content.as_bytes())
         .await
         .map_err(|e| format!("Failed to write export file: {e}"))?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_export_filename;
+
+    #[test]
+    fn export_filenames_are_single_components() {
+        for name in [
+            "journal-logs-2026-11-11T10-22-33-123Z.csv",
+            "auth-full-2026-11-11.csv",
+            "audit.txt",
+            "a_b-c1.csv",
+        ] {
+            ensure_export_filename(name).expect(name);
+        }
+    }
+
+    /// The command itself: it must actually write the file and return the path
+    /// it wrote to, or the export silently produces nothing.
+    #[test]
+    fn export_writes_the_file_and_returns_its_path() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let name = format!("lcp-selftest-{}.csv", std::process::id());
+        let content = "a,b\n1,2";
+        let path = rt
+            .block_on(super::export_journal_logs_to_file(name.clone(), content.to_string()))
+            .expect("export must succeed");
+        let written = std::fs::read_to_string(&path).expect("file must exist and be readable");
+        assert_eq!(written, content, "the written bytes must match");
+        assert!(
+            std::path::Path::new(&path).ends_with(&name),
+            "the file must be named as requested: {path}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn export_rejects_a_traversal_filename_without_writing() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let err = rt
+            .block_on(super::export_journal_logs_to_file(
+                "../lcp-evil.csv".to_string(),
+                "x".to_string(),
+            ))
+            .expect_err("traversal must be refused");
+        assert!(err.contains("path"), "the error must name the problem: {err}");
+    }
+
+    #[test]
+    fn export_filenames_cannot_escape_the_download_directory() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../.bashrc",
+            "../../etc/cron.d/pwn",
+            "/etc/cron.d/pwn",
+            "sub/dir.csv",
+            "name with space.csv",
+            "name\n.csv",
+            "na\u{0000}me.csv",
+        ] {
+            assert!(
+                ensure_export_filename(name).is_err(),
+                "{name:?} must be refused"
+            );
+        }
+    }
 }
 

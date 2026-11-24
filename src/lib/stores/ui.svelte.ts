@@ -70,6 +70,9 @@ class UIStore {
   isOled = $state(false);
   /** Drawer docked as a side-by-side split view (only on wide screens) */
   isDrawerDocked = $state(false);
+  /** Screens that must confirm before a tab switch can discard unsaved work. */
+  private leaveGuards: Array<() => boolean> = [];
+  private skipLeaveGuard = false;
 
   initVisibilityListener() {
     if (typeof window !== 'undefined') {
@@ -220,6 +223,8 @@ class UIStore {
   preAppliedJournalPriority = $state<string>('all');
   preAppliedJournalSearch = $state<string>('');
   preAppliedJournalUnit = $state<string>('');
+  /** Restrict the journal to the current boot when a deep link asks for it */
+  preAppliedJournalBoot = $state(false);
   /**
    * Deep-link context that is currently applied to the Journal view.
    *
@@ -352,6 +357,28 @@ class UIStore {
   }
 
   setActiveTab(tab: TabId) {
+    if (tab !== this.activeTab && !this.skipLeaveGuard) {
+      const blocked = this.leaveGuards.some((guard) => {
+        try {
+          return guard();
+        } catch {
+          return false;
+        }
+      });
+      if (blocked) {
+        this.confirm(
+          'Unsaved Changes',
+          'This page has unsaved changes that will be lost if you leave now.',
+          () => {
+            this.skipLeaveGuard = true;
+            this.setActiveTab(tab);
+            this.skipLeaveGuard = false;
+          },
+          true
+        );
+        return;
+      }
+    }
     if (tab !== this.activeTab) {
       this.navHistory = [...this.navHistory, this.activeTab];
       if (tab !== 'system-dashboard') {
@@ -466,6 +493,17 @@ class UIStore {
     this.passwordResolver = null;
     this.passwordDialog = { isOpen: false, title: '', message: '' };
     resolver?.(null);
+  }
+
+  /**
+   * Register a predicate that returns true while the page has unsaved work.
+   * The returned function unregisters it.
+   */
+  registerLeaveGuard(guard: () => boolean): () => void {
+    this.leaveGuards.push(guard);
+    return () => {
+      this.leaveGuards = this.leaveGuards.filter((entry) => entry !== guard);
+    };
   }
 
   confirm(title: string, message: string, onConfirm: () => void | Promise<void>, danger = false) {

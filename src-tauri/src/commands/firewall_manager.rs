@@ -15,6 +15,8 @@ pub struct FirewallState {
     pub is_panic: bool,
     pub active_zones: Vec<String>,
     pub default_zone: String,
+    pub backend: String,
+    pub zones: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +45,8 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
                 is_panic: false,
                 active_zones: vec![],
                 default_zone: String::new(),
+                backend: "firewalld".to_string(),
+                zones: vec![],
             });
         }
 
@@ -92,11 +96,40 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
             active_zones.push(default_zone.clone());
         }
 
+        let zones_out = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            Command::new("firewall-cmd")
+                .arg("--get-zones")
+                .output()
+        ).await;
+        let mut zones: Vec<String> = match zones_out {
+            Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        };
+        for zone in &active_zones {
+            if !zones.contains(zone) {
+                zones.push(zone.clone());
+            }
+        }
+        if !default_zone.is_empty() && !zones.contains(&default_zone) {
+            zones.push(default_zone.clone());
+        }
+        zones.sort();
+        zones.dedup();
+        if zones.is_empty() {
+            zones = active_zones.clone();
+        }
+
         return Ok(FirewallState {
             is_running,
             is_panic,
             active_zones,
             default_zone,
+            backend: "firewalld".to_string(),
+            zones,
         });
     }
 
@@ -117,6 +150,8 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
             is_panic: false,
             active_zones: vec!["ufw".to_string()],
             default_zone: "ufw".to_string(),
+            backend: "ufw".to_string(),
+            zones: vec!["ufw".to_string()],
         });
     }
 
@@ -125,59 +160,74 @@ pub async fn get_firewall_state() -> Result<FirewallState, String> {
 
 #[tauri::command]
 pub async fn get_zone_rules(zone: String) -> Result<ZoneRules, String> {
+    if zone.trim().is_empty() {
+        return Err("A zone is required to read firewall rules.".to_string());
+    }
+    firewall_zone_name_valid(&zone)?;
+
     if crate::binary_exists("firewall-cmd").await {
         let services_out = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             Command::new("firewall-cmd")
                 .args(["--zone", &zone, "--list-services"])
                 .output()
-        ).await;
-        
-        let services: Vec<String> = match services_out {
-            Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect(),
-            _ => Vec::new(),
-        };
+        ).await
+        .map_err(|_| "firewall-cmd --list-services timed out".to_string())?
+        .map_err(|e| format!("Could not list services for zone '{zone}': {e}"))?;
+        if !services_out.status.success() {
+            return Err(format!(
+                "Could not list services for zone '{zone}': {}",
+                String::from_utf8_lossy(&services_out.stderr).trim()
+            ));
+        }
 
         let ports_out = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             Command::new("firewall-cmd")
                 .args(["--zone", &zone, "--list-ports"])
                 .output()
-        ).await;
-        
-        let ports: Vec<String> = match ports_out {
-            Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect(),
-            _ => Vec::new(),
-        };
+        ).await
+        .map_err(|_| "firewall-cmd --list-ports timed out".to_string())?
+        .map_err(|e| format!("Could not list ports for zone '{zone}': {e}"))?;
+        if !ports_out.status.success() {
+            return Err(format!(
+                "Could not list ports for zone '{zone}': {}",
+                String::from_utf8_lossy(&ports_out.stderr).trim()
+            ));
+        }
 
-        return Ok(ZoneRules {
-            zone,
-            services,
-            ports,
-        });
+        let mut services: Vec<String> = String::from_utf8_lossy(&services_out.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let mut ports: Vec<String> = String::from_utf8_lossy(&ports_out.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        services.sort();
+        services.dedup();
+        ports.sort();
+        ports.dedup();
+        return Ok(ZoneRules { zone, services, ports });
     }
 
     if crate::binary_exists("ufw").await {
         let output = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
-            Command::new("ufw")
-                .arg("status")
-                .output()
-        ).await.map_err(|_| "ufw status timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+            Command::new("ufw").arg("status").output()
+        ).await
+        .map_err(|_| "ufw status timed out".to_string())?
+        .map_err(|e| format!("Could not read ufw status: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Could not read ufw status: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut services = Vec::new();
         let mut ports = Vec::new();
-
         let mut in_rules = false;
         for line in stdout.lines() {
             let trimmed = line.trim();
@@ -190,23 +240,18 @@ pub async fn get_zone_rules(zone: String) -> Result<ZoneRules, String> {
                 if !parts.is_empty() {
                     let target = parts[0];
                     if target.contains('/') || target.chars().all(|c| c.is_ascii_digit()) {
-                        if !ports.contains(&target.to_string()) {
+                        if !ports.iter().any(|value| value == target) {
                             ports.push(target.to_string());
                         }
-                    } else {
-                        if !services.contains(&target.to_string()) {
-                            services.push(target.to_string());
-                        }
+                    } else if !services.iter().any(|value| value == target) {
+                        services.push(target.to_string());
                     }
                 }
             }
         }
-
-        return Ok(ZoneRules {
-            zone,
-            services,
-            ports,
-        });
+        services.sort();
+        ports.sort();
+        return Ok(ZoneRules { zone, services, ports });
     }
 
     Err("Neither firewalld nor ufw is available".to_string())
@@ -562,6 +607,11 @@ pub async fn toggle_panic_mode(
 
 #[tauri::command]
 pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String> {
+    if zone.trim().is_empty() {
+        return Err("A zone is required for rich rules.".to_string());
+    }
+    firewall_zone_name_valid(&zone)?;
+
     if crate::binary_exists("firewall-cmd").await {
         let output = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
@@ -569,10 +619,13 @@ pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String
                 .args(["--zone", &zone, "--list-rich-rules"])
                 .output()
         ).await.map_err(|_| "firewall-cmd --list-rich-rules timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Could not list rich rules for zone '{zone}': {e}"))?;
 
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            return Err(format!(
+                "Could not list rich rules for zone '{zone}': {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -584,57 +637,70 @@ pub async fn firewall_get_rich_rules(zone: String) -> Result<Vec<String>, String
     }
 
     if crate::binary_exists("ufw").await {
-        let output = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            Command::new("ufw")
-                .args(["status", "numbered"])
-                .output()
-        ).await.map_err(|_| "ufw status timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut rules = Vec::new();
-        let mut in_rules = false;
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_rules = true;
-            }
-            if in_rules && !trimmed.is_empty() {
-                rules.push(trimmed.to_string());
-            }
-        }
-        return Ok(rules);
+        return Err("Rich rules are a firewalld feature; ufw uses numbered rules.".to_string());
     }
 
-    Ok(Vec::new())
+    Err("Neither firewalld nor ufw is available".to_string())
 }
 
 #[tauri::command]
 pub async fn firewall_get_zone_interfaces(zone: String) -> Result<Vec<String>, String> {
-    if crate::binary_exists("firewall-cmd").await {
-        let output = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            Command::new("firewall-cmd")
-                .args(["--zone", &zone, "--list-interfaces"])
-                .output()
-        ).await.map_err(|_| "firewall-cmd --list-interfaces timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    if zone.trim().is_empty() {
+        return Err("A zone is required for interface bindings.".to_string());
+    }
+    firewall_zone_name_valid(&zone)?;
 
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    if !crate::binary_exists("firewall-cmd").await {
+        if crate::binary_exists("ufw").await {
+            return Err(
+                "Interface-zone bindings are a firewalld feature; ufw binds interfaces globally."
+                    .to_string(),
+            );
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let interfaces = stdout.trim()
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        return Ok(interfaces);
+        return Err("Neither firewalld nor ufw is available".to_string());
     }
 
-    firewall_get_all_interfaces().await
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        Command::new("firewall-cmd")
+            .args(["--zone", &zone, "--list-interfaces"])
+            .output()
+    ).await.map_err(|_| "firewall-cmd --list-interfaces timed out".to_string())?
+    .map_err(|e| format!("Could not list interfaces for zone '{zone}': {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Could not list interfaces for zone '{zone}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut interfaces: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect();
+    interfaces.sort();
+    interfaces.dedup();
+    Ok(interfaces)
+}
+
+/// Parse `ip -o link show` into interface names. Peer suffixes such as
+/// `veth0@if5` name the interface on this side; the `@if5` part is not part
+/// of the bindable name.
+fn parse_ip_link_interfaces(stdout: &str) -> Vec<String> {
+    let mut interfaces: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let name = parts.get(1)?.trim_end_matches(':');
+            let name = name.split('@').next().unwrap_or(name).to_string();
+            (name != "lo" && !name.is_empty()).then_some(name)
+        })
+        .collect();
+    interfaces.sort();
+    interfaces.dedup();
+    interfaces
 }
 
 #[tauri::command]
@@ -645,24 +711,16 @@ pub async fn firewall_get_all_interfaces() -> Result<Vec<String>, String> {
             .args(["-o", "link", "show"])
             .output()
     ).await.map_err(|_| "ip link show timed out".to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("Could not list network interfaces: {e}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!(
+            "Could not list network interfaces: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut interfaces = Vec::new();
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let name = parts[1].trim_end_matches(':').to_string();
-            if name != "lo" {
-                interfaces.push(name);
-            }
-        }
-    }
-    Ok(interfaces)
+    Ok(parse_ip_link_interfaces(&String::from_utf8_lossy(&output.stdout)))
 }
 
 #[tauri::command]
@@ -795,55 +853,69 @@ pub struct PortListenerInfo {
     pub is_listening: bool,
     pub process_name: String,
     pub pid: String,
+    /// Local socket address from `ss`, e.g. `0.0.0.0:8080` or `[::]:8080`.
+    pub address: String,
 }
 
-/// Check if a local process is currently listening on the specified port
+/// Find the listener for `port` in `ss -H` output. Returns the local address,
+/// process name and PID. The process fields are best-effort: another user's
+/// process may be hidden even though the listener is visible.
+fn parse_port_listener(stdout: &str, port: u16) -> Option<(String, String, String)> {
+    let suffix = format!(":{port}");
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 || !parts[3].ends_with(&suffix) {
+            continue;
+        }
+        let address = parts[3].to_string();
+        let mut process_name = String::new();
+        let mut pid = String::new();
+        if let Some(proc_info) = parts.get(5) {
+            if let Some(name_start) = proc_info.find("(\"") {
+                if let Some(name_end) = proc_info[name_start + 2..].find('"') {
+                    process_name = proc_info[name_start + 2..name_start + 2 + name_end].to_string();
+                }
+            }
+            if let Some(pid_start) = proc_info.find("pid=") {
+                let rest = &proc_info[pid_start + 4..];
+                let pid_end = rest.find(',').unwrap_or(rest.len());
+                pid = rest[..pid_end].to_string();
+            }
+        }
+        return Some((address, process_name, pid));
+    }
+    None
+}
+
+/// Check if a local process is currently listening on the specified port.
 #[tauri::command]
 pub async fn firewall_check_port_listener(port: u16, proto: String) -> Result<PortListenerInfo, String> {
     let flag = if proto.to_lowercase().contains("udp") { "-ulpn" } else { "-tlpn" };
     let output = Command::new("ss")
         .args([flag, "-H"])
         .output()
-        .await;
-
-    let mut is_listening = false;
-    let mut process_name = String::new();
-    let mut pid = String::new();
-
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let target = format!(":{}", port);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 && parts[3].ends_with(&target) {
-                is_listening = true;
-                if parts.len() >= 6 {
-                    let proc_info = parts[5];
-                    if let Some(name_start) = proc_info.find("(\"") {
-                        if let Some(name_end) = proc_info[name_start + 2..].find('"') {
-                            process_name = proc_info[name_start + 2..name_start + 2 + name_end].to_string();
-                        }
-                    }
-                    if let Some(pid_start) = proc_info.find("pid=") {
-                        let rest = &proc_info[pid_start + 4..];
-                        let pid_end = rest.find(',').unwrap_or(rest.len());
-                        pid = rest[..pid_end].to_string();
-                    }
-                }
-                break;
-            }
-        }
+        .await
+        .map_err(|e| format!("Could not inspect listening sockets: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not inspect listening sockets: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (address, process_name, pid) = parse_port_listener(&stdout, port)
+        .unwrap_or_else(|| (String::new(), String::new(), String::new()));
 
     Ok(PortListenerInfo {
         port,
         proto,
-        is_listening,
+        is_listening: !address.is_empty(),
         process_name,
         pid,
+        address,
     })
 }
-
 
 #[cfg(test)]
 mod firewall_ssh_guard_tests {
@@ -1463,5 +1535,39 @@ mod firewall_operand_validation_tests {
     fn ss_header_only_output_means_no_sessions() {
         let header = "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n";
         assert!(parse_ssh_sessions(header).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod firewall_read_tests {
+    use super::{parse_ip_link_interfaces, parse_port_listener};
+
+    #[test]
+    fn ip_link_names_strip_peer_suffixes_and_loopback() {
+        let output = "\
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n\
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP\n\
+3: veth0@if5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n";
+        assert_eq!(
+            parse_ip_link_interfaces(output),
+            vec!["eth0".to_string(), "veth0".to_string()]
+        );
+    }
+
+    #[test]
+    fn listener_parser_reads_ipv4_and_ipv6_addresses() {
+        let output = "\
+LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:* users:((\"nginx\",pid=1234,fd=6))\n\
+LISTEN 0 4096 [::]:8080 [::]:* users:((\"nginx\",pid=1234,fd=7))\n";
+        assert_eq!(
+            parse_port_listener(output, 8080),
+            Some(("0.0.0.0:8080".to_string(), "nginx".to_string(), "1234".to_string()))
+        );
+        assert_eq!(parse_port_listener(output, 8081), None);
+        assert_eq!(
+            parse_port_listener(output, 80),
+            None,
+            "a longer port must not satisfy a shorter suffix"
+        );
     }
 }

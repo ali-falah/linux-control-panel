@@ -31,14 +31,27 @@
   let activeDensity = $derived(density ?? uiStore.tableDensity);
 </script>
 
-<div class="table-wrap table-{activeDensity} {className}" {style} {onscroll}>
+<div class="table-frame" {style}>
+  <div class="table-wrap table-{activeDensity} {className}" {onscroll}>
+    {#if tableAction}
+      <table use:tableAction={actionParams} {...rest}>
+        {@render children?.()}
+      </table>
+    {:else}
+      <table {...rest}>
+        {@render children?.()}
+      </table>
+    {/if}
+  </div>
   {#if showDensityToggle}
+    <!-- Outside the scrolling box, so it stays put while the rows move. -->
     <div class="tbl-floating-density-pill" role="group" aria-label="Table Density Toggle">
       <button
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'compact' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('compact')}
-        title="Compact Mode (28px row height, 11px font, max data density)"
+        aria-pressed={activeDensity === 'compact'}
+        title="Compact Mode (max data density, 11px font)"
       >
         <Rows4 size={12} />
       </button>
@@ -46,7 +59,8 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'normal' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('normal')}
-        title="Normal Mode (36px row height, 12px font, standard balanced view)"
+        aria-pressed={activeDensity === 'normal'}
+        title="Normal Mode (balanced density, 12px font)"
       >
         <Rows3 size={12} />
       </button>
@@ -54,21 +68,12 @@
         type="button"
         class="tbl-floating-density-btn {activeDensity === 'spacious' ? 'active' : ''}"
         onclick={() => uiStore.setTableDensity('spacious')}
-        title="Spacious Mode (44px row height, 13px font, comfortable relaxed view)"
+        aria-pressed={activeDensity === 'spacious'}
+        title="Spacious Mode (comfortable reading, 13px font)"
       >
         <Rows2 size={12} />
       </button>
     </div>
-  {/if}
-
-  {#if tableAction}
-    <table use:tableAction={actionParams} {...rest}>
-      {@render children?.()}
-    </table>
-  {:else}
-    <table {...rest}>
-      {@render children?.()}
-    </table>
   {/if}
 </div>
 
@@ -82,6 +87,10 @@
     top: 6px;
     right: 8px;
     z-index: 30;
+    /* recessed until pointed at — 0.4 keeps it discoverable without
+       competing with the data; keyboard focus lifts it too */
+    opacity: 0.3;
+    transition: opacity 0.15s ease;
     display: inline-flex;
     align-items: center;
     background: rgba(11, 23, 38, 0.85);
@@ -97,6 +106,11 @@
     background: rgba(255, 255, 255, 0.9);
     border-color: #CBD5E1;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+  }
+
+  .tbl-floating-density-pill:hover,
+  .tbl-floating-density-pill:focus-within {
+    opacity: 1;
   }
 
   .tbl-floating-density-btn {

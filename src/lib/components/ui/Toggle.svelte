@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { HTMLButtonAttributes } from 'svelte/elements';
 
-  interface Props extends HTMLButtonAttributes {
+  interface Props extends Omit<HTMLButtonAttributes, 'onchange'> {
     checked?: boolean;
     onToggle?: (checked: boolean) => void;
     onchange?: (checked: boolean) => void;

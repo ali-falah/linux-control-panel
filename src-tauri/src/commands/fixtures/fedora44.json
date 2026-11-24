@@ -1,0 +1,16 @@
+[
+  {
+    "id": "fedora",
+    "name": "Fedora 44 - x86_64",
+    "is_enabled": true,
+    "base_url": ["https://download.example.org/fedora/44/Everything/x86_64/os/"],
+    "repo_file_path": "/etc/yum.repos.d/fedora.repo"
+  },
+  {
+    "id": "updates",
+    "name": "Fedora 44 - x86_64 - Updates",
+    "is_enabled": true,
+    "base_url": ["https://download.example.org/fedora/44/Everything/x86_64/updates/"],
+    "repo_file_path": "/etc/yum.repos.d/fedora.repo"
+  }
+]

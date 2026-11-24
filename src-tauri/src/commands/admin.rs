@@ -249,9 +249,72 @@ pub async fn admin_mode_state() -> AdminModeState {
 /// Check the installed PolicyKit action definitions at startup or on demand.
 /// A missing, stale or weakened file is reported as an error; the helper and
 /// the Polkit call path also refuse to proceed.
+///
+/// A rules.d file this user cannot read (Fedora ships `0750 root:polkitd`) is
+/// not an error: only the helper, running as root, can see it. Reporting it as
+/// broken would offer a "repair" that writes a correct rule and then fails the
+/// very same check.
 #[tauri::command]
 pub async fn admin_policy_status() -> Result<(), String> {
-    crate::utils::root_policy::verify_installed_polkit_state()
+    crate::utils::root_policy::verify_installed_polkit_policy()?;
+    match crate::utils::root_policy::polkit_rule_check() {
+        crate::utils::root_policy::PolkitRuleCheck::Verified
+        | crate::utils::root_policy::PolkitRuleCheck::Unreadable(_) => Ok(()),
+        crate::utils::root_policy::PolkitRuleCheck::Mismatch(message) => Err(message),
+    }
+}
+
+/// Install (or repair) the rules.d rule that turns the helper's authorisation
+/// into a *kept* one, then read it back.
+///
+/// A source checkout and an AppImage do not run the package scripts, so the
+/// policy file can be present while the rule is missing. The consequence is
+/// not cosmetic: `admin_mode_on` can never turn ON (PolicyKit keeps nothing
+/// without the rule), and every privileged action would prompt again. This
+/// command closes that dead end with the one authorisation the helper's
+/// `install_polkit_rule` action needs.
+///
+/// The rule text comes from the app's own constant and the helper refuses
+/// anything that is not byte-identical to it, so the strongest thing this can
+/// grant is still exactly "the root owned helper may run as root".
+#[tauri::command]
+pub async fn admin_policy_repair() -> Result<String, String> {
+    // The rule only grants a keep *for* the policy's action ids, so repairing
+    // it without the policy would be meaningless (and the helper refuses to
+    // run without the policy anyway).
+    crate::utils::root_policy::verify_installed_polkit_policy()?;
+
+    // Already installed byte for byte: never raise a needless prompt.
+    if matches!(
+        crate::utils::root_policy::polkit_rule_check(),
+        crate::utils::root_policy::PolkitRuleCheck::Verified
+    ) {
+        return Ok("The administrator authorization rule is already installed.".to_string());
+    }
+
+    // The same named-action route every other helper call takes: no arguments,
+    // one PolicyKit prompt, the rule text on stdin. It reports a helper that
+    // predates the action, and the helper itself refuses any content that is
+    // not byte-identical to its own constant.
+    install_polkit_rule().await?;
+
+    // The helper validated the exact bytes before writing them. Read the file
+    // back when this host allows it; a rules.d directory this user cannot read
+    // is not a failed repair.
+    match crate::utils::root_policy::polkit_rule_check() {
+        crate::utils::root_policy::PolkitRuleCheck::Verified => Ok(
+            "Administrator authorization rule installed. Admin mode can be enabled now."
+                .to_string(),
+        ),
+        crate::utils::root_policy::PolkitRuleCheck::Unreadable(_) => Ok(
+            "Administrator authorization rule installed. This system does not let the panel \
+             read the rule back; the helper verified the bytes it wrote."
+                .to_string(),
+        ),
+        crate::utils::root_policy::PolkitRuleCheck::Mismatch(error) => Err(format!(
+            "The authorization rule was written but does not verify: {error}"
+        )),
+    }
 }
 
 /// Turn admin mode ON by taking the one authorisation the panel caches.
@@ -262,36 +325,34 @@ pub async fn admin_policy_status() -> Result<(), String> {
 /// `date` cannot be used for this: its pkexec action falls back to
 /// `auth_admin` (no keep), so a successful prompt would leave `--list-temp`
 /// empty and ON could never be verified.
-#[tauri::command]
-pub async fn admin_mode_on() -> AdminModeState {
-    if let Err(error) = crate::utils::root_policy::verify_installed_polkit_policy() {
-        return AdminModeState::off(Some(format!(
-            "The installed PolicyKit policy is missing or unsafe: {error}. \
-             Reinstall src-tauri/polkit/com.controlpanel.pkexec.policy before enabling admin mode."
-        )));
-    }
-    let before = read_admin_mode_state();
-    if before.on {
-        return before;
-    }
-    if before.error.is_some() {
-        // We cannot verify the result of a prompt, so we must not raise one.
-        return before;
-    }
+///
+/// A missing or stale rule is repaired here rather than handed back to the
+/// user: a readable mismatch is installed before the first prompt, and a host
+/// that hides the rule from this user (`0750 root:polkitd`) is repaired and
+/// retried once if the first keep does not stick.
+/// Install the rules.d rule through the helper's one bootstrap action.
+///
+/// The helper validates the bytes itself; this is the only action that runs
+/// before the rule exists, so it is the one that makes the keep possible.
+async fn install_polkit_rule() -> Result<(), String> {
+    crate::commands::service_manager::run_service_named_action(
+        "install_polkit_rule",
+        &[],
+        crate::utils::root_policy::POLKIT_RULE_TEXT,
+    )
+    .await
+}
 
-    let Some(helper) = installed_helper_path() else {
-        return AdminModeState::off(Some(
-            "The administrator helper is not installed, so admin mode cannot be enabled."
-                .to_string(),
-        ));
-    };
+/// Run the helper's `admin_keep` and report the state PolicyKit actually kept.
+///
+/// ON is never inferred from the exit code: the helper runs, then
+/// `pkcheck --list-temp` is read back. A prompt that was dismissed, or one that
+/// PolicyKit did not keep, comes back as an `Off` state with the reason.
+async fn take_admin_keep(helper: &str) -> Result<AdminModeState, String> {
     let args = vec![String::from("admin_keep")];
-    let output = match run_privileged_output(helper, &args, &RootAuth::Polkit).await {
-        Ok(output) => output,
-        Err(error) => {
-            return AdminModeState::off(Some(format!("Admin mode was not enabled: {error}")))
-        }
-    };
+    let output = run_privileged_output(helper, &args, &RootAuth::Polkit)
+        .await
+        .map_err(|error| format!("Admin mode was not enabled: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if output.status.code() == Some(126) || stderr.contains("dismissed") {
@@ -301,20 +362,85 @@ pub async fn admin_mode_on() -> AdminModeState {
         } else {
             format!("Admin mode was not enabled: {stderr}")
         };
-        return AdminModeState::off(Some(message));
+        return Err(message);
+    }
+    Ok(read_admin_mode_state())
+}
+
+#[tauri::command]
+pub async fn admin_mode_on() -> AdminModeState {
+    if let Err(error) = crate::utils::root_policy::verify_installed_polkit_policy() {
+        return AdminModeState::off(Some(format!(
+            "The installed PolicyKit policy is missing or unsafe: {error}. \
+             Reinstall src-tauri/polkit/com.controlpanel.pkexec.policy before enabling admin mode."
+        )));
     }
 
-    // The helper ran, but ON is only true if PolicyKit actually kept the
-    // authorisation. Never infer it from the exit code alone.
-    let after = read_admin_mode_state();
-    if after.on {
-        after
-    } else {
-        AdminModeState::off(Some(after.error.unwrap_or_else(|| {
-            "PolicyKit did not keep the administrator authorization. Is the panel's polkit rule installed?"
-                .to_string()
-        })))
+    let Some(helper) = installed_helper_path() else {
+        return AdminModeState::off(Some(
+            "The administrator helper (lcp-admin) is not installed. Install the Control Panel \
+             package, or place the bundled helper at /usr/bin/lcp-admin, then try again."
+                .to_string(),
+        ));
+    };
+
+    let before = read_admin_mode_state();
+    if before.on {
+        return before;
     }
+    if before.error.is_some() {
+        // We cannot verify the result of a prompt, so we must not raise one.
+        return before;
+    }
+
+    // A readable, wrong rule is repaired first: prompting for a keep that
+    // PolicyKit will not grant spends the password for nothing. A rule this
+    // user cannot read (Fedora's `0750 root:polkitd` directory) proves
+    // nothing either way — the keep check below decides.
+    let mut rule_verified = matches!(
+        crate::utils::root_policy::polkit_rule_check(),
+        crate::utils::root_policy::PolkitRuleCheck::Verified
+    );
+
+    if !rule_verified
+        && matches!(
+            crate::utils::root_policy::polkit_rule_check(),
+            crate::utils::root_policy::PolkitRuleCheck::Mismatch(_)
+        )
+    {
+        if let Err(error) = install_polkit_rule().await {
+            return AdminModeState::off(Some(error));
+        }
+        rule_verified = matches!(
+            crate::utils::root_policy::polkit_rule_check(),
+            crate::utils::root_policy::PolkitRuleCheck::Verified
+        );
+    }
+
+    let first = match take_admin_keep(helper).await {
+        Ok(state) => state,
+        Err(message) => return AdminModeState::off(Some(message)),
+    };
+    if first.on {
+        return first;
+    }
+
+    // Self-healing for hosts where the rule cannot be read: the prompt above
+    // was wasted because the rule really is missing. Install it and retry the
+    // keep once, so the user never has to find a Repair button.
+    if !rule_verified {
+        if let Err(error) = install_polkit_rule().await {
+            let reason = first.error.unwrap_or_default();
+            return AdminModeState::off(Some(format!("{reason} {error}").trim().to_string()));
+        }
+        return match take_admin_keep(helper).await {
+            Ok(second) if second.on => second,
+            Ok(second) => AdminModeState::off(second.error),
+            Err(message) => AdminModeState::off(Some(message)),
+        };
+    }
+
+    AdminModeState::off(first.error)
 }
 
 /// Turn admin mode OFF by revoking the real cached authorisation, then confirm

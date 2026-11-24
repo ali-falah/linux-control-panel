@@ -12,8 +12,6 @@ const SYSTEMD_ROOT: &str = "/tmp/lcp-admin-test-fixture/systemd/system";
 const SYSTEMCTL_BIN: &str = "/tmp/lcp-admin-test-fixture/bin/systemctl";
 const LOG: &str = "/tmp/lcp-admin-test-fixture/log/calls.log";
 const HELPER: &str = env!("CARGO_BIN_EXE_lcp-admin");
-static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
-use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug)]
 struct Run {
@@ -36,7 +34,11 @@ fn run_helper_with_stdin(args: &[&str], stdin: &str) -> Run {
         .spawn()
         .unwrap_or_else(|err| panic!("unexpected spawn error {err}"));
     if let Some(mut pipe) = child.stdin.take() {
-        pipe.write_all(stdin.as_bytes()).unwrap();
+        // A helper that refuses the request exits without reading stdin, so the
+        // write can fail with EPIPE depending on timing. The exit status and
+        // stderr are what these tests assert, so a closed pipe is not an error.
+        let _ = pipe.write_all(stdin.as_bytes());
+        let _ = pipe.flush();
     }
     let output = child.wait_with_output().unwrap();
     Run {
@@ -46,10 +48,14 @@ fn run_helper_with_stdin(args: &[&str], stdin: &str) -> Run {
     }
 }
 
-fn fixture() -> MutexGuard<'static, ()> {
-    let guard = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn fixture() -> std::fs::File {
+    // The fixture directory is shared by every test binary, and each binary is
+    // its own process — an in-process Mutex cannot serialise them. The flock is
+    // released by the kernel even if this test panics or the process dies.
+    let lock_file = std::fs::File::create(format!("{FIXTURE_ROOT}.lock"))
+        .expect("fixture lock file could not be created");
+    rustix::fs::flock(&lock_file, rustix::fs::FlockOperation::LockExclusive)
+        .expect("the fixture lock could not be taken");
     let _ = std::fs::remove_dir_all(FIXTURE_ROOT);
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/bin")).unwrap();
     std::fs::create_dir_all(format!("{FIXTURE_ROOT}/log")).unwrap();
@@ -66,7 +72,7 @@ exit 0
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(SYSTEMCTL_BIN, STUB).unwrap();
     std::fs::set_permissions(SYSTEMCTL_BIN, std::fs::Permissions::from_mode(0o755)).unwrap();
-    guard
+    lock_file
 }
 
 fn calls() -> Vec<String> {
@@ -316,4 +322,27 @@ fn rollback_with_successful_retry_does_not_require_recovery() {
         std::fs::read_to_string(&path).unwrap(),
         "[Service]\nEnvironment=OLD=1\n"
     );
+}
+
+#[test]
+fn unit_create_writes_a_new_unit_and_refuses_overwrite() {
+    let _guard = fixture();
+    let content = "[Unit]\nDescription=Fixture Service\n[Service]\nExecStart=/bin/true\n";
+    let run = run_helper_with_stdin(&["unit_create", "demo.service"], content);
+    assert_eq!(run.code, 0, "new unit must be created: {run:?}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{SYSTEMD_ROOT}/demo.service")).unwrap(),
+        content
+    );
+    assert_eq!(calls(), vec!["daemon-reload"]);
+
+    let again = run_helper_with_stdin(&["unit_create", "demo.service"], content);
+    assert_eq!(again.code, 2, "an existing unit must not be overwritten: {again:?}");
+    assert!(again.stderr.contains("already exists"), "{again:?}");
+    assert_eq!(calls(), vec!["daemon-reload"]);
+
+    let invalid = run_helper_with_stdin(&["unit_create", "-bad.service"], content);
+    assert_eq!(invalid.code, 2, "invalid unit name must be refused: {invalid:?}");
+    let empty = run_helper_with_stdin(&["unit_create", "empty.service"], "");
+    assert_eq!(empty.code, 2, "an empty unit must be refused: {empty:?}");
 }

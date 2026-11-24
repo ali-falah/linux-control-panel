@@ -1,5 +1,6 @@
 <script lang="ts">
   import SearchBar from '../components/ui/SearchBar.svelte';
+  import FilterChips from '../components/ui/FilterChips.svelte';
   import Select from '../components/ui/Select.svelte';
   import TabGroup from '../components/ui/TabGroup.svelte';
   import { tableFeatures } from '../actions/tableFeatures';
@@ -10,12 +11,14 @@
   import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
   import DatePicker from '../components/ui/DatePicker.svelte';
+  import ContextMenu from '../components/ui/ContextMenu.svelte';
+  import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
   import { 
     Server, Activity, Globe, FileCode, FolderOpen, FileText, Shield, 
-    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle, 
+    Play, Square, RotateCcw, RefreshCw, CheckCircle, XCircle, AlertTriangle, ShieldAlert,
     Plus, Trash2, Eye, EyeOff, Upload, FolderPlus, Edit3, Download, Copy, ListFilter, 
     ChevronRight, ChevronDown, Lock, Clock, ArchiveRestore, Save, BarChart2, 
     TerminalSquare, Filter, Search, Sparkles, Bot, Zap, TrendingUp, Radio, HardDrive, Compass, Layers, PieChart, ArrowUpRight, WrapText
@@ -81,6 +84,9 @@
     top_user_agents: [string, number][];
     top_methods: [string, number][];
     hourly_traffic: [string, number][];
+    sample_lines: number;
+    first_entry: string;
+    last_entry: string;
   }
 
   // ─── State ────────────────────────────────────────────────────────────────
@@ -223,16 +229,31 @@
   let analyticsData = $state<NginxLogAnalytics | null>(null);
   let analyticsLoading = $state(false);
   let analyticsLogFile = $state('/var/log/nginx/access.log');
+  let analyticsFull = $state(false);
+  let analyticsUpdatedAt = $state('');
 
   // Overview
   let serviceStatus = $state<NginxServiceStatus | null>(null);
   let testResult = $state<NginxTestResult | null>(null);
   let stats = $state<NginxStats | null>(null);
+  let statsLoading = $state(false);
   let serviceLoading = $state(false);
+  const nginxServiceActions: Array<{
+    action: 'start' | 'stop' | 'restart' | 'reload';
+    label: string;
+    danger: boolean;
+    icon: any;
+  }> = [
+    { action: 'start', label: 'Start', danger: false, icon: Play },
+    { action: 'stop', label: 'Stop', danger: true, icon: Square },
+    { action: 'restart', label: 'Restart', danger: false, icon: RotateCcw },
+    { action: 'reload', label: 'Reload', danger: false, icon: RefreshCw },
+  ];
   let testLoading = $state(false);
 
   // Sites
   let sites = $state<NginxSite[]>([]);
+  let sitesError = $state<string | null>(null);
   let sitesLoading = $state(false);
   let showNewSiteForm = $state(false);
   let newSite = $state<NewSiteConfig>({
@@ -317,11 +338,27 @@
   let logFiles = $state<string[]>([]);
   let selectedLog = $state('');
   let logContent = $state('');
+  let logError = $state<string | null>(null);
   let logLoading = $state(false);
   let logFilter = $state('');
   let logAutoRefresh = $state(false);
   let logInterval: ReturnType<typeof setInterval> | null = null;
   let logViewMode = $state<'structured' | 'raw'>('structured');
+  let rawWrap = $state(true);
+
+  /** Thin severity accent for raw lines — the text itself stays untouched. */
+  function rawLineSeverity(line: string): string {
+    if (/\[(error|crit|emerg|alert)\]/.test(line)) return 'sev-5';
+    if (/\[warn\]/.test(line)) return 'sev-4';
+    const status = line.match(/"\s+(\d{3})\s+/);
+    if (status) {
+      const code = Number(status[1]);
+      if (code >= 500) return 'sev-5';
+      if (code >= 400) return 'sev-4';
+    }
+    return '';
+  }
+
   let logStatusFilter = $state<'all' | '2xx' | '3xx' | '4xx' | '5xx'>('all');
   let timeRange = $state('all');
   let customStartDate = $state('');
@@ -419,6 +456,14 @@
     }
   }
 
+  /** "2026-10-23 12:44:48" — archived logs span days, so the row needs the date. */
+  function formatLogMoment(date: Date | null, fallback: string): string {
+    if (!date) return fallback;
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+      `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
   function parseLogLine(line: string): ParsedLogEntry {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -480,13 +525,14 @@
         else clientBrowser = userAgent.split(' ')[0].substring(0, 15);
       }
 
+      const accessDate = parseLogDate(rawTime);
       return {
         raw: line,
         type: 'access',
         ip,
         timestamp: rawTime,
-        formattedTime,
-        date: parseLogDate(rawTime),
+        formattedTime: formatLogMoment(accessDate, formattedTime),
+        date: accessDate,
         method,
         path,
         httpVersion: httpVer,
@@ -521,7 +567,7 @@
         raw: line,
         type: 'error',
         timestamp,
-        formattedTime: timestamp.split(' ')[1] || timestamp,
+        formattedTime: formatLogMoment(parseLogDate(timestamp), timestamp),
         date: parseLogDate(timestamp),
         logLevel: level,
         errorMessage: message,
@@ -545,6 +591,24 @@
       .map(parseLogLine)
       .reverse();
   });
+
+  // Raw mode keeps the search box useful; the status category is a property of
+  // the parsed entries, so it is only meaningful in the structured view.
+  const rawLogContent = $derived.by(() => {
+    const query = logFilter.trim().toLowerCase();
+    if (!query) return logContent;
+    return logContent
+      .split('\n')
+      .filter(line => line.toLowerCase().includes(query))
+      .join('\n');
+  });
+
+  const rawLines = $derived(rawLogContent.split('\n'));
+
+  /** Newest rotated access log, offered when the active log is empty. */
+  const newestAccessArchive = $derived(
+    logFiles.find(file => /\/access\.log-/.test(file)) ?? ''
+  );
 
   const filteredLogEntries = $derived.by(() => {
     let list = parsedLogEntries;
@@ -609,6 +673,7 @@
 
   // SSL
   let sslCerts = $state<SslCert[]>([]);
+  let sslError = $state<string | null>(null);
   let sslLoading = $state(false);
   let renewingCert = $state('');
 
@@ -674,11 +739,14 @@
   }
 
   async function loadStats() {
+    statsLoading = true;
     try {
       stats = await invoke<NginxStats>('nginx_get_stats');
       statusStore.setLastCommand('curl -s http://localhost/nginx_status', 0, true);
     } catch {
       statusStore.setLastCommand('curl -s http://localhost/nginx_status', 1, false);
+    } finally {
+      statsLoading = false;
     }
   }
 
@@ -768,8 +836,10 @@
     sitesLoading = true;
     try {
       sites = await invoke<NginxSite[]>('nginx_list_sites');
+      sitesError = null;
       statusStore.setLastCommand('ls /etc/nginx/conf.d/ /etc/nginx/sites-available/', 0, true);
     } catch (e) {
+      sitesError = String(e);
       uiStore.addToast(`Failed to load sites: ${e}`, 'error');
       statusStore.setLastCommand('ls /etc/nginx/conf.d/', 1, false);
     } finally {
@@ -889,6 +959,16 @@
 
   let siteSearchQuery = $state('');
   let siteSourceFilter = $state<'all' | 'conf.d' | 'sites-available' | 'sites-enabled'>('all');
+  const siteSourceFilters = [
+    { id: 'all', label: 'All' },
+    { id: 'conf.d', label: 'conf.d' },
+    { id: 'sites-available', label: 'sites-available' },
+  ] as const;
+  const siteSourceCounts = $derived({
+    all: sites.length,
+    'conf.d': sites.filter(s => s.source === 'conf.d').length,
+    'sites-available': sites.filter(s => s.source === 'sites-available').length,
+  });
 
   let filteredSites = $derived.by(() => {
     let list = sites;
@@ -907,6 +987,43 @@
       );
     }
     return list;
+  });
+
+  type SiteSortKey = 'name' | 'ports' | 'status';
+  let siteSortKey = $state<SiteSortKey>('name');
+  let siteSortAsc = $state(true);
+
+  function sortSitesBy(key: SiteSortKey) {
+    if (siteSortKey === key) siteSortAsc = !siteSortAsc;
+    else {
+      siteSortKey = key;
+      siteSortAsc = true;
+    }
+  }
+
+  function siteAriaSort(key: SiteSortKey): 'ascending' | 'descending' | 'none' {
+    if (siteSortKey !== key) return 'none';
+    return siteSortAsc ? 'ascending' : 'descending';
+  }
+
+  function siteSortIndicator(key: SiteSortKey): string {
+    if (siteSortKey !== key) return '↕';
+    return siteSortAsc ? '↑' : '↓';
+  }
+
+  const visibleSites = $derived.by(() => {
+    const direction = siteSortAsc ? 1 : -1;
+    return [...filteredSites].sort((a, b) => {
+      let order = 0;
+      if (siteSortKey === 'name') {
+        order = a.name.localeCompare(b.name);
+      } else if (siteSortKey === 'ports') {
+        order = (a.ports?.[0] ?? '').localeCompare(b.ports?.[0] ?? '', undefined, { numeric: true });
+      } else {
+        order = Number(a.enabled) - Number(b.enabled);
+      }
+      return order * direction || a.name.localeCompare(b.name);
+    });
   });
 
   async function openSiteInEditor(site: NginxSite) {
@@ -1054,6 +1171,20 @@
   }
 
   async function selectConfig(cfg: NginxConfigFile) {
+    // Never throw away unsaved work by switching files.
+    if (selectedConfig && selectedConfig.path !== cfg.path && hasChanges()) {
+      uiStore.confirm(
+        'Discard unsaved changes?',
+        `"${selectedConfig.name}" has unsaved changes. Opening "${cfg.name}" will discard them.`,
+        () => void openConfig(cfg),
+        true
+      );
+      return;
+    }
+    await openConfig(cfg);
+  }
+
+  async function openConfig(cfg: NginxConfigFile) {
     editorLoading = true;
     selectedConfig = cfg;
     showDiff = false;
@@ -1200,7 +1331,13 @@
   }
 
   async function viewWwwFile(entry: WwwEntry) {
-    if (entry.is_dir) { toggleExpand(entry.path); return; }
+    if (entry.is_dir) {
+      // Select the folder first: its actions (subfolder/upload/rename/delete)
+      // live in the panel that renders for a directory entry.
+      selectedWwwEntry = entry;
+      toggleExpand(entry.path);
+      return;
+    }
     selectedWwwEntry = entry;
     wwwFileContent = '';
     wwwFileLoading = true;
@@ -1231,7 +1368,10 @@
   }
 
   async function createDir() {
-    if (!newDirName.trim()) return;
+    if (!newDirName.trim()) {
+      uiStore.addToast('Enter a folder name first.', 'warning');
+      return;
+    }
     const full = `${newDirParent}/${newDirName}`.replace(/\/\//g, '/');
     try {
       await invoke('nginx_create_www_dir', { path: full });
@@ -1254,8 +1394,8 @@
     }
 
     uiStore.confirm(
-      `Delete ${entry.isDir ? 'Folder' : 'File'}`,
-      `Are you sure you want to permanently delete "${entry.path}"${entry.isDir ? ' and all files within it? This will remove all web content permanently.' : '? This action cannot be undone.'}`,
+      `Delete ${entry.is_dir ? 'Folder' : 'File'}`,
+      `Are you sure you want to permanently delete "${entry.path}"${entry.is_dir ? ' and all files within it? This will remove all web content permanently.' : '? This action cannot be undone.'}`,
       async () => {
         try {
           await invoke('nginx_delete_www_entry', { path: entry.path });
@@ -1273,18 +1413,19 @@
   }
 
   async function doRename() {
-    if (!renamingEntry || !renameValue.trim()) return;
-    const parentDir = renamingEntry.path.substring(0, renamingEntry.path.lastIndexOf('/'));
+    const entry = renamingEntry;
+    if (!entry || !renameValue.trim()) return;
+    const parentDir = entry.path.substring(0, entry.path.lastIndexOf('/'));
     const newPath = `${parentDir}/${renameValue}`;
     try {
-      await invoke('nginx_rename_www_entry', { oldPath: renamingEntry.path, newPath });
-      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 0, true);
+      await invoke('nginx_rename_www_entry', { oldPath: entry.path, newPath });
+      statusStore.setLastCommand(`mv ${entry.path} ${newPath}`, 0, true);
       uiStore.addToast('Renamed ✓', 'success');
       renamingEntry = null;
       await loadWww();
     } catch (e) {
       uiStore.addToast(`Rename failed: ${e}`, 'error');
-      statusStore.setLastCommand(`mv ${renamingEntry.path} ${newPath}`, 1, false);
+      statusStore.setLastCommand(`mv ${entry.path} ${newPath}`, 1, false);
     }
   }
 
@@ -1304,7 +1445,17 @@
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
-  // ─── WWW Context Menu ──────────────────────────────────────────────────────
+  // ─── Context Menus ────────────────────────────────────────────────────────
+  interface NginxContextItem {
+    label: string;
+    icon?: any;
+    action?: () => void;
+    danger?: boolean;
+    disabled?: boolean;
+    divider?: boolean;
+    color?: string;
+  }
+
   let wwwContextMenu = $state<{
     visible: boolean;
     x: number;
@@ -1312,26 +1463,6 @@
     entry: WwwEntry | null;
   }>({ visible: false, x: 0, y: 0, entry: null });
 
-  function handleWwwContextMenu(e: MouseEvent, entry: WwwEntry | null) {
-    e.preventDefault();
-    e.stopPropagation();
-    const menuWidth = 210;
-    const menuHeight = 260;
-    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
-    wwwContextMenu = {
-      visible: true,
-      x,
-      y,
-      entry,
-    };
-  }
-
-  function closeWwwContextMenu() {
-    wwwContextMenu.visible = false;
-  }
-
-  // Right-click Site Context Menu
   let siteContextMenu = $state<{
     visible: boolean;
     x: number;
@@ -1339,34 +1470,135 @@
     site: NginxSite | null;
   }>({ visible: false, x: 0, y: 0, site: null });
 
+  function handleWwwContextMenu(e: MouseEvent, entry: WwwEntry | null) {
+    e.preventDefault();
+    e.stopPropagation();
+    wwwContextMenu = { visible: true, x: e.clientX, y: e.clientY, entry };
+  }
+
   function handleSiteContextMenu(e: MouseEvent, site: NginxSite) {
     e.preventDefault();
     e.stopPropagation();
-    const menuWidth = 220;
-    const menuHeight = 310;
-    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
-    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
-    siteContextMenu = {
-      visible: true,
-      x,
-      y,
-      site,
-    };
+    siteContextMenu = { visible: true, x: e.clientX, y: e.clientY, site };
   }
 
-  function closeSiteContextMenu() {
-    siteContextMenu.visible = false;
+  function siteContextItems(site: NginxSite): NginxContextItem[] {
+    const items: NginxContextItem[] = [
+      { label: 'Quick Inspect', icon: Eye, action: () => openSiteInspector(site) },
+      { label: 'Edit in Full Editor', icon: FileCode, action: () => openSiteInEditor(site) },
+      { label: 'Clone Site Config', icon: Copy, action: () => openCloneModal(site) },
+      { label: 'View Logs & Analytics', icon: BarChart2, action: () => jumpToSiteLogs(site, 'analytics') },
+    ];
+
+    if (!site.has_ssl) {
+      items.push({
+        label: "Issue Let's Encrypt SSL",
+        icon: Sparkles,
+        color: 'var(--color-accent)',
+        action: () => openQuickSsl(site),
+      });
+    }
+
+    if (site.source === 'sites-available' || site.source === 'conf.d') {
+      items.push({
+        label: site.enabled ? 'Disable Site' : 'Enable Site',
+        icon: site.enabled ? EyeOff : Eye,
+        disabled: toggleLoadingFor === site.name,
+        action: () => toggleSite(site),
+      });
+    }
+
+    items.push(
+      {
+        label: 'Copy Config Path',
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(site.path);
+          uiStore.addToast('Copied site path to clipboard', 'info');
+        },
+      },
+      { label: '', divider: true },
+      { label: 'Delete Site', icon: Trash2, danger: true, action: () => confirmDeleteSite(site) },
+    );
+
+    return items;
   }
 
-  // Global click & esc listener to close context menus and popovers
+  function wwwContextItems(entry: WwwEntry | null): NginxContextItem[] {
+    if (!entry) {
+      return [
+        {
+          label: 'New Folder at Root',
+          icon: FolderPlus,
+          action: () => {
+            showNewDirForm = true;
+            newDirParent = '/var/www';
+          },
+        },
+        { label: 'Upload File to /var/www', icon: Upload, action: () => uploadFile('/var/www') },
+        { label: 'Refresh File Tree', icon: RefreshCw, action: () => loadWww() },
+      ];
+    }
+
+    if (!entry.is_dir) {
+      return [
+        { label: 'View / Preview', icon: Eye, action: () => viewWwwFile(entry) },
+        {
+          label: 'Rename File',
+          icon: Edit3,
+          action: () => {
+            renamingEntry = entry;
+            renameValue = entry.name;
+          },
+        },
+        {
+          label: 'Copy Full Path',
+          icon: Copy,
+          action: () => {
+            navigator.clipboard.writeText(entry.path);
+            uiStore.addToast('Copied full path to clipboard', 'info');
+          },
+        },
+        { label: '', divider: true },
+        { label: 'Delete File', icon: Trash2, danger: true, action: () => confirmDeleteWww(entry) },
+      ];
+    }
+
+    return [
+      {
+        label: 'New Subfolder',
+        icon: FolderPlus,
+        action: () => {
+          showNewDirForm = true;
+          newDirParent = entry.path;
+        },
+      },
+      { label: 'Upload File Here', icon: Upload, action: () => uploadFile(entry.path) },
+      {
+        label: 'Rename Folder',
+        icon: Edit3,
+        action: () => {
+          renamingEntry = entry;
+          renameValue = entry.name;
+        },
+      },
+      {
+        label: 'Copy Folder Path',
+        icon: Copy,
+        action: () => {
+          navigator.clipboard.writeText(entry.path);
+          uiStore.addToast('Copied folder path to clipboard', 'info');
+        },
+      },
+      { label: '', divider: true },
+      { label: 'Delete Folder', icon: Trash2, danger: true, action: () => confirmDeleteWww(entry) },
+    ];
+  }
+
+  // Close the custom date popover on outside click / Escape. The shared
+  // ContextMenu owns its own dismissal.
   $effect(() => {
     function handleOutsideClick(e: MouseEvent) {
-      if (wwwContextMenu.visible) {
-        closeWwwContextMenu();
-      }
-      if (siteContextMenu.visible) {
-        closeSiteContextMenu();
-      }
       if (showCustomPopover && popoverContainer && !popoverContainer.contains(e.target as Node)) {
         const target = e.target as HTMLElement;
         if (!target.closest('.custom-range-container') && !target.closest('.date-picker-container')) {
@@ -1375,11 +1607,7 @@
       }
     }
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        if (wwwContextMenu.visible) closeWwwContextMenu();
-        if (siteContextMenu.visible) closeSiteContextMenu();
-        if (showCustomPopover) showCustomPopover = false;
-      }
+      if (e.key === 'Escape' && showCustomPopover) showCustomPopover = false;
     }
     window.addEventListener('click', handleOutsideClick);
     window.addEventListener('keydown', handleKey);
@@ -1390,6 +1618,23 @@
   });
 
   // ─── Logs ──────────────────────────────────────────────────────────────────
+
+  /** Badge colour for an nginx error-log level: only real errors are red. */
+  function logLevelClass(level?: string): string {
+    switch ((level || '').toLowerCase()) {
+      case 'emerg':
+      case 'alert':
+      case 'crit':
+      case 'error':
+        return 'status-5xx';
+      case 'warn':
+        return 'status-4xx';
+      case 'notice':
+        return 'status-2xx';
+      default:
+        return 'status-3xx';
+    }
+  }
 
   async function loadLogFiles() {
     try {
@@ -1407,21 +1652,23 @@
     }
   }
 
-  async function loadLog() {
+  async function loadLog(silent = false) {
     if (!selectedLog && logFiles.length > 0) {
       selectedLog = logFiles[0];
     }
     if (!selectedLog) return;
-    logLoading = true;
+    if (!silent) logLoading = true;
     try {
       logContent = await invoke<string>('nginx_read_log', {
         path: selectedLog,
         lines: 500,
         filter: null,
       });
+      logError = null;
       statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 0, true);
     } catch (e) {
       logContent = '';
+      logError = String(e);
       uiStore.addToast(`Failed to read log: ${e}`, 'error');
       statusStore.setLastCommand(`tail -n 500 ${selectedLog}`, 1, false);
     } finally {
@@ -1432,11 +1679,20 @@
   function toggleAutoRefresh() {
     logAutoRefresh = !logAutoRefresh;
     if (logAutoRefresh) {
-      logInterval = setInterval(() => loadLog(), 5000);
+      // silent reload: no spinner, so the stream does not blink every 5s
+      logInterval = setInterval(() => loadLog(true), 5000);
     } else {
       if (logInterval) { clearInterval(logInterval); logInterval = null; }
     }
   }
+
+  $effect(() => {
+    if (activeNav !== 'logs' && logInterval) {
+      clearInterval(logInterval);
+      logInterval = null;
+      logAutoRefresh = false;
+    }
+  });
 
   function confirmClearLog() {
     if (!selectedLog) return;
@@ -1459,23 +1715,77 @@
   }
 
   async function exportLog() {
-    const blob = new Blob([logContent], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = selectedLog.split('/').pop() ?? 'nginx.log';
-    a.click();
-    URL.revokeObjectURL(url);
+    // The webview has no download handler, so a Blob + <a>.click() does
+    // nothing — write the file through the backend like every other export.
+    try {
+      const filename = selectedLog.split('/').pop() ?? 'nginx.log';
+      await invoke<string>('export_journal_logs_to_file', { filename, content: logContent });
+      uiStore.addToast(`Exported ${filename} to Downloads.`, 'success');
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
   }
 
   // ─── SSL ───────────────────────────────────────────────────────────────────
+
+  async function exportAnalytics() {
+    if (!analyticsData) return;
+    const data = analyticsData;
+    const rows: (string | number)[][] = [
+      ['Metric', 'Value'],
+      ['File', analyticsLogFile],
+      ['Mode', analyticsFull ? 'full file (up to 200k lines)' : 'newest 15,000 lines'],
+      ['Lines in sample', data.sample_lines],
+      ['First entry', data.first_entry],
+      ['Last entry', data.last_entry],
+      ['Total requests', data.total_requests],
+      ['Unique client IPs', data.unique_ips],
+      ['Bytes sent', data.total_bytes_sent],
+      ['2xx', data.status_2xx],
+      ['3xx', data.status_3xx],
+      ['4xx', data.status_4xx],
+      ['5xx', data.status_5xx],
+      ['Success rate %', data.success_rate.toFixed(1)],
+      ['Error rate %', data.error_rate.toFixed(1)],
+      [],
+      ['Top client IPs', 'Hits'],
+      ...data.top_ips,
+      [],
+      ['Top paths', 'Hits'],
+      ...data.top_paths,
+      [],
+      ['Top methods', 'Hits'],
+      ...data.top_methods,
+      [],
+      ['Top referrers', 'Hits'],
+      ...data.top_referrers,
+      [],
+      ['Top user agents', 'Hits'],
+      ...data.top_user_agents,
+      [],
+      ['Hour', 'Requests'],
+      ...data.hourly_traffic,
+    ];
+    const csv = rows
+      .map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    try {
+      const filename = `nginx-analytics-${analyticsLogFile.split('/').pop() ?? 'access.log'}.csv`;
+      await invoke<string>('export_journal_logs_to_file', { filename, content: csv });
+      uiStore.addToast(`Exported ${filename} to Downloads.`, 'success');
+    } catch (e) {
+      uiStore.addToast(`Export failed: ${e}`, 'error');
+    }
+  }
 
   async function loadSslCerts() {
     sslLoading = true;
     try {
       sslCerts = await invoke<SslCert[]>('nginx_list_ssl_certs');
+      sslError = null;
       statusStore.setLastCommand('certbot certificates', 0, true);
     } catch (e) {
+      sslError = String(e);
       uiStore.addToast(`Failed to load certs: ${e}`, 'error');
       statusStore.setLastCommand('certbot certificates', 1, false);
     } finally {
@@ -1515,8 +1825,16 @@
   async function loadAnalytics(notify = false) {
     analyticsLoading = true;
     try {
-      analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', { path: analyticsLogFile });
-      statusStore.setLastCommand(`tail -n 15000 ${analyticsLogFile}`, 0, true);
+      analyticsData = await invoke<NginxLogAnalytics>('nginx_get_log_analytics', {
+        path: analyticsLogFile,
+        full: analyticsFull,
+      });
+      analyticsUpdatedAt = new Date().toLocaleTimeString();
+      statusStore.setLastCommand(
+        `${analyticsFull ? 'full scan' : 'tail -n 15000'} ${analyticsLogFile}`,
+        0,
+        true,
+      );
       lastLoadedAnalyticsLog = analyticsLogFile;
       if (notify) {
         uiStore.addToast(`Refreshed telemetry from ${analyticsLogFile.split('/').pop()}`, 'info');
@@ -1564,15 +1882,42 @@
     }
   }
 
-  const tabDefs = $derived([
+  // Five destinations; the seventh tab set collapses into scope switches.
+  const navTabs: { id: string; label: string; icon: any }[] = [
     { id: 'overview', label: 'Overview', icon: Activity },
-    { id: 'sites',    label: 'Sites',    icon: Globe },
-    { id: 'editor',   label: 'Config Editor', icon: FileCode },
-    { id: 'www',      label: 'WWW Files', icon: FolderOpen },
-    { id: 'logs',     label: 'Logs',     icon: FileText },
-    { id: 'analytics',label: 'Analytics',icon: BarChart2 },
-    { id: 'ssl',      label: 'SSL / Certs', icon: Lock },
-  ] as { id: typeof activeTab; label: string; icon: any }[]);
+    { id: 'sites', label: 'Sites', icon: Globe },
+    { id: 'files', label: 'Files', icon: FolderOpen },
+    { id: 'logs', label: 'Logs', icon: FileText },
+    { id: 'ssl', label: 'Certificates', icon: Lock },
+  ];
+
+  const fileScopes: { id: string; label: string; icon: any }[] = [
+    { id: 'editor', label: 'Configuration', icon: FileCode },
+    { id: 'www', label: 'Web root', icon: FolderOpen },
+  ];
+
+  const logScopes: { id: string; label: string; icon: any }[] = [
+    { id: 'logs', label: 'Stream', icon: FileText },
+    { id: 'analytics', label: 'Analytics', icon: BarChart2 },
+  ];
+
+  const activeNav = $derived(
+    activeTab === 'editor' || activeTab === 'www'
+      ? 'files'
+      : activeTab === 'analytics'
+        ? 'logs'
+        : activeTab
+  );
+
+  function selectNav(id: string) {
+    if (id === 'files') {
+      activeTab = activeTab === 'www' ? 'www' : 'editor';
+    } else if (id === 'logs') {
+      activeTab = activeTab === 'analytics' ? 'analytics' : 'logs';
+    } else {
+      activeTab = id as typeof activeTab;
+    }
+  }
 
   $effect(() => {
     if (uiStore.targetSubTab && ['overview', 'sites', 'editor', 'www', 'logs', 'analytics', 'ssl'].includes(uiStore.targetSubTab)) {
@@ -1597,7 +1942,9 @@
       } else if (currentTab === 'www' && !loadedTabs.has('www')) {
         loadedTabs.add('www');
         loadWww();
-      } else if (currentTab === 'logs' && !loadedTabs.has('logs')) {
+      } else if (currentTab === 'logs') {
+        // Always re-list: the set depends on the current privileges, so a
+        // refresh after enabling admin mode must pick up the new files.
         loadedTabs.add('logs');
         loadLogFiles();
       } else if (currentTab === 'analytics') {
@@ -1624,10 +1971,16 @@
     subtitle={loading ? 'Checking nginx…' : installInfo?.installed ? `${installInfo.version} — Manage web server configs, sites, and files` : 'nginx is not installed on this system'} 
     icon={Server} 
   >
-    {#if activeTab === 'logs'}
-      <!-- Range Selector (Journal Logs Style) placed in Page Header -->
+    <TabGroup
+      size="sm"
+      tabs={navTabs}
+      activeTab={activeNav}
+      onchange={selectNav}
+    />
+
+    {#if activeNav === 'logs'}
       <div class="custom-range-container">
-        <Select bind:value={timeRange} onchange={handleRangeChange} style="height: 30px; width: 140px;">
+        <Select bind:value={timeRange} onchange={handleRangeChange} size="sm" style="width: 140px;" ariaLabel="Log time range">
           <option value="all">All Logs</option>
           <option value="1">Last 24 Hours</option>
           <option value="3">Last 3 Days</option>
@@ -1641,39 +1994,18 @@
             <div class="popover-row">
               <span class="popover-label">From</span>
               <DatePicker bind:value={customStartDate} placeholder="Start date" />
-              <input
-                type="time"
-                bind:value={customStartTime}
-                class="log-dt"
-              />
+              <input type="time" bind:value={customStartTime} class="log-dt" />
             </div>
             <div class="popover-row" style="margin-top: 10px;">
               <span class="popover-label">To</span>
               <DatePicker bind:value={customEndDate} placeholder="End date" />
-              <input
-                type="time"
-                bind:value={customEndTime}
-                class="log-dt"
-              />
+              <input type="time" bind:value={customEndTime} class="log-dt" />
             </div>
             <div class="popover-actions">
-              <button
-                type="button"
-                class="popover-btn apply-btn"
-                onclick={() => {
-                  showCustomPopover = false;
-                }}
-              >
+              <button type="button" class="popover-btn apply-btn" onclick={() => { showCustomPopover = false; }}>
                 Apply
               </button>
-              <button
-                type="button"
-                class="popover-btn cancel-btn"
-                onclick={() => {
-                  showCustomPopover = false;
-                  if (!customStartDate) timeRange = 'all';
-                }}
-              >
+              <button type="button" class="popover-btn cancel-btn" onclick={() => { showCustomPopover = false; if (!customStartDate) timeRange = 'all'; }}>
                 Cancel
               </button>
             </div>
@@ -1681,7 +2013,6 @@
         {/if}
       </div>
     {/if}
-
     {#if aiStore.enabled && installInfo?.installed}
       <Button variant="outline" size="sm" onclick={() => showAiNginxPromptBox = !showAiNginxPromptBox} title="Generate NGINX configuration block with AI">
         <Sparkles size={14} style="color:var(--color-accent);" /> AI Config Generator
@@ -1739,51 +2070,57 @@
           <code>sudo pacman -S nginx</code>
         </div>
       </div>
-      <Button variant="primary" class="" onclick={init}>
-        <RefreshCw size={14} /> Recheck
+      <Button variant="primary" class="" onclick={init} disabled={loading}>
+        <RefreshCw size={14} class={loading ? 'animate-spin-slow' : ''} /> Recheck
       </Button>
     </div>
   {:else}
-    <!-- ─── Controls: Tabs & Actions ─── -->
+    <!-- ─── Controls: tab-local filters and actions ─── -->
     <div class="controls-row">
-      <div class="tab-bar">
-        {#each tabDefs as tab}
-          <button class="tab-btn { activeTab === tab.id ? 'active' : '' }"
-            onclick={() => (activeTab = tab.id)}
-            id={`nginx-tab-${tab.id}`}
-          >
-            <tab.icon size={14} />
-            {tab.label}
-          </button>
-        {/each}
+      <div class="nginx-tab-scope">
+        {#if activeNav === 'files'}
+          <TabGroup
+            size="sm"
+            tabs={fileScopes}
+            activeTab={activeTab}
+            onchange={(id) => (activeTab = id as typeof activeTab)}
+          />
+        {:else if activeNav === 'logs'}
+          <TabGroup
+            size="sm"
+            tabs={logScopes}
+            activeTab={activeTab}
+            onchange={(id) => (activeTab = id as typeof activeTab)}
+          />
+        {/if}
       </div>
 
       <div class="tab-actions">
         {#if activeTab === 'sites'}
-          <Button variant="outline" class="btn-sm" onclick={loadSites} id="nginx-refresh-sites">
-            <RefreshCw size={13} /> Refresh
-          </Button>
+          <button class="header-refresh-btn" onclick={loadSites} disabled={sitesLoading} id="nginx-refresh-sites" title="Reload sites" aria-label="Reload sites">
+            <RefreshCw size={13} class={sitesLoading ? 'animate-spin-slow' : ''} />
+          </button>
           <Button variant="primary" class="btn-sm" onclick={() => (showNewSiteForm = true)} id="nginx-new-site">
             <Plus size={13} /> New Site
           </Button>
-          <Button variant="primary" class="btn-sm" onclick={() => (showProxyWizard = true)} id="nginx-new-proxy">
+          <Button variant="outline" class="btn-sm" onclick={() => (showProxyWizard = true)} id="nginx-new-proxy">
             <Globe size={13} /> New Proxy
           </Button>
         {:else if activeTab === 'editor'}
-          <Button variant="outline" class="btn-sm" onclick={loadConfigs} id="nginx-refresh-configs">
-            <RefreshCw size={13} /> Refresh
-          </Button>
+          <button class="header-refresh-btn" onclick={loadConfigs} disabled={editorLoading} id="nginx-refresh-configs" title="Reload configuration files" aria-label="Reload configuration files">
+            <RefreshCw size={13} class={editorLoading ? 'animate-spin-slow' : ''} />
+          </button>
           <Button variant="outline" class="btn-sm" onclick={() => { showBackups = !showBackups; if (showBackups) loadBackups(); }} id="nginx-show-backups">
             <ArchiveRestore size={13} /> Backups ({backups.length})
           </Button>
         {:else if activeTab === 'www'}
-          <Button variant="outline" class="btn-sm" onclick={loadWww} id="nginx-refresh-www"><RefreshCw size={13} /> Refresh</Button>
+          <button class="header-refresh-btn" onclick={loadWww} disabled={wwwLoading} id="nginx-refresh-www" title="Reload web root" aria-label="Reload web root"><RefreshCw size={13} class={wwwLoading ? 'animate-spin-slow' : ''} /></button>
           <Button variant="primary" class="btn-sm" onclick={() => { showNewDirForm = !showNewDirForm; newDirParent = '/var/www'; }} id="nginx-new-dir">
             <FolderPlus size={13} /> New Dir
           </Button>
         {:else if activeTab === 'logs'}
           <div style="width: 260px; max-width: 280px; flex-shrink: 0;">
-            <Select bind:value={selectedLog} onchange={loadLog} id="nginx-log-select">
+            <Select bind:value={selectedLog} onchange={() => loadLog()} size="sm" id="nginx-log-select" ariaLabel="Log file">
               {#if selectedLog && !logFiles.includes(selectedLog)}
                 <option value={selectedLog}>{selectedLog.split('/').pop()} • Custom</option>
               {/if}
@@ -1798,23 +2135,31 @@
             <SearchBar bind:value={logFilter} placeholder="Filter logs (e.g. /api, 404, 192.168, GET)…" style="margin:0; width: 100%;" />
           </div>
           <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
-            <Button variant="outline" class="btn-sm" onclick={loadLog} id="nginx-log-refresh">
-              <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} /> Refresh
-            </Button>
+            <button class="header-refresh-btn" onclick={() => loadLogFiles()} disabled={logLoading} id="nginx-log-refresh" title="Reload log files and this log" aria-label="Reload log files and this log">
+              <RefreshCw size={13} class={logLoading ? 'animate-spin-slow' : ''} />
+            </button>
             <Button variant={logAutoRefresh ? 'primary' : 'outline'} size="sm" onclick={toggleAutoRefresh} id="nginx-log-auto">
               <Clock size={13} /> {logAutoRefresh ? 'Live: On' : 'Live: Off'}
             </Button>
-            <Button variant="outline" class="btn-sm" onclick={exportLog} id="nginx-log-export">
-              <Download size={13} /> Export
-            </Button>
-            <Button variant="danger" class="btn-sm" onclick={confirmClearLog} id="nginx-log-clear">
-              <Trash2 size={13} /> Clear
-            </Button>
+            <button class="export-action-btn" onclick={exportLog} id="nginx-log-export" title="Export this log" aria-label="Export this log">
+              <Download size={13} />
+              <ChevronDown size={11} style="opacity:0.7;" />
+            </button>
+            <KebabMenu align="right" title="Log actions">
+              <button
+                class="menu-item"
+                style="color: var(--color-error);"
+                onclick={confirmClearLog}
+                id="nginx-log-clear"
+              >
+                <Trash2 size={13} /> Clear log
+              </button>
+            </KebabMenu>
           </div>
         {:else if activeTab === 'ssl'}
-          <Button variant="outline" class="btn-sm" onclick={loadSslCerts} id="nginx-refresh-ssl">
-            <RefreshCw size={13} /> Refresh
-          </Button>
+          <button class="header-refresh-btn" onclick={loadSslCerts} disabled={sslLoading} id="nginx-refresh-ssl" title="Reload certificates" aria-label="Reload certificates">
+            <RefreshCw size={13} class={sslLoading ? 'animate-spin-slow' : ''} />
+          </button>
         {/if}
       </div>
     </div>
@@ -1824,7 +2169,7 @@
 
       <!-- ══ OVERVIEW ══════════════════════════════════════════════════════ -->
       {#if activeTab === 'overview'}
-        <div class="tab-section overview-section" style="display:flex; flex-direction:column; gap:20px;">
+        <div class="tab-section overview-section" style="display:flex; flex-direction:column; gap:14px;">
           <!-- Top Action Ribbon -->
           <div class="ov-action-ribbon">
             <div class="ov-ribbon-left">
@@ -1880,8 +2225,9 @@
                 class="btn-sm" 
                 onclick={() => Promise.all([loadServiceStatus(), loadTestResult(), loadStats(), loadSites()])}
                 title="Refresh all overview statistics"
+                disabled={serviceLoading || testLoading || sitesLoading || statsLoading}
               >
-                <RefreshCw size={13} class={serviceLoading || testLoading ? 'animate-spin' : ''} />
+                <RefreshCw size={13} class={serviceLoading || testLoading || sitesLoading || statsLoading ? 'animate-spin-slow' : ''} />
                 <span>Refresh</span>
               </Button>
             </div>
@@ -1910,12 +2256,23 @@
                 </p>
 
                 <div class="service-btns">
-                  {#each [['start','Start',false,Play], ['stop','Stop',true,Square], ['restart','Restart',false,RotateCcw], ['reload','Reload',false,RefreshCw]] as [action, label, isDanger, Icon]}
+                  {#each nginxServiceActions as { action, label, danger, icon: Icon }}
+                    {@const wrongState =
+                      (action === 'start' && serviceStatus?.active) ||
+                      (action === 'stop' && !serviceStatus?.active) ||
+                      (action === 'reload' && !serviceStatus?.active)}
                     <Button
-                      variant={isDanger ? 'danger' : 'outline'}
+                      variant={danger ? 'danger' : 'outline'}
                       class="btn-sm"
-                      onclick={() => requestServiceAction(action as string)}
-                      disabled={serviceLoading}
+                      onclick={() => requestServiceAction(action)}
+                      disabled={serviceLoading || wrongState}
+                      title={action === 'start' && serviceStatus?.active
+                        ? 'nginx is already running'
+                        : action === 'stop' && !serviceStatus?.active
+                          ? 'nginx is already stopped'
+                          : action === 'reload' && !serviceStatus?.active
+                            ? 'Start nginx before reloading it'
+                            : `${label} nginx`}
                       id={`nginx-svc-${action}`}
                     >
                       {#if serviceLoading}
@@ -1955,9 +2312,12 @@
               </div>
 
               {#if testResult}
-                <div class="test-result {testResult.passed ? 'test-pass' : 'test-fail'}">
+                {@const needsAdmin = !testResult.passed && testResult.output.includes('Admin mode is off')}
+                <div class="test-result {testResult.passed ? 'test-pass' : needsAdmin ? 'test-warn' : 'test-fail'}">
                   {#if testResult.passed}
                     <CheckCircle size={17} /> <span>Configuration Syntax OK</span>
+                  {:else if needsAdmin}
+                    <ShieldAlert size={17} /> <span>Test needs administrator mode</span>
                   {:else}
                     <XCircle size={17} /> <span>Configuration Syntax Error</span>
                   {/if}
@@ -2017,7 +2377,7 @@
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;">
                 <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Ports:</span>
                 {#each detectedOverviewPorts as p}
-                  <span class="port-badge {p.includes('SSL') ? 'ssl' : 'plain'}">{p}</span>
+                  <span class="port-badge {p === '443' ? 'ssl' : 'plain'}">{p}</span>
                 {/each}
                 {#if totalProxiesCount > 0}
                   <span class="site-meta-pill proxy" style="margin-left:auto;">
@@ -2114,96 +2474,6 @@
             </div>
           </div>
 
-          <!-- Bottom: Configured Virtual Hosts Preview Table -->
-          <div class="card ov-card">
-            <div class="ov-card-header">
-              <div class="ov-card-title">
-                <Globe size={16} class="text-accent" />
-                <span>Configured Virtual Hosts</span>
-                <span class="badge badge-muted" style="margin-left:6px;">{sites.length} total</span>
-              </div>
-              <Button variant="outline" class="btn-sm" onclick={() => activeTab = 'sites'}>
-                <span>Open Sites Manager</span>
-                <ArrowUpRight size={13} />
-              </Button>
-            </div>
-
-            {#if sites.length === 0}
-              <div class="empty-state" style="padding:24px;">No virtual hosts loaded yet.</div>
-            {:else}
-              <div class="ov-sites-mini-table-wrap">
-                <table class="ov-sites-mini-table">
-                  <thead>
-                    <tr>
-                      <th>Virtual Host</th>
-                      <th>Ports &amp; SSL</th>
-                      <th>Source</th>
-                      <th>Status</th>
-                      <th style="text-align:right;">Quick Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each sites as site}
-                      <tr>
-                        <td>
-                          <div style="display:flex; align-items:center; gap:8px;">
-                            <Globe size={13} class="text-accent" />
-                            <strong>{site.name}</strong>
-                            {#if site.domains && site.domains.length > 0}
-                              {#each site.domains as dom}
-                                <span class="site-meta-pill domain" style="font-size:10px;">{dom}</span>
-                              {/each}
-                            {/if}
-                            {#if site.proxies && site.proxies.length > 0}
-                              {#each site.proxies as prx}
-                                <span class="site-meta-pill proxy" style="font-size:10px;">{prx}</span>
-                              {/each}
-                            {/if}
-                          </div>
-                        </td>
-                        <td>
-                          <div style="display:flex; align-items:center; gap:4px;">
-                            {#if site.ports && site.ports.length > 0}
-                              {#each site.ports as p}
-                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}" style="font-size:10px; padding:1px 5px;">
-                                  {#if p.includes('SSL') || site.has_ssl}<Lock size={9} />{/if}
-                                  {p}
-                                </span>
-                              {/each}
-                            {:else}
-                              <span class="port-badge plain" style="font-size:10px; padding:1px 5px;">80</span>
-                            {/if}
-                          </div>
-                        </td>
-                        <td><span class="badge badge-muted" style="font-size:10.5px;">{site.source}</span></td>
-                        <td>
-                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}" style="font-size:10.5px;">
-                            {site.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
-                        </td>
-                        <td style="text-align:right;">
-                          <div style="display:flex; justify-content:flex-end; gap:6px;">
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInspector(site)} title="Quick Inspect">
-                              <Eye size={11} />
-                              <span>Inspect</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => openSiteInEditor(site)} title="Edit Config">
-                              <FileCode size={11} />
-                              <span>Edit</span>
-                            </Button>
-                            <Button variant="outline" class="btn-sm" onclick={() => jumpToSiteLogs(site, 'analytics')} title="View Logs">
-                              <BarChart2 size={11} />
-                              <span>Logs</span>
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {/if}
-          </div>
         </div>
 
       <!-- ══ SITES ══════════════════════════════════════════════════════════ -->
@@ -2211,95 +2481,24 @@
         <div class="tab-section">
 
 
-          {#if showNewSiteForm}
-            <div class="card new-site-form">
-              <h4 class="form-title">Create New Site</h4>
-              <div class="form-grid">
-                <label class="form-field">
-                  <span>Server Name (domain)</span>
-                  <input type="text" bind:value={newSite.server_name} placeholder="example.com" id="nginx-site-name" />
-                </label>
-                <label class="form-field">
-                  <span>Port</span>
-                  <input type="number" bind:value={newSite.port} min={1} max={65535} id="nginx-site-port" />
-                </label>
-                <label class="form-field form-toggle">
-                  <span>Reverse Proxy</span>
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.is_proxy}
-                    onclick={() => newSite.is_proxy = !newSite.is_proxy}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.is_proxy}
-                    aria-label="Toggle Reverse Proxy"
-                    id="nginx-site-proxy"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                </label>
-                {#if newSite.is_proxy}
-                  <label class="form-field form-full">
-                    <span>Proxy Target URL</span>
-                    <input type="text" bind:value={newSite.proxy_url} placeholder="http://localhost:3000" id="nginx-site-proxy-url" />
-                  </label>
-                {:else}
-                  <label class="form-field">
-                    <span>Root Directory</span>
-                    <input type="text" bind:value={newSite.root_dir} placeholder="/var/www/html" id="nginx-site-root" />
-                  </label>
-                  <label class="form-field">
-                    <span>Index File</span>
-                    <input type="text" bind:value={newSite.index_file} id="nginx-site-index" />
-                  </label>
-                {/if}
-                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.enable_404}
-                    onclick={() => newSite.enable_404 = !newSite.enable_404}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.enable_404}
-                    aria-label="Toggle custom 404 page"
-                    id="nginx-site-404"
-                    style="transform: scale(0.8);"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                  Include 404 error page
-                </label>
-                <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-secondary); cursor:pointer;">
-                  <button
-                    class="ui-toggle"
-                    class:on={newSite.enable_50x}
-                    onclick={() => newSite.enable_50x = !newSite.enable_50x}
-                    type="button"
-                    role="switch"
-                    aria-checked={newSite.enable_50x}
-                    aria-label="Toggle custom 50x page"
-                    id="nginx-site-50x"
-                    style="transform: scale(0.8);"
-                  >
-                    <span class="ui-toggle-thumb"></span>
-                  </button>
-                  Include 50x error pages
-                </label>
-              </div>
-              <div class="form-actions">
-                <Button variant="ghost" class="" onclick={() => (showNewSiteForm = false)}>Cancel</Button>
-                <Button variant="primary" class="" onclick={createSite} disabled={newSiteLoading} id="nginx-create-site-submit">
-                  {#if newSiteLoading}<div class="spinner-sm"></div>{/if}
-                  Create Site
-                </Button>
-              </div>
-            </div>
-          {/if}
-
           {#if sitesLoading}
             <div class="center-state"><div class="spinner"></div></div>
+          {:else if sitesError}
+            <EmptyState
+              icon={Server}
+              title="Could not load site configurations"
+              description={sitesError}
+              actionLabel="Retry"
+              onAction={loadSites}
+            />
           {:else if sites.length === 0}
-            <div class="empty-state">No site configurations found</div>
+            <EmptyState
+              icon={Globe}
+              title="No site configurations found"
+              description="Create a virtual host to serve a site, or add a reverse proxy for an app on this machine."
+              actionLabel="New Site"
+              onAction={() => (showNewSiteForm = true)}
+            />
           {:else}
             <!-- Sites Toolbar -->
             <div class="sites-toolbar">
@@ -2309,44 +2508,56 @@
                   placeholder="Search sites by name, source, or path…" 
                 />
               </div>
-              <div class="sites-filter-pills">
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'all'} 
-                  onclick={() => siteSourceFilter = 'all'}
-                >
-                  All ({sites.length})
-                </button>
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'conf.d'} 
-                  onclick={() => siteSourceFilter = 'conf.d'}
-                >
-                  conf.d ({sites.filter(s => s.source === 'conf.d').length})
-                </button>
-                <button 
-                  type="button" 
-                  class="filter-pill" 
-                  class:active={siteSourceFilter === 'sites-available'} 
-                  onclick={() => siteSourceFilter = 'sites-available'}
-                >
-                  sites-available ({sites.filter(s => s.source === 'sites-available').length})
-                </button>
-              </div>
+              <FilterChips
+                options={siteSourceFilters.map(option => ({ ...option, count: siteSourceCounts[option.id] }))}
+                value={siteSourceFilter}
+                onchange={(id) => (siteSourceFilter = id)}
+                label="Filter sites by source"
+              />
             </div>
 
-            <div class="table-wrap">
-              <table use:tableFeatures>
+            <Table
+              tableAction={tableFeatures}
+              actionParams={{ sortable: false }}
+              class="sites-table"
+              style="border:none; border-radius:0;"
+            >
                 <thead>
                   <tr>
-                    <th>Site &amp; Routing</th>
-                    <th>Ports &amp; SSL</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                    <th>Configuration Path</th>
-                    <th style="text-align:right;">Actions</th>
+                    <th
+                      style="width:34%"
+                      class:sort-asc={siteSortKey === 'name' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'name' && !siteSortAsc}
+                      aria-sort={siteAriaSort('name')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('name')}>
+                        Site &amp; Routing <span class="sort-indicator">{siteSortIndicator('name')}</span>
+                      </button>
+                    </th>
+                    <th
+                      style="width:16%"
+                      class:sort-asc={siteSortKey === 'ports' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'ports' && !siteSortAsc}
+                      aria-sort={siteAriaSort('ports')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('ports')}>
+                        Ports &amp; SSL <span class="sort-indicator">{siteSortIndicator('ports')}</span>
+                      </button>
+                    </th>
+                    <th style="width:10%">Source</th>
+                    <th
+                      style="width:12%"
+                      class:sort-asc={siteSortKey === 'status' && siteSortAsc}
+                      class:sort-desc={siteSortKey === 'status' && !siteSortAsc}
+                      aria-sort={siteAriaSort('status')}
+                    >
+                      <button type="button" class="th-sort-btn" onclick={() => sortSitesBy('status')}>
+                        Status <span class="sort-indicator">{siteSortIndicator('status')}</span>
+                      </button>
+                    </th>
+                    <th style="width:18%">Configuration Path</th>
+                    <!-- The table density control floats in this corner; the label stays for screen readers. -->
+                    <th style="width:10%; text-align:right" aria-label="Actions"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2357,7 +2568,7 @@
                       </td>
                     </tr>
                   {:else}
-                    {#each filteredSites as site}
+                    {#each visibleSites as site}
                       <tr class="site-row" oncontextmenu={(e) => handleSiteContextMenu(e, site)}>
                         <!-- Column 1: Site Name & Routing -->
                         <td class="site-name-cell-wrapper">
@@ -2381,7 +2592,7 @@
                               <div class="site-routing-tags">
                                 {#if site.domains}
                                   {#each site.domains as dom}
-                                    <span class="site-meta-pill domain" title="Configured Server Name">
+                                    <span class="site-meta-pill domain" title={`Server name: ${dom}`}>
                                       <Globe size={10} />
                                       <span>{dom}</span>
                                     </span>
@@ -2389,7 +2600,7 @@
                                 {/if}
                                 {#if site.proxies}
                                   {#each site.proxies as prx}
-                                    <span class="site-meta-pill proxy" title="Reverse Proxy Target">
+                                    <span class="site-meta-pill proxy" title={`Proxy target: ${prx}`}>
                                       <ArrowUpRight size={10} />
                                       <span>{prx}</span>
                                     </span>
@@ -2405,8 +2616,8 @@
                           <div class="site-ports-cell">
                             {#if site.ports && site.ports.length > 0}
                               {#each site.ports as p}
-                                <span class="port-badge {p.includes('SSL') || site.has_ssl ? 'ssl' : 'plain'}">
-                                  {#if p.includes('SSL') || site.has_ssl}
+                                <span class="port-badge {p === '443' || site.has_ssl ? 'ssl' : 'plain'}">
+                                  {#if p === '443' || site.has_ssl}
                                     <Lock size={10} />
                                   {/if}
                                   <span>{p}</span>
@@ -2417,15 +2628,14 @@
                             {/if}
 
                             {#if !site.has_ssl}
-                              <button 
-                                type="button" 
-                                class="btn-quick-ssl-badge" 
-                                onclick={() => openQuickSsl(site)} 
-                                title="Issue automated Let's Encrypt SSL certificate via Certbot"
+                              <Button
+                                variant="outline"
+                                size="xs"
+                                onclick={() => openQuickSsl(site)}
+                                title="Issue an automated Let's Encrypt certificate with Certbot"
                               >
-                                <Sparkles size={10} />
-                                <span>Get SSL</span>
-                              </button>
+                                <Lock size={11} /> SSL
+                              </Button>
                             {/if}
                           </div>
                         </td>
@@ -2435,9 +2645,12 @@
 
                         <!-- Column 4: Status -->
                         <td>
-                          <span class="badge {site.enabled ? 'badge-success' : 'badge-error'}">
-                            {site.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
+                          <Toggle
+                            checked={site.enabled}
+                            disabled={toggleLoadingFor === site.name}
+                            title={`${site.enabled ? 'Disable' : 'Enable'} ${site.name}`}
+                            onclick={() => toggleSite(site)}
+                          />
                         </td>
 
                         <!-- Column 5: Path -->
@@ -2526,8 +2739,7 @@
                     {/each}
                   {/if}
                 </tbody>
-              </table>
-            </div>
+            </Table>
           {/if}
         </div>
 
@@ -2550,7 +2762,7 @@
                       class="file-item"
                       class:selected={selectedConfig?.path === cfg.path}
                       onclick={() => selectConfig(cfg)}
-                      id={`nginx-cfg-${cfg.name}`}
+                      id={`nginx-cfg-${cfg.path}`}
                     >
                       <FileCode size={12} />
                       <span>{cfg.name}</span>
@@ -2621,30 +2833,6 @@
             {/if}
           </div>
 
-          <!-- Backups panel -->
-          {#if showBackups}
-            <div class="backups-panel">
-              <div class="editor-sidebar-header">
-                <span>Backups</span>
-                <Button variant="ghost" class=" btn-sm" onclick={() => (showBackups = false)}>✕</Button>
-              </div>
-              {#if backupsLoading}
-                <div class="center-state"><div class="spinner-sm"></div></div>
-              {:else if backups.length === 0}
-                <p class="empty-state">No backups yet</p>
-              {:else}
-                {#each backups as bk}
-                  <div class="backup-item">
-                    <div class="backup-name">{bk.filename}</div>
-                    <div class="backup-ts">{bk.timestamp}</div>
-                    <Button variant="outline" size="sm" onclick={() => restoreBackup(bk)} id={`nginx-restore-${bk.filename}`}>
-                      <ArchiveRestore size={11} /> Restore
-                    </Button>
-                  </div>
-                {/each}
-              {/if}
-            </div>
-          {/if}
         </div>
 
       <!-- ══ WWW FILES ══════════════════════════════════════════════════════ -->
@@ -2662,7 +2850,7 @@
               <div class="www-tree-header-actions">
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; }} 
                   title="New Folder" 
                   id="nginx-new-folder-top"
@@ -2671,7 +2859,7 @@
                 </Button>
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={() => uploadFile('/var/www')} 
                   title="Upload File" 
                   id="nginx-upload-top"
@@ -2680,7 +2868,7 @@
                 </Button>
                 <Button 
                   variant="ghost" 
-                  class="btn-xs" 
+                  size="xs"
                   onclick={loadWww} 
                   title="Refresh Files" 
                   id="nginx-refresh-www-top"
@@ -2693,8 +2881,8 @@
             {#if showNewDirForm}
               <div class="new-dir-form">
                 <input type="text" bind:value={newDirName} placeholder="Folder name..." id="nginx-new-dir-name" />
-                <Button variant="primary" class="btn-xs" onclick={createDir} id="nginx-create-dir">Create</Button>
-                <Button variant="ghost" class="btn-xs" onclick={() => (showNewDirForm = false)}>✕</Button>
+                <Button variant="primary" size="xs" onclick={createDir} id="nginx-create-dir">Create</Button>
+                <Button variant="ghost" size="xs" onclick={() => (showNewDirForm = false)}>✕</Button>
               </div>
             {/if}
             {#if wwwLoading}
@@ -2963,6 +3151,14 @@
 
           {#if logLoading}
             <div class="center-state"><div class="spinner"></div></div>
+          {:else if logError}
+            <EmptyState
+              icon={FileText}
+              title="Could not read this log"
+              description={logError}
+              actionLabel="Retry"
+              onAction={() => loadLog()}
+            />
           {:else if filteredLogEntries.length === 0}
             <div class="editor-empty" style="min-height: 280px;">
               <FileText size={36} style="color: var(--color-text-muted);" />
@@ -2972,6 +3168,11 @@
           {:else if logViewMode === 'structured'}
             <div class="structured-log-stream">
               {#each filteredLogEntries as entry, idx}
+                {@const dayKey = entry.formattedTime?.slice(0, 10) ?? ''}
+                {@const prevDayKey = idx > 0 ? (filteredLogEntries[idx - 1].formattedTime?.slice(0, 10) ?? '') : ''}
+                {#if dayKey && dayKey !== prevDayKey}
+                  <div class="log-day-separator"><span>{dayKey}</span></div>
+                {/if}
                 {#if entry.type === 'access'}
                   <div 
                     class="log-row-card access-card"
@@ -3061,7 +3262,7 @@
                     onkeydown={(e) => { if (e.key === 'Enter') expandedLogIndex = expandedLogIndex === idx ? null : idx; }}
                   >
                     <div class="log-row-main">
-                      <span class="status-code-badge status-5xx">
+                      <span class="status-code-badge {logLevelClass(entry.logLevel)}">
                         [{entry.logLevel?.toUpperCase()}]
                       </span>
                       <span class="log-error-msg" title={entry.errorMessage}>
@@ -3101,12 +3302,42 @@
             <!-- Raw Mode -->
             <div class="raw-terminal-view">
               <div class="raw-terminal-header">
-                <span>{selectedLog} — {filteredLogEntries.length} entries</span>
-                <Button variant="outline" class="btn-sm" onclick={() => copyLogLine(logContent)}>
-                  <Copy size={12} /> Copy All
-                </Button>
+                <span>
+                  {selectedLog} — {rawLines.filter(line => line.trim()).length} lines
+                  <em class="raw-filter-note">raw file content, unmodified</em>
+                  {#if logStatusFilter !== 'all'}
+                    <em class="raw-filter-note">status filter applies to the structured view</em>
+                  {/if}
+                </span>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onclick={() => (rawWrap = !rawWrap)}
+                    title={rawWrap ? 'Wrap long lines: on' : 'Wrap long lines: off'}
+                  >
+                    <WrapText size={12} /> {rawWrap ? 'Wrap on' : 'Wrap off'}
+                  </Button>
+                  <Button variant="outline" size="sm" onclick={() => copyLogLine(rawLogContent)}>
+                    <Copy size={12} /> Copy shown
+                  </Button>
+                </div>
               </div>
-              <pre class="log-view raw-code-body">{logContent || '(empty)'}</pre>
+
+              <div class="raw-viewport" class:wrap={rawWrap}>
+                {#each rawLines as line, index}
+                  <div
+                    class="raw-line {rawLineSeverity(line)}"
+                    title={line || 'blank line'}
+                  >
+                    <span class="raw-gutter" aria-hidden="true">{index + 1}</span>
+                    <span class="raw-text">{line || '\u00A0'}</span>
+                  </div>
+                {/each}
+                {#if rawLines.length === 0}
+                  <div class="raw-line"><span class="raw-gutter" aria-hidden="true">1</span><span class="raw-text text-muted">(empty)</span></div>
+                {/if}
+              </div>
             </div>
           {/if}
         </div>
@@ -3129,7 +3360,7 @@
             <div class="analytics-header-right">
               <div style="display:flex; align-items:center; gap:8px;">
                 <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">Log Source:</span>
-                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} style="height:28px; width:260px;">
+                <Select bind:value={analyticsLogFile} onchange={() => loadAnalytics(true)} size="sm" style="width:260px;" ariaLabel="Analytics log file">
                   {#if analyticsLogFile && !logFiles.includes(analyticsLogFile)}
                     <option value={analyticsLogFile}>{analyticsLogFile.split('/').pop()} • Custom</option>
                   {/if}
@@ -3148,13 +3379,36 @@
 
               <span class="analytics-sample-badge">
                 <Radio size={11} class="text-accent pulsing" />
-                <span>{analyticsLogFile.includes('error') ? 'Error Event Diagnostics' : 'Sample: 15,000 requests'}</span>
+                <span>
+                  {#if analyticsData}
+                    {analyticsData.sample_lines.toLocaleString()} lines
+                    {#if analyticsData.first_entry}
+                      · {analyticsData.first_entry} → {analyticsData.last_entry}
+                    {/if}
+                  {:else}
+                    newest 15,000 lines
+                  {/if}
+                </span>
               </span>
 
-              <Button variant="outline" class="btn-sm" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data">
-                <RefreshCw size={12} class={analyticsLoading ? 'animate-spin' : ''} />
-                <span>Refresh</span>
+              <Button
+                variant={analyticsFull ? 'primary' : 'outline'}
+                size="sm"
+                onclick={() => { analyticsFull = !analyticsFull; loadAnalytics(true); }}
+                disabled={analyticsLoading}
+                title={analyticsFull
+                  ? 'Analysing the full file (up to 200,000 lines) — click for the newest 15,000'
+                  : 'Analysing the newest 15,000 lines — click to scan the full file (up to 200,000)'}
+              >
+                {analyticsFull ? 'Full file' : 'Sample'}
               </Button>
+              <Button variant="outline" size="sm" onclick={exportAnalytics} disabled={!analyticsData}>
+                <Download size={12} /> Export CSV
+              </Button>
+              <span class="analytics-updated">{analyticsUpdatedAt ? `Updated ${analyticsUpdatedAt}` : ''}</span>
+              <button class="header-refresh-btn" onclick={() => loadAnalytics(true)} disabled={analyticsLoading} title="Refresh analytics data" aria-label="Refresh analytics data">
+                <RefreshCw size={12} class={analyticsLoading ? 'animate-spin-slow' : ''} />
+              </button>
             </div>
           </div>
 
@@ -3187,6 +3441,38 @@
           {#if analyticsLoading}
             <div class="center-state" style="padding:60px 0;"><div class="spinner"></div></div>
           {:else if analyticsData}
+            {#if analyticsData.total_requests === 0}
+              <!-- One message, one block: the trust note would only repeat it. -->
+              <div class="analytics-empty" role="status">
+                <AlertTriangle size={16} />
+                <div>
+                  <strong>No access-log entries in this sample</strong>
+                  <p>
+                    {analyticsFull
+                      ? 'This file contains no combined-format access entries.'
+                      : 'The newest 15,000 lines of this file contain no combined-format access entries.'}
+                    Check that nginx uses the combined log format, or choose another file.
+                  </p>
+                  {#if !analyticsLogFile.includes('-') && newestAccessArchive}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      style="margin-top:8px;"
+                      onclick={() => { analyticsLogFile = newestAccessArchive; loadAnalytics(true); }}
+                    >
+                      Analyse {newestAccessArchive.split('/').pop()}
+                    </Button>
+                  {/if}
+                </div>
+              </div>
+            {:else}
+              <p class="analytics-trust-note">
+                Totals cover the sampled window above, not the full log history.
+                {#if analyticsLogFile.includes('error')}
+                  This is an error log: the cards count events by severity, not HTTP requests.
+                {/if}
+              </p>
+            {/if}
             <!-- ─── 5 Large Hero KPI Cards ──────────────────────────────── -->
             <div class="analytics-kpi-grid">
               <!-- KPI 1: Total Requests / Error Events -->
@@ -3239,7 +3525,7 @@
               <!-- KPI 4: Success Rate (2xx/3xx) -->
               <div class="analytics-kpi-card card">
                 <div class="analytics-kpi-header">
-                  <span class="analytics-kpi-label">Success Rate</span>
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Clean Events' : 'Success Rate'}</span>
                   <div class="analytics-kpi-icon-wrap green">
                     <CheckCircle size={18} />
                   </div>
@@ -3254,14 +3540,18 @@
               <!-- KPI 5: Error Rate (4xx/5xx) -->
               <div class="analytics-kpi-card card">
                 <div class="analytics-kpi-header">
-                  <span class="analytics-kpi-label">Error Rate</span>
+                  <span class="analytics-kpi-label">{analyticsLogFile.includes('error') ? 'Warn / Error Events' : 'Error Rate'}</span>
                   <div class="analytics-kpi-icon-wrap amber">
                     <AlertTriangle size={18} />
                   </div>
                 </div>
                 <div class="analytics-kpi-value {analyticsData.error_rate > 5 ? 'red' : 'amber'}">{analyticsData.error_rate.toFixed(1)}%</div>
                 <div class="analytics-kpi-footer">
-                  <span class="analytics-kpi-subtext">{(analyticsData.status_4xx + analyticsData.status_5xx).toLocaleString()} 4xx/5xx responses</span>
+                  <span class="analytics-kpi-subtext">
+                    <span class="text-warn">{analyticsData.status_4xx.toLocaleString()} 4xx</span>
+                    ·
+                    <span class="text-error">{analyticsData.status_5xx.toLocaleString()} 5xx</span>
+                  </span>
                   <span class="analytics-kpi-tag {analyticsData.error_rate > 5 ? 'red' : 'amber'}">
                     {analyticsData.error_rate > 5 ? 'Elevated' : 'Normal'}
                   </span>
@@ -3590,8 +3880,20 @@
             </div>
             {#if sslLoading}
               <div class="center-state"><div class="spinner"></div></div>
+            {:else if sslError}
+              <EmptyState
+                icon={Lock}
+                title="Certificates are not readable here"
+                description={sslError}
+                actionLabel="Retry"
+                onAction={loadSslCerts}
+              />
             {:else if sslCerts.length === 0}
-              <div class="empty-state">No certificates found in /etc/letsencrypt/live/</div>
+              <EmptyState
+                icon={Lock}
+                title="No certificates found"
+                description="certbot has not issued a certificate on this host yet."
+              />
             {:else}
             <div class="ssl-grid">
               {#each sslCerts as cert}
@@ -3640,7 +3942,7 @@
       class="tree-item {selectedWwwEntry?.path === entry.path ? 'tree-selected' : ''}"
       onclick={() => viewWwwFile(entry)}
       oncontextmenu={(e) => handleWwwContextMenu(e, entry)}
-      id={`nginx-www-${entry.name}-${depth}`}
+      id={`nginx-www-${entry.path}`}
       title="Click to view • Right-click for options"
     >
       {#if entry.is_dir}
@@ -3660,7 +3962,7 @@
           bind:value={renameValue}
           onkeydown={(e) => { if (e.key === 'Enter') doRename(); if (e.key === 'Escape') renamingEntry = null; }}
           onclick={(e) => e.stopPropagation()}
-          id={`nginx-rename-${entry.name}`}
+          id={`nginx-rename-${entry.path}`}
           autofocus
         />
       {:else}
@@ -3679,162 +3981,29 @@
   {/if}
 {/snippet}
 
-<!-- ─── Sites Right-Click Context Menu ────────────────────────────────────── -->
-{#if siteContextMenu.visible && siteContextMenu.site}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div 
-    class="www-context-menu" 
-    style="top: {siteContextMenu.y}px; left: {siteContextMenu.x}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <div class="context-menu-header">
-      <Globe size={13} class="text-accent" />
-      <span class="context-menu-title" title={siteContextMenu.site.name}>{siteContextMenu.site.name}</span>
-    </div>
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item" onclick={() => { openSiteInspector(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Eye size={13} />
-      <span>Quick Inspect</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openSiteInEditor(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <FileCode size={13} />
-      <span>Edit in Full Editor</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { openCloneModal(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Clone Site Config</span>
-    </button>
-
-    <button class="context-menu-item" onclick={() => { jumpToSiteLogs(siteContextMenu.site!, 'analytics'); closeSiteContextMenu(); }}>
-      <BarChart2 size={13} />
-      <span>View Logs &amp; Analytics</span>
-    </button>
-
-    {#if !siteContextMenu.site.has_ssl}
-      <button class="context-menu-item" onclick={() => { openQuickSsl(siteContextMenu.site!); closeSiteContextMenu(); }}>
-        <Sparkles size={13} class="text-accent" />
-        <span>Issue Let's Encrypt SSL</span>
-      </button>
-    {/if}
-
-    {#if siteContextMenu.site.source === 'sites-available' || siteContextMenu.site.source === 'conf.d'}
-      <button 
-        class="context-menu-item" 
-        onclick={() => { toggleSite(siteContextMenu.site!); closeSiteContextMenu(); }}
-        disabled={toggleLoadingFor === siteContextMenu.site.name}
-      >
-        {#if siteContextMenu.site.enabled}
-          <EyeOff size={13} />
-          <span>Disable Site</span>
-        {:else}
-          <Eye size={13} />
-          <span>Enable Site</span>
-        {/if}
-      </button>
-    {/if}
-
-    <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(siteContextMenu.site!.path); uiStore.addToast('Copied site path to clipboard', 'info'); closeSiteContextMenu(); }}>
-      <Copy size={13} />
-      <span>Copy Config Path</span>
-    </button>
-
-    <div class="context-menu-divider"></div>
-
-    <button class="context-menu-item danger" onclick={() => { confirmDeleteSite(siteContextMenu.site!); closeSiteContextMenu(); }}>
-      <Trash2 size={13} />
-      <span>Delete Site</span>
-    </button>
-  </div>
+<!-- ─── Shared Right-Click Context Menus ─────────────────────────────────── -->
+{#if siteContextMenu.site}
+  <ContextMenu
+    bind:isOpen={siteContextMenu.visible}
+    x={siteContextMenu.x}
+    y={siteContextMenu.y}
+    title={siteContextMenu.site.name}
+    icon={Globe}
+    items={siteContextItems(siteContextMenu.site)}
+    onclose={() => { siteContextMenu.visible = false; }}
+  />
 {/if}
 
-<!-- ─── WWW Right-Click Context Menu ──────────────────────────────────────── -->
-{#if wwwContextMenu.visible}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div 
-    class="www-context-menu" 
-    style="top: {wwwContextMenu.y}px; left: {wwwContextMenu.x}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    {#if wwwContextMenu.entry}
-      <div class="context-menu-header">
-        {#if wwwContextMenu.entry.is_dir}
-          <FolderOpen size={13} class="text-accent" />
-        {:else}
-          <FileText size={13} class="text-accent" />
-        {/if}
-        <span class="context-menu-title" title={wwwContextMenu.entry.name}>{wwwContextMenu.entry.name}</span>
-      </div>
-      <div class="context-menu-divider"></div>
-
-      {#if !wwwContextMenu.entry.is_dir}
-        <!-- File Actions -->
-        <button class="context-menu-item" onclick={() => { viewWwwFile(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Eye size={13} />
-          <span>View / Preview</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
-          <Edit3 size={13} />
-          <span>Rename File</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied full path to clipboard', 'info'); closeWwwContextMenu(); }}>
-          <Copy size={13} />
-          <span>Copy Full Path</span>
-        </button>
-        <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Trash2 size={13} />
-          <span>Delete File</span>
-        </button>
-      {:else}
-        <!-- Directory Actions -->
-        <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = wwwContextMenu.entry!.path; closeWwwContextMenu(); }}>
-          <FolderPlus size={13} />
-          <span>New Subfolder</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { uploadFile(wwwContextMenu.entry!.path); closeWwwContextMenu(); }}>
-          <Upload size={13} />
-          <span>Upload File Here</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { renamingEntry = wwwContextMenu.entry; renameValue = wwwContextMenu.entry!.name; closeWwwContextMenu(); }}>
-          <Edit3 size={13} />
-          <span>Rename Folder</span>
-        </button>
-        <button class="context-menu-item" onclick={() => { navigator.clipboard.writeText(wwwContextMenu.entry!.path); uiStore.addToast('Copied folder path to clipboard', 'info'); closeWwwContextMenu(); }}>
-          <Copy size={13} />
-          <span>Copy Folder Path</span>
-        </button>
-        <div class="context-menu-divider"></div>
-        <button class="context-menu-item danger" onclick={() => { confirmDeleteWww(wwwContextMenu.entry!); closeWwwContextMenu(); }}>
-          <Trash2 size={13} />
-          <span>Delete Folder</span>
-        </button>
-      {/if}
-    {:else}
-      <!-- Empty Tree Area Actions -->
-      <div class="context-menu-header">
-        <FolderOpen size={13} class="text-accent" />
-        <span class="context-menu-title">/var/www Root</span>
-      </div>
-      <div class="context-menu-divider"></div>
-      <button class="context-menu-item" onclick={() => { showNewDirForm = true; newDirParent = '/var/www'; closeWwwContextMenu(); }}>
-        <FolderPlus size={13} />
-        <span>New Folder at Root</span>
-      </button>
-      <button class="context-menu-item" onclick={() => { uploadFile('/var/www'); closeWwwContextMenu(); }}>
-        <Upload size={13} />
-        <span>Upload File to /var/www</span>
-      </button>
-      <button class="context-menu-item" onclick={() => { loadWww(); closeWwwContextMenu(); }}>
-        <RefreshCw size={13} />
-        <span>Refresh File Tree</span>
-      </button>
-    {/if}
-  </div>
+{#if wwwContextMenu.visible || wwwContextMenu.entry}
+  <ContextMenu
+    bind:isOpen={wwwContextMenu.visible}
+    x={wwwContextMenu.x}
+    y={wwwContextMenu.y}
+    title={wwwContextMenu.entry?.name ?? '/var/www Root'}
+    icon={wwwContextMenu.entry ? (wwwContextMenu.entry.is_dir ? FolderOpen : FileText) : FolderOpen}
+    items={wwwContextItems(wwwContextMenu.entry)}
+    onclose={() => { wwwContextMenu.visible = false; }}
+  />
 {/if}
 
 <!-- ─── Modals ─────────────────────────────────────────────────────────────── -->
@@ -4109,6 +4278,127 @@
   {/if}
 </SideDrawer>
 
+<!-- ══ BACKUPS DRAWER ═══════════════════════════════════════════════════════ -->
+<SideDrawer
+  bind:isOpen={showBackups}
+  title="Configuration backups"
+  subtitle="One revision is kept for every write"
+  width="460px"
+>
+  {#if backupsLoading}
+    <div class="center-state"><div class="spinner-sm"></div></div>
+  {:else if backups.length === 0}
+    <EmptyState
+      icon={ArchiveRestore}
+      title="No backups yet"
+      description="Every configuration write creates one revision here, so you can restore the previous version."
+    />
+  {:else}
+    <div class="backups-list">
+      {#each backups as bk}
+        <div class="backup-item">
+          <div>
+            <div class="backup-name">{bk.filename}</div>
+            <div class="backup-ts">{bk.timestamp}</div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={() => restoreBackup(bk)}
+            id={`nginx-restore-${bk.filename}`}
+          >
+            <ArchiveRestore size={11} /> Restore
+          </Button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</SideDrawer>
+
+<!-- ══ NEW SITE DRAWER ══════════════════════════════════════════════════════ -->
+<SideDrawer
+  bind:isOpen={showNewSiteForm}
+  title="New site"
+  subtitle="Virtual host configuration"
+  width="520px"
+>
+  {#snippet headerActions()}
+    <Button variant="ghost" size="sm" onclick={() => (showNewSiteForm = false)} disabled={newSiteLoading}>
+      Cancel
+    </Button>
+    <Button variant="primary" size="sm" onclick={createSite} disabled={newSiteLoading}>
+      {#if newSiteLoading}<div class="spinner-sm"></div>{/if}
+      Create site
+    </Button>
+  {/snippet}
+
+  <div class="new-site-form">
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Identity</h4>
+      <Input
+        id="nginx-site-name"
+        label="Server name (domain)"
+        bind:value={newSite.server_name}
+        placeholder="example.com"
+      />
+      <Input
+        id="nginx-site-port"
+        label="Port"
+        type="number"
+        min={1}
+        max={65535}
+        bind:value={newSite.port}
+      />
+    </section>
+
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Content</h4>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">Reverse proxy</span>
+          <span class="toggle-row-hint">Forward requests to an app instead of serving files.</span>
+        </div>
+        <Toggle checked={newSite.is_proxy} onchange={(value) => (newSite.is_proxy = value)} />
+      </div>
+
+      {#if newSite.is_proxy}
+        <Input
+          id="nginx-site-proxy-url"
+          label="Proxy target URL"
+          bind:value={newSite.proxy_url}
+          placeholder="http://localhost:3000"
+        />
+      {:else}
+        <Input
+          id="nginx-site-root"
+          label="Root directory"
+          bind:value={newSite.root_dir}
+          placeholder="/var/www/html"
+        />
+        <Input id="nginx-site-index" label="Index file" bind:value={newSite.index_file} />
+      {/if}
+    </section>
+
+    <section class="drawer-section">
+      <h4 class="drawer-section-title">Error pages</h4>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">404 page</span>
+          <span class="toggle-row-hint">Serve a custom page for missing files.</span>
+        </div>
+        <Toggle checked={newSite.enable_404} onchange={(value) => (newSite.enable_404 = value)} />
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-row-text">
+          <span class="toggle-row-label">50x pages</span>
+          <span class="toggle-row-hint">Serve a custom page for server errors.</span>
+        </div>
+        <Toggle checked={newSite.enable_50x} onchange={(value) => (newSite.enable_50x = value)} />
+      </div>
+    </section>
+  </div>
+</SideDrawer>
+
 <!-- ══ CLONE SITE DRAWER ═════════════════════════════════════════════════════ -->
 <SideDrawer bind:isOpen={showCloneDrawer} title="Clone Site Configuration" width="460px">
   {#if cloningSite}
@@ -4267,13 +4557,13 @@
     padding: 12px 16px;
   }.ni-cmd-label { font-size: 12px; color: var(--color-text-muted); white-space: nowrap; }.ni-cmd code { font-family: var(--font-mono); font-size: 13px; color: var(--color-accent-soft); }/* ─── Tab Bar ────────────────────────────────────────────────────────── */ /* ─── Spinners ───────────────────────────────────────────────────────── */ .spinner {
     width: 24px; height: 24px;
-    border: 2px solid rgba(255,255,255,0.1);
+    border: 2px solid var(--color-border);
     border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }.spinner-sm {
     width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,0.1);
+    border: 2px solid var(--color-border);
     border-top-color: var(--color-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -4424,9 +4714,13 @@
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.25);
   }.test-fail {
-    background: rgba(244, 63, 94, 0.1);
+    background: var(--color-error-muted);
     color: var(--color-error);
-    border: 1px solid rgba(244, 63, 94, 0.25);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+  }.test-warn {
+    background: var(--color-warning-muted);
+    color: var(--color-warning);
+    border: 1px solid rgba(245, 158, 11, 0.3);
   }.test-output-wrap {
     position: relative;
     background: var(--color-bg-base);
@@ -4512,31 +4806,6 @@
   }.ov-env-btn code {
     font-family: var(--font-mono);
     color: var(--color-text-secondary);
-  }.ov-sites-mini-table-wrap {
-    overflow-x: auto;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: var(--color-bg-base);
-  }.ov-sites-mini-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }.ov-sites-mini-table th {
-    text-align: left;
-    padding: 8px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    border-bottom: 1px solid var(--color-border);
-    background: rgba(255, 255, 255, 0.02);
-  }.ov-sites-mini-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text-primary);
-  }.ov-sites-mini-table tr:last-child td {
-    border-bottom: none;
-  }.ov-sites-mini-table tr:hover {
-    background: rgba(255, 255, 255, 0.02);
   }.version-display {
     font-family: var(--font-mono);
     font-size: 13px;
@@ -4560,30 +4829,6 @@
     flex: 1;
     min-width: 260px;
     max-width: 480px;
-  }.sites-filter-pills {
-    display: flex;
-    gap: 4px;
-    background: var(--color-bg-base);
-    padding: 3px;
-    border-radius: 8px;
-    border: 1px solid var(--color-border);
-  }.filter-pill {
-    background: transparent;
-    border: none;
-    padding: 4px 10px;
-    font-size: 11.5px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }.filter-pill:hover {
-    color: var(--color-text-primary);
-  }.filter-pill.active {
-    background: var(--color-bg-card);
-    color: var(--color-accent);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    font-weight: 600;
   }.site-row {
     transition: background 0.15s ease, transform 0.1s ease;
   }.site-row:hover {
@@ -4650,21 +4895,26 @@
   }.site-meta-pill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 1.5px 6px;
-    border-radius: 4px;
+    gap: 5px;
+    max-width: 260px;
+    padding: 2px 8px;
+    border-radius: 999px;
     font-size: 10.5px;
     font-family: var(--font-mono);
-    line-height: 1.3;
+    line-height: 1.35;
     font-weight: 500;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    overflow: hidden;
+  }.site-meta-pill > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }.site-meta-pill.domain {
-    background: rgba(0, 218, 243, 0.08);
-    color: var(--color-accent);
-    border: 1px solid rgba(0, 218, 243, 0.2);
+    color: var(--color-text-accent);
   }.site-meta-pill.proxy {
-    background: rgba(168, 85, 247, 0.1);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.25);
+    color: var(--color-text-secondary);
   }.site-ports-cell {
     display: flex;
     align-items: center;
@@ -4680,32 +4930,13 @@
     font-family: var(--font-mono);
     font-weight: 600;
   }.port-badge.plain {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     color: var(--color-text-secondary);
     border: 1px solid var(--color-border);
   }.port-badge.ssl {
     background: rgba(16, 185, 129, 0.1);
     color: var(--color-success);
     border: 1px solid rgba(16, 185, 129, 0.25);
-  }.btn-quick-ssl-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 10.5px;
-    font-weight: 600;
-    background: linear-gradient(135deg, rgba(236, 72, 153, 0.15), rgba(168, 85, 247, 0.15));
-    color: #f472b6;
-    border: 1px dashed rgba(236, 72, 153, 0.4);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }.btn-quick-ssl-badge:hover {
-    background: linear-gradient(135deg, rgba(236, 72, 153, 0.35), rgba(168, 85, 247, 0.35));
-    color: #ffffff;
-    border-color: #f472b6;
-    transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(236, 72, 153, 0.25);
   }/* ─── Inspector & Drawer Utilities ───────────────────────────────────── */ .inspect-meta-card {
     display: flex;
     flex-direction: column;
@@ -4946,7 +5177,7 @@
     font-size: 12px;
     background: rgba(0,0,0,0.2);
     padding: 12px 0;
-  }.diff-line { display: flex; gap: 12px; padding: 1px 16px; }.diff-add { background: rgba(16,185,129,0.1); color: var(--color-success); }.diff-remove { background: rgba(244,63,94,0.1); color: var(--color-error); }.diff-same { color: var(--color-text-muted); }.diff-marker { width: 14px; flex-shrink: 0; font-weight: 700; }.diff-text { white-space: pre-wrap; word-break: break-all; }/* Backups panel */ .backups-panel {
+  }.diff-line { display: flex; gap: 12px; padding: 1px 16px; }.diff-add { background: rgba(16,185,129,0.1); color: var(--color-success); }.diff-remove { background: rgba(244,63,94,0.1); color: var(--color-error); }.diff-same { color: var(--color-text-muted); }.diff-marker { width: 14px; flex-shrink: 0; font-weight: 700; }.diff-text { white-space: pre-wrap; word-break: break-all; }/* Backups drawer */ .backups-list { display: flex; flex-direction: column; gap: 10px; } .backups-panel {
     width: 250px;
     min-width: 250px;
     border-left: 1px solid var(--color-border);
@@ -4977,7 +5208,7 @@
     justify-content: space-between;
     padding: 10px 14px;
     border-bottom: 1px solid var(--color-border);
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     flex-shrink: 0;
   }.www-tree-title {
     display: flex;
@@ -5019,67 +5250,13 @@
     margin: 1px 4px;
     transition: all 0.12s ease;
   }.tree-item:hover { 
-    background: rgba(255, 255, 255, 0.05); 
+    background: var(--color-bg-raised);
     color: var(--color-text-primary); 
   }.tree-item.tree-selected { 
     background: rgba(0, 218, 243, 0.12); 
     color: var(--color-accent); 
     font-weight: 500;
-  }.tree-arrow { width: 14px; display: flex; align-items: center; justify-content: center; opacity: 0.7; }.tree-arrow-spacer { width: 14px; flex-shrink: 0; }.tree-icon { flex-shrink: 0; }.tree-icon.folder { color: #f59e0b; }.tree-icon.file { color: var(--color-text-muted); }.tree-item.tree-selected :global(.tree-icon):global(.file) { color: var(--color-accent); }.tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.tree-size { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }.rename-input { font-size: 11px; padding: 2px 6px; width: 120px; border-radius: 4px; }/* Right-Click Context Menu */ .www-context-menu {
-    position: fixed;
-    z-index: 1000;
-    min-width: 200px;
-    background: var(--color-bg-card, #0f172a);
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 6px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    animation: menu-fade 0.12s ease;
-  }.context-menu-header {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 5px 8px 6px;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--color-text-muted);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    margin-bottom: 2px;
-  }.context-menu-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 160px;
-  }.context-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 10px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--color-text-secondary);
-    font-size: 11.5px;
-    font-family: var(--font-sans);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.12s ease;
-    white-space: nowrap;
-  }.context-menu-item:hover {
-    background: rgba(0, 218, 243, 0.12);
-    color: var(--color-text-primary);
-  }.context-menu-item.danger { color: var(--color-error); }.context-menu-item.danger:hover {
-    background: rgba(239, 68, 68, 0.15);
-    color: #fca5a5;
-  }.context-menu-divider {
-    height: 1px;
-    background: rgba(255, 255, 255, 0.08);
-    margin: 3px 0;
-  }/* WWW Viewer */ .www-viewer {
+  }.tree-arrow { width: 14px; display: flex; align-items: center; justify-content: center; opacity: 0.7; }.tree-arrow-spacer { width: 14px; flex-shrink: 0; }.tree-icon { flex-shrink: 0; }.tree-icon.folder { color: #f59e0b; }.tree-icon.file { color: var(--color-text-muted); }.tree-item.tree-selected :global(.tree-icon):global(.file) { color: var(--color-accent); }.tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.tree-size { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }.rename-input { font-size: 11px; padding: 2px 6px; width: 120px; border-radius: 4px; }/* WWW Viewer */ .www-viewer {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -5105,7 +5282,7 @@
     font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--color-text-muted);
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--color-bg-raised);
     padding: 2px 7px;
     border-radius: 4px;
     overflow: hidden;
@@ -5153,7 +5330,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 14px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-bottom: 1px solid var(--color-border);
     flex-shrink: 0;
     gap: 10px;
@@ -5220,7 +5397,7 @@
     width: 100%;
     transition: background 0.1s ease;
   }.code-row:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--color-bg-raised);
   }.code-row .gutter-num {
     padding: 0 12px 0 10px;
     min-width: 48px;
@@ -5276,7 +5453,7 @@
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--color-text-muted);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     padding: 3px 8px;
     border-radius: 5px;
   }.analytics-header-right {
@@ -5383,7 +5560,7 @@
     height: 18px;
     border-radius: 6px;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--color-bg-raised);
     margin-bottom: 14px;
     box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
   }.status-seg { height: 100%; transition: width 0.4s ease; }.status-seg.seg-2xx { background: linear-gradient(90deg, #059669, #10b981); }.status-seg.seg-3xx { background: linear-gradient(90deg, #0284c7, #38bdf8); }.status-seg.seg-4xx { background: linear-gradient(90deg, #d97706, #f59e0b); }.status-seg.seg-5xx { background: linear-gradient(90deg, #dc2626, #f87171); }.status-seg-empty {
@@ -5400,7 +5577,7 @@
   }.status-pill-card {
     padding: 10px 14px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
@@ -5446,7 +5623,7 @@
     height: 90px;
     display: flex;
     align-items: flex-end;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--color-bg-raised);
     border-radius: 4px;
     overflow: visible;
     position: relative;
@@ -5472,7 +5649,7 @@
     font-family: var(--font-mono);
     padding: 4px 8px;
     border-radius: 6px;
-    border: 1px solid var(--color-border, rgba(255, 255, 255, 0.18));
+    border: 1px solid var(--color-border, var(--color-border));
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     white-space: nowrap;
     z-index: 9999;
@@ -5487,7 +5664,7 @@
     transform: translateX(-50%);
     border-width: 4px;
     border-style: solid;
-    border-color: var(--color-border, rgba(255, 255, 255, 0.18)) transparent transparent transparent;
+    border-color: var(--color-border, var(--color-border)) transparent transparent transparent;
   }.hourly-bar-tooltip .tooltip-time {
     color: var(--color-accent, #00daf3);
     font-weight: 700;
@@ -5529,7 +5706,7 @@
     text-align: left;
   }.analytics-table td {
     padding: 7px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid var(--color-bg-raised);
     vertical-align: middle;
   }.analytics-rank {
     font-family: var(--font-mono);
@@ -5548,7 +5725,7 @@
     font-weight: 700;
     padding: 1px 4px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     color: var(--color-text-muted);
   }.analytics-sub-badge.public {
     background: rgba(168, 85, 247, 0.15);
@@ -5567,7 +5744,7 @@
     flex: 1;
     height: 6px;
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     overflow: hidden;
   }.analytics-prog-bar.cyan { background: #00daf3; }.analytics-prog-bar.purple { background: #a855f7; }.analytics-prog-bar.green { background: #10b981; }.analytics-prog-bar.blue { background: #3b82f6; }.analytics-prog-pct {
     font-size: 10.5px;
@@ -5585,7 +5762,7 @@
     border-radius: 4px;
     transition: all 0.12s;
   }.analytics-copy-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--color-bg-hover);
     color: var(--color-text-primary);
   }/* Methods & Referrers */ .analytics-methods-container {
     display: flex;
@@ -5609,7 +5786,7 @@
     padding: 2px 6px;
     border-radius: 4px;
     text-transform: uppercase;
-  }.analytics-method-tag.method-get { background: rgba(16, 185, 129, 0.18); color: #34d399; }.analytics-method-tag.method-post { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }.analytics-method-tag.method-put { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }.analytics-method-tag.method-delete { background: rgba(239, 68, 68, 0.18); color: #f87171; }.analytics-method-tag.method-head { background: rgba(168, 85, 247, 0.18); color: #c084fc; }.analytics-method-tag.method-options { background: rgba(255, 255, 255, 0.12); color: var(--color-text-secondary); }.analytics-method-count {
+  }.analytics-method-tag.method-get { background: rgba(16, 185, 129, 0.18); color: #34d399; }.analytics-method-tag.method-post { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }.analytics-method-tag.method-put { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }.analytics-method-tag.method-delete { background: rgba(239, 68, 68, 0.18); color: #f87171; }.analytics-method-tag.method-head { background: rgba(168, 85, 247, 0.18); color: #c084fc; }.analytics-method-tag.method-options { background: var(--color-bg-hover); color: var(--color-text-secondary); }.analytics-method-count {
     font-size: 10.5px;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -5623,7 +5800,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 4px 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-radius: 5px;
     font-size: 11.5px;
   }.analytics-ref-name {
@@ -5647,7 +5824,7 @@
     flex-direction: column;
     gap: 4px;
     padding: 6px 8px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--color-bg-raised);
     border-radius: 6px;
   }.analytics-ua-info {
     display: flex;
@@ -5787,7 +5964,7 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 14px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid var(--color-bg-hover);
     padding-top: 10px;
   }.popover-btn {
     font-family: inherit;
@@ -5804,7 +5981,7 @@
   }.apply-btn:hover {
     background: #00b9cf;
   }.cancel-btn {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     color: var(--color-text-secondary);
   }.cancel-btn:hover {
     background: rgba(255, 255, 255, 0.15);
@@ -5814,7 +5991,7 @@
     height: 6px;
     border-radius: 50%;
   }.pill-dot.green { background: var(--color-success); }.pill-dot.blue { background: var(--color-info); }.pill-dot.amber { background: var(--color-warning); }.pill-dot.red { background: var(--color-error); }.pill-badge {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--color-bg-hover);
     padding: 1px 5px;
     border-radius: 4px;
     font-size: 10px;
@@ -5866,7 +6043,7 @@
     overflow: hidden;
   }.log-row-card:hover {
     border-color: var(--color-border-hover, #334155);
-    background: var(--color-bg-hover, rgba(255, 255, 255, 0.03));
+    background: var(--color-bg-hover, var(--color-bg-raised));
   }.log-row-card.expanded {
     border-color: var(--color-accent, #00daf3);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
@@ -6060,6 +6237,62 @@
     margin: 0;
     height: 100%;
     min-height: 350px;
+  }
+
+  .raw-viewport {
+    flex: 1;
+    min-height: 350px;
+    max-height: calc(100vh - 300px);
+    overflow: auto;
+    padding: 8px 0;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+  }
+
+  .raw-line {
+    display: flex;
+    gap: 12px;
+    padding: 0 12px;
+    white-space: pre;
+  }
+
+  .raw-viewport.wrap .raw-line {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .raw-viewport.wrap .raw-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .raw-gutter {
+    position: sticky;
+    left: 0;
+    flex: 0 0 52px;
+    text-align: right;
+    color: var(--color-text-muted);
+    opacity: 0.55;
+    user-select: none;
+    background: var(--color-bg-base);
+  }
+
+  .raw-text {
+    color: var(--color-text-secondary);
+  }
+
+  .raw-line.sev-4 {
+    border-left: 2px solid var(--color-warning);
+    background: var(--color-warning-muted);
+  }
+
+  .raw-line.sev-5 {
+    border-left: 2px solid var(--color-error);
+    background: var(--color-error-muted);
   }/* ── Explicit Light Mode High-Contrast Overrides ── */ :global(html.light-mode) .log-row-card, :global([data-theme="light"]) .log-row-card {
     background: #FFFFFF !important;
     border: 1px solid #CBD5E1 !important;
@@ -6186,4 +6419,116 @@
     max-width: 600px;
     min-width: 400px;
     color: var(--color-text-secondary);
-  }.modal-footer { display: flex; justify-content: flex-end; margin-top: 20px; }.modal-wide .modal-output { max-width: 700px; min-width: 500px; }</style>
+  }.modal-footer { display: flex; justify-content: flex-end; margin-top: 20px; }.modal-wide .modal-output { max-width: 700px; min-width: 500px; }
+  /* ─── Analytics trust + empty state ─────────────────────────────── */
+  .analytics-trust-note {
+    margin: 0 0 12px;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+  }
+
+  .analytics-updated {
+    font-size: 10.5px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .analytics-empty {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    border-radius: 8px;
+    background: var(--color-warning-muted);
+    border-left: 3px solid var(--color-warning);
+    color: var(--color-text-secondary);
+  }
+
+  .analytics-empty strong {
+    display: block;
+    color: var(--color-text-primary);
+    font-size: 12.5px;
+    margin-bottom: 2px;
+  }
+
+  .analytics-empty p {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+
+  .log-day-separator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0 6px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+  }
+
+  .log-day-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  /* ─── New Site drawer ───────────────────────────────────────────── */
+  .new-site-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .drawer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: var(--color-bg-card);
+  }
+
+  .drawer-section-title {
+    margin: 0;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 0;
+  }
+
+  .toggle-row + .toggle-row {
+    border-top: 1px solid var(--color-border);
+    padding-top: 10px;
+  }
+
+  .toggle-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .toggle-row-label {
+    font-size: 12.5px;
+    color: var(--color-text-primary);
+  }
+
+  .toggle-row-hint {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+</style>

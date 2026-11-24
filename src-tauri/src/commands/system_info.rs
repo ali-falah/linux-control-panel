@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::collections::VecDeque;
 use std::sync::Mutex;
 
 static TELEMETRY_HISTORY: Mutex<Option<VecDeque<SystemStats>>> = Mutex::new(None);
@@ -240,13 +240,21 @@ pub struct SystemStats {
 fn parse_cpu_line(line: &str) -> Option<(u64, u64)> {
     // Format: "cpu0 user nice system idle iowait irq softirq steal guest guest_nice"
     let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 { return None; }
-    let values: Vec<u64> = parts[1..].iter()
-        .filter_map(|v| v.parse::<u64>().ok())
+    if parts.is_empty() || !parts[0].starts_with("cpu") {
+        return None;
+    }
+    // Keep positions stable even when a field is malformed.
+    let values: Vec<u64> = parts[1..]
+        .iter()
+        .map(|value| value.parse::<u64>().unwrap_or(0))
         .collect();
-    if values.len() < 4 { return None; }
-    let idle = values[3];
-    let total: u64 = values.iter().sum();
+    if values.len() < 4 {
+        return None;
+    }
+    // I/O wait is idle time, not CPU work. Guest time is already counted in
+    // user/nice, so it must not be added to the total again.
+    let idle = values[3] + values.get(4).copied().unwrap_or(0);
+    let total: u64 = values.iter().take(8).sum();
     Some((idle, total))
 }
 
@@ -273,11 +281,12 @@ async fn sample_cpu() -> (f64, Vec<f64>) {
     let current = read_stat();
     let now = std::time::Instant::now();
 
-    let prev_opt = {
-        let mut guard = PREV_CPU_SAMPLE.lock().unwrap();
+    let prev_opt = if let Ok(mut guard) = PREV_CPU_SAMPLE.lock() {
         let prev = guard.clone();
         *guard = Some((now, current.clone()));
         prev
+    } else {
+        None
     };
 
     if let Some((prev_time, prev_sample)) = prev_opt {
@@ -473,129 +482,259 @@ pub struct ProcessEntry {
     pub mem_rss_mb: f64,
     pub state: String,
     pub user: String,
+    pub uid: u32,
+    /// Whether the panel's user may signal or renice this process. Root-owned
+    /// processes are listed but their actions must be disabled.
+    pub owned: bool,
     pub threads: u32,
+}
+
+struct ProcStat {
+    name: String,
+    state: String,
+    ppid: u32,
+    utime: u64,
+    stime: u64,
+    threads: u32,
+    rss_pages: u64,
+}
+
+/// Parse `/proc/<pid>/stat`. The command name is wrapped in parentheses and may
+/// contain spaces and further parentheses, so the fields start after the last
+/// `)`; splitting the whole line would shift every following field.
+fn parse_proc_stat(stat: &str) -> Option<ProcStat> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let name = stat[open + 1..close].to_string();
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    if fields.len() < 22 {
+        return None;
+    }
+    // fields[0] is field 3 (state) in proc(5). utime (14), stime (15),
+    // num_threads (20) and rss (24) therefore sit at 11, 12, 17 and 21.
+    Some(ProcStat {
+        name,
+        state: fields[0].to_string(),
+        ppid: fields[1].parse().unwrap_or(0),
+        utime: fields[11].parse().unwrap_or(0),
+        stime: fields[12].parse().unwrap_or(0),
+        threads: fields[17].parse().unwrap_or(1),
+        rss_pages: fields[21].parse().unwrap_or(0),
+    })
+}
+
+fn page_size() -> u64 {
+    let value = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if value > 0 {
+        value as u64
+    } else {
+        4096
+    }
+}
+
+fn total_memory_kb() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .unwrap_or_default()
+        .lines()
+        .find(|line| line.starts_with("MemTotal:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+}
+
+fn cpu_total_jiffies() -> u64 {
+    fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|stat| {
+            stat.lines()
+                .find(|line| line.starts_with("cpu "))
+                .and_then(parse_cpu_line)
+        })
+        .map(|(_, total)| total)
+        .unwrap_or(1)
+}
+
+fn read_process_uid(pid: u32) -> Option<u32> {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("Uid:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// `/etc/passwd` is read once per scan instead of once per process.
+fn user_map() -> HashMap<u32, String> {
+    let mut users = HashMap::new();
+    if let Ok(passwd) = fs::read_to_string("/etc/passwd") {
+        for line in passwd.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() >= 3 {
+                if let Ok(uid) = fields[2].parse::<u32>() {
+                    users.entry(uid).or_insert_with(|| fields[0].to_string());
+                }
+            }
+        }
+    }
+    users
+}
+
+fn process_cmdline(pid: u32, name: &str) -> String {
+    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_default()
+        .replace('\0', " ")
+        .trim()
+        .chars()
+        .take(240)
+        .collect::<String>();
+    if cmdline.is_empty() {
+        format!("[{name}]")
+    } else {
+        cmdline
+    }
+}
+
+fn round1(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+/// The panel runs as the desktop user. Only that user's processes (or anything,
+/// when the panel itself runs as root) may be signalled or reniced.
+fn can_manage_uid(euid: u32, target_uid: u32) -> bool {
+    euid == 0 || euid == target_uid
 }
 
 #[tauri::command]
 pub async fn get_process_list() -> Result<Vec<ProcessEntry>, String> {
-    // Get total RAM for % calculation
-    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let mem_total_kb: u64 = meminfo.lines()
-        .find(|l| l.starts_with("MemTotal:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+    let mem_total_kb = total_memory_kb();
+    let page_size = page_size();
+    let users = user_map();
+    let euid = current_euid();
+    let total_jiffies_1 = cpu_total_jiffies();
 
-    // Sample /proc/stat for total jiffies
-    let stat1 = fs::read_to_string("/proc/stat").unwrap_or_default();
-    let total_jiffies_1: u64 = stat1.lines()
-        .find(|l| l.starts_with("cpu "))
-        .map(|l| l.split_whitespace().skip(1).filter_map(|v| v.parse::<u64>().ok()).sum())
-        .unwrap_or(1);
-
-    // Snapshot all proc utime+stime
-    let proc_dir = fs::read_dir("/proc").map_err(|e| e.to_string())?;
-    let mut snapshot1: Vec<(u32, u32, u64, u64, String, String, String, u32, u64)> = Vec::new();
-
-    for entry in proc_dir.flatten() {
-        let name = entry.file_name();
-        let pid_str = name.to_string_lossy();
-        let Ok(pid) = pid_str.parse::<u32>() else { continue };
-
-        let stat_path = format!("/proc/{pid}/stat");
-        let Ok(stat) = fs::read_to_string(&stat_path) else { continue };
-        let parts: Vec<&str> = stat.split_whitespace().collect();
-        if parts.len() < 24 { continue; }
-
-        // Extract fields from /proc/pid/stat
-        let proc_name = parts[1].trim_matches(|c| c == '(' || c == ')').to_string();
-        let state = parts[2].to_string();
-        let ppid: u32 = parts[3].parse().unwrap_or(0);
-        let utime: u64 = parts[13].parse().unwrap_or(0);
-        let stime: u64 = parts[14].parse().unwrap_or(0);
-        let threads: u32 = parts[19].parse().unwrap_or(1);
-
-        // RSS in pages → convert to KB
-        let rss_pages: u64 = parts[23].parse().unwrap_or(0);
-        let page_size = 4096u64; // common on Linux x86_64
-        let rss_kb = rss_pages * page_size / 1024;
-
-        // Username from /proc/pid/status
-        let uid = fs::read_to_string(format!("/proc/{pid}/status"))
-            .unwrap_or_default()
-            .lines()
-            .find(|l| l.starts_with("Uid:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let user = uid_to_user(uid);
-
-        snapshot1.push((pid, ppid, utime + stime, rss_kb, proc_name, state, user, threads, uid as u64));
+    struct Snapshot {
+        pid: u32,
+        stat: ProcStat,
+        uid: u32,
+        rss_kb: u64,
     }
 
-    // Wait 300ms then re-sample for CPU %
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let mut snapshot1: Vec<Snapshot> = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some(parsed) = parse_proc_stat(&stat) else {
+            continue;
+        };
+        let uid = read_process_uid(pid).unwrap_or(0);
+        let rss_kb = parsed.rss_pages.saturating_mul(page_size) / 1024;
+        snapshot1.push(Snapshot {
+            pid,
+            stat: parsed,
+            uid,
+            rss_kb,
+        });
+    }
 
-    let stat2 = fs::read_to_string("/proc/stat").unwrap_or_default();
-    let total_jiffies_2: u64 = stat2.lines()
-        .find(|l| l.starts_with("cpu "))
-        .map(|l| l.split_whitespace().skip(1).filter_map(|v| v.parse::<u64>().ok()).sum())
-        .unwrap_or(1);
+    // Wait 300ms then re-sample for CPU %.
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let total_jiffies_2 = cpu_total_jiffies();
     let d_total = total_jiffies_2.saturating_sub(total_jiffies_1).max(1);
 
-    let mut processes: Vec<ProcessEntry> = snapshot1.iter().filter_map(|(pid, ppid, jiffies1, rss_kb, name, state, user, threads, _uid)| {
-        let stat_path = format!("/proc/{pid}/stat");
-        let stat2 = fs::read_to_string(&stat_path).ok()?;
-        let parts2: Vec<&str> = stat2.split_whitespace().collect();
-        if parts2.len() < 15 { return None; }
-        let utime2: u64 = parts2[13].parse().unwrap_or(0);
-        let stime2: u64 = parts2[14].parse().unwrap_or(0);
-        let jiffies2 = utime2 + stime2;
-        let d_proc = jiffies2.saturating_sub(*jiffies1);
-        let cpu_pct = (d_proc as f64 / d_total as f64) * 100.0;
+    let mut processes = Vec::with_capacity(snapshot1.len());
+    for item in snapshot1 {
+        let Ok(stat2) = fs::read_to_string(format!("/proc/{}/stat", item.pid)) else {
+            continue;
+        };
+        let Some(second) = parse_proc_stat(&stat2) else {
+            continue;
+        };
+        let jiffies1 = item.stat.utime + item.stat.stime;
+        let jiffies2 = second.utime + second.stime;
+        let cpu_pct = (jiffies2.saturating_sub(jiffies1) as f64 / d_total as f64) * 100.0;
+        let mem_pct = (item.rss_kb as f64 / mem_total_kb as f64) * 100.0;
+        let user = users
+            .get(&item.uid)
+            .cloned()
+            .unwrap_or_else(|| item.uid.to_string());
 
-        let mem_pct = (*rss_kb as f64 / mem_total_kb as f64) * 100.0;
-        let mem_rss_mb = *rss_kb as f64 / 1024.0;
+        processes.push(ProcessEntry {
+            pid: item.pid,
+            ppid: item.stat.ppid,
+            name: item.stat.name.clone(),
+            cmdline: process_cmdline(item.pid, &item.stat.name),
+            cpu_percent: round1(cpu_pct),
+            mem_percent: round1(mem_pct),
+            mem_rss_mb: round1(item.rss_kb as f64 / 1024.0),
+            state: item.stat.state,
+            user,
+            uid: item.uid,
+            owned: can_manage_uid(euid, item.uid),
+            threads: item.stat.threads,
+        });
+    }
 
-        let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))
-            .unwrap_or_default()
-            .replace('\0', " ")
-            .trim()
-            .chars()
-            .take(240)
-            .collect::<String>();
-
-        Some(ProcessEntry {
-            pid: *pid,
-            ppid: *ppid,
-            name: name.clone(),
-            cmdline: if cmdline.is_empty() { format!("[{name}]") } else { cmdline },
-            cpu_percent: (cpu_pct * 10.0).round() / 10.0,
-            mem_percent: (mem_pct * 10.0).round() / 10.0,
-            mem_rss_mb: (mem_rss_mb * 10.0).round() / 10.0,
-            state: state.clone(),
-            user: user.clone(),
-            threads: *threads,
-        })
-    }).collect();
-
-    // Sort by CPU% descending, take top 1000
-    processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
-    processes.truncate(1000);
-
+    // The UI sorts and builds the tree; the full list keeps parents present.
+    processes.sort_by_key(|process| process.pid);
     Ok(processes)
 }
 
-fn uid_to_user(uid: u32) -> String {
-    let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
-    for line in passwd.lines() {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() >= 3 && parts[2].parse::<u32>().ok() == Some(uid) {
-            return parts[0].to_string();
-        }
+/// One process for the connection drawer, without scanning the whole table.
+#[tauri::command]
+pub async fn get_process_details(pid: u32) -> Result<Option<ProcessEntry>, String> {
+    if pid == 0 {
+        return Ok(None);
     }
-    uid.to_string()
+    let Ok(stat1) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return Ok(None);
+    };
+    let Some(first) = parse_proc_stat(&stat1) else {
+        return Ok(None);
+    };
+    let total1 = cpu_total_jiffies();
+    tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
+    let Ok(stat2) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return Ok(None);
+    };
+    let Some(second) = parse_proc_stat(&stat2) else {
+        return Ok(None);
+    };
+    let total2 = cpu_total_jiffies();
+    let d_total = total2.saturating_sub(total1).max(1);
+    let d_proc = (second.utime + second.stime).saturating_sub(first.utime + first.stime);
+    let cpu_pct = (d_proc as f64 / d_total as f64) * 100.0;
+    let uid = read_process_uid(pid).unwrap_or(0);
+    let users = user_map();
+    let rss_kb = first.rss_pages.saturating_mul(page_size()) / 1024;
+    let mem_pct = (rss_kb as f64 / total_memory_kb() as f64) * 100.0;
+
+    Ok(Some(ProcessEntry {
+        pid,
+        ppid: first.ppid,
+        name: first.name.clone(),
+        cmdline: process_cmdline(pid, &first.name),
+        cpu_percent: round1(cpu_pct),
+        mem_percent: round1(mem_pct),
+        mem_rss_mb: round1(rss_kb as f64 / 1024.0),
+        state: first.state,
+        user: users.get(&uid).cloned().unwrap_or_else(|| uid.to_string()),
+        uid,
+        owned: can_manage_uid(current_euid(), uid),
+        threads: first.threads,
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -625,8 +764,17 @@ pub fn kill_process(pid: u32, signal: u32) -> Result<String, String> {
     }
 
     // ── Guard 4: Verify process still exists ──────────────────────────────
-    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+    let Some(target_uid) = read_process_uid(pid) else {
         return Ok(format!("Process {pid} no longer exists."));
+    };
+
+    // ── Guard 5: Only the owner may signal it ─────────────────────────────
+    // The OS enforces this too, but a clear refusal keeps the UI honest and
+    // stops it from offering actions that can only fail.
+    if !can_manage_uid(current_euid(), target_uid) {
+        return Err(format!(
+            "You can only signal your own processes. PID {pid} belongs to another user."
+        ));
     }
 
     // ── Send signal ────────────────────────────────────────────────────────
@@ -655,6 +803,12 @@ pub async fn renice_process(pid: u32, priority: i32) -> Result<String, String> {
     }
     if pid == 1 || pid <= 100 {
         return Err(format!("Cannot change priority for PID {pid} (protected system process)."));
+    }
+    let Some(target_uid) = read_process_uid(pid) else {
+        return Err(format!("Process {pid} no longer exists."));
+    };
+    if !can_manage_uid(current_euid(), target_uid) {
+        return Err("You can only change the priority of your own processes.".to_string());
     }
 
     if priority < 0 {
@@ -934,6 +1088,103 @@ pub struct ActiveConnection {
     pub state: String,
     pub process_name: String,
     pub pid: Option<u32>,
+    pub local_host: String,
+    pub local_port: Option<u16>,
+    pub remote_host: String,
+    pub remote_port: Option<u16>,
+    pub remote_is_loopback: bool,
+    pub remote_is_external: bool,
+}
+
+fn split_endpoint(endpoint: &str) -> (String, Option<u16>) {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() || endpoint == "*" || endpoint == "*:*" {
+        return ("*".to_string(), None);
+    }
+    // `ss` prints IPv6 endpoints as `[::1]:631` and wildcard ports as `:*`.
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            let host = &rest[..close];
+            let port = rest[close + 1..]
+                .strip_prefix(':')
+                .and_then(|value| value.parse::<u16>().ok());
+            return (host.to_string(), port);
+        }
+    }
+    if let Some((host, port)) = endpoint.rsplit_once(':') {
+        if port == "*" {
+            return (host.to_string(), None);
+        }
+        if let Ok(port) = port.parse::<u16>() {
+            return (host.to_string(), Some(port));
+        }
+    }
+    (endpoint.to_string(), None)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    host == "localhost"
+        || host == "::1"
+        || host.starts_with("127.")
+        || host.starts_with("::ffff:127.")
+        || host.eq_ignore_ascii_case("ip6-localhost")
+}
+
+fn is_unspecified_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "" | "*" | "0.0.0.0" | "::" | "::ffff:0.0.0.0")
+}
+
+fn parse_ss_line(line: &str) -> Option<ActiveConnection> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    // Netid State Recv-Q Send-Q Local Peer [Process] — six columns minimum.
+    if parts.len() < 6 {
+        return None;
+    }
+    let protocol = parts[0].to_string();
+    let state = parts[1].to_string();
+    let local_address = parts[4].to_string();
+    let remote_address = parts[5].to_string();
+    let (local_host, local_port) = split_endpoint(&local_address);
+    let (remote_host, remote_port) = split_endpoint(&remote_address);
+
+    let mut process_name = "N/A".to_string();
+    let mut pid = None;
+    if parts.len() >= 7 {
+        let proc_part = parts[6..].join(" ");
+        if let Some(start) = proc_part.find('"') {
+            if let Some(end) = proc_part[start + 1..].find('"') {
+                process_name = proc_part[start + 1..start + 1 + end].to_string();
+            }
+        }
+        if let Some(pid_start) = proc_part.find("pid=") {
+            let pid_part = &proc_part[pid_start + 4..];
+            let pid_end = pid_part.find(',').or_else(|| pid_part.find(')'));
+            if let Some(pid_end) = pid_end {
+                if let Ok(parsed) = pid_part[..pid_end].parse::<u32>() {
+                    pid = Some(parsed);
+                }
+            }
+        }
+    }
+
+    let remote_is_loopback = is_loopback_host(&remote_host);
+    let remote_is_external = !remote_is_loopback && !is_unspecified_host(&remote_host);
+    Some(ActiveConnection {
+        protocol,
+        local_address,
+        remote_address,
+        state,
+        process_name,
+        pid,
+        local_host,
+        local_port,
+        remote_host,
+        remote_port,
+        remote_is_loopback,
+        remote_is_external,
+    })
 }
 
 #[tauri::command]
@@ -941,54 +1192,10 @@ pub async fn get_active_connections() -> Result<Vec<ActiveConnection>, String> {
     let mut cmd = crate::utils::privilege::tokio::Command::new("ss");
     cmd.args(["-tunp"]);
     cmd.stdout(std::process::Stdio::piped());
-    
+
     let output = cmd.output().await.map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
-    let mut connections = Vec::new();
-    for line in stdout.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 5 {
-            let protocol = parts[0].to_string();
-            let state = parts[1].to_string();
-            let local_address = parts[4].to_string();
-            let remote_address = parts[5].to_string();
-            
-            let mut process_name = "N/A".to_string();
-            let mut pid = None;
-            if parts.len() >= 7 {
-                let proc_part = parts[6..].join(" ");
-                if let Some(start) = proc_part.find("\"") {
-                    if let Some(end) = proc_part[start+1..].find("\"") {
-                        process_name = proc_part[start+1..start+1+end].to_string();
-                    }
-                }
-                if let Some(pid_start) = proc_part.find("pid=") {
-                    let pid_part = &proc_part[pid_start+4..];
-                    if let Some(pid_end) = pid_part.find(',') {
-                        if let Ok(p) = pid_part[..pid_end].parse::<u32>() {
-                            pid = Some(p);
-                        }
-                    } else if let Some(pid_end) = pid_part.find(')') {
-                        if let Ok(p) = pid_part[..pid_end].parse::<u32>() {
-                            pid = Some(p);
-                        }
-                    }
-                }
-            }
-            
-            connections.push(ActiveConnection {
-                protocol,
-                local_address,
-                remote_address,
-                state,
-                process_name,
-                pid,
-            });
-        }
-    }
-    
-    Ok(connections)
+    Ok(stdout.lines().skip(1).filter_map(parse_ss_line).collect())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1251,27 +1458,56 @@ pub async fn ping_gateway(ip: String) -> Result<String, String> {
     Err("timeout".to_string())
 }
 
+const CPU_THERMAL_TYPES: &[&str] = &[
+    "x86_pkg_temp", "coretemp", "k10temp", "zenpower", "cpu", "package", "tctl", "tdie", "soc",
+];
+
+/// Pick a CPU sensor rather than the hottest zone overall: on laptops the
+/// Wi-Fi card or an SSD zone is often hotter than the package.
+fn select_cpu_temperature(zones: &[(String, f32)]) -> Option<f32> {
+    let mut cpu_temp: Option<f32> = None;
+    let mut any_temp: Option<f32> = None;
+
+    for (kind, temp) in zones {
+        if !temp.is_finite() || *temp < -40.0 || *temp > 200.0 {
+            continue;
+        }
+        any_temp = Some(any_temp.map_or(*temp, |current| current.max(*temp)));
+        let kind = kind.to_ascii_lowercase();
+        if CPU_THERMAL_TYPES
+            .iter()
+            .any(|candidate| kind.contains(candidate))
+        {
+            cpu_temp = Some(cpu_temp.map_or(*temp, |current| current.max(*temp)));
+        }
+    }
+
+    cpu_temp.or(any_temp)
+}
+
 #[tauri::command]
 pub async fn get_cpu_temperature() -> Result<Option<f32>, String> {
-    let mut max_temp: Option<f32> = None;
+    let mut zones = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
-            let name_str = file_name.to_string_lossy();
-            if name_str.starts_with("thermal_zone") {
-                let temp_path = entry.path().join("temp");
-                if let Ok(temp_str) = fs::read_to_string(temp_path) {
-                    if let Ok(temp_val) = temp_str.trim().parse::<f32>() {
-                        let temp_c = temp_val / 1000.0;
-                        if max_temp.is_none() || temp_c > max_temp.unwrap() {
-                            max_temp = Some(temp_c);
-                        }
-                    }
-                }
+            if !file_name.to_string_lossy().starts_with("thermal_zone") {
+                continue;
             }
+            let kind = fs::read_to_string(entry.path().join("type"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let Ok(temp_str) = fs::read_to_string(entry.path().join("temp")) else {
+                continue;
+            };
+            let Ok(temp_val) = temp_str.trim().parse::<f32>() else {
+                continue;
+            };
+            zones.push((kind, temp_val / 1000.0));
         }
     }
-    Ok(max_temp)
+    Ok(select_cpu_temperature(&zones))
 }
 
 #[tauri::command]
@@ -1424,6 +1660,7 @@ pub async fn get_storage_distribution() -> Result<StorageDistribution, String> {
 /// Opens a local directory or file in the default desktop file manager (via xdg-open).
 #[tauri::command]
 pub async fn open_folder(path: String) -> Result<(), String> {
+    crate::utils::root_policy::ensure_openable_path(&path)?;
     Command::new("xdg-open")
         .arg(&path)
         .spawn()
@@ -1473,4 +1710,114 @@ mod smart_health_tests {
         assert!(!message.contains("/usr/sbin"));
         assert!(!message.contains("/dev/sda"));
     }
+}
+
+#[cfg(test)]
+mod monitoring_tests {
+    use super::{
+        can_manage_uid, parse_cpu_line, parse_proc_stat, parse_ss_line, select_cpu_temperature,
+        split_endpoint,
+    };
+
+    #[test]
+    fn proc_stat_names_with_spaces_do_not_shift_the_fields() {
+        // Real shape from a process whose command name contains spaces.
+        let stat = "11222 (npm run tauri:d) S 11047 11222 11047 34816 11222 4194304 7686 0 52 0 40 8 0 0 20 0 11 0 62635 1160687616 17232 18";
+        let parsed = parse_proc_stat(stat).expect("stat line is parsed");
+        assert_eq!(parsed.name, "npm run tauri:d");
+        assert_eq!(parsed.state, "S");
+        assert_eq!(parsed.ppid, 11047);
+        assert_eq!(parsed.utime, 40);
+        assert_eq!(parsed.stime, 8);
+        assert_eq!(parsed.threads, 11);
+        assert_eq!(parsed.rss_pages, 17232);
+
+        // A closing parenthesis inside the name must not cut it short.
+        let tricky =
+            "42 (my ) app) R 1 42 42 0 -1 4194304 0 0 0 0 5 6 0 0 20 0 7 0 1234 5678 99 0";
+        let parsed = parse_proc_stat(tricky).expect("paren in name is parsed");
+        assert_eq!(parsed.name, "my ) app");
+        assert_eq!(parsed.ppid, 1);
+        assert_eq!(parsed.utime, 5);
+        assert_eq!(parsed.stime, 6);
+        assert_eq!(parsed.threads, 7);
+        assert_eq!(parsed.rss_pages, 99);
+    }
+
+    #[test]
+    fn cpu_time_counts_iowait_as_idle_and_ignores_guest_double_count() {
+        // user nice system idle iowait irq softirq steal guest guest_nice
+        let (idle, total) =
+            parse_cpu_line("cpu  100 0 50 800 50 10 10 0 40 0").expect("cpu line");
+        assert_eq!(idle, 850);
+        // 100 + 0 + 50 + 800 + 50 + 10 + 10 + 0; guest/nice are already in user.
+        assert_eq!(total, 1020);
+    }
+
+    #[test]
+    fn ss_lines_parse_endpoints_and_processes() {
+        let loopback = parse_ss_line(
+            "tcp ESTAB 0 0 127.0.0.1:38120 127.0.0.1:57123 users:((\"openchamber\",pid=16161,fd=33))",
+        )
+        .expect("tcp line");
+        assert_eq!(loopback.local_host, "127.0.0.1");
+        assert_eq!(loopback.local_port, Some(38120));
+        assert_eq!(loopback.remote_port, Some(57123));
+        assert_eq!(loopback.pid, Some(16161));
+        assert_eq!(loopback.process_name, "openchamber");
+        assert!(loopback.remote_is_loopback);
+        assert!(!loopback.remote_is_external);
+
+        let udp = parse_ss_line("udp ESTAB 0 0 192.168.0.103%wlp1s0:68 192.168.0.1:67")
+            .expect("udp line without a process");
+        assert_eq!(udp.local_port, Some(68));
+        assert_eq!(udp.pid, None);
+        assert_eq!(udp.process_name, "N/A");
+        assert!(udp.remote_is_external);
+
+        let listen = parse_ss_line("tcp LISTEN 0 128 [::]:22 [::]:* users:((\"sshd\",pid=900,fd=3))")
+            .expect("ipv6 listen line");
+        assert_eq!(listen.local_host, "::");
+        assert_eq!(listen.local_port, Some(22));
+        assert_eq!(listen.remote_port, None);
+        assert!(!listen.remote_is_external);
+
+        // A short line must be ignored, not index past its end.
+        assert!(parse_ss_line("tcp ESTAB 0 0 127.0.0.1:1").is_none());
+    }
+
+    #[test]
+    fn endpoint_splitting_handles_brackets_and_wildcards() {
+        assert_eq!(split_endpoint("[::1]:631"), ("::1".to_string(), Some(631)));
+        assert_eq!(split_endpoint("0.0.0.0:*"), ("0.0.0.0".to_string(), None));
+        assert_eq!(split_endpoint("*:*"), ("*".to_string(), None));
+        assert_eq!(
+            split_endpoint("[::ffff:127.0.0.1]:8080"),
+            ("::ffff:127.0.0.1".to_string(), Some(8080))
+        );
+    }
+
+    #[test]
+    fn cpu_sensor_is_preferred_over_hotter_non_cpu_zones() {
+        let zones = vec![
+            ("acpitz".to_string(), 70.0),
+            ("x86_pkg_temp".to_string(), 55.0),
+            ("B0D4".to_string(), 60.0),
+        ];
+        assert_eq!(select_cpu_temperature(&zones), Some(55.0));
+
+        let no_cpu_sensor = vec![("acpitz".to_string(), 47.0), ("B0D4".to_string(), 52.0)];
+        assert_eq!(select_cpu_temperature(&no_cpu_sensor), Some(52.0));
+
+        let invalid = vec![("x86_pkg_temp".to_string(), -273.0)];
+        assert_eq!(select_cpu_temperature(&invalid), None);
+    }
+
+    #[test]
+    fn only_the_owner_or_root_may_manage_a_process() {
+        assert!(can_manage_uid(1000, 1000));
+        assert!(!can_manage_uid(1000, 0));
+        assert!(can_manage_uid(0, 1000));
+    }
+
 }

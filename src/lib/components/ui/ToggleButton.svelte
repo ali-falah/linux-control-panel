@@ -12,6 +12,8 @@
     inactiveIcon?: any;
     icon?: any;
     size?: 'sm' | 'md';
+    /** Leave `active` entirely to the parent (exclusive groups such as filter chips). */
+    controlled?: boolean;
     class?: string;
     spinWhenActive?: boolean;
     onclick?: (e: MouseEvent, active: boolean) => void;
@@ -28,6 +30,7 @@
     inactiveIcon,
     icon,
     size = 'sm',
+    controlled = false,
     class: className = '',
     spinWhenActive = false,
     onclick,
@@ -38,7 +41,9 @@
 
   function handleClick(e: MouseEvent) {
     if (disabled) return;
-    active = !active;
+    // A controlled button never flips itself: the owner decides which chip wins,
+    // so clicking the active one keeps it active instead of toggling it off.
+    if (!controlled) active = !active;
     if (onclick) onclick(e, active);
   }
 
