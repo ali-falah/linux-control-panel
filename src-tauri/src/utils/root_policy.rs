@@ -1105,6 +1105,37 @@ pub fn validate_profile_sh_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Upper bound for `/etc/environment` content; shared with the helper so the
+/// privileged action and the app enforce the same limit.
+pub const ENVIRONMENT_CONTENT_MAX: usize = 256 * 1024;
+
+/// The one file the `write_environment_file` helper action may publish.
+pub const ENVIRONMENT_PATH: &str = "/etc/environment";
+
+/// `/etc/environment` is data read by PAM, not a shell script. The panel
+/// validates the variables it edits itself; this helper-side policy only keeps
+/// the file readable and bounded (valid UTF-8, no NUL/CR, sane line length,
+/// size limit) so a malformed document can never reach the PAM parser. The
+/// caller is a wheel member who authenticated through PolicyKit — the path is
+/// the restriction this action adds, and it is a constant.
+pub fn validate_environment_content(content: &str) -> Result<(), String> {
+    if content.len() > ENVIRONMENT_CONTENT_MAX {
+        return Err("The environment file is too large.".to_string());
+    }
+    if content.contains('\0') {
+        return Err("The environment file must not contain NUL bytes.".to_string());
+    }
+    if content.contains('\r') {
+        return Err("The environment file must use LF line endings.".to_string());
+    }
+    for (index, line) in content.lines().enumerate() {
+        if line.len() > 8192 {
+            return Err(format!("Line {} is longer than 8192 characters.", index + 1));
+        }
+    }
+    Ok(())
+}
+
 // ─── Repository content policy (F-2) ─────────────────────────────────────────
 //
 // `ensure_repo_file_path` confines *where* a repository file may live. That
@@ -4070,7 +4101,7 @@ pub const HELPER_CLEAR_VALUE: &str = "__LCP_CLEAR__";
 // assert its ROOT_ACTIONS gate list never drifts from this validation list.
 pub(crate) const HELPER_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
-    "write_profile_sh", "restore_profile_sh",
+    "write_profile_sh", "write_environment_file", "restore_profile_sh",
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
@@ -4639,6 +4670,16 @@ fn check_helper_action(args: &[String]) -> Result<(), String> {
             action,
             "this action does not exist",
         ));
+    }
+    if action == "write_environment_file" {
+        if args.len() != 1 {
+            return Err(operand_not_allowed(
+                "lcp-admin",
+                action,
+                "this action takes no arguments (the content arrives on stdin)",
+            ));
+        }
+        return Ok(());
     }
     if action == "audit_setup" {
         if args.len() != 1 {
@@ -9699,5 +9740,31 @@ mod system_info_validator_tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&device);
         }
+    }
+}
+
+#[cfg(test)]
+mod environment_content_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_documents_the_panel_writes() {
+        for content in [
+            "",
+            "# header\n\nPATH=\"/usr/local/bin:/usr/bin\"\n",
+            "EDITOR=vim\nJAVA_HOME=\"/usr/lib/jvm/java-21\"\n",
+            "export LEGACY=1\n",
+            "not an assignment\n",
+        ] {
+            assert!(validate_environment_content(content).is_ok(), "{content:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_control_characters_and_oversized_lines() {
+        assert!(validate_environment_content("FOO=a\0b\n").is_err());
+        assert!(validate_environment_content("FOO=a\rb\n").is_err());
+        assert!(validate_environment_content(&format!("FOO={}\n", "x".repeat(9000))).is_err());
+        assert!(validate_environment_content(&"#\n".repeat(ENVIRONMENT_CONTENT_MAX / 2 + 1)).is_err());
     }
 }

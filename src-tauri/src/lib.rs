@@ -20,7 +20,7 @@ use commands::{
         dnf_check_updates, dnf_update_advisories, dnf_run_upgrade, dnf_dry_run_upgrade, dnf_read_log,
         dnf_check_lock_status, dnf_kill_lock, dnf_cancel_upgrade,
     },
-    env_manager::{read_env_vars, write_env_vars},
+    env_manager::{read_env_file, write_env_file},
     firewall_manager::{
         get_firewall_state, get_zone_rules, modify_firewall_rule, toggle_panic_mode,
         firewall_get_rich_rules, firewall_get_zone_interfaces, firewall_get_all_interfaces,
@@ -295,8 +295,8 @@ pub fn run() {
             cron_list_timers,
             cron_toggle_timer,
             // Environment Manager
-            read_env_vars,
-            write_env_vars,
+            read_env_file,
+            write_env_file,
             // Nginx Manager
             nginx_check_installed,
             nginx_service_status,

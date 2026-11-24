@@ -94,7 +94,7 @@
     align-items: center;
     gap: 6px;
     background: var(--color-accent);
-    color: #000000;
+    color: var(--color-text-on-accent);
     font-weight: 700;
     font-size: 12.5px;
     padding: 8px 16px;
@@ -103,11 +103,6 @@
     cursor: pointer;
     margin-top: 10px;
     transition: all 0.15s ease;
-  }
-
-  :global(html.light-mode) .empty-action-btn {
-    background: #2563EB;
-    color: #FFFFFF;
   }
 
   .empty-action-btn:hover {

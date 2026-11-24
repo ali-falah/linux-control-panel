@@ -5,17 +5,15 @@
   import { tableFeatures } from '../actions/tableFeatures';
   import Button from '../components/ui/Button.svelte';
   import Input from '../components/ui/Input.svelte';
-  import Card from '../components/ui/Card.svelte';
   import Badge from '../components/ui/Badge.svelte';
-  import Table from '../components/ui/Table.svelte';
   import Toggle from '../components/ui/Toggle.svelte';
   import SideDrawer from '../components/SideDrawer.svelte';
   import EmptyState from '../components/ui/EmptyState.svelte';
 
   import { invoke } from '@tauri-apps/api/core';
-  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Play, Copy, Check, X } from '@lucide/svelte';
+  import { Terminal, Variable, FolderOpen, Eye, RefreshCw, Plus, Trash2, Sparkles, Copy, Check, X, Pencil } from '@lucide/svelte';
   import { Save, AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight } from '@lucide/svelte';
-  import { FileCode, ArchiveRestore, GripVertical, Search, Folder } from '@lucide/svelte';
+  import { FileCode, ArchiveRestore, Folder } from '@lucide/svelte';
   import { uiStore } from '../stores/ui.svelte.ts';
   import { statusStore } from '../stores/status.svelte.ts';
   import { aiStore } from '../stores/aiStore.svelte.ts';
@@ -23,7 +21,7 @@
   import PageHeader from '../components/PageHeader.svelte';
 
   // ─── AI Terminal Assistant State ──────────────────────────────────────────
-  let showAiAssistant = $state(true);
+  let showAiAssistant = $state(false);
   let aiPrompt = $state('');
   let aiLoading = $state(false);
   let aiResponse = $state<{ generated_command: string; explanation: string; safety_level: string } | null>(null);
@@ -44,11 +42,6 @@
     } finally {
       aiLoading = false;
     }
-  }
-
-  function executeCommand(cmd: string) {
-    statusStore.setLastCommand(cmd, 0, true);
-    uiStore.addToast(`Command dispatched: ${cmd}`, 'success');
   }
 
   function copyCommand(cmd: string) {
@@ -159,7 +152,7 @@
 
   // ─── Computed ─────────────────────────────────────────────────────────────
 
-  const conflictMap = $derived(() => {
+  const conflictMap = $derived.by(() => {
     const m = new Map<string, string[]>();
     for (const g of varGroups) {
       for (const v of g.vars) {
@@ -199,6 +192,13 @@
 
   const hasFileChanges = $derived(fileContent !== savedFileContent);
 
+  const totalVars = $derived(varGroups.reduce((count, group) => count + group.vars.length, 0));
+  const filesWithExports = $derived(varGroups.filter(group => group.vars.length > 0).length);
+  const conflictNames = $derived(
+    [...conflictMap].filter(([, sources]) => sources.length > 1).length
+  );
+
+
   // ─── Init ──────────────────────────────────────────────────────────────────
 
   $effect(() => {
@@ -231,18 +231,12 @@
   async function loadLiveValues() {
     loadingLive = true;
     try {
-      const names = varGroups.flatMap(g => g.vars.map(v => v.name));
-      const unique = [...new Set(names)];
-      const map = new Map<string, string>();
-      await Promise.all(
-        unique.map(async name => {
-          try {
-            const val = await invoke<string>('shell_get_live_value', { name });
-            map.set(name, val);
-          } catch {}
-        }),
-      );
-      liveValuesMap = map;
+      // One login-shell run returns every value; the old code started one
+      // `printenv` per variable.
+      const live = await invoke<LiveEnvVar[]>('shell_get_live_env');
+      liveValuesMap = new Map(live.map(entry => [entry.name, entry.live_value]));
+    } catch (e) {
+      uiStore.addToast(`Failed to read live values: ${e}`, 'error');
     } finally {
       loadingLive = false;
     }
@@ -279,6 +273,7 @@
         name: addVarForm.name.trim(),
         value: addVarForm.value,
         oldLine: null,
+        lineNumber: 0,
       });
       uiStore.addToast(`Added export ${addVarForm.name} ✓`, 'success');
       statusStore.setLastCommand(`echo "export ${addVarForm.name}=..." >> ${addVarForm.targetFile}`, 0, true);
@@ -303,6 +298,7 @@
         name: editingVar.newName.trim(),
         value: editingVar.newValue,
         oldLine: editingVar.v.raw_line,
+        lineNumber: editingVar.v.line_number,
       });
       uiStore.addToast(`Updated ${editingVar.newName} ✓`, 'success');
       statusStore.setLastCommand(`sed -i 's/.../.../' ${editingVar?.v.source_path ?? ''}`, 0, true);
@@ -323,7 +319,11 @@
       `Remove "export ${v.name}" from ${v.source_path}?\n\nThis will delete the line:\n${v.raw_line}`,
       async () => {
         try {
-          await invoke('shell_delete_var', { path: v.source_path, rawLine: v.raw_line });
+          await invoke('shell_delete_var', {
+            path: v.source_path,
+            rawLine: v.raw_line,
+            lineNumber: v.line_number,
+          });
           uiStore.addToast(`Deleted ${v.name} ✓`, 'success');
           statusStore.setLastCommand(`sed -i '/${v.name}=/d' ${v.source_path}`, 0, true);
           await loadVarGroups();
@@ -544,117 +544,117 @@
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
   function shortPath(p: string): string {
-    const home = p.match(/^\/home\/[^/]+/) ?? [];
-    return p.replace(home[0] ?? '', '~');
+    const home = p.match(/^\/home\/[^/]+/);
+    return home ? p.replace(home[0], '~') : p;
   }
 </script>
 
 <!-- ─── Page ────────────────────────────────────────────────────────────── -->
 <div class="module-page">
   <!-- Header -->
-  <PageHeader title="Shell Environment" icon={Terminal}>
+  <PageHeader
+    title="Shell Environment"
+    subtitle="Exports, PATH and startup files for your login shell"
+    icon={Terminal}
+  >
+    <TabGroup
+      size="sm"
+      tabs={[
+        { id: 'variables', label: 'Variables', icon: Variable, count: totalVars },
+        { id: 'path', label: 'PATH', icon: FolderOpen, count: pathEntries.length },
+        { id: 'files', label: 'Profile Files', icon: FileCode, count: profileFiles.length },
+        { id: 'preview', label: 'Live Preview', icon: Eye }
+      ]}
+      bind:activeTab={activeTab}
+    />
     {#if aiStore.enabled && !showAiAssistant}
-      <Button variant="ghost" size="sm" onclick={() => showAiAssistant = true} title="Open AI Terminal Assistant">
-        <Sparkles size={14} style="color: var(--color-accent);" /> AI Assistant
-      </Button>
-    {/if}
-    {#if activeTab === 'variables'}
-      <button class="header-refresh-btn" onclick={loadVarGroups} disabled={varsLoading}>
-        <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
-      </button>
-      <Button variant="primary" size="sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
-        <Plus size={13} /> Add Variable
+      <Button variant="ghost" size="sm" onclick={() => showAiAssistant = true} title="Open the AI terminal assistant">
+        <Sparkles size={14} style="color: var(--color-accent);" /> AI command
       </Button>
     {/if}
   </PageHeader>
 
   {#if aiStore.enabled && showAiAssistant}
-    <div class="ai-terminal-card" style="padding: 14px 16px; background: rgba(0, 218, 243, 0.04); border: 1px solid rgba(0, 218, 243, 0.2); border-radius: 12px; margin-bottom: 16px; position: relative;">
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-        <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; color: var(--color-text-primary);">
-          <Sparkles size={16} style="color: var(--color-accent);" />
-          AI Terminal Assistant (Natural Language Bash Generator)
+    <section class="ai-card">
+      <div class="ai-head">
+        <div class="ai-title">
+          <Sparkles size={15} />
+          <span>AI terminal assistant</span>
+          <Badge variant="muted">natural language</Badge>
         </div>
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <span style="font-size: 11px; color: var(--color-text-muted);">Fedora Linux Optimized</span>
-          <button 
-            type="button" 
-            onclick={() => showAiAssistant = false} 
-            title="Hide AI Assistant"
-            style="background: transparent; border: none; color: var(--color-text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px; border-radius: 4px; transition: all 0.2s;"
-            onmouseenter={(e) => { e.currentTarget.style.color = 'var(--color-text-primary)'; e.currentTarget.style.background = 'var(--color-bg-raised)'; }}
-            onmouseleave={(e) => { e.currentTarget.style.color = 'var(--color-text-muted)'; e.currentTarget.style.background = 'transparent'; }}
-          >
-            <X size={15} />
-          </button>
-        </div>
+        <button
+          type="button"
+          class="ai-close"
+          onclick={() => (showAiAssistant = false)}
+          title="Hide the assistant"
+          aria-label="Hide the assistant"
+        >
+          <X size={14} />
+        </button>
       </div>
 
-      <div style="display: flex; gap: 8px;">
+      <div class="ai-row">
         <input
+          class="input ai-input"
           type="text"
           bind:value={aiPrompt}
           onkeydown={(e) => e.key === 'Enter' && handleGenerateCommand()}
-          placeholder="e.g. Find all log files over 100MB modified in the last 7 days and sort by size..."
-          style="flex: 1; padding: 8px 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 8px; color: var(--color-text-primary); font-size: 12px;"
+          placeholder="e.g. find log files over 100 MB from the last 7 days"
+          aria-label="Describe the command you need"
         />
-        <Button variant="primary" onclick={handleGenerateCommand} disabled={aiLoading || !aiPrompt.trim()}>
+        <Button variant="primary" size="sm" onclick={handleGenerateCommand} disabled={aiLoading || !aiPrompt.trim()}>
           {#if aiLoading}<RefreshCw size={13} class="animate-spin-slow" />{:else}<Sparkles size={13} />{/if}
-          Generate Command
+          Generate
         </Button>
       </div>
 
       {#if aiResponse}
-        <div style="margin-top: 12px; padding: 12px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 8px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <span style="font-size: 12px; font-weight: 600; color: var(--color-text-muted);">Generated Bash Command</span>
-            <span class="badge" style="text-transform: uppercase; font-size: 10px; padding: 2px 6px; border-radius: 4px; background: {aiResponse.safety_level === 'safe' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)'}; color: {aiResponse.safety_level === 'safe' ? '#22c55e' : '#ef4444'}; font-weight: 600;">
+        <div class="ai-result">
+          <div class="ai-result-head">
+            <span>Generated command</span>
+            <Badge variant={aiResponse.safety_level === 'safe' ? 'success' : 'error'}>
               {aiResponse.safety_level}
-            </span>
+            </Badge>
           </div>
-
-          <div style="font-family: var(--font-mono); font-size: 12.5px; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; color: var(--color-accent); word-break: break-all; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div class="ai-command">
             <code>{aiResponse.generated_command}</code>
-            <div style="display: flex; gap: 6px;">
-              <button type="button" class="btn btn-outline btn-xs" onclick={() => copyCommand(aiResponse?.generated_command ?? '')} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
-                {#if copiedCommand}<Check size={12} />{:else}<Copy size={12} />{/if} Copy
-              </button>
-              <button type="button" class="btn btn-primary btn-xs" onclick={() => executeCommand(aiResponse?.generated_command ?? '')} style="padding: 3px 8px; display: flex; align-items: center; gap: 4px;">
-                <Play size={12} /> Dispatch
-              </button>
-            </div>
+            <Button variant="outline" size="xs" onclick={() => copyCommand(aiResponse?.generated_command ?? '')}>
+              {#if copiedCommand}<Check size={12} />{:else}<Copy size={12} />{/if} Copy
+            </Button>
           </div>
-
-          <p style="font-size: 12px; color: var(--color-text-muted); margin-top: 8px; margin-bottom: 0;">
-            {aiResponse.explanation}
-          </p>
+          <p class="ai-explain">{aiResponse.explanation}</p>
         </div>
       {/if}
-    </div>
+    </section>
   {/if}
 
-  <!-- Controls: Tabs & Actions -->
   <div class="controls-row">
-    <div class="tab-bar">
-      <button class="tab-btn" class:active={activeTab === 'variables'} onclick={() => (activeTab = 'variables')}>
-        <Variable size={14} /> Variables
-      </button>
-      <button class="tab-btn" class:active={activeTab === 'path'} onclick={() => (activeTab = 'path')}>
-        <FolderOpen size={14} /> PATH Manager
-      </button>
-      <button class="tab-btn" class:active={activeTab === 'files'} onclick={() => (activeTab = 'files')}>
-        <FileCode size={14} /> Profile Files
-      </button>
-      <button class="tab-btn" class:active={activeTab === 'preview'} onclick={() => (activeTab = 'preview')}>
-        <Eye size={14} /> Live Preview
-      </button>
-    </div>
-
+    {#if activeTab === 'variables'}
+      <div class="var-summary" aria-label="Variable summary">
+        <span class="summary-stat">
+          <Variable size={12} /><strong>{totalVars}</strong> {totalVars === 1 ? 'var' : 'vars'}
+        </span>
+        <span class="summary-divider"></span>
+        <span class="summary-stat">
+          <FileCode size={12} /><strong>{filesWithExports}</strong> {filesWithExports === 1 ? 'file' : 'files'}
+        </span>
+        <span class="summary-divider"></span>
+        <span class="summary-stat" class:warn={conflictNames > 0} title="Same variable defined in more than one file">
+          <AlertTriangle size={12} /><strong>{conflictNames}</strong> {conflictNames === 1 ? 'conflict' : 'conflicts'}
+        </span>
+      </div>
+    {/if}
     <div class="tab-actions">
       {#if activeTab === 'variables'}
-        <SearchBar bind:value={filterVars} placeholder="Filter variables..." style="margin:0; width:220px" />
-        <Button variant="outline" onclick={() => { showLiveValues = !showLiveValues; if(showLiveValues) loadLiveValues(); }}>
-          <Eye size={14} /> Live values
+        <button class="header-refresh-btn" onclick={loadVarGroups} disabled={varsLoading}>
+          <RefreshCw size={13} class={varsLoading ? 'animate-spin-slow' : ''} /> Refresh
+        </button>
+        <SearchBar bind:value={filterVars} placeholder="Filter variables…" style="margin:0; width:220px" />
+        <Button variant="outline" size="sm" onclick={() => { showLiveValues = !showLiveValues; if (showLiveValues) loadLiveValues(); }}>
+          <Eye size={14} /> {showLiveValues ? 'Hide live values' : 'Live values'}
+        </Button>
+        <Button variant="primary" size="sm" onclick={() => startAddVar(profileFiles[0]?.path || '')}>
+          <Plus size={13} /> Add Variable
         </Button>
       {:else if activeTab === 'path'}
         <button class="header-refresh-btn" onclick={loadPathEntries} disabled={pathLoading} id="shell-reload-path">
@@ -671,14 +671,14 @@
       {:else if activeTab === 'preview'}
         <div style="display:flex; align-items:center; gap:6px;">
           <span class="text-muted text-xs">Source:</span>
-          <Select bind:value={selectedSourceFile} size="sm" style="width: 140px;">
-            <option value="">Select file...</option>
-            {#each profileFiles.filter(f => !f.is_system) as f}
+          <Select bind:value={selectedSourceFile} size="sm" style="width: 150px;">
+            <option value="">Select file…</option>
+            {#each profileFiles as f}
               <option value={f.path}>{f.display_name}</option>
             {/each}
           </Select>
           <Button variant="outline" disabled={!selectedSourceFile} onclick={() => { const f = profileFiles.find(pf => pf.path === selectedSourceFile); if(f) sourceFile(f); }}>
-            Run
+            Source
           </Button>
         </div>
         <Button variant="primary" onclick={loadLiveEnv} disabled={previewLoading} id="shell-load-env">
@@ -694,8 +694,6 @@
     <!-- ══ VARIABLES ══════════════════════════════════════════════════════ -->
     {#if activeTab === 'variables'}
       <div class="tab-section" style="padding: 0; display: flex; flex-direction: column; flex: 1; min-height: 0;">
-
-
         {#if addVarForm}
           <div class="card add-var-form" style="margin-bottom:24px">
             <div class="form-title">Add exported variable</div>
@@ -770,25 +768,31 @@
                       <div class="col-name">NAME</div>
                       <div class="col-value">DEFINED VALUE</div>
                       {#if showLiveValues}<div class="col-value">LIVE VALUE</div>{/if}
-                      <div class="col-meta">METADATA</div>
                       <div class="col-actions">ACTIONS</div>
                     </div>
                     
                     {#each group.vars as v}
-                      {@const conflicts = conflictMap().get(v.name) ?? []}
+                      {@const conflicts = conflictMap.get(v.name) ?? []}
                       {@const liveVal = liveValuesMap.get(v.name)}
                       {@const outOfSync = showLiveValues && liveVal !== undefined && liveVal !== v.value}
                       
                       <div class="sg-row">
                         <div class="col-name">
-                          {#if editingVar?.v === v}
-                            <input class="sg-input" bind:value={editingVar.newName} />
-                          {:else}
-                            {v.name}
-                            {#if conflicts.length > 1}
-                              <span class="badge badge-warning conflict-badge" title="Defined in: {conflicts.join(', ')}">⚠</span>
+                          <div class="name-line">
+                            {#if editingVar?.v === v}
+                              <input class="sg-input" bind:value={editingVar.newName} aria-label="Variable name" />
+                            {:else}
+                              <span class="var-name-text">{v.name}</span>
+                              {#if conflicts.length > 1}
+                                <Badge variant="warning" title={`Defined in ${conflicts.length} files: ${conflicts.join(', ')}`}>
+                                  ×{conflicts.length}
+                                </Badge>
+                              {/if}
                             {/if}
-                          {/if}
+                          </div>
+                          <span class="var-source" title={`${group.source_path}:${v.line_number}`}>
+                            {group.display_name}:{v.line_number}
+                          </span>
                         </div>
                         <div class="col-value">
                           {#if editingVar?.v === v}
@@ -806,23 +810,21 @@
                             {/if}
                           </div>
                         {/if}
-                        <div class="col-meta">
-                          {#if editingVar?.v !== v}
-                            <span class="src-badge" title="src: {group.display_name}:{v.line_number}">src: {group.display_name}:{v.line_number}</span>
-                          {/if}
-                        </div>
                         <div class="col-actions">
                           {#if editingVar?.v === v}
-                            <button class="icon-btn" style="color:var(--color-accent)" onclick={saveEditVar} disabled={savingVar}>
+                            <Button variant="ghost" size="sm" class="row-action" aria-label="Save change" title="Save change" disabled={savingVar} onclick={saveEditVar}>
                               {#if savingVar}<div class="spinner-sm"></div>{:else}<Save size={14} />{/if}
-                            </button>
-                            <button class="icon-btn" onclick={() => (editingVar = null)}><XCircle size={14} /></button>
+                            </Button>
+                            <Button variant="ghost" size="sm" class="row-action" aria-label="Cancel edit" title="Cancel" onclick={() => (editingVar = null)}>
+                              <XCircle size={14} />
+                            </Button>
                           {:else}
-                            <button class="icon-btn" onclick={() => startEditVar(v)} title="Edit">
-                              <!-- Inline SVG for Edit icon if Lucide's Edit2 is missing, but I can just use a text pencil or keep the custom layout -->
-                              ✎
-                            </button>
-                            <button class="icon-btn" onclick={() => confirmDeleteVar(v)} title="Delete"><Trash2 size={14}/></button>
+                            <Button variant="ghost" size="sm" class="row-action" aria-label={`Edit ${v.name}`} title="Edit variable" onclick={() => startEditVar(v)}>
+                              <Pencil size={14} />
+                            </Button>
+                            <Button variant="ghost" size="sm" class="row-action danger" aria-label={`Delete ${v.name}`} title="Delete variable" onclick={() => confirmDeleteVar(v)}>
+                              <Trash2 size={14} />
+                            </Button>
                           {/if}
                         </div>
                       </div>
@@ -1171,23 +1173,15 @@
           <div class="preview-toolbar">
             <SearchBar bind:value={filterLive} placeholder="Filter variables…" style="flex:1; margin:0" />
             
-            <label class="toggle-label-row" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">
-              <button
-                class="ui-toggle"
-                class:on={showOnlyUnsynced}
-                onclick={() => showOnlyUnsynced = !showOnlyUnsynced}
-                role="switch"
-                aria-checked={showOnlyUnsynced}
-                type="button"
-                id="shell-unsynced-only"
-                aria-label="Toggle show only out-of-sync"
-                style="transform: scale(0.8); margin-right:4px;"
-              >
-                <span class="ui-toggle-thumb"></span>
-              </button>
-              Show out-of-sync only
-            </label>
-            <span class="text-muted text-xs" style="background:rgba(255,255,255,0.03); padding:8px 12px; border-radius:8px; border:1px solid var(--color-border);">{filteredLiveEnv.length} / {liveEnv.length} vars</span>
+            <div class="toggle-label-row">
+              <Toggle
+                checked={showOnlyUnsynced}
+                onToggle={(value) => (showOnlyUnsynced = value)}
+                aria-label="Show only out-of-sync variables"
+              />
+              <span>Show out-of-sync only</span>
+            </div>
+            <span class="preview-count">{filteredLiveEnv.length} / {liveEnv.length} vars</span>
           </div>
 
 
@@ -1198,7 +1192,7 @@
               <thead>
                 <tr>
                   <th>Variable</th>
-                  <th>Live value (bash -l)</th>
+                  <th>Live value (login shell)</th>
                   <th>Defined value (file)</th>
                   <th style="text-align:center">In sync</th>
                   <th>Source</th>
@@ -1238,12 +1232,16 @@
             </table>
           </div>
         {:else if !previewLoading}
-          <div class="empty-state">
-            <Eye size={40} style="color:var(--color-text-muted)" />
-            <p>Click "Preview env" to run bash -l -c env and see your resolved environment</p>
-          </div>
+          <EmptyState
+            icon={Eye}
+            title="No environment loaded"
+            description="Load your login shell environment to compare the values defined in your profile files with what the shell actually resolves."
+            actionLabel="Preview env"
+            actionIcon={RefreshCw}
+            onAction={loadLiveEnv}
+          />
         {:else}
-          <div class="center-state"><div class="spinner"></div> Running bash login shell…</div>
+          <div class="center-state"><div class="spinner"></div> Running your login shell…</div>
         {/if}
       </div>
     {/if}
@@ -1303,7 +1301,7 @@
     background: rgba(255,255,255,0.04);
     border-radius: 4px;
     margin-left: 6px;
-  }.conflict-badge { margin-left: 6px; }:global(.out-of-sync) { background: rgba(245,158,11,0.05); }.row-unsynced { background: rgba(245,158,11,0.06); }.text-warn { color: var(--color-warning) !important; }.text-muted { color: var(--color-text-muted) !important; }.text-xs { font-size: 11px; }:global(.icon-ok) { color: var(--color-success); flex-shrink: 0; }.mono-input { font-family: var(--font-mono); font-size: 13px; }/* ─── Add var form ───────────────────────────────────────────────── */ .add-var-form { margin-bottom: 8px; }.form-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: var(--color-text-primary); }.add-var-grid {
+  }:global(.out-of-sync) { background: rgba(245,158,11,0.05); }.row-unsynced { background: rgba(245,158,11,0.06); }.text-warn { color: var(--color-warning) !important; }.text-muted { color: var(--color-text-muted) !important; }.text-xs { font-size: 11px; }:global(.icon-ok) { color: var(--color-success); flex-shrink: 0; }.mono-input { font-family: var(--font-mono); font-size: 13px; }/* ─── Add var form ───────────────────────────────────────────────── */ .add-var-form { margin-bottom: 8px; }.form-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: var(--color-text-primary); }.add-var-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
@@ -1480,9 +1478,108 @@
   }/* ─── Preview tab ────────────────────────────────────────────────── */ .preview-toolbar {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   }.toggle-label-row {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 12px; color: var(--color-text-secondary); cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 11px;
+    border-radius: 8px;
+    background: var(--color-bg-raised);
+    font-size: 11.5px; color: var(--color-text-secondary);
     white-space: nowrap;
+  }.preview-count {
+    padding: 6px 11px;
+    border-radius: 8px;
+    background: var(--color-bg-raised);
+    font-family: var(--font-mono);
+    font-size: 10.5px; color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  /* ─── Variable summary strip ─────────────────────────────────────── */
+  .var-summary {
+    display: inline-flex;
+    align-items: center;
+    height: 30px;
+    padding: 0 3px;
+    border-radius: 8px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-subtle);
+    flex-shrink: 0;
+  }
+  .summary-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 8px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+  .summary-stat :global(svg) { color: var(--color-text-muted); }
+  .summary-stat strong {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-text-primary);
+  }
+  .summary-stat.warn { color: var(--color-warning); }
+  .summary-stat.warn :global(svg) { color: var(--color-warning); }
+  .summary-stat.warn strong { color: var(--color-warning); }
+  .summary-divider {
+    width: 1px;
+    height: 14px;
+    background: var(--color-border);
+  }
+
+  /* ─── AI assistant ───────────────────────────────────────────────── */
+  .ai-card {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 12px 14px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+  .ai-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .ai-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; font-weight: 650; color: var(--color-text-primary);
+    min-width: 0;
+  }
+  .ai-title :global(svg) { color: var(--color-accent); }
+  .ai-close {
+    display: grid; place-items: center;
+    width: 24px; height: 24px;
+    border: none; border-radius: 6px;
+    background: transparent; color: var(--color-text-muted);
+    cursor: pointer;
+  }
+  .ai-close:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+  .ai-row { display: flex; align-items: center; gap: 8px; }
+  .ai-input { flex: 1; min-width: 0; height: 34px; font-size: 12px; }
+  .ai-result {
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 9px;
+    background: var(--color-bg-input);
+  }
+  .ai-result-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .ai-command {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--color-accent);
+    overflow-wrap: anywhere;
+  }
+  .ai-command code { overflow-wrap: anywhere; }
+  .ai-explain {
+    margin: 0;
+    font-size: 11.5px; line-height: 1.45;
+    color: var(--color-text-secondary);
   }/* ─── ShellEnv Custom Design ────────────────────────────── */.shell-groups-list {
     display: flex;
     flex-direction: column;
@@ -1572,7 +1669,7 @@
     border-bottom: 1px solid var(--color-border);
   }.sg-row:last-child {
     border-bottom: none;
-  }.col-name { width: 250px; font-family: var(--font-mono); font-weight: 600; color: var(--color-text-primary); font-size: 13px; }.col-value { flex: 1; padding-right: 20px; min-width: 0; }.col-meta { width: 160px; }.col-actions { width: 100px; display: flex; justify-content: flex-end; gap: 6px; }.sg-input {
+  }.col-name { width: 250px; min-width: 0; flex-shrink: 0; font-family: var(--font-mono); font-weight: 600; color: var(--color-text-primary); font-size: 13px; }.name-line { display: flex; align-items: center; gap: 6px; min-width: 0; }.var-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.var-source { display: block; margin-top: 1px; font-family: var(--font-mono); font-size: 10px; font-weight: 500; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.col-value { flex: 1; padding-right: 20px; min-width: 0; }.col-actions { width: 84px; flex-shrink: 0; display: flex; justify-content: flex-end; gap: 4px; }.col-actions :global(.row-action) { width: 30px; height: 30px; min-width: 30px; padding: 0; background: var(--color-bg-raised); border: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); }.col-actions :global(.row-action:hover:not(:disabled)) { background: var(--color-bg-hover); border-color: var(--color-border); color: var(--color-text-primary); }.col-actions :global(.row-action.danger:hover:not(:disabled)) { background: var(--color-error-muted); color: var(--color-error); }.sg-input {
     width: 100%;
     background: var(--color-bg-base);
     border: 1px solid var(--color-border);
@@ -1587,33 +1684,6 @@
     border-color: var(--color-accent);
     color: var(--color-text-primary);
     background: var(--color-bg-surface);
-  }.src-badge {
-    background: rgba(20, 184, 166, 0.12);
-    color: #0d9488;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    white-space: nowrap;
-  }.icon-btn {
-    background: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: all 0.2s;
-  }.icon-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text-primary);
-  }.icon-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }.sg-add-row {
     display: flex;
     align-items: center;
@@ -1627,69 +1697,9 @@
     transition: color 0.2s;
   }.sg-add-row:hover {
     color: var(--color-accent);
-  }/* ─── Light Mode Explicit Contrast Overrides ────────────────── */
-  /* `:global()` is required: without it Svelte scopes the `html` ancestor to
-     the component and drops the whole rule as unused — the overrides would
-     never apply. */
-  :global(html.light-mode) .shell-group-card {
-    background: #FFFFFF !important;
-    border: 1px solid #E5E7EB !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+  }  .user-badge.system-badge {
+    background: var(--color-warning-muted);
+    border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
+    color: var(--color-warning);
   }
-  :global(html.light-mode) .sg-name {
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .sg-table-header {
-    background: #F9FAFB !important;
-    border-bottom: 1px solid #E5E7EB !important;
-    color: #6B7280 !important;
-    font-weight: 600 !important;
-  }
-  :global(html.light-mode) .sg-row {
-    border-bottom: 1px solid #E5E7EB !important;
-  }
-  :global(html.light-mode) .col-name {
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .sg-input {
-    background: #F9FAFB !important;
-    border: 1px solid #E5E7EB !important;
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .sg-input:focus,
-  :global(html.light-mode) .sg-input:not([readonly]) {
-    background: #FFFFFF !important;
-    border-color: #2563EB !important;
-  }
-  :global(html.light-mode) .user-badge {
-    background: #F3F4F6 !important;
-    border: 1px solid #E5E7EB !important;
-    color: #374151 !important;
-  }
-  :global(html.light-mode) .user-badge.system-badge {
-    background: rgba(217, 119, 6, 0.12) !important;
-    color: #B45309 !important;
-    border: 1px solid rgba(217, 119, 6, 0.25) !important;
-  }
-  :global(html.light-mode) .var-count {
-    color: #4B5563 !important;
-  }
-  :global(html.light-mode) .src-badge {
-    background: rgba(37, 99, 235, 0.08) !important;
-    color: #1D4ED8 !important;
-  }
-  :global(html.light-mode) .icon-btn {
-    background: #FFFFFF !important;
-    border: 1px solid #E5E7EB !important;
-    color: #4B5563 !important;
-  }
-  :global(html.light-mode) .icon-btn:hover {
-    background: #F3F4F6 !important;
-    color: #111827 !important;
-  }
-  :global(html.light-mode) .sg-add-row {
-    color: #374151 !important;
-  }
-  :global(html.light-mode) .sg-add-row:hover {
-    color: #2563EB !important;
-  }</style>
+</style>

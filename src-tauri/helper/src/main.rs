@@ -25,6 +25,7 @@ use root_policy::{
     is_valid_account_name, nginx_config_remove_path_valid, nginx_config_path_valid,
     nginx_link_as_valid, nginx_site_unlink_path_valid, validate_nginx_config_content,
     validate_profile_sh_content, validate_profile_sh_path, var_www_is_protected,
+    validate_environment_content, ENVIRONMENT_CONTENT_MAX, ENVIRONMENT_PATH,
     firewall_rich_rule_valid, firewall_port_value_valid, firewall_service_name_valid,
     firewall_zone_name_valid, firewall_interface_name_valid, FirewallRichRule,
     FirewallRichRuleAction, FirewallRichRuleElement, FirewallRichRuleFamily,
@@ -2785,7 +2786,7 @@ fn pci_reset_action(slot: &str) -> Result<(), String> {
 /// caller. Until then the action name is refused at dispatch, fail-closed.
 const ROOT_ACTIONS: &[&str] = &[
     "admin_keep", "install_polkit_rule", "read_user_ssh_keys", "write_user_ssh_keys",
-    "write_profile_sh", "restore_profile_sh",
+    "write_profile_sh", "write_environment_file", "restore_profile_sh",
     "nginx_config_install", "nginx_config_backup", "nginx_restore_backup",
     "nginx_link_site", "nginx_unlink_site", "nginx_config_remove",
     "nginx_www_fs", "nginx_www_install",
@@ -2948,6 +2949,14 @@ fn main() {
             } else {
                 Err(format!(
                     "lcp-admin: the action '{requested}' takes exactly one profile file path."
+                ))
+            }
+        } else if requested == "write_environment_file" {
+            if args.len() == 1 {
+                write_environment_file_action()
+            } else {
+                Err(format!(
+                    "lcp-admin: the action '{requested}' takes no arguments; the content arrives on stdin."
                 ))
             }
         } else if requested == "restore_profile_sh" {
@@ -3862,6 +3871,20 @@ fn write_user_ssh_keys_action(username: &str) -> Result<(), String> {
 /// existing `.sh` atomically and preserves its owner and mode; creates new
 /// files as `0644 root:root`. Symlinks are never followed — an existing
 /// symlinked destination is refused, not written through.
+/// The `write_environment_file` action: publishes `/etc/environment` from
+/// stdin. The destination is a constant — no argv names a path — and the
+/// content must satisfy the same shared policy the app checks before the
+/// privileged call. The write core keeps a revision backup and publishes
+/// atomically.
+fn write_environment_file_action() -> Result<(), String> {
+    let content = read_stdin_content(ENVIRONMENT_CONTENT_MAX as u64, "environment file")?;
+    validate_environment_content(&content)?;
+    if let Some(backup) = install_root_owned_file(ENVIRONMENT_PATH, &content, "environment file")? {
+        println!("{backup}");
+    }
+    Ok(())
+}
+
 fn write_profile_sh_action(path: &str) -> Result<(), String> {
     // both halves of the policy hold independently — the helper must not
     // depend on the app having validated anything

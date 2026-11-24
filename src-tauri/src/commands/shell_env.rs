@@ -63,19 +63,29 @@ pub struct LiveEnvVar {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CRITICAL_VARS: &[&str] = &["PATH", "HOME", "USER", "SHELL", "LOGNAME", "UID", "GID"];
-
 fn user_profile_files() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    // The startup files of the two shells this distribution ships by default.
+    // Fish configuration has a different syntax and is not parsed here.
     vec![
         home.join(".bashrc"),
         home.join(".bash_profile"),
+        home.join(".bash_login"),
         home.join(".profile"),
+        home.join(".zshrc"),
+        home.join(".zshenv"),
+        home.join(".zprofile"),
+        home.join(".zlogin"),
     ]
 }
 
 fn all_profile_files() -> Vec<PathBuf> {
-    let mut files = user_profile_files();
+    // Only files that exist are shown and parsed; the allowlist above still
+    // covers a managed file the panel may create later.
+    let mut files: Vec<PathBuf> = user_profile_files()
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect();
     // append /etc/profile.d/*.sh
     if let Ok(rd) = std::fs::read_dir(PROFILE_D_DIR) {
         let mut sys: Vec<PathBuf> = rd
@@ -142,6 +152,28 @@ fn parse_exports_from_content(content: &str, source_path: &str) -> Vec<ShellVar>
     vars
 }
 
+/// The shell whose login environment the Live Preview represents. Only
+/// bash/zsh/sh are accepted; anything else falls back to bash.
+fn login_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL") {
+        let name = Path::new(&shell)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if matches!(name, "bash" | "zsh" | "sh") && Path::new(&shell).is_file() {
+            return shell;
+        }
+    }
+    for candidate in [
+        "/usr/bin/bash", "/bin/bash", "/usr/bin/zsh", "/bin/zsh", "/usr/bin/sh", "/bin/sh",
+    ] {
+        if Path::new(candidate).is_file() {
+            return candidate.to_string();
+        }
+    }
+    String::from("bash")
+}
+
 fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -152,6 +184,27 @@ fn is_valid_var_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Quote a value for `export NAME="..."` without changing expansion:
+/// `$HOME`/`$PATH` keep working, while an embedded quote can no longer break
+/// the line or swallow the rest of the file. Newlines are refused before this
+/// is called.
+fn shell_double_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+fn has_control_characters(value: &str) -> bool {
+    value.contains(['\n', '\r', '\0'])
 }
 
 fn backup_dir() -> PathBuf {
@@ -321,17 +374,116 @@ fn content_with_path_entry(content: &str, directory: &str) -> String {
     }
 }
 
-/// Drop every uncommented `PATH` line mentioning `directory`.
+/// The directories of a `PATH=...` / `export PATH=...` assignment line, or
+/// `None` for every other line. The value is split as a real PATH list, so a
+/// removal can never cut a directory out of the middle of another one.
+fn path_assignment_directories(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let value = rest.strip_prefix("PATH=")?.trim();
+    let inner = if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    Some(
+        inner
+            .split(':')
+            .map(|entry| entry.trim().to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect(),
+    )
+}
+
+fn expand_path_entry(entry: &str) -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let home = home.to_string_lossy();
+    if let Some(rest) = entry.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else {
+        entry.replace("${HOME}", &home).replace("$HOME", &home)
+    }
+}
+
+fn path_entry_matches_dir(entry: &str, directory: &str) -> bool {
+    entry == directory || expand_path_entry(entry) == directory
+}
+
+/// Remove one directory from every PATH assignment that contains it. A line
+/// that only re-exported the base `$PATH` after the removal is dropped
+/// entirely; lines unrelated to `directory` are kept byte-for-byte.
 fn content_without_path_entry(content: &str, directory: &str) -> String {
-    content
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !(t.contains("PATH") && t.contains(directory) && !t.starts_with('#'))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+    let mut out: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let Some(directories) = path_assignment_directories(line) else {
+            out.push(line.to_string());
+            continue;
+        };
+        if !directories.iter().any(|entry| path_entry_matches_dir(entry, directory)) {
+            out.push(line.to_string());
+            continue;
+        }
+
+        let remaining: Vec<&str> = directories
+            .iter()
+            .filter(|entry| !path_entry_matches_dir(entry, directory))
+            .map(String::as_str)
+            .collect();
+        let only_base_path = remaining.is_empty()
+            || (remaining.len() == 1 && matches!(remaining[0], "$PATH" | "${PATH}"));
+        if only_base_path {
+            continue;
+        }
+
+        let indent = &line[..line.len() - line.trim_start().len()];
+        let prefix = if line.trim_start().starts_with("export ") {
+            "export "
+        } else {
+            ""
+        };
+        out.push(format!("{indent}{prefix}PATH=\"{}\"", remaining.join(":")));
+    }
+
+    let mut updated = out.join("\n");
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated
+}
+
+/// A directory the PATH tab may append: absolute, no list separator, no shell
+/// metacharacters. The generated line still has to pass the profile content
+/// policy, but this rejects the mistake with a precise message first.
+fn path_directory_valid(directory: &str) -> Result<(), String> {
+    if directory.is_empty() || directory.len() > 1024 {
+        return Err(String::from("The directory must be 1 to 1024 characters."));
+    }
+    if !directory.starts_with('/') {
+        return Err(format!(
+            "\"{directory}\" is not an absolute path — PATH entries must start with /."
+        ));
+    }
+    if directory.contains(':') {
+        return Err(String::from(
+            "A PATH entry can not contain ':' (that separates PATH entries).",
+        ));
+    }
+    if directory
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+')))
+    {
+        return Err(format!(
+            "\"{directory}\" contains characters that are not allowed in a PATH entry."
+        ));
+    }
+    Ok(())
 }
 
 /// Write one `/etc/profile.d/<name>.sh` file through the dedicated root
@@ -397,8 +549,31 @@ pub async fn shell_list_profile_files() -> Result<Vec<ProfileFile>, String> {
     Ok(result)
 }
 
+/// The Files tab may only open files the panel itself lists. A renderer that
+/// names another path gets a refusal instead of an arbitrary read.
+fn ensure_managed_profile_path(path: &str) -> Result<(), String> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute()
+        || candidate.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(format!(
+            "Refusing to read '{path}': the path must be absolute and normalised."
+        ));
+    }
+    if !all_profile_files().iter().any(|managed| managed == candidate) {
+        return Err(format!("'{path}' is not a profile file this panel manages."));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn shell_read_profile_file(path: String) -> Result<String, String> {
+    ensure_managed_profile_path(&path)?;
     std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))
 }
 
@@ -423,12 +598,77 @@ pub async fn shell_parse_all_exports() -> Result<Vec<ShellVarGroup>, String> {
 
 #[tauri::command]
 pub async fn shell_get_live_value(name: String) -> Result<String, String> {
-    let out = Command::new("printenv")
-        .arg(&name)
+    if !is_valid_var_name(&name) {
+        return Err(format!("Invalid environment variable name: '{name}'"));
+    }
+    // The name is a positional parameter, never spliced into the script.
+    let args = vec![
+        String::from("-l"),
+        String::from("-c"),
+        String::from("printenv \"$1\""),
+        String::from("lcp-printenv"),
+        name,
+    ];
+    let out = Command::new(login_shell())
+        .args(&args)
         .output()
         .await
-        .map_err(|e| format!("Failed to run printenv: {e}"))?;
+        .map_err(|e| format!("Failed to read the live value: {e}"))?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Replace exactly one line. The line number comes from the parse the user is
+/// looking at; if the file moved on, the old line no longer matches and the
+/// write is refused instead of touching a different line.
+fn replace_profile_line(
+    content: &str,
+    line_number: usize,
+    old_line: Option<&str>,
+    new_line: &str,
+) -> Result<String, String> {
+    if line_number == 0 {
+        return Err(String::from("A line number is required to edit a variable."));
+    }
+    let Some(existing) = content.lines().nth(line_number - 1) else {
+        return Err(String::from("The file changed since it was loaded — refresh and try again."));
+    };
+    if let Some(old) = old_line {
+        if existing.trim() != old.trim() {
+            return Err(String::from("The file changed since it was loaded — refresh and try again."));
+        }
+    }
+    let mut lines: Vec<&str> = content.lines().collect();
+    lines[line_number - 1] = new_line;
+    let mut updated = lines.join("\n");
+    if content.ends_with('\n') {
+        updated.push('\n');
+    }
+    Ok(updated)
+}
+
+/// Remove exactly one line, after checking it still is the line the user
+/// asked to delete.
+fn remove_profile_line(content: &str, line_number: usize, raw_line: &str) -> Result<String, String> {
+    if line_number == 0 {
+        return Err(String::from("A line number is required to delete a variable."));
+    }
+    let Some(existing) = content.lines().nth(line_number - 1) else {
+        return Err(String::from("The file changed since it was loaded — refresh and try again."));
+    };
+    if existing.trim() != raw_line.trim() {
+        return Err(String::from("The file changed since it was loaded — refresh and try again."));
+    }
+    let kept: Vec<&str> = content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| *index != line_number - 1)
+        .map(|(_, line)| line)
+        .collect();
+    let mut updated = kept.join("\n");
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -437,20 +677,26 @@ pub async fn shell_write_var(
     name: String,
     value: String,
     old_line: Option<String>,
+    line_number: usize,
 ) -> Result<(), String> {
-    // Safety: validate name
     if !is_valid_var_name(&name) {
-        return Err(format!("Invalid variable name: '{name}'. Must match [A-Za-z_][A-Za-z0-9_]*"));
+        return Err(format!(
+            "Invalid variable name: '{name}'. Must match [A-Za-z_][A-Za-z0-9_]*"
+        ));
     }
-    if CRITICAL_VARS.contains(&name.as_str()) && name == "PATH" {
-        return Err(format!("'{name}' is a critical system variable. Use the PATH Manager tab to modify it."));
+    if name == "PATH" {
+        return Err(String::from(
+            "'PATH' is managed on the PATH tab so the file stays a valid PATH assignment.",
+        ));
+    }
+    if has_control_characters(&value) {
+        return Err(String::from("A variable value must be a single line."));
     }
     // The route is decided first — a renderer-supplied path outside the two
     // managed families is refused before any backup, file creation or write.
     let profile_file = match profile_write_route(&path) {
         ProfileWriteRoute::ProfileD(file_name) => Some(file_name),
         ProfileWriteRoute::Home => {
-            // create user file if not exists
             if !std::path::Path::new(&path).exists() {
                 std::fs::write(&path, "").map_err(|e| format!("Cannot create {path}: {e}"))?;
             }
@@ -461,23 +707,14 @@ pub async fn shell_write_var(
     };
 
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let new_line = format!("export {name}=\"{value}\"");
+    let new_line = format!("export {name}={}", shell_double_quote(&value));
 
-    let new_content = if let Some(old) = &old_line {
-        // Rewrite the specific line
-        content
-            .lines()
-            .map(|l| if l.trim() == old.trim() { new_line.as_str() } else { l })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + if content.ends_with('\n') { "\n" } else { "" }
+    let new_content = if line_number > 0 {
+        replace_profile_line(&content, line_number, old_line.as_deref(), &new_line)?
+    } else if content.is_empty() || content.ends_with('\n') {
+        format!("{content}{new_line}\n")
     } else {
-        // Append to end
-        if content.is_empty() || content.ends_with('\n') {
-            format!("{content}{new_line}\n")
-        } else {
-            format!("{content}\n{new_line}\n")
-        }
+        format!("{content}\n{new_line}\n")
     };
 
     match profile_file {
@@ -487,18 +724,17 @@ pub async fn shell_write_var(
 }
 
 #[tauri::command]
-pub async fn shell_delete_var(path: String, raw_line: String) -> Result<(), String> {
+pub async fn shell_delete_var(
+    path: String,
+    raw_line: String,
+    line_number: usize,
+) -> Result<(), String> {
     // Refused before the file is even read — let alone backed up or written.
     if matches!(profile_write_route(&path), ProfileWriteRoute::Refused) {
         return Err(unmanaged_path_error(&path));
     }
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let new_content = content
-        .lines()
-        .filter(|l| l.trim() != raw_line.trim())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let new_content = remove_profile_line(&content, line_number, &raw_line)?;
     match profile_d_name(&path) {
         Some(file_name) => write_profile_d_as_root(&file_name, &new_content).await.map(|_| ()),
         None => {
@@ -541,6 +777,11 @@ pub async fn shell_create_profile_d_file(name: String) -> Result<String, String>
     let file_name = format!("{clean}.sh");
     // Validates the name and the destination before any privileged call.
     let path = profile_d_target(&file_name)?;
+    if Path::new(&path).exists() {
+        return Err(format!(
+            "{path} already exists — open it in the editor instead of creating it again."
+        ));
+    }
     let content = "#!/usr/bin/env bash\n# Created by Linux Control Panel\n";
     // The helper installs the file as 0644 itself; no separate root chmod.
     write_profile_d_as_root(&file_name, content).await?;
@@ -583,8 +824,62 @@ pub async fn shell_list_backups() -> Result<Vec<ShellBackup>, String> {
             }
         }
     }
+    // The root helper keeps a revision sibling next to every /etc/profile.d
+    // write. Those are real snapshots too, so the vault lists and restores
+    // them through the same helper action.
+    if let Ok(rd) = std::fs::read_dir(PROFILE_D_DIR) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let Some((original_name, seconds)) = profile_d_backup_parts(&filename) else {
+                continue;
+            };
+            let timestamp = chrono::DateTime::from_timestamp(seconds, 0)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "—".to_string());
+            backups.push(ShellBackup {
+                backup_path: path.to_string_lossy().to_string(),
+                original_path: format!("{PROFILE_D_DIR}/{original_name}"),
+                timestamp,
+                filename,
+            });
+        }
+    }
+
     backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(backups)
+}
+
+/// `<name>.<seconds>_<pid>.<nanos>.bak` — the revision name the helper writes.
+fn profile_d_backup_parts(filename: &str) -> Option<(String, i64)> {
+    let stem = filename.strip_suffix(".bak")?;
+    let (before_unique, unique) = stem.rsplit_once('_')?;
+    let (pid, nanos) = unique.split_once('.')?;
+    if pid.is_empty()
+        || nanos.is_empty()
+        || !pid.bytes().all(|b| b.is_ascii_digit())
+        || !nanos.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let (original, stamp) = before_unique.rsplit_once('.')?;
+    if original.is_empty()
+        || original.starts_with('.')
+        || !original.ends_with(".sh")
+        || original.contains('/')
+        || stamp.is_empty()
+        || !stamp.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((original.to_string(), stamp.parse().ok()?))
 }
 
 /// A user-owned backup must be one this app created itself: it must live in
@@ -725,10 +1020,16 @@ pub async fn shell_restore_backup(backup_path: String, original_path: String) ->
 #[tauri::command]
 pub async fn shell_parse_path() -> Result<Vec<PathEntry>, String> {
     let path_val = std::env::var("PATH").unwrap_or_default();
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
 
     // Try to find which profile file each entry comes from
-    let all_contents: Vec<(String, String)> = all_profile_files()
+    let mut source_files = all_profile_files();
+    for extra in ["/etc/environment", "/etc/profile"] {
+        let path = PathBuf::from(extra);
+        if path.is_file() {
+            source_files.push(path);
+        }
+    }
+    let all_contents: Vec<(String, String)> = source_files
         .into_iter()
         .filter_map(|p| {
             let s = p.to_str().unwrap_or("").to_string();
@@ -740,23 +1041,17 @@ pub async fn shell_parse_path() -> Result<Vec<PathEntry>, String> {
         .split(':')
         .filter(|d| !d.is_empty())
         .map(|dir| {
-            // Expand ~ manually
-            let expanded = if dir.starts_with("~/") {
-                home.join(&dir[2..]).to_str().unwrap_or(dir).to_string()
-            } else {
-                dir.to_string()
-            };
+            let expanded = expand_path_entry(dir);
             let exists = std::path::Path::new(&expanded).exists();
 
-            // Find source file
+            // Find the assignment that actually contains this directory.
             let source = all_contents.iter().find_map(|(path, content)| {
-                for line in content.lines() {
-                    let t = line.trim();
-                    if t.contains("PATH") && t.contains(dir) && !t.starts_with('#') {
-                        return Some(path.clone());
-                    }
-                }
-                None
+                let found = content.lines().any(|line| {
+                    path_assignment_directories(line)
+                        .map(|entries| entries.iter().any(|entry| path_entry_matches_dir(entry, dir)))
+                        .unwrap_or(false)
+                });
+                found.then(|| path.clone())
             });
 
             PathEntry {
@@ -776,7 +1071,16 @@ pub async fn shell_add_path_entry(directory: String, profile_path: String) -> Re
     if matches!(profile_write_route(&profile_path), ProfileWriteRoute::Refused) {
         return Err(unmanaged_path_error(&profile_path));
     }
+    path_directory_valid(&directory)?;
     let content = std::fs::read_to_string(&profile_path).unwrap_or_default();
+    let already_present = content
+        .lines()
+        .filter_map(path_assignment_directories)
+        .flatten()
+        .any(|entry| path_entry_matches_dir(&entry, &directory));
+    if already_present {
+        return Err(format!("{directory} is already on PATH in {profile_path}."));
+    }
     let new_content = content_with_path_entry(&content, &directory);
     match profile_d_name(&profile_path) {
         Some(file_name) => write_profile_d_as_root(&file_name, &new_content).await.map(|_| ()),
@@ -806,8 +1110,9 @@ pub async fn shell_remove_path_entry(directory: String, profile_path: String) ->
 
 #[tauri::command]
 pub async fn shell_get_live_env() -> Result<Vec<LiveEnvVar>, String> {
-    // Run `bash -l -c env` to get a login-shell environment
-    let out = Command::new("bash")
+    // Run the user's login shell for a real login environment (bash is used
+    // only when neither $SHELL nor a known shell is available).
+    let out = Command::new(login_shell())
         .args(["-l", "-c", "env"])
         .output()
         .await
@@ -836,7 +1141,7 @@ pub async fn shell_get_live_env() -> Result<Vec<LiveEnvVar>, String> {
             } else {
                 (None, None)
             };
-            let in_sync = defined_value.as_ref().map(|d| d == &live_value).unwrap_or(true);
+            let in_sync = values_in_sync(defined_value.as_ref(), &live_value);
             Some(LiveEnvVar { name, live_value, defined_value, in_sync, source_path })
         })
         .collect();
@@ -890,6 +1195,24 @@ fn source_file_argv(path: &str) -> Vec<String> {
 /// Turn `env` output into preview rows: each value's definition is taken from
 /// the sourced file and `in_sync` is a real comparison — never a hard-coded
 /// `true`. Same rule `shell_get_live_env` uses for its preview.
+/// `$HOME` in a profile value expands at login, so compare the expanded form.
+/// A value still containing another variable or a command substitution is
+/// dynamic and can not be judged out of sync from a static read.
+fn values_in_sync(defined: Option<&String>, live: &str) -> bool {
+    let Some(defined) = defined else {
+        return true;
+    };
+    let home = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .to_string_lossy()
+        .to_string();
+    let expanded = defined.replace("${HOME}", &home).replace("$HOME", &home);
+    if expanded.contains('$') || expanded.contains('`') {
+        return true;
+    }
+    expanded == live
+}
+
 fn live_env_with_definitions(
     stdout: &str,
     definitions: &[(String, String)],
@@ -905,10 +1228,7 @@ fn live_env_with_definitions(
                 .iter()
                 .find(|(defined_name, _)| defined_name == &name)
                 .map(|(_, value)| value.clone());
-            let in_sync = defined_value
-                .as_ref()
-                .map(|defined| defined == &live_value)
-                .unwrap_or(true);
+            let in_sync = values_in_sync(defined_value.as_ref(), &live_value);
             Some(LiveEnvVar {
                 name,
                 live_value,
@@ -927,7 +1247,7 @@ pub async fn shell_source_file(path: String) -> Result<Vec<LiveEnvVar>, String> 
 
     // The path travels as a positional argument, so it is never parsed by a
     // shell (previously: `format!("source {path} && env")` — injection).
-    let out = Command::new("bash")
+    let out = Command::new(login_shell())
         .args(source_file_argv(&path))
         .output()
         .await
@@ -1409,7 +1729,12 @@ mod profile_restore_tests {
         let expected = vec![
             home.join(".bashrc"),
             home.join(".bash_profile"),
+            home.join(".bash_login"),
             home.join(".profile"),
+            home.join(".zshrc"),
+            home.join(".zshenv"),
+            home.join(".zprofile"),
+            home.join(".zlogin"),
         ];
         assert_eq!(user_profile_files(), expected);
     }
@@ -1601,6 +1926,7 @@ mod profile_write_tests {
             "LCP_EVIL".to_string(),
             "yes".to_string(),
             None,
+            0,
         )
         .await
         .expect_err("an unmanaged home path must be refused");
@@ -1615,6 +1941,7 @@ mod profile_write_tests {
             "LCP_EVIL".to_string(),
             "yes".to_string(),
             None,
+            0,
         )
         .await
         .expect_err("an /etc file outside profile.d must be refused");
@@ -1625,7 +1952,11 @@ mod profile_write_tests {
     /// unmanaged file is neither modified nor backed up.
     #[tokio::test]
     async fn shell_delete_var_refuses_an_unmanaged_path_before_it_reads_the_file() {
-        let error = shell_delete_var("/etc/hosts".to_string(), "127.0.0.1 localhost".to_string())
+        let error = shell_delete_var(
+            "/etc/hosts".to_string(),
+            "127.0.0.1 localhost".to_string(),
+            0,
+        )
             .await
             .expect_err("an unmanaged path must be refused");
         assert!(error.contains("not a profile file this panel manages"), "{error}");
@@ -1671,5 +2002,122 @@ mod profile_write_tests {
                 .contains("localhost"),
             "/etc/hosts must be untouched"
         );
+    }
+}
+
+// ─── tests: PATH editing, live comparison, backup names ─────────────────────
+
+#[cfg(test)]
+mod environment_helper_tests {
+    use super::*;
+
+    #[test]
+    fn path_assignment_lines_yield_their_directories() {
+        assert_eq!(
+            path_assignment_directories("export PATH=\"$PATH:/opt/bin\"").unwrap(),
+            vec!["$PATH", "/opt/bin"]
+        );
+        assert_eq!(
+            path_assignment_directories("PATH=\"/usr/bin:/bin\"").unwrap(),
+            vec!["/usr/bin", "/bin"]
+        );
+        assert_eq!(
+            path_assignment_directories("  export PATH=$PATH:/go/bin").unwrap(),
+            vec!["$PATH", "/go/bin"]
+        );
+        assert!(path_assignment_directories("# export PATH=/nope").is_none());
+        assert!(path_assignment_directories("export FOO=/x").is_none());
+    }
+
+    #[test]
+    fn removing_one_path_entry_keeps_the_others_on_the_line() {
+        let content = "export PATH=\"$PATH:/opt/bin:/opt/go/bin\"\n";
+        assert_eq!(
+            content_without_path_entry(content, "/opt/bin"),
+            "export PATH=\"$PATH:/opt/go/bin\"\n"
+        );
+        assert_eq!(content_without_path_entry(content, "/usr/bin"), content);
+        assert_eq!(
+            content_without_path_entry("export PATH=\"$PATH:/usr/bin\"\n", "/bin"),
+            "export PATH=\"$PATH:/usr/bin\"\n"
+        );
+        assert_eq!(
+            content_without_path_entry("export PATH=\"$PATH:/opt/bin\"\n", "/opt/bin"),
+            ""
+        );
+    }
+
+    #[test]
+    fn path_entries_are_validated_before_they_are_written() {
+        assert!(path_directory_valid("/opt/bin").is_ok());
+        assert!(path_directory_valid("/opt/my_tools-1.2/bin").is_ok());
+        for bad in ["", "opt/bin", "/opt bin", "/opt/a:b", "/opt/a;rm", "/opt/$(", "/opt/`id`"] {
+            assert!(path_directory_valid(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn sync_comparison_expands_home_and_ignores_dynamic_values() {
+        let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
+        assert!(values_in_sync(Some(&format!("{home}/bin")), &format!("{home}/bin")));
+        assert!(values_in_sync(Some(&String::from("$HOME/bin")), &format!("{home}/bin")));
+        assert!(!values_in_sync(Some(&String::from("$HOME/bin")), "/elsewhere"));
+        assert!(values_in_sync(Some(&String::from("$OTHER/bin")), "/anything"));
+        assert!(values_in_sync(None, "anything"));
+    }
+
+    #[test]
+    fn profile_backup_names_are_recognised() {
+        let (name, seconds) = profile_d_backup_parts("10-lang.sh.1700000000_1234.5678.bak").unwrap();
+        assert_eq!(name, "10-lang.sh");
+        assert_eq!(seconds, 1_700_000_000);
+        for bad in [
+            "10-lang.sh.bak",
+            "10-lang.sh.1700000000.bak",
+            "10-lang.sh.1700000000_1234.bak",
+            ".hidden.sh.1_2.3.bak",
+            "notes.txt.1_2.3.bak",
+            "10-lang.sh.1700000000_1234.5678",
+        ] {
+            assert!(profile_d_backup_parts(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn quoting_keeps_expansion_but_escapes_quotes() {
+        assert_eq!(shell_double_quote("plain"), "\"plain\"");
+        assert_eq!(shell_double_quote("a \"quote\""), "\"a \\\"quote\\\"\"");
+        assert_eq!(shell_double_quote("$HOME/bin"), "\"$HOME/bin\"");
+    }
+}
+
+#[cfg(test)]
+mod profile_line_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_only_the_requested_line() {
+        let content = "export A=\"1\"\nexport B=\"2\"\nexport A=\"1\"\n";
+        let updated =
+            replace_profile_line(content, 2, Some("export B=\"2\""), "export B=\"3\"").unwrap();
+        assert_eq!(updated, "export A=\"1\"\nexport B=\"3\"\nexport A=\"1\"\n");
+    }
+
+    #[test]
+    fn refuses_when_the_line_no_longer_matches() {
+        let content = "export A=\"1\"\n";
+        assert!(replace_profile_line(content, 1, Some("export A=\"9\""), "export A=\"2\"").is_err());
+        assert!(replace_profile_line(content, 5, None, "export A=\"2\"").is_err());
+        assert!(replace_profile_line(content, 0, None, "export A=\"2\"").is_err());
+    }
+
+    #[test]
+    fn removes_only_the_requested_line() {
+        let content = "export A=\"1\"\nexport B=\"2\"\nexport A=\"1\"\n";
+        let updated = remove_profile_line(content, 3, "export A=\"1\"").unwrap();
+        assert_eq!(updated, "export A=\"1\"\nexport B=\"2\"\n");
+        assert_eq!(remove_profile_line("export A=\"1\"\n", 1, "export A=\"1\"").unwrap(), "");
+        assert!(remove_profile_line(content, 1, "export B=\"2\"").is_err());
+        assert!(remove_profile_line(content, 0, "export A=\"1\"").is_err());
     }
 }
